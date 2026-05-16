@@ -17,6 +17,17 @@
 -- shared_dict :get/:set don't throw, so they don't need a wrapper.
 -- See docs/security-review.md §"Fail-open philosophy".
 
+-- Deployment feature flag. The CDN operator puppet template always renders
+-- `set $abuse_controls_enabled "true"` or `"false"` from hiera (default
+-- "false" in common.yaml; per-host override flips to "true" during the
+-- canary rollout — see docs/CDN operator-rollout/canary-plan.md). When the
+-- var is explicitly "false", skip the pipeline.
+--
+-- When the var is UNSET (demo stand, shadow stand, any deployment that
+-- doesn't bother with the flag) we fall through to running normally —
+-- so demo and shadow don't need to know about this flag at all.
+if ngx.var.abuse_controls_enabled == "false" then return end
+
 local ja4 = require "ja4_compute"
 
 local ok, fp_or_err = pcall(ja4.compute)
@@ -41,8 +52,27 @@ local list = ngx.shared.fp_blocklist
 local verdict = list:get(fp) or "allow"
 
 cache:set(fp, verdict, 60)
-ngx.log(ngx.INFO, "verdict=", verdict, " (cold) fp=", fp,
-                  " ua=", ngx.var.http_user_agent or "-")
+-- Structured log line consumed by docs/CDN operator-rollout/monitoring.md
+-- (verdict counts + pipeline latency) and runbook.md (UA join for
+-- complaint inspection).
+--
+-- Field contract:
+--   rt= seconds, time elapsed since request start AT THIS POINT (access
+--       phase). This is the verdict pipeline latency upper bound — not
+--       the full request_time (which only finalises in log phase).
+--       Matches what monitoring's "Antibot pipeline overhead" SLO means.
+--   ua= quoted with double quotes so the runbook's `ua="[^"]*"` regex
+--       extracts spaces-containing UAs cleanly. Embedded `"` in UA are
+--       not escaped; an attacker controls UA but cannot use it to break
+--       the line because we use NOTICE-level log lines which are not
+--       fed back into the verdict path.
+--
+-- NOTICE level so the line survives a production `error_log ... notice;`
+-- setting — monitoring parses these for metrics and needs them at the
+-- same level as the rest of production. INFO would get filtered out.
+ngx.log(ngx.NOTICE, "verdict=", verdict, " (cold) fp=", fp,
+                    " rt=", ngx.var.request_time or "-",
+                    ' ua="', (ngx.var.http_user_agent or "-"), '"')
 
 if verdict == "block" then
     return ngx.exit(403)
