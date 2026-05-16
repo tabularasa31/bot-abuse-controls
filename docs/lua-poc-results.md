@@ -2,7 +2,7 @@
 
 ClickUp task [86exmhy8j](https://app.clickup.com/t/86exmhy8j). Measures whether running the Bot & Abuse Controls verdict pipeline (cache → blocklist → `ngx.exit`) entirely in `access_by_lua` on the edge is viable as an alternative to round-tripping every request to the Go sidecar via `auth_request`.
 
-> **What this PoC does not prove.** The fingerprint computed in [verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua) is **synthetic** — `md5(ssl_cipher .. ":" .. ssl_protocol .. ":" .. ua[:32])` — not real JA3/JA4. We picked synthetic because there is no off-the-shelf Lua library that computes JA3 from the raw ClientHello (`vela-security/openresty-ssl-ja3` is a custom-patched OpenResty image; `paragor/qrator-ja3-nginx` is only a Qrator-format reformatter), and rolling our own ClientHello parser is Phase 2 work. The architectural question this PoC answers — *is the Lua verdict pipeline fast enough on the edge?* — is orthogonal to where the fingerprint comes from. Phase 1 ([antibot-lab/docs/ja3-poc-results.md](../../antibot-lab/docs/ja3-poc-results.md)) already proved JA4 extraction via the FoxIO C module; Phase 2 will wire that into the Lua pipeline.
+> **Reading order.** The "Bench: 2026-05-16" and "Comparison with Phase 1" sections below were written for the *original* PoC #2 with a synthetic `md5(ssl_cipher .. ":" .. ssl_protocol .. ":" .. ua[:32])` fingerprint — kept as the historical baseline. The [Phase 2 — real fp](#phase-2--real-fp-synthetic-md5-replaced) section further down documents the current behaviour ([verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua) now hashes real TLS handshake invariants via [ja4_compute.lua](../infra/nginx-lua-poc/lua/ja4_compute.lua); see ClickUp [86exmjzug](https://app.clickup.com/t/86exmjzug)). Phase 1 baseline at [antibot-lab/docs/ja3-poc-results.md](../../antibot-lab/docs/ja3-poc-results.md).
 
 ## Setup
 
@@ -50,6 +50,51 @@ PoC #2 numbers are **higher** than Phase 1 baseline because Phase 1 baseline inc
 Decisions for the [edge Lua vs Go sidecar RFC](architecture/edge-lua-vs-sidecar.md):
 - Verdict cache + blocklist lookup → **edge Lua** (terminating, fast, no sidecar round-trip).
 - Sidecar round-trip (`auth_request` or `ngx.location.capture`) reserved for the 5–10% "grey" verdicts that need heavy scoring or fresh state.
+
+## Phase 2 — real fp (synthetic md5 replaced)
+
+ClickUp [86exmjzug](https://app.clickup.com/t/86exmjzug). Replaces the synthetic `md5(cipher .. ":" .. protocol .. ":" .. ua)` from PoC #2 with a real handshake-derived fp built from `$ssl_ciphers + $ssl_curves + $ssl_protocol + $ssl_alpn_protocol + $ssl_server_name`. The verdict pipeline (cache → blocklist → `ngx.exit`) is unchanged byte-for-byte from PoC #2 — see [infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua) and [infra/nginx-lua-poc/lua/ja4_compute.lua](../infra/nginx-lua-poc/lua/ja4_compute.lua).
+
+### Three-spike comparison
+
+RFC §Е listed three viable paths; we built scaffolding for each ([infra/nginx-lua-poc/spikes/](../infra/nginx-lua-poc/spikes/)) and benched what we could:
+
+| Spike | RPS allow | p50 | p99 | Build wall-clock | Maintenance burden | Strict FoxIO JA4? |
+|---|---:|---:|---:|---:|---|:---:|
+| 1. vela-security/openresty-ssl-ja3 | not measured | — | — | 15–25 min (yum + OpenSSL 1.1.1l + OpenResty source) | We own the fork; OpenSSL 1.1.1l EOL'd 2023-09-11 | JA3, not JA4 |
+| 2. **Lua $ssl_* compute (chosen)** | **38 781** isolated / **35 283** real stand | **2.42 ms** | **21.7 ms** | 0 s (stock `openresty/openresty:alpine`) | Lua module owned by us, ~80 LoC, no build chain | No (Lua-lite, leading `L` prefix) |
+| 3. FoxIO ja4-nginx-module + lua | not measured | — | — | 25–40 min (nginx 1.30.0 + OpenSSL 4.0.0 + LuaJIT + ngx_devel_kit + lua-nginx + ja4) | 5 upstream pins + line-anchored nginx patch | Yes (`t`-prefix) |
+
+Spike 1 declined: OpenSSL 1.1.1l pin + unmaintained vendored tarball + EOL'd CentOS 7 build base = unacceptable supply-chain risk. Spike 3 declined for now: substantial build burden for the only material upside (byte-compatible JA4), and we have no concrete consumer for external JA4 feeds yet. Full per-spike RESULTS.md in each spike directory; Dockerfiles remain build-ready if we ever need them.
+
+### Bench: 2026-05-16, M-class MacBook Pro
+
+| Variant | Path | RPS | p50 | p75 | p90 | p99 | Notes |
+|---|---|---:|---:|---:|---:|---:|---|
+| Baseline (no Lua, `/__health`) | TLS + nginx `return 200` | **39 746** | 2.25 ms | 2.93 ms | 3.89 ms | 8.90 ms | Same as PoC #2 baseline. |
+| PoC #2 — synthetic md5 allow path | TLS + `access_by_lua` md5 + `content_by_lua` 200 | **34 808** | 2.49 ms | 3.37 ms | 4.89 ms | 25.39 ms | Reference from earlier doc above. |
+| **Phase 2 — real fp allow path** | TLS + `access_by_lua` sha256 of `$ssl_ciphers` + `content_by_lua` 200 | **35 283** | **2.42 ms** | **3.36 ms** | **5.23 ms** | **21.70 ms** | +1.4% RPS vs synthetic, p50 −0.07 ms, p99 −3.7 ms. |
+
+The real fp is **essentially free** at the request hot path: `$ssl_ciphers` is already populated by nginx; the only added work per cache miss is splitting the cipher list on `:`, sorting, and a single SHA256 over ~600 bytes. The PoC #2 synthetic md5 did almost the same amount of work and produced a less useful signal.
+
+### Fingerprints captured (3 automation clients)
+
+```
+curl 8.7.1 (LibreSSL macOS):   L13d49h2_de2bb2c70653_d07b7f455339
+Go-http-client/1.1 (alpine):   L13d1300_69e852b66fc7_747a969b1fb5
+python-requests 2.32.5:        L13i30h1_bcf826a2cd28_8c35449021c4
+```
+
+Browser fingerprints (Chrome/Firefox/Safari) need manual capture via `https://antibot.local:8443/__fp` — see [docs/phase2-fp-catalog.md](phase2-fp-catalog.md) for the full table and the cross-validation protocol against `pip install ja4` + Wireshark JA4 plugin (script: [scripts/cross-validate-ja4.sh](../scripts/cross-validate-ja4.sh)).
+
+### Why the chosen `L`-prefix fp is not strict FoxIO JA4 — and when that matters
+
+FoxIO JA4's third component (`JA4_c`) requires the full ClientHello extension list + signature_algorithms. Nginx's `access_by_lua` does not have access to the raw ClientHello — by the time `access_by_lua` runs, OpenSSL has discarded the parsed ClientHello buffer. Reading extensions in pure Lua would require either:
+
+1. Running compute in `ssl_client_hello_by_lua_block` (where the data lives) and bridging the result to `access_by_lua` via OpenSSL `SSL_set_ex_data` over FFI — ~150 LoC of FFI with session-reuse / SSL-pointer-reuse edge cases. Worthwhile only if the cost is justified by a concrete need.
+2. Switching to a C-module compute (Spike 1 or 3) and paying the build-chain cost.
+
+For unblocking cascade tasks A1 (fp blocklist) and A5 (UA ↔ JA consistency check), our `L`-prefix fp is sufficient — it discriminates clients by their TLS library, which is exactly the signal A1/A5 need. The decision can be revisited as a Phase 2.5 sub-task if a concrete need for external JA4 feed interop appears.
 
 ## Reproduce
 

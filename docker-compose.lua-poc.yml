@@ -4,13 +4,13 @@
 #   # Bring up
 #   docker compose -f docker-compose.lua-poc.yml --profile lua-only up -d --build
 #
-#   # Probe (collect synthetic fingerprints)
+#   # Probe (collect real handshake-derived fingerprints — Phase 2, 86exmjzug)
 #   ./scripts/lua-poc-probe.sh
 #
 #   # Bench
 #   wrk -c100 -d20s -t4 --latency \
-#       --resolve antibot.local:127.0.0.1 \
-#       https://antibot.local:8443/
+#       -H "Host: antibot.local" \
+#       https://127.0.0.1:8443/
 #
 #   # Tear down
 #   docker compose -f docker-compose.lua-poc.yml --profile lua-only down
