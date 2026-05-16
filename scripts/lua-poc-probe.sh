@@ -25,7 +25,7 @@ set -euo pipefail
 HOST="antibot.local"
 PORT="8443"
 URL="https://${HOST}:${PORT}/__fp"
-RESOLVE="--resolve ${HOST}:${PORT}:127.0.0.1"
+RESOLVE=(--resolve "${HOST}:${PORT}:127.0.0.1")
 
 container="nginx-lua-poc"
 if ! docker ps --format '{{.Names}}' | grep -q "^${container}\$"; then
@@ -60,7 +60,7 @@ probe() {
 }
 
 probe "curl" \
-    curl -ksS ${RESOLVE} "${URL}"
+    curl -ksS "${RESOLVE[@]}" "${URL}"
 
 probe "python-requests" \
     python3 -c "
