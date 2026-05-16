@@ -62,13 +62,22 @@ function _M.compute()
     local ver  = TLS_VER_CODE[tls_ver] or "00"
     local snic = (#sni > 0) and "d" or "i"
 
-    -- Cipher count = colon-separated tokens in $ssl_ciphers.
-    local cipher_count = 0
+    -- Single pass over $ssl_ciphers: split into list, derive count from #list,
+    -- sort, hash. Avoids a separate iteration just to count colons.
+    local list = {}
     if #ciphers > 0 then
-        cipher_count = 1
-        for _ in ciphers:gmatch(":") do cipher_count = cipher_count + 1 end
+        for c in ciphers:gmatch("[^:]+") do
+            list[#list + 1] = c
+        end
     end
+    local cipher_count = #list
     if cipher_count > 99 then cipher_count = 99 end
+
+    local ja_b = "000000000000"
+    if cipher_count > 0 then
+        table.sort(list)
+        ja_b = sha256_12(table.concat(list, ","))
+    end
 
     -- ALPN first-and-last char, lowercased. "h2" -> "h2", "http/1.1" -> "h1".
     local alpn_two = "00"
@@ -77,17 +86,6 @@ function _M.compute()
     end
 
     local prefix = string.format("L%s%s%02d%s", ver, snic, cipher_count, alpn_two)
-
-    -- Canonical cipher hash: split on ":", sort, sha256:12.
-    local ja_b = "000000000000"
-    if #ciphers > 0 then
-        local list = {}
-        for c in ciphers:gmatch("[^:]+") do
-            list[#list + 1] = c
-        end
-        table.sort(list)
-        ja_b = sha256_12(table.concat(list, ","))
-    end
 
     -- Curves + alpn hash (substitute for the missing extension hash).
     local ja_c = sha256_12(curves .. "|" .. alpn .. "|" .. tls_ver)
