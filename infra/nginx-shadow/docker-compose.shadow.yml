@@ -1,0 +1,69 @@
+# Shadow-mode antibot deployment.
+#
+# Run on a VM in front of a real (low-stakes) site to collect production
+# fingerprint distribution and verdict counts without dropping any
+# traffic. Bring up:
+#   1. Customise nginx.shadow.conf (upstream + server_name + cert paths)
+#   2. Drop your TLS cert (fullchain.pem + privkey.pem) into ./certs/
+#      OR bind-mount your existing /etc/letsencrypt/ tree into the
+#      container's /etc/nginx/certs/
+#   3. docker compose -f docker-compose.shadow.yml up -d
+#
+# Logs:
+#   docker logs -f nginx-shadow | grep ANTIBOT_EVENT
+#
+# Or stream JSON events through jq for analysis:
+#   docker logs -f nginx-shadow 2>&1 | grep --line-buffered ANTIBOT_EVENT \
+#     | sed 's/.*ANTIBOT_EVENT //' | jq -c .
+#
+# See infra/nginx-shadow/scripts/analyze-shadow-log.sh for ready-made
+# recipes (top fps, would-block %, ua-vs-fp mismatches, etc.).
+#
+# To convert to ACTIVE blocking later: edit nginx.shadow.conf and change
+#   access_by_lua_file  /etc/nginx/lua/verdict.lua
+# to
+#   access_by_lua_file  /etc/nginx/lua-common/verdict.lua
+# (the PoC's verdict.lua calls ngx.exit(403); the shadow one only logs).
+
+services:
+  nginx-shadow:
+    image: openresty/openresty:alpine
+    container_name: nginx-shadow
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"   # for ACME http-01 challenge if you use certbot
+    volumes:
+      # Antibot config + shadow-mode Lua handlers.
+      - ./nginx.shadow.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./lua:/etc/nginx/lua:ro
+      # Reuse ja4_compute.lua + probe.lua from the PoC tree without
+      # duplicating them. Mounted read-only at /etc/nginx/lua-common
+      # which is on the lua_package_path.
+      - ../nginx-lua-poc/lua:/etc/nginx/lua-common:ro
+      # TLS certs. Adjust the source path to wherever you provision
+      # certs on the host. Examples:
+      #   ./certs                            # if you put cert.pem manually
+      #   /etc/letsencrypt/live/<domain>     # if certbot manages them
+      - ./certs:/etc/nginx/certs:ro
+    # Structured-log shipping target — uncomment + customise if you want
+    # to route ANTIBOT_EVENT lines to a Loki / fluentd / syslog stack
+    # instead of the default json-file driver. Defaults work fine for
+    # the first 1-2 weeks of shadow data collection.
+    #
+    # logging:
+    #   driver: loki
+    #   options:
+    #     loki-url: http://loki.example:3100/loki/api/v1/push
+    #     loki-pipeline-stages: |
+    #       - regex:
+    #           expression: 'ANTIBOT_EVENT (?P<event>{.+})'
+    #       - json:
+    #           source: event
+    #           expressions:
+    #             fp: fp
+    #             would_verdict: would_verdict
+    #             host: host
+    #     loki-relabel-config: |
+    #       - action: labelmap
+    #         regex: __extracted_(.+)
