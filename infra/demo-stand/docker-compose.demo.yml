@@ -11,7 +11,14 @@ services:
       - "80:80"   # reserved for ACME http-01 challenge if certbot-managed
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      # Demo-specific Lua (verdict.lua, blocklist, init, metrics, admin,
+      # probe, log_event). Mounted at /etc/nginx/lua.
       - ./lua:/etc/nginx/lua:ro
+      # Production fp compute (ja4_compute + ja4_helpers) bind-mounted
+      # from the canonical infra/nginx-lua-poc/lua/ tree so the demo
+      # uses the exact same code as production, not a copy that drifts.
+      # nginx.demo.conf's lua_package_path includes /etc/nginx/lua-common.
+      - ../nginx-lua-poc/lua:/etc/nginx/lua-common:ro
       - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
     # Log via the default json-file driver — fine for the demo. Real

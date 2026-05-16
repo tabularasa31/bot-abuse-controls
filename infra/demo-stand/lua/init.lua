@@ -6,14 +6,15 @@
 local blocklist = require "blocklist"
 
 local fp_dict = ngx.shared.fp_blocklist
+local n = 0
 for fp, verdict in pairs(blocklist.entries) do
     local ok, err = fp_dict:set(fp, verdict)
-    if not ok then
+    if ok then
+        n = n + 1
+    else
         ngx.log(ngx.ERR, "fp_blocklist:set failed: ", err)
     end
 end
-
-local n = fp_dict:get_keys(0) and #fp_dict:get_keys(0) or 0
 ngx.log(ngx.NOTICE, "[demo] fp_blocklist loaded: ", n, " entries")
 
 -- Prime metrics counters so they're visible at zero rather than absent.

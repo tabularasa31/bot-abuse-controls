@@ -27,6 +27,19 @@ local uptime_h = string.format("%dh %dm %ds",
     math.floor(uptime_s / 60) % 60,
     uptime_s % 60)
 
+-- HTML-escape values before injecting into the rendered page. Blocklist
+-- entries today come from a static Lua table (trusted source), but the
+-- catalog hot-reload (RFC §В1) will pull entries from the sidecar at
+-- runtime — at that point an attacker-controlled fp string would be
+-- rendered into HTML. Escape now so the demo doesn't become a footgun
+-- the moment that pipeline lands.
+local HTML_ESCAPE = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
+                      ['"'] = "&quot;", ["'"] = "&#39;" }
+local function html_escape(s)
+    if not s then return "" end
+    return (tostring(s):gsub("[&<>\"']", HTML_ESCAPE))
+end
+
 -- List blocklist entries (max 50 shown — anything more is unreadable
 -- in HTML and the operator should query the shared_dict directly).
 local keys = fp_dict:get_keys(50)
@@ -34,7 +47,7 @@ local rows = {}
 for _, key in ipairs(keys) do
     rows[#rows + 1] = string.format(
         "<tr><td><code>%s</code></td><td>%s</td></tr>",
-        key, fp_dict:get(key) or "?")
+        html_escape(key), html_escape(fp_dict:get(key) or "?"))
 end
 local extra = #keys >= 50 and " (showing first 50)" or ""
 
