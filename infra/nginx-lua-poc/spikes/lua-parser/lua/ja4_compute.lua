@@ -52,6 +52,24 @@ local function sha256_12(s)
     return str_to_hex(h:final()):sub(1, 12)
 end
 
+-- RFC 8701 GREASE: 0x?A?A where both bytes equal AND low nibble is 0xA.
+-- Strip before sort+hash so Chrome/Safari fps stay stable across reloads.
+local function is_grease(token)
+    -- Named ciphers never match — fast-skip if first 2 bytes != "0x".
+    if token:byte(1) ~= 48 or token:byte(2) ~= 120 then return false end
+    return token:match("^0x([0-9a-f])a%1a$") ~= nil
+end
+
+local function split_strip_grease(s)
+    local out = {}
+    if #s > 0 then
+        for tok in s:gmatch("[^:]+") do
+            if not is_grease(tok) then out[#out + 1] = tok end
+        end
+    end
+    return out
+end
+
 function _M.compute()
     local ciphers = ngx.var.ssl_ciphers or ""
     local curves  = ngx.var.ssl_curves  or ""
@@ -62,14 +80,7 @@ function _M.compute()
     local ver  = TLS_VER_CODE[tls_ver] or "00"
     local snic = (#sni > 0) and "d" or "i"
 
-    -- Single pass over $ssl_ciphers: split into list, derive count from #list,
-    -- sort, hash. Avoids a separate iteration just to count colons.
-    local list = {}
-    if #ciphers > 0 then
-        for c in ciphers:gmatch("[^:]+") do
-            list[#list + 1] = c
-        end
-    end
+    local list = split_strip_grease(ciphers)
     local cipher_count = #list
     if cipher_count > 99 then cipher_count = 99 end
 
@@ -79,6 +90,8 @@ function _M.compute()
         ja_b = sha256_12(table.concat(list, ","))
     end
 
+    local curves_canonical = table.concat(split_strip_grease(curves), ":")
+
     -- ALPN first-and-last char, lowercased. "h2" -> "h2", "http/1.1" -> "h1".
     local alpn_two = "00"
     if #alpn >= 2 then
@@ -87,8 +100,8 @@ function _M.compute()
 
     local prefix = string.format("L%s%s%02d%s", ver, snic, cipher_count, alpn_two)
 
-    -- Curves + alpn hash (substitute for the missing extension hash).
-    local ja_c = sha256_12(curves .. "|" .. alpn .. "|" .. tls_ver)
+    -- Curves + alpn hash. Uses GREASE-stripped curves so the hash is stable.
+    local ja_c = sha256_12(curves_canonical .. "|" .. alpn .. "|" .. tls_ver)
 
     return prefix .. "_" .. ja_b .. "_" .. ja_c,
            { ciphers = ciphers, curves = curves, alpn = alpn,
