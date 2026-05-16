@@ -78,9 +78,21 @@ echo
 echo "## Would-be blocks by UA family heuristic"
 echo "------------------------------------------------------------"
 echo "(UA strings matching curl|python|Go|wget|bot|crawler|scrape patterns, only would_verdict=block)"
-jq -r 'select(.would_verdict == "block") | .ua' "${tmp}" \
-    | grep -iE 'curl|python|go-http|wget|bot|crawler|scrape|spider' \
-    | sort | uniq -c | sort -rn | head -10
+# Zero block events is a valid steady state in shadow mode, and grep
+# returns 1 when nothing matches — under `set -e` that would abort the
+# whole script. Capture the output, swallow the exit status, branch on
+# whether we got anything.
+ua_blocks=$(
+    jq -r 'select(.would_verdict == "block") | .ua' "${tmp}" \
+        | grep -iE 'curl|python|go-http|wget|bot|crawler|scrape|spider' \
+        | sort | uniq -c | sort -rn | head -10 \
+        || true
+)
+if [ -z "${ua_blocks}" ]; then
+    echo "  (no bot-like UAs among would_verdict=block events)"
+else
+    echo "${ua_blocks}"
+fi
 echo
 
 echo "## Fp cardinality over time (events per minute, distinct fp per minute)"
@@ -116,13 +128,22 @@ echo
 echo "## Latency percentiles (request_time_ms — full proxied request)"
 echo "------------------------------------------------------------"
 jq -r '.request_time_ms' "${tmp}" | sort -n \
-    | awk '{a[NR]=$1} END {
-        printf "  p50:  %.2f ms\n", a[int(NR*0.50)]
-        printf "  p75:  %.2f ms\n", a[int(NR*0.75)]
-        printf "  p90:  %.2f ms\n", a[int(NR*0.90)]
-        printf "  p99:  %.2f ms\n", a[int(NR*0.99)]
-        printf "  max:  %.2f ms\n", a[NR]
-      }'
+    | awk '{a[NR]=$1}
+           # idx(p) maps a percentile to a 1-indexed array position using
+           # the nearest-rank method: ceil(p * N). Clamps to [1, N] so we
+           # never read a[0] (empty in awk → 0.00; the small-sample bug
+           # this replaces). For N=1 all percentiles return the single
+           # sample; for N=4 p50 returns a[2], p99 returns a[4].
+           function ceil(x) { return (x == int(x)) ? x : int(x) + 1 }
+           function idx(p,   v) { v = ceil(p * NR); if (v < 1) v = 1; if (v > NR) v = NR; return v }
+           END {
+               if (NR == 0) { print "  (no samples)"; exit }
+               printf "  p50:  %.2f ms  (n=%d)\n", a[idx(0.50)], NR
+               printf "  p75:  %.2f ms\n",         a[idx(0.75)]
+               printf "  p90:  %.2f ms\n",         a[idx(0.90)]
+               printf "  p99:  %.2f ms\n",         a[idx(0.99)]
+               printf "  max:  %.2f ms\n",         a[NR]
+           }'
 echo
 
 echo "============================================================"

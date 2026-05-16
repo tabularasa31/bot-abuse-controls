@@ -35,6 +35,22 @@ if #ua > 200 then ua = ua:sub(1, 197) .. "..." end
 local ciphers = parts.ciphers or ""
 if #ciphers > 256 then ciphers = ciphers:sub(1, 253) .. "..." end
 
+-- ngx.var.{request,upstream_response}_time can be:
+--   * a normal number string ("0.012")
+--   * "-" (nginx writes this when the upstream couldn't be reached)
+--   * a comma-separated list ("0.001, 0.002") if proxy_next_upstream retried
+-- Bare tonumber returns nil on the latter two, and `nil * 1000` crashes
+-- the request. ms() handles all three by taking the LAST numeric piece
+-- (most-recent attempt for the retry case) and returning 0 if nothing
+-- parses — same shape as a missing-but-present field.
+local function ms(raw)
+    if not raw or raw == "" or raw == "-" then return 0 end
+    -- Split on comma — for retries we want the latest attempt's time.
+    local last
+    for piece in raw:gmatch("[^,%s]+") do last = piece end
+    return (tonumber(last) or 0) * 1000
+end
+
 local event = {
     ts                  = ngx.now(),
     -- request
@@ -42,9 +58,9 @@ local event = {
     host                = ngx.var.host,
     uri                 = ngx.var.uri,
     status              = ngx.var.status,           -- upstream response code
-    request_time_ms     = tonumber(ngx.var.request_time) * 1000,
-    upstream_time_ms    = tonumber(ngx.var.upstream_response_time or 0) * 1000,
-    bytes_sent          = tonumber(ngx.var.bytes_sent),
+    request_time_ms     = ms(ngx.var.request_time),
+    upstream_time_ms    = ms(ngx.var.upstream_response_time),
+    bytes_sent          = tonumber(ngx.var.bytes_sent) or 0,
     -- client
     remote_addr         = ngx.var.remote_addr,
     ua                  = ua,

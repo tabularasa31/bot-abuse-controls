@@ -32,11 +32,25 @@ services:
     restart: unless-stopped
     ports:
       - "443:443"
-      - "80:80"   # for ACME http-01 challenge if you use certbot
+      # Port 80 is wired to the HTTP server block in nginx.shadow.conf —
+      # serves /.well-known/acme-challenge/ from /var/www/certbot for
+      # ACME http-01 renewals, redirects everything else to HTTPS.
+      # If you don't need port 80 at all (DNS-01 challenge, externally-
+      # managed cert, or CDN fronting), remove the mapping below AND
+      # delete the server { listen 80; ... } block in nginx.shadow.conf
+      # to avoid binding an unused port.
+      - "80:80"
     volumes:
       # Antibot config + shadow-mode Lua handlers.
       - ./nginx.shadow.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
       - ./lua:/etc/nginx/lua:ro
+      # ACME http-01 challenge webroot. Bind-mount the host directory
+      # certbot writes to (the `--webroot -w <dir>` mode). On a Debian/
+      # Ubuntu host with stock certbot, that path is usually
+      # /var/www/certbot or /var/lib/letsencrypt — adjust to match.
+      # If you don't use http-01, you can leave this commented out and
+      # also remove the port-80 server block (see above).
+      # - /var/www/certbot:/var/www/certbot:ro
       # Reuse ja4_compute.lua + probe.lua from the PoC tree without
       # duplicating them. Mounted read-only at /etc/nginx/lua-common
       # which is on the lua_package_path.
