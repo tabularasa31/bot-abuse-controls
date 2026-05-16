@@ -23,3 +23,6 @@ antibot/*.test
 
 # Docker logs / volumes
 docker-compose.override.yml
+infra/demo-stand/certs/*.pem
+infra/demo-stand/certs/*.key
+infra/demo-stand/certs/*.crt

@@ -1,0 +1,35 @@
+# Demo-stand compose. Single openresty container, active blocking
+# pipeline, multi-scenario endpoints. See ./README.md for setup.
+
+services:
+  nginx-demo:
+    image: openresty/openresty:alpine
+    container_name: nginx-demo
+    restart: unless-stopped
+    # REVISION is exposed via /__version. Override with a real git sha
+    # on deployment:
+    #   REVISION=$(git rev-parse --short HEAD) docker compose -f \
+    #       infra/demo-stand/docker-compose.demo.yml up -d
+    # ${REVISION:-dev} also requires the env-var listing inside nginx
+    # (see nginx.demo.conf: `env REVISION;` at the top).
+    environment:
+      REVISION: ${REVISION:-dev}
+    ports:
+      - "443:443"
+      - "80:80"   # reserved for ACME http-01 challenge if certbot-managed
+    volumes:
+      - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      # Demo-specific Lua (verdict.lua, blocklist, init, metrics, admin,
+      # probe, log_event). Mounted at /etc/nginx/lua.
+      - ./lua:/etc/nginx/lua:ro
+      # Production fp compute (ja4_compute + ja4_helpers) bind-mounted
+      # from the canonical infra/nginx-lua-poc/lua/ tree so the demo
+      # uses the exact same code as production, not a copy that drifts.
+      # nginx.demo.conf's lua_package_path includes /etc/nginx/lua-common.
+      - ../nginx-lua-poc/lua:/etc/nginx/lua-common:ro
+      - ./sites:/etc/nginx/sites:ro
+      - ./certs:/etc/nginx/certs:ro
+    # Log via the default json-file driver — fine for the demo. Real
+    # production would point to a log aggregator (Loki / fluentd / etc.)
+    # — see infra/nginx-shadow/docker-compose.shadow.yml for the
+    # commented-out loki driver example.

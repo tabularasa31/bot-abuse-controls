@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>abuse-controls demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 720px;
+         margin: 3em auto; padding: 0 1em; color: #222; line-height: 1.6; }
+  h1 { margin-bottom: 0.2em; }
+  p.lede { color: #666; margin-top: 0; }
+  pre { background: #f4f4f4; padding: 12px 16px; border-radius: 4px; font-size: 13px;
+        overflow-x: auto; }
+  code { background: #f4f4f4; padding: 1px 4px; border-radius: 2px; font-size: 13px; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid #eee;
+           font-size: 14px; vertical-align: top; }
+  a { color: #06f; }
+</style>
+</head>
+<body>
+
+<h1>abuse-controls — demo stand</h1>
+<p class="lede">If you can see this page, your browser passed the verdict pipeline.
+A request from <code>curl</code> or <code>python-requests</code> on the same URL
+would get <code>403</code>.</p>
+
+<h2>Why your browser is allowed</h2>
+<p>The pipeline computed a TLS-handshake-derived fingerprint for your connection
+and looked it up in a small seed blocklist. Browser fingerprints are not in the
+seed; default automation tool fingerprints are. The seed entries are visible at
+<a href="/__admin">/__admin</a>.</p>
+
+<p>To see your own fingerprint, visit <a href="/__fp">/__fp</a>.</p>
+
+<h2>What to try</h2>
+<table>
+  <tr><th>Action</th><th>Expected</th></tr>
+  <tr><td>Open this page in a browser</td><td><code>200</code> (you just did)</td></tr>
+  <tr><td><code>curl -k https://&lt;host&gt;/</code></td><td><code>403</code></td></tr>
+  <tr><td><code>python3 -c "import requests; requests.get('https://&lt;host&gt;/', verify=False)"</code></td><td><code>403</code></td></tr>
+  <tr><td>Visit <a href="/__fp">/__fp</a></td><td>Your fp + raw <code>$ssl_*</code> components</td></tr>
+  <tr><td>Visit <a href="/__admin">/__admin</a></td><td>Live counters + blocklist</td></tr>
+  <tr><td>Visit <a href="/metrics">/metrics</a></td><td>Prometheus scrape text</td></tr>
+  <tr><td>Bench <code>wrk -c100 -d10s https://&lt;host&gt;/</code> vs <code>wrk -c100 -d10s https://&lt;host&gt;/baseline/</code></td><td>~32K vs ~40K RPS — the antibot overhead</td></tr>
+</table>
+
+<h2>What this is</h2>
+<p>This stand runs the production verdict pipeline from
+<a href="https://github.com/tabularasa31/abuse-controls">abuse-controls</a>
+(<code>infra/nginx-lua-poc/lua/verdict.lua</code> + dependencies). The code
+is unit-tested, lint-clean, and documented:</p>
+<ul>
+  <li><a href="https://github.com/tabularasa31/abuse-controls/blob/main/docs/security-review.md">Security review</a></li>
+  <li><a href="https://github.com/tabularasa31/abuse-controls/blob/main/docs/architecture-decisions/">Architecture decisions</a></li>
+  <li><a href="https://github.com/tabularasa31/abuse-controls/blob/main/docs/engineering-narrative.md">Engineering narrative</a> (chronological)</li>
+  <li><a href="https://github.com/tabularasa31/abuse-controls/blob/main/docs/lua-poc-results.md">PoC #2 + Phase 2 benchmarks</a></li>
+</ul>
+
+<p style="margin-top: 3em; color: #888; font-size: 13px;">
+Demo stand spec: <a href="https://github.com/tabularasa31/abuse-controls/blob/main/infra/demo-stand/README.md">infra/demo-stand/README.md</a>.
+</p>
+
+</body>
+</html>
