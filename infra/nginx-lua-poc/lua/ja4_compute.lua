@@ -52,6 +52,40 @@ local function sha256_12(s)
     return str_to_hex(h:final()):sub(1, 12)
 end
 
+-- RFC 8701 GREASE: nginx renders unknown cipher / curve values as
+-- "0x<4 hex>". GREASE values are 0x?A?A where both bytes are equal AND the
+-- low nibble is 0xA — i.e. 0x0A0A, 0x1A1A, ..., 0xFAFA (16 values per slot).
+-- Chrome and Safari rotate GREASE per TLS connection; if we keep them in the
+-- hash input, the same browser produces a different fp on every reload.
+-- Strip before sort+hash so the fp is stable per (client TLS library), which
+-- is the property that makes the signal useful.
+local function is_grease(token)
+    -- Fast path: named ciphers ("TLS_AES_...", "ECDHE-...") never match —
+    -- skip the pattern entirely. Only "0x<hex>" / "0X<hex>" tokens can be
+    -- GREASE. Stock nginx renders unknown values lowercase, but patched
+    -- builds and other nginx forks may render uppercase, so accept both.
+    if token:byte(1) ~= 48 then return false end  -- '0'
+    local b2 = token:byte(2)
+    if b2 ~= 120 and b2 ~= 88 then return false end  -- 'x' or 'X'
+    -- Case-insensitive pattern. Backreference %1 is byte-exact, but
+    -- character classes around it accept either case, so "0xAaAa",
+    -- "0X1a1A", and "0x6a6a" all match as long as both nibbles agree.
+    return token:match("^0[xX]([0-9a-fA-F])[aA]%1[aA]$") ~= nil
+end
+
+-- Split colon-separated token list, stripping GREASE.
+local function split_strip_grease(s)
+    local out = {}
+    if #s > 0 then
+        for tok in s:gmatch("[^:]+") do
+            if not is_grease(tok) then
+                out[#out + 1] = tok
+            end
+        end
+    end
+    return out
+end
+
 function _M.compute()
     local ciphers = ngx.var.ssl_ciphers or ""
     local curves  = ngx.var.ssl_curves  or ""
@@ -62,14 +96,10 @@ function _M.compute()
     local ver  = TLS_VER_CODE[tls_ver] or "00"
     local snic = (#sni > 0) and "d" or "i"
 
-    -- Single pass over $ssl_ciphers: split into list, derive count from #list,
-    -- sort, hash. Avoids a separate iteration just to count colons.
-    local list = {}
-    if #ciphers > 0 then
-        for c in ciphers:gmatch("[^:]+") do
-            list[#list + 1] = c
-        end
-    end
+    -- Single pass over $ssl_ciphers: split + strip GREASE, then sort+hash.
+    -- cipher_count derived from #list (post-strip), matches the JA4 spec
+    -- which excludes GREASE from the count too.
+    local list = split_strip_grease(ciphers)
     local cipher_count = #list
     if cipher_count > 99 then cipher_count = 99 end
 
@@ -79,6 +109,11 @@ function _M.compute()
         ja_b = sha256_12(table.concat(list, ","))
     end
 
+    -- Curves: strip GREASE too. Order is preserved (the spec does NOT sort
+    -- curves), but GREASE removal is required for stable hash across reloads.
+    local curve_list = split_strip_grease(curves)
+    local curves_canonical = table.concat(curve_list, ":")
+
     -- ALPN first-and-last char, lowercased. "h2" -> "h2", "http/1.1" -> "h1".
     local alpn_two = "00"
     if #alpn >= 2 then
@@ -87,8 +122,9 @@ function _M.compute()
 
     local prefix = string.format("L%s%s%02d%s", ver, snic, cipher_count, alpn_two)
 
-    -- Curves + alpn hash (substitute for the missing extension hash).
-    local ja_c = sha256_12(curves .. "|" .. alpn .. "|" .. tls_ver)
+    -- Curves + alpn hash (substitute for the missing extension hash). Uses
+    -- the GREASE-stripped curves so the hash is stable across browser reloads.
+    local ja_c = sha256_12(curves_canonical .. "|" .. alpn .. "|" .. tls_ver)
 
     return prefix .. "_" .. ja_b .. "_" .. ja_c,
            { ciphers = ciphers, curves = curves, alpn = alpn,

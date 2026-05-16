@@ -19,17 +19,32 @@ Leading `L` distinguishes from FoxIO JA4 (`t` prefix). See [lua-poc-results.md �
 | curl 8.7.1 (macOS LibreSSL) | `L13d49h2_de2bb2c70653_d07b7f455339` | 1.3 | antibot.local | h2 (negotiated) | 49 | LibreSSL ships a long compatibility cipher list including legacy GOST + RC4. The `d` (SNI present) discriminator + 49-cipher count is the cheap-to-eyeball signature. |
 | python-requests 2.32.5 (Python 3.9 alpine) | `L13i30h1_bcf826a2cd28_8c35449021c4` | 1.3 | (empty) | http/1.1 | 30 | No SNI because connection target is `127.0.0.1` (IP literals don't get SNI from requests). ALPN `h1` is the actionable signal — a "Chrome" UA over `_h1` is suspicious by itself, matching Phase 1's observation. |
 | Go-http-client/1.1 (Go 1.23 alpine) | `L13d1300_69e852b66fc7_747a969b1fb5` | 1.3 | antibot.local | (none) | 13 | Go's default `crypto/tls` advertises NO ALPN (`00` suffix). 13-cipher list is the smallest of the three automation clients. |
-| Chrome (macOS, latest) | _TODO — open https://antibot.local:8443/__fp in Chrome, paste `fp=` line_ | | | | | Manual capture per [scripts/lua-poc-probe.sh](../scripts/lua-poc-probe.sh) §"manual browser probes". |
-| Firefox (macOS, latest) | _TODO — same_ | | | | | |
-| Safari (macOS, latest) | _TODO — same_ | | | | | |
+| Chrome 148 macOS | `L13d15h2_1ed0482b9b4c_67cae73fc687` | 1.3 | antibot.local | h2 | 15 (post-GREASE-strip) | Verified stable across 3 reloads. Raw `$ssl_ciphers` includes GREASE (`0x8a8a` on one capture, `0x6a6a` on another) which rotates per TLS connection — the filter strips it before sort+hash, so the fp stays the same. |
+| Firefox 150 macOS | `L13d16h2_902b16b03119_e262d3a22ca9` | 1.3 | antibot.local | h2 | 16 | Firefox does NOT use GREASE — fp unaffected by the filter, byte-identical to pre-fix capture. |
+| Safari 26.3.1 macOS | `L13d20h2_51b6cc891816_0644cd6ac2cd` | 1.3 | antibot.local | h2 | 20 (post-GREASE-strip) | Verified stable across 2 reloads. Raw `$ssl_ciphers` includes GREASE (`0x6a6a`) and curves include GREASE (`0x8a8a`) — both stripped. Cipher list contains legacy `DES-CBC3-SHA` (3 variants) which neither Chrome nor Firefox advertises in this version. |
 
-After the three browser fingerprints are captured, this catalog reaches 6 distinct entries (acceptance gate for [86exmjzug](https://app.clickup.com/t/86exmjzug)) and matches the Phase 1 catalog shape one-for-one.
+Catalog reaches 6 distinct fingerprints — acceptance gate for [86exmjzug](https://app.clickup.com/t/86exmjzug) met. With the GREASE filter applied, **prefix `L<ver><sni><cipher_cnt><alpn>` now discriminates Chrome (15) vs Firefox (16) vs Safari (20) on cipher count alone** — the hash is still needed to discriminate clients with identical prefixes but no longer needed for browser-vs-browser separation in this set.
 
-## Observations (3-client subset)
+## GREASE finding (caught during browser capture, fixed in same PR)
 
-- All 3 automation clients produce distinct fingerprints. Cipher-count alone (49 / 30 / 13) discriminates them.
-- The component portion of the prefix (`L<ver><sni><cipher_cnt><alpn>`) is human-readable and the cheap fast-path filter; the SHA hash tails are the precise discriminator only when the prefix collides.
-- All 3 produce TLS 1.3, but the cipher *list* differs by client TLS library — exactly the property that makes this signal robust to UA spoofing.
+Chrome and Safari implement [RFC 8701 GREASE](https://datatracker.ietf.org/doc/html/rfc8701) — they advertise random reserved cipher / curve values (`0x?A?A` where both nibbles match: `0x0A0A, 0x1A1A, 0x2A2A, ..., 0xFAFA` — 16 possible per slot) that rotate **per TLS connection**. Browsers ship GREASE to break server implementations that hardcode TLS values and to make fingerprinting harder.
+
+The initial Spike 2 implementation did NOT strip GREASE before sort+hash, so:
+
+- The same Chrome on the same machine produced a **different fp every new TLS connection** — GREASE value changed, landed in `$ssl_ciphers`, sort order shifted, sha256 output was different.
+- A Chrome blocklist entry would have caught **only the one GREASE variant** the operator captured. ~16 possible variants per browser version means the blocklist becomes impractical for browsers.
+
+Fix landed in [infra/nginx-lua-poc/lua/ja4_compute.lua](../infra/nginx-lua-poc/lua/ja4_compute.lua) (~15 LoC): the `is_grease()` helper pattern-matches `^0x([0-9a-f])a%1a$` against each cipher/curve token before adding to the canonical list. Fast-path skip for non-`0x` tokens keeps the per-request cost flat (named ciphers like `TLS_AES_128_GCM_SHA256` never invoke the regex).
+
+Verified: Chrome and Safari fps reproduced across multiple reloads after the fix; Firefox unchanged (Mozilla does not enable GREASE in cipher_suites).
+
+## Observations (full 6-client catalog)
+
+- **Cipher counts span 13 → 49** (Go → curl) after GREASE strip. Automation clients sit at 13–30, browsers at 15–20. Coarse filter still useful.
+- **Browser cipher counts are all distinct** (Chrome 15, Firefox 16, Safari 20) — prefix alone separates them in this catalog. The hash component remains the precise discriminator if/when two clients collide on prefix (none do in this 6-client set, but production traffic could surface collisions).
+- **All 6 use TLS 1.3; all browsers negotiate `h2` ALPN** — discriminator is cipher list content, exactly as Phase 1 documented.
+- **Phase 1 Safari structural observation reproduced**: Safari ships more ciphers than Firefox (20 vs 16) and includes legacy `DES-CBC3-SHA` variants, distinct prefix from Firefox.
+- **Cross-browser hash collision check**: no two clients in this 6-client set produced the same fp (prefix OR hash). The closest pair on prefix was Chrome (`L13d15h2`) vs Firefox (`L13d16h2`) — 1-cipher difference.
 
 ## Cross-validation
 
@@ -66,7 +81,7 @@ The PoC #2 stand uses Spike 2 from RFC §Е (see [docs/architecture/edge-lua-vs-
 
 - ✅ Zero build-chain maintenance (stays on stock `openresty/openresty:alpine`)
 - ✅ Real, spoof-resistant, handshake-derived fingerprint
-- ✅ +0.4 K RPS over the synthetic md5 baseline; passes the ≥26 K acceptance bar at 35.3 K
+- ✅ ~32 K RPS allow path (median of 3 clean runs, post-GREASE-strip — see [PR #4](https://github.com/tabularasa31/abuse-controls/pull/4)); passes the ≥26 K acceptance bar by 23 % headroom. −8 % vs the synthetic md5 baseline, which is the cost of producing a real signal
 - ✅ Distinguishes browser vs automation vs different TLS libraries
 
 for:
