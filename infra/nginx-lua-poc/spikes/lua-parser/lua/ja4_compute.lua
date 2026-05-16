@@ -3,74 +3,50 @@
 --
 -- WHY THIS IS NOT STRICT FOXIO JA4
 -- --------------------------------
--- FoxIO JA4 requires the full ClientHello extension list + signature_algorithms,
--- which OpenSSL only exposes during the SSL_CLIENT_HELLO_CB. lua-resty-core's
--- `ngx.ssl.clienthello.get_client_hello_ext(type)` exposes specific extension
--- *bodies* in the `ssl_client_hello_by_lua` phase, but does not expose the
--- full extension-presence list nor the offered cipher list. Bridging that data
--- to `access_by_lua` requires either OpenSSL ex_data via FFI or a worker-shared
--- map keyed by SSL session — both add ~150-200 lines of FFI/glue with edge
--- cases on session reuse and SSL pointer reuse.
+-- FoxIO JA4 requires the full ClientHello extension list +
+-- signature_algorithms, which OpenSSL only exposes during the
+-- SSL_CLIENT_HELLO_CB. lua-resty-core's ngx.ssl.clienthello.* API
+-- exposes specific extension bodies in the ssl_client_hello_by_lua
+-- phase, but does not expose the full extension-presence list nor the
+-- offered cipher list. Bridging that data to access_by_lua requires
+-- OpenSSL ex_data via FFI or a worker-shared map keyed by SSL session
+-- — both add ~150-200 lines of FFI/glue with session-reuse and SSL
+-- pointer-reuse edge cases.
 --
--- This module instead uses nginx's standard `$ssl_*` vars (available since
--- nginx 1.11.7) which give us most of the JA4 components except extensions:
+-- This module instead uses nginx's standard $ssl_* vars (available
+-- since nginx 1.11.7), which give us most of the JA4 components except
+-- extensions:
 --   $ssl_protocol         -> TLS version
---   $ssl_ciphers          -> client-offered cipher list (the strongest signal)
+--   $ssl_ciphers          -> client-offered cipher list (strongest signal)
 --   $ssl_curves           -> client-offered EC curves
 --   $ssl_alpn_protocol    -> negotiated ALPN
 --   $ssl_server_name      -> SNI
 --
--- The resulting hash is:
+-- Result fp:
 --   * Real (built from TLS handshake invariants, not synthetic md5)
---   * Spoof-resistant (cipher list is fixed by the client's TLS library; UA
---     swap doesn't change it)
+--   * Spoof-resistant (cipher list fixed by client TLS library;
+--     UA swap doesn't change it)
 --   * Browser-vs-automation distinguishing (Chrome cipher list != curl)
---   * Stable per (client TLS stack) - same client = same fp
+--   * Stable per (client TLS stack) — same client = same fp
 --
--- It is NOT byte-identical to FoxIO JA4 → cannot cross-validate against the
--- FoxIO Python `ja4` library for exact-match. Spike RESULTS.md captures this.
+-- NOT byte-identical to FoxIO JA4 — cannot cross-validate exact hash
+-- against the FoxIO Python `ja4` library. See docs/phase2-fp-catalog.md.
 --
--- Format: "L13d27_<sha256(sorted_ciphers):12>_<sha256(curves|alpn):12>"
---   prefix "L" = "lua-lite", versions/sni/count layout mirror JA4_a so the
---   value is grep-friendly alongside real JA4 if we ever ship both.
+-- Format: "L<ver><sni><cipher_cnt><alpn>_<sha256(sorted_ciphers):12>_<sha256(curves|alpn|ver):12>"
+--   prefix "L" = "lua-lite", versions/sni/count layout mirrors JA4_a
+--   so the value is grep-friendly alongside real JA4 if we ever ship
+--   both side by side.
 
 local resty_sha256 = require "resty.sha256"
 local str_to_hex   = require("resty.string").to_hex
+local helpers      = require "ja4_helpers"
 
 local _M = {}
-
-local TLS_VER_CODE = {
-    ["TLSv1.3"] = "13",
-    ["TLSv1.2"] = "12",
-    ["TLSv1.1"] = "11",
-    ["TLSv1"]   = "10",
-}
 
 local function sha256_12(s)
     local h = resty_sha256:new()
     h:update(s)
     return str_to_hex(h:final()):sub(1, 12)
-end
-
--- RFC 8701 GREASE: 0x?A?A where both bytes equal AND low nibble is 0xA.
--- Strip before sort+hash so Chrome/Safari fps stay stable across reloads.
-local function is_grease(token)
-    -- Named ciphers never match — fast-skip if first 2 bytes are not "0x"/"0X".
-    -- Stock nginx renders lowercase, patched builds may go uppercase, accept both.
-    if token:byte(1) ~= 48 then return false end
-    local b2 = token:byte(2)
-    if b2 ~= 120 and b2 ~= 88 then return false end
-    return token:match("^0[xX]([0-9a-fA-F])[aA]%1[aA]$") ~= nil
-end
-
-local function split_strip_grease(s)
-    local out = {}
-    if #s > 0 then
-        for tok in s:gmatch("[^:]+") do
-            if not is_grease(tok) then out[#out + 1] = tok end
-        end
-    end
-    return out
 end
 
 function _M.compute()
@@ -80,10 +56,13 @@ function _M.compute()
     local tls_ver = ngx.var.ssl_protocol or ""
     local sni     = ngx.var.ssl_server_name or ""
 
-    local ver  = TLS_VER_CODE[tls_ver] or "00"
-    local snic = (#sni > 0) and "d" or "i"
+    local ver  = helpers.tls_ver_code(tls_ver)
+    local snic = helpers.sni_char(sni)
 
-    local list = split_strip_grease(ciphers)
+    -- Cipher list: split + strip GREASE, then sort+hash. Counts come
+    -- from the post-strip list so they match the JA4 spec (GREASE not
+    -- counted).
+    local list = helpers.split_strip_grease(ciphers)
     local cipher_count = #list
     if cipher_count > 99 then cipher_count = 99 end
 
@@ -93,18 +72,17 @@ function _M.compute()
         ja_b = sha256_12(table.concat(list, ","))
     end
 
-    local curves_canonical = table.concat(split_strip_grease(curves), ":")
+    local curves_canonical = table.concat(helpers.split_strip_grease(curves), ":")
 
-    -- ALPN first-and-last char, lowercased. "h2" -> "h2", "http/1.1" -> "h1".
-    local alpn_two = "00"
-    if #alpn >= 2 then
-        alpn_two = (alpn:sub(1, 1) .. alpn:sub(-1)):lower()
-    end
-
+    local alpn_two = helpers.alpn_two(alpn)
     local prefix = string.format("L%s%s%02d%s", ver, snic, cipher_count, alpn_two)
 
-    -- Curves + alpn hash. Uses GREASE-stripped curves so the hash is stable.
-    local ja_c = sha256_12(curves_canonical .. "|" .. alpn .. "|" .. tls_ver)
+    -- Curves + alpn hash (substitute for the missing extension hash).
+    -- Uses GREASE-stripped curves + normalised 2-digit ver (not raw
+    -- tls_ver) so the hash is stable across both reload AND nginx-build
+    -- variations. See infra/nginx-lua-poc/lua/ja4_compute.lua for the
+    -- full rationale comment.
+    local ja_c = sha256_12(curves_canonical .. "|" .. alpn .. "|" .. ver)
 
     return prefix .. "_" .. ja_b .. "_" .. ja_c,
            { ciphers = ciphers, curves = curves, alpn = alpn,

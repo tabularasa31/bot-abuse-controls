@@ -38,9 +38,9 @@ _M.entries = {
 -- in docs/lua-poc-results.md exactly.
 --
 -- _M.entries = {
---     ["L13d49h2_de2bb2c70653_d07b7f455339"] = "block",  -- curl/8.7.1
---     ["L13d1300_69e852b66fc7_747a969b1fb5"] = "block",  -- Go-http-client/1.1
---     ["L13i30h1_bcf826a2cd28_8c35449021c4"] = "block",  -- python-requests/2.32.5
+--     ["L13d49h2_de2bb2c70653_2d5fbeed7632"] = "block",  -- curl/8.7.1
+--     ["L13d1300_69e852b66fc7_1bb3b57910c1"] = "block",  -- Go-http-client/1.1
+--     ["L13i30h1_bcf826a2cd28_60bdc24aefcc"] = "block",  -- python-requests/2.32.5
 -- }
 
 return _M

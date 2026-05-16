@@ -32,7 +32,9 @@ set -euo pipefail
 HOST="antibot.local"
 PORT="8443"
 URL="https://${HOST}:${PORT}/__fp"
-RESOLVE="--resolve ${HOST}:${PORT}:127.0.0.1"
+# Bash array so word-splitting is explicit; passes "--resolve <host>:<port>:<ip>"
+# as two separate argv entries to curl regardless of how it's referenced.
+RESOLVE=(--resolve "${HOST}:${PORT}:127.0.0.1")
 PCAP=/tmp/abuse-controls-phase2-validate.pcap
 IFACE=${IFACE:-lo0}
 
@@ -56,8 +58,11 @@ fi
 
 rm -f "${PCAP}"
 echo "==> capturing handshakes for 3 probes on ${IFACE} -> ${PCAP}"
-sudo tcpdump -i ${IFACE} -w "${PCAP}" "tcp port ${PORT}" &
+sudo tcpdump -i "${IFACE}" -w "${PCAP}" "tcp port ${PORT}" &
 TCPDUMP_PID=$!
+# shellcheck disable=SC2064  # We want $TCPDUMP_PID expanded at trap-set time,
+# not at trap-fire time, so the trap knows the pid even after the variable
+# goes out of scope.
 trap "sudo kill ${TCPDUMP_PID} 2>/dev/null || true" EXIT
 
 # Verify tcpdump actually started AND produced a pcap file. tcpdump on macOS
@@ -65,24 +70,24 @@ trap "sudo kill ${TCPDUMP_PID} 2>/dev/null || true" EXIT
 # the presence check has to wait for it.
 for _ in 1 2 3 4 5; do
     sleep 0.5
-    if sudo kill -0 ${TCPDUMP_PID} 2>/dev/null && [ -s "${PCAP}" -o -e "${PCAP}" ]; then
+    if sudo kill -0 "${TCPDUMP_PID}" 2>/dev/null && { [ -s "${PCAP}" ] || [ -e "${PCAP}" ]; }; then
         break
     fi
 done
 
-if ! sudo kill -0 ${TCPDUMP_PID} 2>/dev/null; then
+if ! sudo kill -0 "${TCPDUMP_PID}" 2>/dev/null; then
     echo "tcpdump exited before probes ran — no pcap captured, aborting" >&2
     exit 1
 fi
 if [ ! -e "${PCAP}" ]; then
     echo "tcpdump did not create ${PCAP} within 2.5s — aborting" >&2
-    sudo kill ${TCPDUMP_PID} 2>/dev/null || true
+    sudo kill "${TCPDUMP_PID}" 2>/dev/null || true
     exit 1
 fi
 echo "    tcpdump running (pid ${TCPDUMP_PID}), pcap at ${PCAP}"
 
 echo "==> probe 1/3: curl"
-curl -ksS ${RESOLVE} "${URL}" > /tmp/p2-curl.txt
+curl -ksS "${RESOLVE[@]}" "${URL}" > /tmp/p2-curl.txt
 echo "    fp: $(grep ^fp= /tmp/p2-curl.txt)"
 
 echo "==> probe 2/3: python-requests"

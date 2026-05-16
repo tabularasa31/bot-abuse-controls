@@ -27,17 +27,17 @@ The leading `L` makes it grep-distinguishable from a true FoxIO JA4 (`t` prefix)
 
 ```
 $ curl -ksS --resolve antibot.local:8453:127.0.0.1 https://antibot.local:8453/__fp
-fp=L13d49h2_de2bb2c70653_d07b7f455339
+fp=L13d49h2_de2bb2c70653_2d5fbeed7632
 tls_ver=TLSv1.3       sni=antibot.local   alpn=h2          ua=curl/8.7.1
 ciphers: 49 (TLS_AES_*, TLS_CHACHA20_*, ECDHE-*, ... LEGACY-GOST...)
 
 $ python3 -c "import requests, urllib3; urllib3.disable_warnings(); print(requests.get('https://127.0.0.1:8453/__fp', verify=False).text)"
-fp=L13i30h1_bcf826a2cd28_8c35449021c4
+fp=L13i30h1_bcf826a2cd28_60bdc24aefcc
 tls_ver=TLSv1.3       sni=             alpn=http/1.1    ua=python-requests/2.32.5
 ciphers: 30                                                      (no SNI: connected to 127.0.0.1)
 
 $ docker run --rm --network host golang:1.23-alpine sh -c "<go probe>"
-fp=L13d1300_69e852b66fc7_747a969b1fb5
+fp=L13d1300_69e852b66fc7_1bb3b57910c1
 tls_ver=TLSv1.3       sni=antibot.local   alpn=             ua=Go-http-client/1.1
 ciphers: 13                                                      (Go default: no ALPN)
 ```
