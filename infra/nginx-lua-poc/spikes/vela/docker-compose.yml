@@ -1,0 +1,11 @@
+services:
+  nginx-vela-ja3:
+    build: .
+    container_name: nginx-vela-ja3
+    ports:
+      - "8454:443"
+    volumes:
+      - ./nginx.lua.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./lua:/etc/nginx/lua:ro
+      - ./certs:/etc/nginx/certs:ro
+    restart: unless-stopped

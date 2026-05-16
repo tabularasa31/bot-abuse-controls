@@ -2,6 +2,9 @@
 infra/nginx-lua-poc/certs/*.pem
 infra/nginx-lua-poc/certs/*.key
 infra/nginx-lua-poc/certs/*.crt
+infra/nginx-lua-poc/spikes/*/certs/*.pem
+infra/nginx-lua-poc/spikes/*/certs/*.key
+infra/nginx-lua-poc/spikes/*/certs/*.crt
 
 # Local env
 .env

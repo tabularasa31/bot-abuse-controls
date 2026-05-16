@@ -1,6 +1,5 @@
--- Debug endpoint handler. Dumps the per-request real fingerprint plus the
--- raw nginx-exposed TLS handshake components that fed into it. Used by
--- scripts/lua-poc-probe.sh to populate the Phase 2 fp catalog.
+-- Debug endpoint for the Spike 2 stand. Dumps the real handshake-derived
+-- fingerprint plus the raw nginx-exposed components that fed into it.
 
 local ja4 = require "ja4_compute"
 

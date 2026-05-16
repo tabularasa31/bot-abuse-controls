@@ -4,16 +4,16 @@ Isolated stand for ClickUp task [86exmhy8j](https://app.clickup.com/t/86exmhy8j)
 
 ## What is — and isn't — being measured
 
-| Layer | In this PoC | In production (Phase 2+) |
+| Layer | In this PoC (Phase 2) | In production |
 |---|---|---|
 | TLS terminate | OpenResty, TLS 1.3 | CDN operator edge nginx |
-| Fingerprint compute | **Synthetic** (md5 of cipher + protocol + UA prefix) | Real JA3/JA4 — Phase 2 |
-| Verdict path | **Lua** (verdict.lua, shared_dict cache, ngx.exit) | Same Lua, real fingerprint |
+| Fingerprint compute | **Real** — sha256 of sorted `$ssl_ciphers` + handshake metadata; `L`-prefix (see [lua/ja4_compute.lua](lua/ja4_compute.lua)) | Same Lua, same fp |
+| Verdict path | **Lua** (verdict.lua, shared_dict cache, ngx.exit) | Same Lua |
 | Origin proxy | None (return 200 in nginx) | proxy_pass to upstream |
 
-The synthetic fingerprint exists only to make the verdict path deterministic per client class without depending on a JA3-aware build of OpenResty (none of the off-the-shelf Lua libraries actually compute JA3 from `ClientHello`; the question of *where the fingerprint comes from* is orthogonal to *can Lua handle the verdict pipeline*).
+The fingerprint is real (TLS-handshake-derived from `$ssl_ciphers + $ssl_curves + $ssl_protocol + $ssl_alpn_protocol + $ssl_server_name`) and spoof-resistant — a client cannot lie about its TLS library's cipher list by changing UA. It is NOT byte-identical to strict FoxIO JA4 because nginx does not expose the full ClientHello extension list to `access_by_lua`; we hash what is available and gain the cipher-list discriminator without paying for a custom OpenSSL build. See [../../docs/lua-poc-results.md §"Phase 2 — real fp"](../../docs/lua-poc-results.md) for the three-spike comparison and decision.
 
-Phase 1 already proved fingerprint extraction works via the FoxIO C module — see [../../../antibot-lab/docs/ja3-poc-results.md](../../../antibot-lab/docs/ja3-poc-results.md). Phase 2 will wire that into the Lua pipeline.
+Phase 1 proved fingerprint extraction works via the FoxIO C module — see [../../../antibot-lab/docs/ja3-poc-results.md](../../../antibot-lab/docs/ja3-poc-results.md). Phase 2 chose a pure-Lua path to avoid a custom build, with FoxIO scaffolding kept ready at [spikes/foxio/](spikes/foxio/) for if/when strict JA4 interop becomes a requirement.
 
 ## Layout
 
@@ -49,11 +49,13 @@ docker compose -f docker-compose.lua-poc.yml --profile lua-only up -d --build
 curl -k --resolve antibot.local:8443:127.0.0.1 https://antibot.local:8443/__health  # → ok
 curl -k --resolve antibot.local:8443:127.0.0.1 https://antibot.local:8443/__fp      # → fp=... cipher=...
 
-# 4. Probe — collect fingerprints from curl / python / go.
-#    REQUIRED on a fresh clone: the synthetic fp depends on the
-#    client's TLS stack (LibreSSL vs OpenSSL pick different ciphers),
-#    so the reference entries in blocklist.lua WILL NOT match the
-#    fps your host produces. You must capture and paste your own.
+# 4. Probe — collect real fingerprints from curl / python / go (and
+#    manually from Chrome / Firefox / Safari per the script's
+#    "manual browser probes" section).
+#    REQUIRED on a fresh clone: the real fp still depends on the
+#    client's TLS stack (LibreSSL vs OpenSSL pick different cipher
+#    lists), so the reference entries in blocklist.lua WILL NOT match
+#    the fps your host produces. You must capture and paste your own.
 ./scripts/lua-poc-probe.sh
 
 # 5. Edit infra/nginx-lua-poc/lua/blocklist.lua, paste fingerprints
