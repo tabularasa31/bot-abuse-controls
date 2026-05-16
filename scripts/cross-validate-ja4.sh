@@ -11,10 +11,12 @@
 #   for the trade-off rationale.
 #
 # What we validate:
-#   * For 3 clients (curl, python-requests, Chrome) we capture a pcap of
-#     the TLS handshake, feed it to `pip install ja4` and to Wireshark's
-#     JA4 plugin, and check that the *components* (cipher list, ALPN, TLS
-#     version, SNI) agreed with what our stand emitted to /__fp.
+#   * For 3 automation clients (curl, python-requests, go-http-client) we
+#     capture a pcap of the TLS handshake, feed it to `pip install ja4` and
+#     to Wireshark's JA4 plugin, and check that the *components* (cipher
+#     list, ALPN, TLS version, SNI) agreed with what our stand emitted to
+#     /__fp. Browser fingerprints (Chrome/Firefox/Safari) need separate
+#     Wireshark-only validation — see docs/phase2-fp-catalog.md.
 #   * Specifically: our fp's JA4_a prefix (Lver, sni, cipher_cnt, alpn)
 #     must agree with the components in FoxIO's JA4_a for the same handshake.
 #     The 12-char hash tails won't match by design.
@@ -46,11 +48,38 @@ if ! python3 -c "import ja4" 2>/dev/null; then
     exit 1
 fi
 
-echo "==> capturing handshakes for 3 probes on ${IFACE} (sudo may prompt)"
-sudo -n tcpdump -i ${IFACE} -w ${PCAP} "tcp port ${PORT}" 2>/dev/null &
+echo "==> preflight: requesting sudo for tcpdump (will prompt for password if needed)"
+if ! sudo -v; then
+    echo "sudo authentication failed — cannot capture pcap on ${IFACE}" >&2
+    exit 1
+fi
+
+rm -f "${PCAP}"
+echo "==> capturing handshakes for 3 probes on ${IFACE} -> ${PCAP}"
+sudo tcpdump -i ${IFACE} -w "${PCAP}" "tcp port ${PORT}" &
 TCPDUMP_PID=$!
 trap "sudo kill ${TCPDUMP_PID} 2>/dev/null || true" EXIT
-sleep 1
+
+# Verify tcpdump actually started AND produced a pcap file. tcpdump on macOS
+# creates the file with permission to write before it starts capturing, so
+# the presence check has to wait for it.
+for _ in 1 2 3 4 5; do
+    sleep 0.5
+    if sudo kill -0 ${TCPDUMP_PID} 2>/dev/null && [ -s "${PCAP}" -o -e "${PCAP}" ]; then
+        break
+    fi
+done
+
+if ! sudo kill -0 ${TCPDUMP_PID} 2>/dev/null; then
+    echo "tcpdump exited before probes ran — no pcap captured, aborting" >&2
+    exit 1
+fi
+if [ ! -e "${PCAP}" ]; then
+    echo "tcpdump did not create ${PCAP} within 2.5s — aborting" >&2
+    sudo kill ${TCPDUMP_PID} 2>/dev/null || true
+    exit 1
+fi
+echo "    tcpdump running (pid ${TCPDUMP_PID}), pcap at ${PCAP}"
 
 echo "==> probe 1/3: curl"
 curl -ksS ${RESOLVE} "${URL}" > /tmp/p2-curl.txt

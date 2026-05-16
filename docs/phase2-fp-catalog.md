@@ -36,17 +36,29 @@ After the three browser fingerprints are captured, this catalog reaches 6 distin
 Run [scripts/cross-validate-ja4.sh](../scripts/cross-validate-ja4.sh) to capture a pcap and validate against:
 
 1. **FoxIO Python `ja4` library** (`pip install ja4`) — feeds the pcap through, extracts strict JA4. Our `L`-prefix fp is NOT byte-identical to FoxIO's `t`-prefix JA4 by design (see [lua-poc-results.md §"Phase 2 — real fp"](lua-poc-results.md) for why); validation is at the **component level**: cipher list, ALPN, TLS version, SNI presence must agree.
-2. **Wireshark JA4 plugin** — manual third source. Open the pcap, eyeball the same 3 sessions, confirm components.
+2. **Wireshark JA4 plugin** — third source, manual. Open the pcap, eyeball the same sessions, confirm components.
 
-Validation results (filled in after running):
+The script drives **automation clients only** (curl, python-requests, go-http-client) because real browsers can't be invoked headlessly with their production TLS stacks. Browser validation is the manual Wireshark step below.
+
+Validation table for automation clients (filled in after running [scripts/cross-validate-ja4.sh](../scripts/cross-validate-ja4.sh)):
 
 | Probe | Our `/__fp` cipher_count | ja4 lib cipher_count | Wireshark cipher_count | ALPN match | Result |
 |---|---:|---:|---:|:---:|:---:|
 | curl 8.7.1 | 49 | _TODO_ | _TODO_ | | |
 | python-requests | 30 | _TODO_ | _TODO_ | | |
-| Chrome | _TODO_ | _TODO_ | _TODO_ | | |
+| go-http-client | 13 | _TODO_ | _TODO_ | | |
 
-Pass = components match across all three sources for all three probes.
+Browser-side validation (manual, no automation possible):
+
+| Browser | Captured fp (above) | Wireshark ja4 plugin: ClientHello matches? | Cipher_count match? | ALPN match? |
+|---|---|:---:|:---:|:---:|
+| Chrome | _from row above_ | _TODO_ | _TODO_ | _TODO_ |
+| Firefox | _from row above_ | _TODO_ | _TODO_ | _TODO_ |
+| Safari | _from row above_ | _TODO_ | _TODO_ | _TODO_ |
+
+For browsers: open `https://antibot.local:8443/__fp` while Wireshark captures on `lo0`, then in Wireshark filter `tls.handshake.type == 1`, click the browser's ClientHello, and compare the cipher count + ALPN against the catalog row above.
+
+Pass = components match across all three sources (our stand, ja4 lib, Wireshark) for all 3 automation probes, AND Wireshark agrees with the captured browser fps on cipher count + ALPN.
 
 ## Why not strict FoxIO JA4 byte-compatibility
 

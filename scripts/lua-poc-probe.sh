@@ -35,10 +35,26 @@ fi
 echo "using container: ${container}"
 echo
 
+# Track failures so the script exits non-zero if any probe didn't produce a
+# usable fp line. A clean exit must mean "all 3 automation clients captured."
+# Otherwise CI / a downstream caller can mistake a partial run for success.
+FAILED_PROBES=()
+
 probe() {
     local label="$1"; shift
     echo "--- ${label} ---"
-    "$@" || echo "(probe ${label} returned non-zero)"
+    local out
+    if ! out=$("$@" 2>&1); then
+        echo "${out}"
+        echo "FAIL: probe ${label} returned non-zero" >&2
+        FAILED_PROBES+=("${label}")
+    elif ! grep -q '^fp=' <<<"${out}"; then
+        echo "${out}"
+        echo "FAIL: probe ${label} exited 0 but no fp= line in output" >&2
+        FAILED_PROBES+=("${label}")
+    else
+        echo "${out}"
+    fi
     echo
     sleep 0.3
 }
@@ -52,7 +68,7 @@ import requests, urllib3
 urllib3.disable_warnings()
 r = requests.get('https://127.0.0.1:${PORT}/__fp', verify=False, headers={'Host': '${HOST}'})
 print(r.text)
-" || true
+"
 
 probe "go-http-client" \
     docker run --rm --network host golang:1.23-alpine sh -c \
@@ -101,3 +117,13 @@ match what the FoxIO Python ja4 library and Wireshark JA4 plugin extract
 from the same handshake. See cross-validate-ja4.sh for the why-it-is-not-
 byte-identical-to-FoxIO-JA4 caveat.
 EOF
+
+if [ ${#FAILED_PROBES[@]} -gt 0 ]; then
+    echo
+    echo "================================================================================" >&2
+    echo "PROBE FAILURES: ${FAILED_PROBES[*]}" >&2
+    echo "================================================================================" >&2
+    echo "Do NOT paste these results into blocklist.lua or phase2-fp-catalog.md" >&2
+    echo "until the failed probes are fixed and rerun." >&2
+    exit 1
+fi
