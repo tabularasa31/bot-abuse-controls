@@ -1,0 +1,19 @@
+# TLS material — generate locally with openssl
+infra/nginx-lua-poc/certs/*.pem
+infra/nginx-lua-poc/certs/*.key
+infra/nginx-lua-poc/certs/*.crt
+
+# Local env
+.env
+.env.local
+
+# Mac
+.DS_Store
+
+# Go build artifacts (in case antibot/ gets compiled locally)
+antibot/antibot
+antibot/*.test
+*.out
+
+# Docker logs / volumes
+docker-compose.override.yml
