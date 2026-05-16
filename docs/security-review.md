@@ -40,8 +40,8 @@ The verdict pipeline **never** does `ngx.exit(5xx)` itself. If our code crashes,
 The only `ngx.exit(403)` in the pipeline is the deliberate "block this fp" decision. Even then, the production deployment pattern (see ADR-002 and the cascade) goes through **shadow mode first** (`would_verdict=block` logged but request still proxied) for any new blocklist entry, before flipping to enforcement.
 
 Concrete artefacts:
-- [infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua) — read it; only exit is `ngx.exit(403)` on explicit block verdict
-- [infra/nginx-shadow/lua/verdict.lua](../infra/nginx-shadow/lua/verdict.lua) — shadow variant, never exits
+- [infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua) — read it; only exit is `ngx.exit(403)` on explicit block verdict. `compute()` is wrapped in `pcall` so a Lua error inside it (truncated `$ssl_*`, missing var, etc.) logs at ERR level and falls through to allow rather than propagating to a 500. Verified end-to-end by injecting `error()` into compute and confirming the request gets 200 not 500.
+- A shadow-mode variant of verdict.lua (logs the would-be verdict but never exits) ships separately under `infra/nginx-shadow/lua/verdict.lua`. That directory is added by a different change set and is not present in this branch — link will work after that PR merges.
 
 ## DoS resistance
 
@@ -80,10 +80,10 @@ Compared to the rejected Spike 1 (vendored OpenSSL 1.1.1l + vendored OpenResty t
 
 What gets logged for each request:
 
-- In the production pipeline (`infra/nginx-lua-poc/lua/verdict.lua`): one line at INFO level per cache miss: `verdict=allow|block fp=L13d... ua=Mozilla/5.0...`
-- In the shadow pipeline (`infra/nginx-shadow/lua/log_event.lua`): one JSON line per request with fp, raw `$ssl_*` components (cipher list truncated to 256 bytes), UA (truncated to 200 chars), method, host, URI, status, request_time, remote_addr
+- In the production pipeline ([infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua)): one line at INFO level per cache miss — `verdict=allow|block (cold) fp=L13d... ua=...`. UA is included so a "user complains about a 403" investigation can join on the UA without re-parsing the access log.
+- A shadow-mode variant ships in a separate change set under `infra/nginx-shadow/` and emits one JSON line per request (fp + raw `$ssl_*` components truncated to 256 bytes + UA truncated to 200 chars + method/host/URI/status/request_time/remote_addr). Not present in this branch; see PR #5.
 
-**Remote IP is logged** in shadow mode by default. For GDPR / PDN-data compliance, the operator should configure nginx's `set_real_ip_from` + `real_ip_header` to either (a) anonymise (`X-Forwarded-For` from CDN with the last octet stripped) or (b) hash before logging. Not currently implemented — operator responsibility. Flagged for the production handoff (cascade [86exmk0e5](https://app.clickup.com/t/86exmk0e5)).
+**Remote IP is logged** in shadow mode (via the JSON event line) and in production (via nginx's default access log if enabled; the antibot's own log line does NOT include remote_addr — it only has verdict + fp + UA). For GDPR / PDN-data compliance, the operator should configure nginx's `set_real_ip_from` + `real_ip_header` to either (a) anonymise (`X-Forwarded-For` from CDN with the last octet stripped) or (b) hash before logging. Not currently implemented — operator responsibility. Flagged for the production handoff (cascade [86exmk0e5](https://app.clickup.com/t/86exmk0e5)).
 
 **Request bodies are never logged.** We don't even read them; the verdict pipeline runs in `access_by_lua`, before the body is processed.
 
@@ -94,7 +94,7 @@ What gets logged for each request:
 - **GREASE strip is whitelist-based.** We strip the 16 documented GREASE values (RFC 8701). If a new GREASE-like rotation scheme is added to TLS, we won't strip it until we update the pattern. Probability: low (RFC 8701 has been stable since 2019).
 - **Cross-validation is component-level, not byte-match.** Documented in [scripts/cross-validate-ja4.sh](../scripts/cross-validate-ja4.sh) and [docs/phase2-fp-catalog.md](phase2-fp-catalog.md).
 - **No rate limit on the verdict pipeline itself.** A pathological client can hit us at line rate. The pipeline is bounded-cost per request (above), so this is degraded service not outage — but the cascade A3 rate-limit task addresses it explicitly.
-- **shared_dict size sizing is hand-set** (10 MB cache, 1 MB blocklist). Sized for ~100 K cached fps and ~10 K blocklist entries. Production sizing depends on real fp cardinality from shadow-mode trial — see [infra/nginx-shadow/README.md](../infra/nginx-shadow/README.md).
+- **shared_dict size sizing is hand-set** (10 MB cache, 1 MB blocklist). Sized for ~100 K cached fps and ~10 K blocklist entries. Production sizing depends on real fp cardinality from shadow-mode trial — see the `infra/nginx-shadow/README.md` deliverable in PR #5 (not present in this branch).
 
 ## What CI catches today
 
