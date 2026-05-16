@@ -52,12 +52,27 @@ local list = ngx.shared.fp_blocklist
 local verdict = list:get(fp) or "allow"
 
 cache:set(fp, verdict, 60)
+-- Structured log line consumed by docs/CDN operator-rollout/monitoring.md
+-- (verdict counts + pipeline latency) and runbook.md (UA join for
+-- complaint inspection).
+--
+-- Field contract:
+--   rt= seconds, time elapsed since request start AT THIS POINT (access
+--       phase). This is the verdict pipeline latency upper bound — not
+--       the full request_time (which only finalises in log phase).
+--       Matches what monitoring's "Antibot pipeline overhead" SLO means.
+--   ua= quoted with double quotes so the runbook's `ua="[^"]*"` regex
+--       extracts spaces-containing UAs cleanly. Embedded `"` in UA are
+--       not escaped; an attacker controls UA but cannot use it to break
+--       the line because we use NOTICE-level log lines which are not
+--       fed back into the verdict path.
+--
 -- NOTICE level so the line survives a production `error_log ... notice;`
--- setting — the monitoring doc parses these lines for verdict counts and
--- needs them at the same level the rest of production runs at. INFO would
--- get filtered out in steady-state.
+-- setting — monitoring parses these for metrics and needs them at the
+-- same level as the rest of production. INFO would get filtered out.
 ngx.log(ngx.NOTICE, "verdict=", verdict, " (cold) fp=", fp,
-                    " ua=", ngx.var.http_user_agent or "-")
+                    " rt=", ngx.var.request_time or "-",
+                    ' ua="', (ngx.var.http_user_agent or "-"), '"')
 
 if verdict == "block" then
     return ngx.exit(403)
