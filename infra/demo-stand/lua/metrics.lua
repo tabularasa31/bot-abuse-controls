@@ -1,0 +1,56 @@
+-- /metrics handler. Emits Prometheus text-format counters drawn from
+-- the metrics shared_dict (incremented by log_event.lua). Output is
+-- scrape-friendly; a real Prometheus can poll this endpoint directly.
+--
+-- For a production deployment we'd replace this with lua-resty-prometheus
+-- (cascade task В3) which has proper histograms etc. This implementation
+-- is intentionally simple — a few counters plus a derived gauge — so a
+-- reviewer can read it and understand what's being measured.
+
+local m = ngx.shared.metrics
+
+local function get(key) return m:get(key) or 0 end
+
+local now = ngx.time()
+local uptime = now - (m:get("start_time") or now)
+local requests = get("requests_total")
+local hits     = get("cache_hit_total")
+local misses   = get("cache_miss_total")
+local cache_hit_ratio = (hits + misses) > 0 and (hits / (hits + misses)) or 0
+
+ngx.header.content_type = "text/plain; version=0.0.4; charset=utf-8"
+ngx.say(string.format([[
+# HELP antibot_requests_total Requests that went through the verdict pipeline.
+# TYPE antibot_requests_total counter
+antibot_requests_total %d
+
+# HELP antibot_verdict_total Requests by verdict, since worker start.
+# TYPE antibot_verdict_total counter
+antibot_verdict_total{verdict="allow"} %d
+antibot_verdict_total{verdict="block"} %d
+
+# HELP antibot_cache_total Cache hits vs misses on the per-fp verdict cache.
+# TYPE antibot_cache_total counter
+antibot_cache_total{outcome="hit"} %d
+antibot_cache_total{outcome="miss"} %d
+
+# HELP antibot_cache_hit_ratio Derived ratio = hits / (hits + misses).
+# TYPE antibot_cache_hit_ratio gauge
+antibot_cache_hit_ratio %.4f
+
+# HELP antibot_blocklist_entries Number of fps currently in the blocklist shared_dict.
+# TYPE antibot_blocklist_entries gauge
+antibot_blocklist_entries %d
+
+# HELP antibot_uptime_seconds Seconds since this worker started.
+# TYPE antibot_uptime_seconds gauge
+antibot_uptime_seconds %d
+]],
+    requests,
+    get("verdict_allow_total"),
+    get("verdict_block_total"),
+    hits,
+    misses,
+    cache_hit_ratio,
+    get("blocklist_entries"),
+    uptime))
