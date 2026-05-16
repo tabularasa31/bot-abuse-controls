@@ -35,8 +35,11 @@ mkdir -p infra/demo-stand/certs
 cp /your/fullchain.pem infra/demo-stand/certs/fullchain.pem
 cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 
-# Bring up.
-docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
+# Bring up. The REVISION env var feeds /__version so reviewers can see
+# what code is actually deployed. Without it the endpoint reports
+# `commit: dev` (the compose default in docker-compose.demo.yml).
+REVISION=$(git rev-parse --short HEAD) \
+  docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
