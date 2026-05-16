@@ -49,7 +49,11 @@ docker compose -f docker-compose.lua-poc.yml --profile lua-only up -d --build
 curl -k --resolve antibot.local:8443:127.0.0.1 https://antibot.local:8443/__health  # → ok
 curl -k --resolve antibot.local:8443:127.0.0.1 https://antibot.local:8443/__fp      # → fp=... cipher=...
 
-# 4. Probe — collect fingerprints from curl / python / go
+# 4. Probe — collect fingerprints from curl / python / go.
+#    REQUIRED on a fresh clone: the synthetic fp depends on the
+#    client's TLS stack (LibreSSL vs OpenSSL pick different ciphers),
+#    so the reference entries in blocklist.lua WILL NOT match the
+#    fps your host produces. You must capture and paste your own.
 ./scripts/lua-poc-probe.sh
 
 # 5. Edit infra/nginx-lua-poc/lua/blocklist.lua, paste fingerprints
