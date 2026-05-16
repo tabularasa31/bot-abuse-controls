@@ -81,7 +81,7 @@ The PoC #2 stand uses Spike 2 from RFC §Е (see [docs/architecture/edge-lua-vs-
 
 - ✅ Zero build-chain maintenance (stays on stock `openresty/openresty:alpine`)
 - ✅ Real, spoof-resistant, handshake-derived fingerprint
-- ✅ +0.4 K RPS over the synthetic md5 baseline; passes the ≥26 K acceptance bar at 35.3 K
+- ✅ ~32 K RPS allow path (median of 3 clean runs, post-GREASE-strip — see [PR #4](https://github.com/tabularasa31/abuse-controls/pull/4)); passes the ≥26 K acceptance bar by 23 % headroom. −8 % vs the synthetic md5 baseline, which is the cost of producing a real signal
 - ✅ Distinguishes browser vs automation vs different TLS libraries
 
 for:

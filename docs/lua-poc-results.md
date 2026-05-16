@@ -73,9 +73,9 @@ Spike 1 declined: OpenSSL 1.1.1l pin + unmaintained vendored tarball + EOL'd Cen
 |---|---|---:|---:|---:|---:|---:|---|
 | Baseline (no Lua, `/__health`) | TLS + nginx `return 200` | **39 746** | 2.25 ms | 2.93 ms | 3.89 ms | 8.90 ms | Same as PoC #2 baseline. |
 | PoC #2 — synthetic md5 allow path | TLS + `access_by_lua` md5 + `content_by_lua` 200 | **34 808** | 2.49 ms | 3.37 ms | 4.89 ms | 25.39 ms | Reference from earlier doc above. |
-| **Phase 2 — real fp allow path** | TLS + `access_by_lua` sha256 of `$ssl_ciphers` + `content_by_lua` 200 | **35 283** | **2.42 ms** | **3.36 ms** | **5.23 ms** | **21.70 ms** | +1.4% RPS vs synthetic, p50 −0.07 ms, p99 −3.7 ms. |
+| **Phase 2 — real fp allow path (with GREASE strip)** | TLS + `access_by_lua` sha256 of `$ssl_ciphers` + `content_by_lua` 200 | **~32 000** | **2.75 ms** | **3.71 ms** | **5.13 ms** | **10–29 ms** | Median of 3 clean runs (31 660 / 32 161 / 32 378). −8 % RPS vs synthetic, +0.26 ms p50. The cost vs the pre-GREASE-strip implementation (35 283 RPS) is ~10 %, from the per-token GREASE check; see [follow-up PR #4](https://github.com/tabularasa31/abuse-controls/pull/4). Above the ≥26 K acceptance gate by 23 %. |
 
-The real fp is **essentially free** at the request hot path: `$ssl_ciphers` is already populated by nginx; the only added work per cache miss is splitting the cipher list on `:`, sorting, and a single SHA256 over ~600 bytes. The PoC #2 synthetic md5 did almost the same amount of work and produced a less useful signal.
+The real fp is **cheap** at the request hot path: `$ssl_ciphers` is already populated by nginx; the only added work per cache miss is splitting the cipher list on `:`, GREASE filter (one pattern check per token, fast-skipped for named ciphers — see [PR #4](https://github.com/tabularasa31/abuse-controls/pull/4)), sorting, and a single SHA256 over ~600 bytes. The −8 % vs PoC #2's synthetic md5 is the cost of producing a real signal — synthetic md5 produced bytes too, just useless ones.
 
 ### Fingerprints captured (3 automation clients)
 
