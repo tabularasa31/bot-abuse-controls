@@ -17,6 +17,17 @@
 -- shared_dict :get/:set don't throw, so they don't need a wrapper.
 -- See docs/security-review.md §"Fail-open philosophy".
 
+-- Deployment feature flag. The CDN operator puppet template always renders
+-- `set $abuse_controls_enabled "true"` or `"false"` from hiera (default
+-- "false" in common.yaml; per-host override flips to "true" during the
+-- canary rollout — see docs/CDN operator-rollout/canary-plan.md). When the
+-- var is explicitly "false", skip the pipeline.
+--
+-- When the var is UNSET (demo stand, shadow stand, any deployment that
+-- doesn't bother with the flag) we fall through to running normally —
+-- so demo and shadow don't need to know about this flag at all.
+if ngx.var.abuse_controls_enabled == "false" then return end
+
 local ja4 = require "ja4_compute"
 
 local ok, fp_or_err = pcall(ja4.compute)
@@ -41,8 +52,12 @@ local list = ngx.shared.fp_blocklist
 local verdict = list:get(fp) or "allow"
 
 cache:set(fp, verdict, 60)
-ngx.log(ngx.INFO, "verdict=", verdict, " (cold) fp=", fp,
-                  " ua=", ngx.var.http_user_agent or "-")
+-- NOTICE level so the line survives a production `error_log ... notice;`
+-- setting — the monitoring doc parses these lines for verdict counts and
+-- needs them at the same level the rest of production runs at. INFO would
+-- get filtered out in steady-state.
+ngx.log(ngx.NOTICE, "verdict=", verdict, " (cold) fp=", fp,
+                    " ua=", ngx.var.http_user_agent or "-")
 
 if verdict == "block" then
     return ngx.exit(403)
