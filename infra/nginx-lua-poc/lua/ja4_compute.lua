@@ -61,11 +61,16 @@ end
 -- is the property that makes the signal useful.
 local function is_grease(token)
     -- Fast path: named ciphers ("TLS_AES_...", "ECDHE-...") never match —
-    -- skip the regex entirely. Only "0x<hex>" tokens can be GREASE.
-    if token:byte(1) ~= 48 or token:byte(2) ~= 120 then  -- '0', 'x'
-        return false
-    end
-    return token:match("^0x([0-9a-f])a%1a$") ~= nil
+    -- skip the pattern entirely. Only "0x<hex>" / "0X<hex>" tokens can be
+    -- GREASE. Stock nginx renders unknown values lowercase, but patched
+    -- builds and other nginx forks may render uppercase, so accept both.
+    if token:byte(1) ~= 48 then return false end  -- '0'
+    local b2 = token:byte(2)
+    if b2 ~= 120 and b2 ~= 88 then return false end  -- 'x' or 'X'
+    -- Case-insensitive pattern. Backreference %1 is byte-exact, but
+    -- character classes around it accept either case, so "0xAaAa",
+    -- "0X1a1A", and "0x6a6a" all match as long as both nibbles agree.
+    return token:match("^0[xX]([0-9a-fA-F])[aA]%1[aA]$") ~= nil
 end
 
 -- Split colon-separated token list, stripping GREASE.

@@ -55,9 +55,12 @@ end
 -- RFC 8701 GREASE: 0x?A?A where both bytes equal AND low nibble is 0xA.
 -- Strip before sort+hash so Chrome/Safari fps stay stable across reloads.
 local function is_grease(token)
-    -- Named ciphers never match — fast-skip if first 2 bytes != "0x".
-    if token:byte(1) ~= 48 or token:byte(2) ~= 120 then return false end
-    return token:match("^0x([0-9a-f])a%1a$") ~= nil
+    -- Named ciphers never match — fast-skip if first 2 bytes are not "0x"/"0X".
+    -- Stock nginx renders lowercase, patched builds may go uppercase, accept both.
+    if token:byte(1) ~= 48 then return false end
+    local b2 = token:byte(2)
+    if b2 ~= 120 and b2 ~= 88 then return false end
+    return token:match("^0[xX]([0-9a-fA-F])[aA]%1[aA]$") ~= nil
 end
 
 local function split_strip_grease(s)
