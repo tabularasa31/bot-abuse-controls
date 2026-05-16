@@ -10,13 +10,13 @@ The stand demonstrates **active blocking** (not shadow mode) — curl and python
 |---|---|---|---|
 | `/` | a real browser | 200, demo landing page | Browsers are allowed by default. |
 | `/` | `curl -k https://<host>/` | 403 | Default curl (LibreSSL on macOS / OpenSSL elsewhere) matches the seed blocklist — the fp `L13d49h2_...` is one of the pre-loaded automation entries. |
-| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 403 | Same: python-requests fp is in the seed blocklist. |
+| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 403 | python-requests fp seeded in both SNI variants (real-host with `<host>` domain → `L13d30h1_...`; IP-literal target → `L13i30h1_...`). Either way blocks. |
 | `/` | `wget -O - --no-check-certificate https://<host>/` | depends on wget's TLS stack | wget's fp differs by build; may not be in seed blocklist (will pass through with `would_verdict=allow`). |
 | `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. Same response whether or not your fp is blocked. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
 | `/__admin` | a real browser | HTML status page | Live counters: total requests, blocks, allows, cache hit ratio, blocklist size, uptime. No mutation surface. |
-| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_verdict_total{verdict=...}`, `antibot_cache_hit_total`, `antibot_request_duration_seconds_bucket{...}`, `antibot_blocklist_entries`. |
+| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="allow"\|"block"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same site, **no** antibot | Bypasses `access_by_lua` entirely. Direct comparison: hit `/` and `/baseline/` with `wrk`, see the latency delta. |
 
 The seed blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) is the same 3 automation fps documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md), captured 2026-05-16 on macOS arm64. Real production traffic would have a wider seed set; this is enough to demonstrate visible blocking from day 1.
