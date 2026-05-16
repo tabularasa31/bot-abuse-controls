@@ -81,7 +81,7 @@ Compared to the rejected Spike 1 (vendored OpenSSL 1.1.1l + vendored OpenResty t
 What gets logged for each request:
 
 - In the production pipeline ([infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua)): one line at INFO level per cache miss — `verdict=allow|block (cold) fp=L13d... ua=...`. UA is included so a "user complains about a 403" investigation can join on the UA without re-parsing the access log.
-- A shadow-mode variant ships in a separate change set under `infra/nginx-shadow/` and emits one JSON line per request (fp + raw `$ssl_*` components truncated to 256 bytes + UA truncated to 200 chars + method/host/URI/status/request_time/remote_addr). Not present in this branch; see PR #5.
+- The shadow-mode variant at [infra/nginx-shadow/lua/log_event.lua](../infra/nginx-shadow/lua/log_event.lua) emits one JSON line per request (fp + raw `$ssl_*` components truncated to 256 bytes + UA truncated to 200 chars + method/host/URI/status/request_time/remote_addr).
 
 **Remote IP is logged** in shadow mode (via the JSON event line) and in production (via nginx's default access log if enabled; the antibot's own log line does NOT include remote_addr — it only has verdict + fp + UA). For GDPR / PDN-data compliance, the operator should configure nginx's `set_real_ip_from` + `real_ip_header` to either (a) anonymise (`X-Forwarded-For` from CDN with the last octet stripped) or (b) hash before logging. Not currently implemented — operator responsibility. Flagged for the production handoff (cascade [86exmk0e5](https://app.clickup.com/t/86exmk0e5)).
 
