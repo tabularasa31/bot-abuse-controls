@@ -78,8 +78,13 @@ function _M.compute()
     local prefix = string.format("L%s%s%02d%s", ver, snic, cipher_count, alpn_two)
 
     -- Curves + alpn hash (substitute for the missing extension hash).
-    -- Uses GREASE-stripped curves so the hash is stable across reloads.
-    local ja_c = sha256_12(curves_canonical .. "|" .. alpn .. "|" .. tls_ver)
+    -- Uses:
+    --   * GREASE-stripped curves — stable across Chrome/Safari reloads
+    --   * normalised 2-digit `ver` (not raw $ssl_protocol) — stable across
+    --     nginx builds that might render the protocol string differently
+    --     (per the file header doc + ADR-004; was using raw tls_ver,
+    --     gemini code-review caught the inconsistency)
+    local ja_c = sha256_12(curves_canonical .. "|" .. alpn .. "|" .. ver)
 
     return prefix .. "_" .. ja_b .. "_" .. ja_c,
            { ciphers = ciphers, curves = curves, alpn = alpn,
