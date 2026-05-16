@@ -34,7 +34,10 @@ fi
 
 # Materialise once into a temp file so each section doesn't re-read docker.
 tmp=$(mktemp)
-trap "rm -f ${tmp}" EXIT
+# Single-quote the trap body so `${tmp}` is preserved literally and
+# expanded at trap-fire time (still in scope — script-level var).
+# Deferred-expansion form preferred (SC2064).
+trap 'rm -f "${tmp}"' EXIT
 events > "${tmp}"
 
 total=$(wc -l < "${tmp}" | tr -d ' ')

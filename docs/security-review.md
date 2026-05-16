@@ -41,7 +41,7 @@ The only `ngx.exit(403)` in the pipeline is the deliberate "block this fp" decis
 
 Concrete artefacts:
 - [infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua) — read it; only exit is `ngx.exit(403)` on explicit block verdict. `compute()` is wrapped in `pcall` so a Lua error inside it (truncated `$ssl_*`, missing var, etc.) logs at ERR level and falls through to allow rather than propagating to a 500. Verified end-to-end by injecting `error()` into compute and confirming the request gets 200 not 500.
-- A shadow-mode variant of verdict.lua (logs the would-be verdict but never exits) ships separately under `infra/nginx-shadow/lua/verdict.lua`. That directory is added by a different change set and is not present in this branch — link will work after that PR merges.
+- [infra/nginx-shadow/lua/verdict.lua](../infra/nginx-shadow/lua/verdict.lua) — shadow-mode variant: logs the would-be verdict but never `ngx.exit`s. Used during the canary deployment phase before flipping to active blocking.
 
 ## DoS resistance
 
@@ -94,7 +94,7 @@ What gets logged for each request:
 - **GREASE strip is whitelist-based.** We strip the 16 documented GREASE values (RFC 8701). If a new GREASE-like rotation scheme is added to TLS, we won't strip it until we update the pattern. Probability: low (RFC 8701 has been stable since 2019).
 - **Cross-validation is component-level, not byte-match.** Documented in [scripts/cross-validate-ja4.sh](../scripts/cross-validate-ja4.sh) and [docs/phase2-fp-catalog.md](phase2-fp-catalog.md).
 - **No rate limit on the verdict pipeline itself.** A pathological client can hit us at line rate. The pipeline is bounded-cost per request (above), so this is degraded service not outage — but the cascade A3 rate-limit task addresses it explicitly.
-- **shared_dict size sizing is hand-set** (10 MB cache, 1 MB blocklist). Sized for ~100 K cached fps and ~10 K blocklist entries. Production sizing depends on real fp cardinality from shadow-mode trial — see the `infra/nginx-shadow/README.md` deliverable in PR #5 (not present in this branch).
+- **shared_dict size sizing is hand-set** (10 MB cache, 1 MB blocklist). Sized for ~100 K cached fps and ~10 K blocklist entries. Production sizing depends on real fp cardinality from a shadow-mode trial — see [infra/nginx-shadow/README.md](../infra/nginx-shadow/README.md).
 
 ## What CI catches today
 
