@@ -62,7 +62,7 @@ RFC §Е listed three viable paths; we built scaffolding for each ([infra/nginx-
 | Spike | RPS allow | p50 | p99 | Build wall-clock | Maintenance burden | Strict FoxIO JA4? |
 |---|---:|---:|---:|---:|---|:---:|
 | 1. vela-security/openresty-ssl-ja3 | not measured | — | — | 15–25 min (yum + OpenSSL 1.1.1l + OpenResty source) | We own the fork; OpenSSL 1.1.1l EOL'd 2023-09-11 | JA3, not JA4 |
-| 2. **Lua $ssl_* compute (chosen)** | **38 781** isolated / **35 283** real stand | **2.42 ms** | **21.7 ms** | 0 s (stock `openresty/openresty:alpine`) | Lua module owned by us, ~80 LoC, no build chain | No (Lua-lite, leading `L` prefix) |
+| 2. **Lua $ssl_* compute (chosen)** | **~32 000** (median of 3 post-GREASE-strip runs; pre-strip was 35 283) | **2.75 ms** | **10–29 ms** (jittery) | 0 s (stock `openresty/openresty:alpine`) | Lua module owned by us, ~95 LoC incl. RFC 8701 GREASE strip ([PR #4](https://github.com/tabularasa31/abuse-controls/pull/4)), no build chain | No (Lua-lite, leading `L` prefix) |
 | 3. FoxIO ja4-nginx-module + lua | not measured | — | — | 25–40 min (nginx 1.30.0 + OpenSSL 4.0.0 + LuaJIT + ngx_devel_kit + lua-nginx + ja4) | 5 upstream pins + line-anchored nginx patch | Yes (`t`-prefix) |
 
 Spike 1 declined: OpenSSL 1.1.1l pin + unmaintained vendored tarball + EOL'd CentOS 7 build base = unacceptable supply-chain risk. Spike 3 declined for now: substantial build burden for the only material upside (byte-compatible JA4), and we have no concrete consumer for external JA4 feeds yet. Full per-spike RESULTS.md in each spike directory; Dockerfiles remain build-ready if we ever need them.
