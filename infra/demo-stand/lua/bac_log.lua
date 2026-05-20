@@ -21,17 +21,12 @@ local _M = {}
 -- EDGE_ID env var (must be listed in nginx.conf `env EDGE_ID;`).
 local EDGE_ID = os.getenv("EDGE_ID") or "stand-bac"
 
--- Per-resource business mode (shadow / active). Phase 1 has no policy
--- catalog, so the stand emits a single uniform mode. Default is "active"
--- to match the stand's actual handling — it enforces blocking
--- (ngx.exit(403) in verdict.lua), so labelling its traffic "shadow"
--- would misclassify every record. Override via BAC_MODE (must be listed
--- in nginx.conf `env BAC_MODE;`). Per-resource modes arrive with the
--- policy catalog (Phase 3); the field name does not change.
-local MODE = os.getenv("BAC_MODE") or "active"
-if MODE ~= "shadow" and MODE ~= "active" then
-    MODE = "shadow"
-end
+-- Per-resource business mode (shadow / active) stamped into each log
+-- record. Phase 1 has no policy catalog and the stand's fp_blocklist
+-- ships empty (nothing is blocked), so every record is "shadow". Per-
+-- resource modes arrive with the policy catalog (Phase 3); the field
+-- name does not change.
+local MODE = "shadow"
 
 -- action = the effective action the final rule's category implies, kept
 -- separate from verdict so analytics can distinguish "what was decided"

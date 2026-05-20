@@ -2,22 +2,24 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (CDN operator admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand demonstrates **active blocking** (not shadow mode) — curl and python-requests get 403, browsers get 200. This is the same `infra/nginx-lua-poc/lua/verdict.lua` that ships in production, fronted by the multi-scenario endpoints below.
+The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. This is the same `infra/nginx-lua-poc/lua/verdict.lua` that ships in production, fronted by the multi-scenario endpoints below. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
 
 ## Scenarios a reviewer can probe
 
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
 | `/` | a real browser | 200, demo landing page | Browsers are allowed by default. |
-| `/` | `curl -k https://<host>/` | 403 | Default curl (LibreSSL on macOS / OpenSSL elsewhere) matches the seed blocklist — the fp `L13d49h2_...` is one of the pre-loaded automation entries. |
-| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 403 | python-requests fp seeded in both SNI variants (real-host with `<host>` domain → `L13d30h1_...`; IP-literal target → `L13i30h1_...`). Either way blocks. |
-| `/` | `wget -O - --no-check-certificate https://<host>/` | depends on wget's TLS stack | wget's fp differs by build; may not be in seed blocklist (will pass through with `would_verdict=allow`). |
-| `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. Same response whether or not your fp is blocked. |
+| `/` | `curl -k https://<host>/` | 200 | Shadow mode: the cascade computes curl's fp and logs `would_verdict`, but the empty blocklist means no block. Confirm the computed fp via `/__fp`. |
+| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, not blocked. |
+| `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in `/__fp` and the logs. |
+| `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
 | `/__admin` | a real browser | HTML status page | Live counters: total requests, passes, blocks, cache hit ratio, blocklist size, uptime. No mutation surface. |
 | `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same site, **no** antibot | Bypasses `access_by_lua` entirely. Direct comparison: hit `/` and `/baseline/` with `wrk`, see the latency delta. |
+
+The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Candidate automation fps to seed it from (curl/python/Go, captured 2026-05-16 on macOS arm64) are documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md); promoting them into the blocklist is a deliberate, data-driven step (see analyze.py HIGH-confidence candidates), not the default.
 
 ## Structured log (Phase 1 schema)
 
@@ -29,13 +31,11 @@ docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_
 
 Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog so the stand emits one uniform value (`active` by default, matching the stand's blocking behaviour; override via `BAC_MODE`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog and the `fp_blocklist` ships empty, so the stand emits a uniform `shadow`; `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md), [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
 The cascade stages (hygiene/reputation/rate_limits — separate tasks) record their outcome via `bac_log.set_verdict()`/`add_tag()`; the final triggering rule wins. The stand's fp-block path is recorded as the Phase 2 `tls_fp` stage through the same contract. TLS-fp data columns and the centralized telemetry sink are out of scope here (separate tasks).
-
-The seed blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) is the same 3 automation fps documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md), captured 2026-05-16 on macOS arm64. Real production traffic would have a wider seed set; this is enough to demonstrate visible blocking from day 1.
 
 ## Quickstart on a fresh VM
 
@@ -59,10 +59,80 @@ REVISION=$(git rev-parse --short HEAD) \
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # 403 (curl is in seed blocklist)
+curl -k https://localhost/                   # 200 (shadow mode: nothing blocked)
 curl -k https://localhost/__fp               # see your fp
 curl -k https://localhost/metrics            # prometheus text
 ```
+
+## Updating a running stand
+
+The Lua and nginx config are bind-mounted, so an update is just "pull the
+files + reload" — no image rebuild. [`scripts/update.sh`](scripts/update.sh)
+does it safely: fast-forwards `main`, runs `openresty -t` to validate the
+config, and only then `openresty -s reload` (no dropped connections). It
+no-ops when `main` hasn't moved and is safe to run from cron.
+
+**Manual:**
+
+```sh
+./infra/demo-stand/scripts/update.sh
+```
+
+**Auto-pull from `main` every minute (cron on the VM):**
+
+```sh
+mkdir -p /home/ubuntu/abuse-controls/state   # the log dir must exist before cron writes to it
+crontab -e
+```
+
+Add as a **single physical line** (crontab doesn't support `\` line continuation):
+
+```cron
+* * * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/update.sh >> /home/ubuntu/abuse-controls/state/update.log 2>&1
+```
+
+With this, your loop is just `git push` to `main` → edge picks it up within
+a minute. Verify what's live with `curl -k https://<host>/__version`, and
+watch the run log at `state/update.log`.
+
+`update.sh` requires the checkout on the VM to be a real git working copy of
+`main`. If the stand was deployed by copying files (no `.git`), convert it
+first — see below.
+
+## Migrating a snapshot deploy to a git checkout
+
+If `~/abuse-controls` on the VM is a file copy (no `.git`), turn it into a
+fresh `main` checkout so `update.sh` and the cron loop work. In-place
+replace keeps the path, compose project name, and certbot hooks unchanged;
+only the container recreate is brief downtime.
+
+```sh
+cd ~
+docker compose -f ~/abuse-controls/infra/demo-stand/docker-compose.demo.yml down
+mv abuse-controls abuse-controls.bak.$(date +%F)
+git clone https://github.com/tabularasa31/abuse-controls.git abuse-controls
+cd abuse-controls
+
+# Certs: repo compose mounts ./certs (not /etc/letsencrypt). Copy current
+# certs in as real files, then install the deploy-hook so renewals refresh
+# them automatically.
+mkdir -p infra/demo-stand/certs
+sudo install -m644 /etc/letsencrypt/live/bac.example.com/fullchain.pem infra/demo-stand/certs/fullchain.pem
+sudo install -m600 /etc/letsencrypt/live/bac.example.com/privkey.pem  infra/demo-stand/certs/privkey.pem
+sudo chown "$USER:$USER" infra/demo-stand/certs/*.pem
+sudo install -m755 infra/demo-stand/scripts/sync-demo-certs.sh \
+    /etc/letsencrypt/renewal-hooks/deploy/sync-demo-certs.sh
+
+# Bring up from the new checkout. REVISION feeds /__version.
+REVISION=$(git rev-parse --short HEAD) \
+  docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
+curl -k https://localhost/__version
+```
+
+The blocklist ships empty (shadow), so a fresh clone needs no local
+override. Analytics state (`state/`, `reports/`) is gitignored — copy it
+from `abuse-controls.bak.*` to keep history, or start clean. Then install
+the cron line from "Updating a running stand" above.
 
 ## What this does NOT show
 
@@ -83,7 +153,7 @@ infra/demo-stand/
 ├── docker-compose.demo.yml         stock openresty/openresty:alpine + bind mounts
 ├── certs/                          TLS material (gitignored)
 ├── lua/
-│   ├── verdict.lua                 active blocking (production variant; symlink-equivalent of infra/nginx-lua-poc/lua/verdict.lua)
+│   ├── verdict.lua                 verdict pipeline (production variant; symlink-equivalent of infra/nginx-lua-poc/lua/verdict.lua)
 │   ├── ja4_compute.lua             same compute as production
 │   ├── blocklist.lua               seed automation fps
 │   ├── init.lua                    load blocklist, init metrics counters

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Pull latest main and hot-reload the demo edge without dropping traffic.
+#
+# Safe to run from cron every minute: it no-ops once the current commit has
+# been successfully reloaded, validates the nginx config before reloading,
+# and never leaves the live stand on a broken config.
+#
+#   ./infra/demo-stand/scripts/update.sh
+#
+# Cron (every minute):
+#   * * * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/update.sh >> /home/ubuntu/abuse-controls/state/update.log 2>&1
+
+set -euo pipefail
+
+BRANCH="main"
+COMPOSE_FILE="infra/demo-stand/docker-compose.demo.yml"
+SERVICE="nginx-demo"
+
+# Resolve repo root from this script's location, regardless of CWD.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "$REPO_ROOT"
+
+mkdir -p state
+REVISION_FILE="infra/demo-stand/lua/.revision"   # served by /__version (gitignored)
+MARKER="state/.last-reloaded-sha"                # last sha we successfully reloaded
+
+# Single-flight: lock inside the repo (predictable perms, per-checkout
+# isolation — avoids /tmp permission clashes between manual and cron runs).
+exec 9>"state/update.lock"
+flock -n 9 || { echo "$(date -Is) another update in progress, skip"; exit 0; }
+
+git fetch -q origin "$BRANCH"
+# Be explicit about the branch — don't ff-merge origin/main into whatever
+# happens to be checked out.
+git checkout -q "$BRANCH"
+git merge --ff-only "origin/${BRANCH}"
+
+head="$(git rev-parse HEAD)"
+last="$(cat "$MARKER" 2>/dev/null || true)"
+
+# No-op only if this exact commit was already reloaded successfully. We
+# compare against the last SUCCESSFUL reload, not against the remote, so a
+# transient `openresty -t`/reload failure is retried on the next tick even
+# when no new commit has landed.
+if [ "$head" = "$last" ]; then
+  exit 0
+fi
+
+echo "$(date -Is) deploying ${head:0:7}"
+
+# Validate inside the running container BEFORE reloading. A bad config must
+# not take the live stand down.
+if ! docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -t; then
+  echo "$(date -Is) ERROR: openresty -t failed on ${head:0:7}, NOT reloading" >&2
+  exit 1
+fi
+
+docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -s reload
+
+# Reload succeeded: expose the live sha to /__version and record success so
+# the next tick no-ops.
+printf '%s\n' "${head:0:7}" > "$REVISION_FILE"
+printf '%s\n' "$head" > "$MARKER"
+echo "$(date -Is) reloaded ${head:0:7}"
