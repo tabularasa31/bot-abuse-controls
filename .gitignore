@@ -31,3 +31,9 @@ infra/demo-stand/certs/*.crt
 /state/
 # Live deployed sha written by scripts/update.sh, served by /__version
 infra/demo-stand/lua/.revision
+# Analyzer report archive (per-day markdown)
+/reports/
+
+# Python
+__pycache__/
+*.pyc
