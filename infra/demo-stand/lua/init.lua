@@ -36,7 +36,10 @@ ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
     " ip_whitelist=", #config.whitelist_ip,
     " ua_blacklist=", #config.ua_blacklist,
     " asn_datacenters=", #config.asn_datacenters)
-ngx.log(ngx.NOTICE, "[demo] fp_blocklist seeded: ", n, " active entries")
+-- Marker text is a contract: scripts/analyze.py INIT_RE parses the
+-- blocklist size out of "[demo] fp_blocklist loaded: N". Do not reword
+-- without updating that regex, or daily reports mislabel the stand SHADOW.
+ngx.log(ngx.NOTICE, "[demo] fp_blocklist loaded: ", n, " active entries")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
