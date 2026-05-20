@@ -17,8 +17,13 @@ services:
       # edge_id stamped into every BAC log record (see bac_log.lua).
       EDGE_ID: ${EDGE_ID:-stand-bac}
     ports:
-      - "443:443"
-      - "80:80"   # reserved for ACME http-01 challenge if certbot-managed
+      # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
+      # runs another service on :80/:443, set DEMO_BIND_IP to the demo's
+      # dedicated IP (the one the public/floating IP NATs to) in a local
+      # .env so the bind doesn't clash. .env is gitignored.
+      - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
+      - "${DEMO_BIND_IP:-0.0.0.0}:80:80"   # 80 reserved for ACME http-01 challenge
+
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
       # Demo-specific Lua (verdict.lua, blocklist, init, metrics, admin,
