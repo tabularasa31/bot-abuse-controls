@@ -26,3 +26,8 @@ docker-compose.override.yml
 infra/demo-stand/certs/*.pem
 infra/demo-stand/certs/*.key
 infra/demo-stand/certs/*.crt
+
+# Runtime state on the VM (analytics, update-loop bookkeeping)
+/state/
+# Live deployed sha written by scripts/update.sh, served by /__version
+infra/demo-stand/lua/.revision

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Pull latest main and hot-reload the demo edge without dropping traffic.
 #
-# Safe to run from cron every minute: it no-ops when main hasn't moved,
-# validates the nginx config before reloading, and never leaves the live
-# stand on a broken config.
+# Safe to run from cron every minute: it no-ops once the current commit has
+# been successfully reloaded, validates the nginx config before reloading,
+# and never leaves the live stand on a broken config.
 #
 #   ./infra/demo-stand/scripts/update.sh
 #
@@ -20,31 +20,45 @@ SERVICE="nginx-demo"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Single-flight: don't let overlapping cron ticks race on git/reload.
-exec 9>"${TMPDIR:-/tmp}/abuse-controls-update.lock"
+mkdir -p state
+REVISION_FILE="infra/demo-stand/lua/.revision"   # served by /__version (gitignored)
+MARKER="state/.last-reloaded-sha"                # last sha we successfully reloaded
+
+# Single-flight: lock inside the repo (predictable perms, per-checkout
+# isolation — avoids /tmp permission clashes between manual and cron runs).
+exec 9>"state/update.lock"
 flock -n 9 || { echo "$(date -Is) another update in progress, skip"; exit 0; }
 
 git fetch -q origin "$BRANCH"
-
-local_sha="$(git rev-parse HEAD)"
-remote_sha="$(git rev-parse "origin/${BRANCH}")"
-
-if [ "$local_sha" = "$remote_sha" ]; then
-  exit 0   # nothing to do
-fi
-
-echo "$(date -Is) updating ${local_sha:0:7} -> ${remote_sha:0:7}"
-
-# Fast-forward only. If history diverged (someone hand-edited on the VM),
-# bail loudly rather than clobber local state.
+# Be explicit about the branch — don't ff-merge origin/main into whatever
+# happens to be checked out.
+git checkout -q "$BRANCH"
 git merge --ff-only "origin/${BRANCH}"
 
-# Validate config inside the running container BEFORE reloading. A bad
-# config must not take the live stand down.
+head="$(git rev-parse HEAD)"
+last="$(cat "$MARKER" 2>/dev/null || true)"
+
+# No-op only if this exact commit was already reloaded successfully. We
+# compare against the last SUCCESSFUL reload, not against the remote, so a
+# transient `openresty -t`/reload failure is retried on the next tick even
+# when no new commit has landed.
+if [ "$head" = "$last" ]; then
+  exit 0
+fi
+
+echo "$(date -Is) deploying ${head:0:7}"
+
+# Validate inside the running container BEFORE reloading. A bad config must
+# not take the live stand down.
 if ! docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -t; then
-  echo "$(date -Is) ERROR: openresty -t failed on ${remote_sha:0:7}, NOT reloading" >&2
+  echo "$(date -Is) ERROR: openresty -t failed on ${head:0:7}, NOT reloading" >&2
   exit 1
 fi
 
 docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -s reload
-echo "$(date -Is) reloaded ${remote_sha:0:7}"
+
+# Reload succeeded: expose the live sha to /__version and record success so
+# the next tick no-ops.
+printf '%s\n' "${head:0:7}" > "$REVISION_FILE"
+printf '%s\n' "$head" > "$MARKER"
+echo "$(date -Is) reloaded ${head:0:7}"

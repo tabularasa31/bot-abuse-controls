@@ -15,11 +15,27 @@ The stand runs in **shadow mode** — the cascade computes and logs a verdict fo
 | `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
-| `/__admin` | a real browser | HTML status page | Live counters: total requests, blocks, allows, cache hit ratio, blocklist size, uptime. No mutation surface. |
-| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="allow"\|"block"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
+| `/__admin` | a real browser | HTML status page | Live counters: total requests, passes, blocks, cache hit ratio, blocklist size, uptime. No mutation surface. |
+| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same site, **no** antibot | Bypasses `access_by_lua` entirely. Direct comparison: hit `/` and `/baseline/` with `wrk`, see the latency delta. |
 
 The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Candidate automation fps to seed it from (curl/python/Go, captured 2026-05-16 on macOS arm64) are documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md); promoting them into the blocklist is a deliberate, data-driven step (see analyze.py HIGH-confidence candidates), not the default.
+
+## Structured log (Phase 1 schema)
+
+Every request through the pipeline emits exactly one JSON record to docker stdout, prefixed `BAC_LOG `, per the [Phase 1 spec](../../docs/product/phase1-spec.md). View it with:
+
+```sh
+docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_LOG //' | jq -c .
+```
+
+Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
+
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog so the stand emits one uniform value (`shadow` by default for this stand, matching the empty blocklist; override via `BAC_MODE`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+
+`resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md), [config-distribution.md](../../docs/architecture/config-distribution.md)).
+
+The cascade stages (hygiene/reputation/rate_limits — separate tasks) record their outcome via `bac_log.set_verdict()`/`add_tag()`; the final triggering rule wins. The stand's fp-block path is recorded as the Phase 2 `tls_fp` stage through the same contract. TLS-fp data columns and the centralized telemetry sink are out of scope here (separate tasks).
 
 ## Quickstart on a fresh VM
 
@@ -65,8 +81,14 @@ no-ops when `main` hasn't moved and is safe to run from cron.
 **Auto-pull from `main` every minute (cron on the VM):**
 
 ```sh
-* * * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/update.sh \
-    >> /home/ubuntu/abuse-controls/state/update.log 2>&1
+mkdir -p /home/ubuntu/abuse-controls/state   # the log dir must exist before cron writes to it
+crontab -e
+```
+
+Add as a **single physical line** (crontab doesn't support `\` line continuation):
+
+```cron
+* * * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/update.sh >> /home/ubuntu/abuse-controls/state/update.log 2>&1
 ```
 
 With this, your loop is just `git push` to `main` → edge picks it up within
@@ -138,7 +160,8 @@ infra/demo-stand/
 │   ├── metrics.lua                 /metrics handler (Prometheus text format)
 │   ├── admin.lua                   /__admin HTML status page
 │   ├── probe.lua                   /__fp educational endpoint
-│   └── log_event.lua               per-request counter increment + log line
+│   ├── bac_log.lua                 Phase 1 structured-log contract (init/set_verdict/add_tag/emit)
+│   └── log_event.lua               per-request counter increment + structured JSON emit
 └── sites/default-site/
     └── index.html                  demo landing page (served via content_by_lua)
 ```

@@ -21,8 +21,10 @@ ngx.log(ngx.NOTICE, "[demo] fp_blocklist loaded: ", n, " entries")
 local metrics = ngx.shared.metrics
 for _, key in ipairs({
     "requests_total",
-    "verdict_allow_total",
+    "verdict_pass_total",
     "verdict_block_total",
+    "verdict_challenge_total",
+    "verdict_allow_total",
     "cache_hit_total",
     "cache_miss_total",
 }) do

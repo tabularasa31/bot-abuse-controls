@@ -14,6 +14,12 @@ services:
     # (see nginx.demo.conf: `env REVISION;` at the top).
     environment:
       REVISION: ${REVISION:-dev}
+      # edge_id stamped into every BAC log record (see bac_log.lua).
+      EDGE_ID: ${EDGE_ID:-stand-bac}
+      # Per-resource business mode stamped into the log (shadow|active).
+      # Phase 1 has no policy catalog, so the stand emits one uniform value.
+      # Default "shadow" matches the empty blocklist (nothing is blocked).
+      BAC_MODE: ${BAC_MODE:-shadow}
     ports:
       - "443:443"
       - "80:80"   # reserved for ACME http-01 challenge if certbot-managed

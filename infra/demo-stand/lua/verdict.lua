@@ -1,19 +1,30 @@
--- Demo-stand verdict.lua. Same compute_fp + cache + blocklist pipeline
--- as production (infra/nginx-lua-poc/lua/verdict.lua), with one
--- addition: stash fp/verdict into ngx.ctx so log_event.lua can pick
--- them up for metrics increment and structured logging. The block
--- behaviour (ngx.exit(403) on block verdict) is identical to prod —
--- this stand is showing real enforcement, not shadow mode.
+-- Demo-stand access_by_lua handler.
+--
+-- Two responsibilities:
+--   1. Initialise the per-request BAC log context (request_id, start
+--      time, resource_id) so latency_ms covers the whole cascade and
+--      log_event.lua can emit the final structured record.
+--   2. Run the existing TLS-fingerprint block decision (compute_fp +
+--      cache + blocklist), identical to production.
+--
+-- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
+-- through the same bac_log contract the Phase 1 cascade stages
+-- (hygiene / reputation / rate_limits — separate tasks) will use. The
+-- block behaviour (ngx.exit(403)) is unchanged — this stand shows real
+-- enforcement, not shadow mode.
 
-local ja4 = require "ja4_compute"
+local ja4     = require "ja4_compute"
+local bac_log = require "bac_log"
 
-local fp, parts = ja4.compute()
+bac_log.init()
 
-local cache = ngx.shared.verdict_cache
+local fp = ja4.compute()
+
+local cache  = ngx.shared.verdict_cache
 local cached = cache:get(fp)
+local cache_hit = (cached ~= nil)
 
 local verdict
-local cache_hit = (cached ~= nil)
 if cached == "block" or cached == "allow" then
     verdict = cached
 else
@@ -21,12 +32,12 @@ else
     cache:set(fp, verdict, 60)
 end
 
-ngx.ctx.antibot_fp        = fp
-ngx.ctx.antibot_fp_parts  = parts
-ngx.ctx.antibot_verdict   = verdict
-ngx.ctx.antibot_cache_hit = cache_hit
+-- Cache outcome is metrics-only; stash it for log_event.lua's counters.
+ngx.ctx.bac_cache_hit = cache_hit
 
 if verdict == "block" then
+    bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
     return ngx.exit(403)
 end
--- allow: fall through to the location's content handler
+-- allow: fall through. Context keeps its defaults (stage=egress,
+-- verdict=pass) — no Phase 1 rule fired on this stand yet.
