@@ -237,6 +237,30 @@ def save_seen(seen):
     SEEN_FPS.write_text(json.dumps(seen, indent=2, sort_keys=True))
 
 
+# Idempotency watermark: the ts of the newest event already folded into
+# the lifetime counters. The docker-logs window (--since 25h) overlaps the
+# 24h report window, and manual runs re-read it, so without this the
+# lifetime counts in seen-fps.json / ip-cache.json double-count. Only
+# events strictly newer than the watermark update the counters; the
+# windowed report itself is recomputed each run and is unaffected.
+LAST_COUNTED = STATE_DIR / "last-counted.txt"
+
+
+def load_watermark():
+    try:
+        return _parse_iso(LAST_COUNTED.read_text().strip())
+    except Exception:
+        return None
+
+
+def save_watermark(dt):
+    if dt is None:
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LAST_COUNTED.write_text(dt.astimezone(timezone.utc)
+                            .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z\n")
+
+
 def load_ip_cache():
     if not IP_CACHE.exists():
         return {}
@@ -1027,19 +1051,18 @@ def main() -> int:
 
     enrich_ips({e["remote"] for e in events_24h}, ip_cache)
 
-    # Update state — iterate only events_24h to keep lifetime counters
-    # honest. The original resty code iterated events_all (everything
-    # since last container init), which works for resty because it
-    # restarts on every blocklist edit, but inflates lifetime counts
-    # when containers run for weeks. Plus we now use --since 25h on
-    # docker logs which puts the same cap on events_all anyway.
-    # Day attribution comes from the event's own timestamp, not
-    # today_str — so a late-arriving event from yesterday gets the
-    # right day.
-    for e in events_24h:
+    # Update lifetime state only for events strictly newer than the
+    # watermark, so overlapping/repeated runs (cron's 25h window + manual
+    # runs) don't double-count. The windowed report above already reflects
+    # all of events_24h — only the cumulative counters are gated. Day
+    # attribution uses the event's own timestamp, not today_str, so a
+    # late-arriving event from yesterday lands on the right day.
+    watermark = load_watermark()
+    new_events = [e for e in events_24h
+                  if e.get("ts_dt") and (watermark is None or e["ts_dt"] > watermark)]
+    for e in new_events:
         fp = e["fp"]
-        ev_day = (e["ts_dt"].astimezone().strftime("%Y-%m-%d")
-                  if e.get("ts_dt") else today_str)
+        ev_day = e["ts_dt"].astimezone().strftime("%Y-%m-%d")
         if fp not in seen:
             seen[fp] = {
                 "first_seen": e["ts"],
@@ -1057,12 +1080,25 @@ def main() -> int:
         if ip in ip_cache and "error" not in ip_cache[ip]:
             ip_cache[ip]["count"] = ip_cache[ip].get("count", 0) + 1
 
+    # Advance the watermark to the newest event in the window (never
+    # regress it, even if old events have since aged out).
+    newest = max((e["ts_dt"] for e in events_24h if e.get("ts_dt")), default=None)
+    if watermark and (newest is None or watermark > newest):
+        newest = watermark
     save_seen(seen)
     save_ip_cache(ip_cache)
+    save_watermark(newest)
 
     md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source)
     archive = REPORTS_DIR / f"{today_str}.md"
     archive.write_text(md_report)
+
+    # Cache the subject line so daily-report.sh gets it without a second
+    # invocation (which would re-fetch docker logs). Written on every full
+    # run; daily-report.sh reads state/last-subject.txt.
+    sLT = collect_lifetime_stats(seen, ip_cache)
+    (STATE_DIR / "last-subject.txt").write_text(
+        render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
 
     if args.html:
         # HTML renderer keeps the resty-only signature for now; comparison
