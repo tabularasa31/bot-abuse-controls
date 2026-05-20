@@ -26,8 +26,10 @@ antibot_requests_total %d
 
 # HELP antibot_verdict_total Requests by verdict, since worker start.
 # TYPE antibot_verdict_total counter
-antibot_verdict_total{verdict="allow"} %d
+antibot_verdict_total{verdict="pass"} %d
 antibot_verdict_total{verdict="block"} %d
+antibot_verdict_total{verdict="challenge"} %d
+antibot_verdict_total{verdict="allow"} %d
 
 # HELP antibot_cache_total Cache hits vs misses on the per-fp verdict cache.
 # TYPE antibot_cache_total counter
@@ -47,8 +49,10 @@ antibot_blocklist_entries %d
 antibot_uptime_seconds %d
 ]],
     requests,
-    get("verdict_allow_total"),
+    get("verdict_pass_total"),
     get("verdict_block_total"),
+    get("verdict_challenge_total"),
+    get("verdict_allow_total"),
     hits,
     misses,
     cache_hit_ratio,
