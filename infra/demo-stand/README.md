@@ -48,6 +48,38 @@ curl -k https://localhost/__fp               # see your fp
 curl -k https://localhost/metrics            # prometheus text
 ```
 
+## Updating a running stand
+
+The Lua and nginx config are bind-mounted, so an update is just "pull the
+files + reload" — no image rebuild. [`scripts/update.sh`](scripts/update.sh)
+does it safely: fast-forwards `main`, runs `openresty -t` to validate the
+config, and only then `openresty -s reload` (no dropped connections). It
+no-ops when `main` hasn't moved and is safe to run from cron.
+
+**Manual:**
+
+```sh
+./infra/demo-stand/scripts/update.sh
+```
+
+**Auto-pull from `main` every minute (cron on the VM):**
+
+```sh
+* * * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/update.sh \
+    >> /home/ubuntu/abuse-controls/state/update.log 2>&1
+```
+
+With this, your loop is just `git push` to `main` → edge picks it up within
+a minute. Verify what's live with `curl -k https://<host>/__version`.
+
+**Auto-deploy via GitHub Actions** (push-triggered instead of polling) —
+[`.github/workflows/deploy-demo-edge.yml`](../../.github/workflows/deploy-demo-edge.yml).
+On every push to `main` touching `infra/demo-stand/**` or
+`infra/nginx-lua-poc/lua/**`, a runner SSHes into the VM and runs the same
+`update.sh`. Requires repo secrets `DEMO_SSH_HOST`, `DEMO_SSH_USER`,
+`DEMO_SSH_KEY` (a dedicated deploy key), `DEMO_REPO_PATH`. Pick **one** of
+cron-poll or Actions, not both.
+
 ## What this does NOT show
 
 - **Hot-reload of the blocklist** (cascade task [В1](https://app.clickup.com/t/86exmk08u)). The demo uses a static blocklist loaded at init.

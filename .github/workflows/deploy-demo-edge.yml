@@ -1,0 +1,44 @@
+# Auto-deploy the demo edge on every push to main.
+#
+# A GitHub-hosted runner SSHes into the demo VM (public IP) and runs the
+# committed update.sh, which fast-forwards main, validates the nginx
+# config, and hot-reloads OpenResty without dropping traffic.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   DEMO_SSH_HOST   public IP / host of the demo VM (e.g. <EDGE_VM_IP>)
+#   DEMO_SSH_USER   ssh user (e.g. ubuntu)
+#   DEMO_SSH_KEY    private key whose public half is in the VM's
+#                   ~/.ssh/authorized_keys (use a dedicated deploy key,
+#                   not your personal key)
+#   DEMO_REPO_PATH  abs path of the checkout on the VM
+#                   (e.g. /home/ubuntu/abuse-controls)
+
+name: deploy-demo-edge
+
+on:
+  push:
+    branches: [main]
+    # Only redeploy when something the edge actually serves changed.
+    paths:
+      - "infra/demo-stand/**"
+      - "infra/nginx-lua-poc/lua/**"
+  workflow_dispatch: {}   # allow manual "Run workflow"
+
+concurrency:
+  group: deploy-demo-edge
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and run update.sh on the VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEMO_SSH_HOST }}
+          username: ${{ secrets.DEMO_SSH_USER }}
+          key: ${{ secrets.DEMO_SSH_KEY }}
+          script_stop: true
+          script: |
+            cd "${{ secrets.DEMO_REPO_PATH }}"
+            ./infra/demo-stand/scripts/update.sh
