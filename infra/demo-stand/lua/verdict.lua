@@ -10,9 +10,10 @@
 -- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
 -- through the same bac_log contract the Phase 1 cascade stages
 -- (hygiene / reputation / rate_limits — separate tasks) will use. The
--- stand runs shadow: blocklist.lua ships empty, so verdict is always
--- "allow" and nothing is blocked. The ngx.exit(403) path stays wired so
--- adding fps to the blocklist flips it to active without code changes.
+-- stand runs shadow: tls_fp_blocklist.conf ships empty (init.lua seeds the
+-- fp_blocklist dict from it), so verdict is always "allow" and nothing is
+-- blocked. The ngx.exit(403) path stays wired so adding an fp to that
+-- config and restarting flips it to active without code changes.
 
 local ja4     = require "ja4_compute"
 local bac_log = require "bac_log"

@@ -34,6 +34,10 @@ services:
       # uses the exact same code as production, not a copy that drifts.
       # nginx.demo.conf's lua_package_path includes /etc/nginx/lua-common.
       - ../nginx-lua-poc/lua:/etc/nginx/lua-common:ro
+      # Cascade config files (defaults + IP/UA/ASN/fp catalogs), read once
+      # at init_by_lua via the `config` Lua module. Editing a file here and
+      # restarting the container re-applies it (hot-reload is a separate task).
+      - ./config:/etc/nginx/config:ro
       - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
     # Log via the default json-file driver — fine for the demo. Real
