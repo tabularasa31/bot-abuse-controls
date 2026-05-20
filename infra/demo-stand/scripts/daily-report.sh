@@ -13,6 +13,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANALYZE="${HERE}/analyze.py"
 ROOT="${ABUSE_CONTROLS_ROOT:-$(cd "${HERE}/../../.." && pwd)}"
 
+# Local, gitignored env (same file the compose uses for DEMO_BIND_IP).
+# Put REPORT_TO=<routine mailbox> here on the VM — the recipient address
+# is deliberately NOT committed to the repo.
+ENV_FILE="${HERE}/../.env"
+if [ -f "${ENV_FILE}" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "${ENV_FILE}"
+    set +a
+fi
+
 HTML=$(mktemp)
 trap 'rm -f "${HTML}"' EXIT
 
@@ -21,11 +32,22 @@ trap 'rm -f "${HTML}"' EXIT
 python3 "${ANALYZE}" --html > "${HTML}"
 SUBJECT=$(cat "${ROOT}/state/last-subject.txt" 2>/dev/null || echo "[abuse-controls] daily report")
 
-REPORT_FROM=${REPORT_FROM:-reports@example.com}
-REPORT_TO=${REPORT_TO:-reports@example.com}
+# Addresses come from infra/demo-stand/.env (gitignored) — neither is
+# committed:
+#   REPORT_FROM = sender; must match the authenticated msmtp account so
+#                 Gmail SPF/DKIM passes. If unset, msmtp fills the From
+#                 header from its own config (~/.msmtprc).
+#   REPORT_TO   = recipient (the routine's Gmail mailbox); falls back to
+#                 REPORT_FROM.
+REPORT_FROM="${REPORT_FROM:-}"
+REPORT_TO="${REPORT_TO:-$REPORT_FROM}"
+if [ -z "${REPORT_TO}" ]; then
+    echo "daily-report: REPORT_TO unset — set REPORT_TO (and REPORT_FROM) in ${ENV_FILE}" >&2
+    exit 1
+fi
 
 {
-    echo "From: ${REPORT_FROM}"
+    if [ -n "${REPORT_FROM}" ]; then echo "From: ${REPORT_FROM}"; fi
     echo "To: ${REPORT_TO}"
     echo "Subject: ${SUBJECT}"
     echo "MIME-Version: 1.0"

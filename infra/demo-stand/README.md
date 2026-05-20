@@ -158,6 +158,12 @@ location, so it tracks `main` like everything else:
 0 8 * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/daily-report.sh >> /home/ubuntu/abuse-controls/state/cron.log 2>&1
 ```
 
+Addresses live in `infra/demo-stand/.env` (gitignored, same file as
+`DEMO_BIND_IP`) — neither is committed. Set `REPORT_FROM=<sender>` (must
+match the authenticated msmtp account) and `REPORT_TO=<routine mailbox>`;
+`daily-report.sh` sources that `.env`. `REPORT_TO` falls back to
+`REPORT_FROM`; the run aborts if neither is set.
+
 Scoring: impersonator +3 · suspicious cipher count +2 · automation UA +1
 · multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 days +1 · recon URI +1.
 Tiers: HIGH ≥5 → blocklist candidate · MEDIUM 3-4 → watch · LOW 1-2.
