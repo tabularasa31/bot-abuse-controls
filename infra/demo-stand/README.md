@@ -2,24 +2,24 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (CDN operator admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand demonstrates **active blocking** (not shadow mode) — curl and python-requests get 403, browsers get 200. This is the same `infra/nginx-lua-poc/lua/verdict.lua` that ships in production, fronted by the multi-scenario endpoints below.
+The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. This is the same `infra/nginx-lua-poc/lua/verdict.lua` that ships in production, fronted by the multi-scenario endpoints below. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
 
 ## Scenarios a reviewer can probe
 
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
 | `/` | a real browser | 200, demo landing page | Browsers are allowed by default. |
-| `/` | `curl -k https://<host>/` | 403 | Default curl (LibreSSL on macOS / OpenSSL elsewhere) matches the seed blocklist — the fp `L13d49h2_...` is one of the pre-loaded automation entries. |
-| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 403 | python-requests fp seeded in both SNI variants (real-host with `<host>` domain → `L13d30h1_...`; IP-literal target → `L13i30h1_...`). Either way blocks. |
-| `/` | `wget -O - --no-check-certificate https://<host>/` | depends on wget's TLS stack | wget's fp differs by build; may not be in seed blocklist (will pass through with `would_verdict=allow`). |
-| `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. Same response whether or not your fp is blocked. |
+| `/` | `curl -k https://<host>/` | 200 | Shadow mode: the cascade computes curl's fp and logs `would_verdict`, but the empty blocklist means no block. Confirm the computed fp via `/__fp`. |
+| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, not blocked. |
+| `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in `/__fp` and the logs. |
+| `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
 | `/__admin` | a real browser | HTML status page | Live counters: total requests, blocks, allows, cache hit ratio, blocklist size, uptime. No mutation surface. |
 | `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="allow"\|"block"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same site, **no** antibot | Bypasses `access_by_lua` entirely. Direct comparison: hit `/` and `/baseline/` with `wrk`, see the latency delta. |
 
-The seed blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) is the same 3 automation fps documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md), captured 2026-05-16 on macOS arm64. Real production traffic would have a wider seed set; this is enough to demonstrate visible blocking from day 1.
+The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Candidate automation fps to seed it from (curl/python/Go, captured 2026-05-16 on macOS arm64) are documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md); promoting them into the blocklist is a deliberate, data-driven step (see analyze.py HIGH-confidence candidates), not the default.
 
 ## Quickstart on a fresh VM
 
@@ -43,7 +43,7 @@ REVISION=$(git rev-parse --short HEAD) \
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # 403 (curl is in seed blocklist)
+curl -k https://localhost/                   # 200 (shadow mode: nothing blocked)
 curl -k https://localhost/__fp               # see your fp
 curl -k https://localhost/metrics            # prometheus text
 ```
@@ -92,7 +92,7 @@ infra/demo-stand/
 ├── docker-compose.demo.yml         stock openresty/openresty:alpine + bind mounts
 ├── certs/                          TLS material (gitignored)
 ├── lua/
-│   ├── verdict.lua                 active blocking (production variant; symlink-equivalent of infra/nginx-lua-poc/lua/verdict.lua)
+│   ├── verdict.lua                 verdict pipeline (production variant; symlink-equivalent of infra/nginx-lua-poc/lua/verdict.lua)
 │   ├── ja4_compute.lua             same compute as production
 │   ├── blocklist.lua               seed automation fps
 │   ├── init.lua                    load blocklist, init metrics counters
