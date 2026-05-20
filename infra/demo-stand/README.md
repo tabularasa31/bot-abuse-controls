@@ -134,6 +134,34 @@ override. Analytics state (`state/`, `reports/`) is gitignored — copy it
 from `abuse-controls.bak.*` to keep history, or start clean. Then install
 the cron line from "Updating a running stand" above.
 
+## Daily analytics
+
+[`scripts/analyze.py`](scripts/analyze.py) reads the stand's `BAC_LOG`
+json (via `docker logs --since 25h nginx-demo`), builds a per-fingerprint
+view, scores blocklist candidates, and renders markdown / HTML / a
+subject line. fp comes from the record's `tls_fp`; lifetime state lives
+in `state/seen-fps.json` (keyed by fp) and `state/ip-cache.json` (ASN
+enrichment via ip-api.com). Per-day markdown is archived under
+`reports/`. Both dirs are gitignored.
+
+```sh
+python3 infra/demo-stand/scripts/analyze.py            # markdown
+python3 infra/demo-stand/scripts/analyze.py --html     # HTML for email
+python3 infra/demo-stand/scripts/analyze.py --subject  # subject line
+```
+
+[`scripts/daily-report.sh`](scripts/daily-report.sh) wraps it for cron
+(emails the HTML via msmtp + Gmail SMTP). It resolves paths from its own
+location, so it tracks `main` like everything else:
+
+```cron
+0 8 * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/daily-report.sh >> /home/ubuntu/abuse-controls/state/cron.log 2>&1
+```
+
+Scoring: impersonator +3 · suspicious cipher count +2 · automation UA +1
+· multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 days +1 · recon URI +1.
+Tiers: HIGH ≥5 → blocklist candidate · MEDIUM 3-4 → watch · LOW 1-2.
+
 ## What this does NOT show
 
 - **Hot-reload of the blocklist** (cascade task [В1](https://app.clickup.com/t/86exmk08u)). The demo uses a static blocklist loaded at init.

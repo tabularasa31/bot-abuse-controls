@@ -33,4 +33,8 @@ end
 metrics:set("start_time", ngx.time())
 metrics:set("blocklist_entries", n)
 
-ngx.log(ngx.NOTICE, "[demo] mode: ACTIVE blocking (ngx.exit(403) on block verdict)")
+if n == 0 then
+    ngx.log(ngx.NOTICE, "[demo] mode: SHADOW (empty blocklist — nothing blocked)")
+else
+    ngx.log(ngx.NOTICE, "[demo] mode: ACTIVE blocking on ", n, " fp(s) (ngx.exit(403) on block)")
+end

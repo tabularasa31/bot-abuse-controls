@@ -6,11 +6,11 @@
 -- triggering rule wins (last writer), which is the "финальное
 -- сработавшее правило" the schema asks for.
 --
--- Forward-compatibility: the field set and enums are stable. The Phase 2
--- TLS-fp data columns (tls_fp, tls_cipher_count, tls_alpn, tls_sni_present)
--- and the Phase 2/3 optional fields (rule_source, client_rule_name) are
--- NOT emitted here — they land with their own tasks without renaming or
--- reordering these keys.
+-- Forward-compatibility: the field set and enums are stable. `tls_fp` is
+-- emitted (the stand's daily analyzer keys on it). The remaining Phase 2
+-- TLS columns (tls_cipher_count, tls_alpn, tls_sni_present) and the Phase
+-- 2/3 optional fields (rule_source, client_rule_name) still land with
+-- their own tasks, without renaming or reordering these keys.
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt + null sentinels
@@ -74,6 +74,7 @@ function _M.init()
         staging_match = staging_match,           -- populated once staged catalogs land (A11)
         asn           = nil,                     -- filled by reputation stage (A6)
         geo_country   = nil,                     -- filled by reputation stage (A6)
+        tls_fp        = nil,                     -- set by the tls_fp stage (set_tls_fp)
     }
     ngx.ctx.bac = ctx
     return ctx
@@ -123,6 +124,17 @@ function _M.set_source(asn, geo_country)
     ctx.geo_country = geo_country
 end
 
+-- Record the computed TLS fingerprint (tls_fp stage). The remaining Phase 2
+-- TLS columns (tls_cipher_count, tls_alpn, tls_sni_present) still land with
+-- their own task; tls_fp is emitted here because the stand's daily analyzer
+-- keys everything on it (scripts/analyze.py) and derives cipher_count from
+-- the fp token itself.
+function _M.set_tls_fp(fp)
+    local ctx = ngx.ctx.bac
+    if not ctx then return end
+    ctx.tls_fp = fp
+end
+
 -- ISO 8601 with millisecond precision, UTC, e.g. 2026-05-18T14:30:00.123Z
 local function iso8601_ms(now)
     local secs = math.floor(now)
@@ -162,6 +174,7 @@ function _M.emit()
         asn           = ctx.asn or cjson_base.null,
         geo_country   = ctx.geo_country or cjson_base.null,
         ua            = ua or cjson_base.null,
+        tls_fp        = ctx.tls_fp or cjson_base.null,
         stage         = ctx.stage,
         verdict       = ctx.verdict,
         rule          = ctx.rule or cjson_base.null,
