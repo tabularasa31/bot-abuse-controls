@@ -1,15 +1,17 @@
 -- Demo-stand access_by_lua handler.
 --
--- Two responsibilities:
+-- Responsibilities:
 --   1. Initialise the per-request BAC log context (request_id, start
 --      time, resource_id) so latency_ms covers the whole cascade and
 --      log_event.lua can emit the final structured record.
---   2. Run the existing TLS-fingerprint block decision (compute_fp +
+--   2. Run the L1 `hygiene` stage (hygiene.lua: method_not_allowed /
+--      ua_blacklist / header_sanity) — observe-only, never blocks.
+--   3. Run the existing TLS-fingerprint block decision (compute_fp +
 --      cache + blocklist), identical to production.
 --
 -- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
--- through the same bac_log contract the Phase 1 cascade stages
--- (hygiene / reputation / rate_limits — separate tasks) will use. The
+-- through the same bac_log contract as hygiene. The remaining Phase 1
+-- stages (reputation / rate_limits) are separate tasks. The
 -- stand runs shadow: tls_fp_blocklist.conf ships empty (init.lua seeds the
 -- fp_blocklist dict from it), so verdict is always "allow" and nothing is
 -- blocked. The ngx.exit(403) path stays wired so adding an fp to that
@@ -17,8 +19,18 @@
 
 local ja4     = require "ja4_compute"
 local bac_log = require "bac_log"
+local hygiene = require "hygiene"
 
 bac_log.init()
+
+-- L1 hygiene (method_not_allowed / ua_blacklist / header_sanity). Phase 1 is
+-- observe-only: hygiene.run() records the would-be verdict via bac_log and
+-- returns true when a rule fired. We then stop the cascade (the would-be
+-- final rule is this one) and fall through to origin WITHOUT blocking — no
+-- ngx.exit. See hygiene.lua for why this differs from the tls_fp stage below.
+if hygiene.run() then
+    return
+end
 
 local fp = ja4.compute()
 bac_log.set_tls_fp(fp)
