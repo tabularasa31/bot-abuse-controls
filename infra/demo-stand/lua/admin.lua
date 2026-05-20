@@ -9,7 +9,7 @@ local fp_dict = ngx.shared.fp_blocklist
 local function get(key) return m:get(key) or 0 end
 
 local requests = get("requests_total")
-local allows   = get("verdict_allow_total")
+local passes   = get("verdict_pass_total")
 local blocks   = get("verdict_block_total")
 local hits     = get("cache_hit_total")
 local misses   = get("cache_miss_total")
@@ -76,7 +76,7 @@ and decision records.</p>
 
 <h2>Counters</h2>
 <div class="metric"><strong>%d</strong><br>requests</div>
-<div class="metric"><strong>%d</strong><br>allows</div>
+<div class="metric"><strong>%d</strong><br>passes</div>
 <div class="metric"><strong>%d</strong><br>blocks (%s)</div>
 <div class="metric"><strong>%s</strong><br>cache hit ratio</div>
 <div class="metric"><strong>%s</strong><br>uptime</div>
@@ -98,5 +98,5 @@ and decision records.</p>
 
 </body></html>
 ]],
-    requests, allows, blocks, block_pct, hit_ratio, uptime_h,
+    requests, passes, blocks, block_pct, hit_ratio, uptime_h,
     #keys, extra, table.concat(rows, "\n")))
