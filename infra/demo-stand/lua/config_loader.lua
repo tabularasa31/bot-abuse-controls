@@ -20,10 +20,11 @@ local function trim(s)
 end
 
 -- Drop a "#" comment (full-line or trailing) and surrounding whitespace.
--- Our configs never carry a literal '#' inside a value, so a plain find
--- is sufficient and keeps the parser readable.
+-- A "#" only starts a comment at line start or when preceded by
+-- whitespace, so it survives inside a value — e.g. the PR link in
+-- "pr=#42" or a "#" in a UA regex.
 local function strip_comment(s)
-    local hash = s:find("#", 1, true)
+    local hash = s:find("^#") or s:find("%s+#")
     if hash then s = s:sub(1, hash - 1) end
     return trim(s)
 end
