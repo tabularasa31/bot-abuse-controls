@@ -70,15 +70,8 @@ no-ops when `main` hasn't moved and is safe to run from cron.
 ```
 
 With this, your loop is just `git push` to `main` → edge picks it up within
-a minute. Verify what's live with `curl -k https://<host>/__version`.
-
-**Auto-deploy via GitHub Actions** (push-triggered instead of polling) —
-[`.github/workflows/deploy-demo-edge.yml`](../../.github/workflows/deploy-demo-edge.yml).
-On every push to `main` touching `infra/demo-stand/**` or
-`infra/nginx-lua-poc/lua/**`, a runner SSHes into the VM and runs the same
-`update.sh`. Requires repo secrets `DEMO_SSH_HOST`, `DEMO_SSH_USER`,
-`DEMO_SSH_KEY` (a dedicated deploy key), `DEMO_REPO_PATH`. Pick **one** of
-cron-poll or Actions, not both.
+a minute. Verify what's live with `curl -k https://<host>/__version`, and
+watch the run log at `state/update.log`.
 
 ## What this does NOT show
 
