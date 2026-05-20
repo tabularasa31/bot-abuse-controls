@@ -22,11 +22,13 @@ local _M = {}
 local EDGE_ID = os.getenv("EDGE_ID") or "stand-bac"
 
 -- Per-resource business mode (shadow / active). Phase 1 has no policy
--- catalog, and the product stance is observe-only, so the stand emits a
--- single uniform mode — "shadow" by default, override via BAC_MODE (must
--- be listed in nginx.conf `env BAC_MODE;`). Per-resource modes arrive
--- with the policy catalog (Phase 3); the field name does not change.
-local MODE = os.getenv("BAC_MODE") or "shadow"
+-- catalog, so the stand emits a single uniform mode. Default is "active"
+-- to match the stand's actual handling — it enforces blocking
+-- (ngx.exit(403) in verdict.lua), so labelling its traffic "shadow"
+-- would misclassify every record. Override via BAC_MODE (must be listed
+-- in nginx.conf `env BAC_MODE;`). Per-resource modes arrive with the
+-- policy catalog (Phase 3); the field name does not change.
+local MODE = os.getenv("BAC_MODE") or "active"
 if MODE ~= "shadow" and MODE ~= "active" then
     MODE = "shadow"
 end

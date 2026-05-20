@@ -29,7 +29,7 @@ docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_
 
 Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog so the stand emits one uniform value (`shadow` by default, override via `BAC_MODE`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog so the stand emits one uniform value (`active` by default, matching the stand's blocking behaviour; override via `BAC_MODE`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md), [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
