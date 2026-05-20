@@ -15,8 +15,8 @@ The stand runs in **shadow mode** — the cascade computes and logs a verdict fo
 | `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
-| `/__admin` | a real browser | HTML status page | Live counters: total requests, passes, blocks, cache hit ratio, blocklist size, uptime. No mutation surface. |
-| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
+| `/__admin` | a real browser | HTML status page | Mode + counters (requests, pass/block/challenge/allow, unique fp, cache hit ratio, uptime), **rules fired**, a **live ring buffer of recent requests** (verdict/rule/fp/ip/ua), and the blocklist. Read-only, no mutation surface. |
+| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`, `antibot_fp_unique`, `antibot_rule_total{stage,rule}`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same site, **no** antibot | Bypasses `access_by_lua` entirely. Direct comparison: hit `/` and `/baseline/` with `wrk`, see the latency delta. |
 
 The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Candidate automation fps to seed it from (curl/python/Go, captured 2026-05-16 on macOS arm64) are documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md); promoting them into the blocklist is a deliberate, data-driven step (see analyze.py HIGH-confidence candidates), not the default.
@@ -192,10 +192,11 @@ infra/demo-stand/
 │   ├── blocklist.lua               seed automation fps
 │   ├── init.lua                    load blocklist, init metrics counters
 │   ├── metrics.lua                 /metrics handler (Prometheus text format)
-│   ├── admin.lua                   /__admin HTML status page
+│   ├── admin.lua                   /__admin HTML status page (counters, rules fired, recent requests, blocklist)
+│   ├── recent.lua                  last-N request ring buffer for /__admin (shared_dict)
 │   ├── probe.lua                   /__fp educational endpoint
 │   ├── bac_log.lua                 Phase 1 structured-log contract (init/set_verdict/add_tag/emit)
-│   └── log_event.lua               per-request counter increment + structured JSON emit
+│   └── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
 └── sites/default-site/
     └── index.html                  demo landing page (served via content_by_lua)
 ```

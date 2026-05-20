@@ -47,6 +47,10 @@ antibot_blocklist_entries %d
 # HELP antibot_uptime_seconds Seconds since this worker started.
 # TYPE antibot_uptime_seconds gauge
 antibot_uptime_seconds %d
+
+# HELP antibot_fp_unique Distinct TLS fingerprints seen since worker start.
+# TYPE antibot_fp_unique gauge
+antibot_fp_unique %d
 ]],
     requests,
     get("verdict_pass_total"),
@@ -57,4 +61,19 @@ antibot_uptime_seconds %d
     misses,
     cache_hit_ratio,
     get("blocklist_entries"),
-    uptime))
+    uptime,
+    get("fp_unique")))
+
+-- Per-rule counters live in the metrics dict under "rule:<stage>:<rule>"
+-- keys (written by log_event.lua). Emit them as a labelled counter. Cheap
+-- here because the rule code-space is tiny.
+local lines = { "# HELP antibot_rule_total Times each rule fired, by stage.",
+                "# TYPE antibot_rule_total counter" }
+for _, key in ipairs(m:get_keys(0)) do
+    local stage, rule = key:match("^rule:([^:]+):(.+)$")
+    if stage then
+        lines[#lines + 1] = string.format(
+            'antibot_rule_total{stage="%s",rule="%s"} %d', stage, rule, get(key))
+    end
+end
+ngx.say(table.concat(lines, "\n"))
