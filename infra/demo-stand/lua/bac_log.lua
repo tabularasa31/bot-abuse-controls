@@ -142,25 +142,35 @@ function _M.emit()
     if not ctx then return end
 
     local now = ngx.now()
+
+    -- Cap the UA so a pathological multi-KB User-Agent can't push the log
+    -- line past PIPE_BUF (4 KB on Linux) and break the atomicity of the
+    -- single stdout write below. Legitimate UAs are well under this; the
+    -- other fields are bounded, so this keeps the whole line atomic.
+    local ua = ngx.var.http_user_agent
+    if ua and #ua > 2048 then ua = ua:sub(1, 2048) end
+
+    -- Optional/absent fields fall back to a JSON null sentinel so every
+    -- record carries the full key set — a stable schema for the sink.
     local record = {
-        request_id  = ctx.request_id,
-        timestamp   = iso8601_ms(ctx.t_start or now),
-        edge_id     = EDGE_ID,
-        resource_id = cjson_base.null,   -- backend-enriched on ingest; null on edge
-        host        = ngx.var.host,
-        path        = ngx.var.uri,
-        method      = ngx.var.request_method,
-        status      = tonumber(ngx.var.status),
-        ip          = ngx.var.remote_addr,
-        asn         = ctx.asn or cjson_base.null,
-        geo_country = ctx.geo_country or cjson_base.null,
-        ua          = ngx.var.http_user_agent,
+        request_id    = ctx.request_id,
+        timestamp     = iso8601_ms(ctx.t_start or now),
+        edge_id       = EDGE_ID,
+        resource_id   = cjson_base.null,   -- backend-enriched on ingest; null on edge
+        host          = ngx.var.host or cjson_base.null,
+        path          = ngx.var.uri or cjson_base.null,
+        method        = ngx.var.request_method or cjson_base.null,
+        status        = tonumber(ngx.var.status) or cjson_base.null,
+        ip            = ngx.var.remote_addr or cjson_base.null,
+        asn           = ctx.asn or cjson_base.null,
+        geo_country   = ctx.geo_country or cjson_base.null,
+        ua            = ua or cjson_base.null,
         stage         = ctx.stage,
         verdict       = ctx.verdict,
-        rule          = ctx.rule,
+        rule          = ctx.rule or cjson_base.null,
         action        = VERDICT_TO_ACTION[ctx.verdict] or "pass",
         mode          = MODE,
-        latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or nil,
+        latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
         tags          = ctx.tags,
         staging_match = ctx.staging_match,
     }
@@ -178,8 +188,16 @@ function _M.emit()
     -- would corrupt the JSON line. A direct write keeps every line a
     -- clean, jq-parseable object for the telemetry sink (separate task).
     -- The "BAC_LOG " prefix lets the sink grep the structured stream out
-    -- of the access/error lines that share docker stdout. One write +
-    -- flush keeps the sub-PIPE_BUF line atomic across workers.
+    -- of the access/error lines that share docker stdout.
+    --
+    -- The flush is required, not optional: stdout to a docker pipe is
+    -- fully buffered (not line-buffered), so without it lines accumulate
+    -- and get split at arbitrary BUFSIZ boundaries, interleaving across
+    -- workers. Writing the whole line then flushing emits it as one
+    -- write() at the line boundary; with the line kept under PIPE_BUF
+    -- (see UA cap) that write is atomic. The per-request syscall is fine
+    -- for the stand; the telemetry-sink task swaps this for a batched
+    -- async shipper.
     io.stdout:write("BAC_LOG ", line, "\n")
     io.stdout:flush()
 end
