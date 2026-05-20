@@ -73,6 +73,45 @@ With this, your loop is just `git push` to `main` → edge picks it up within
 a minute. Verify what's live with `curl -k https://<host>/__version`, and
 watch the run log at `state/update.log`.
 
+`update.sh` requires the checkout on the VM to be a real git working copy of
+`main`. If the stand was deployed by copying files (no `.git`), convert it
+first — see below.
+
+## Migrating a snapshot deploy to a git checkout
+
+If `~/abuse-controls` on the VM is a file copy (no `.git`), turn it into a
+fresh `main` checkout so `update.sh` and the cron loop work. In-place
+replace keeps the path, compose project name, and certbot hooks unchanged;
+only the container recreate is brief downtime.
+
+```sh
+cd ~
+docker compose -f ~/abuse-controls/infra/demo-stand/docker-compose.demo.yml down
+mv abuse-controls abuse-controls.bak.$(date +%F)
+git clone https://github.com/tabularasa31/abuse-controls.git abuse-controls
+cd abuse-controls
+
+# Certs: repo compose mounts ./certs (not /etc/letsencrypt). Copy current
+# certs in as real files, then install the deploy-hook so renewals refresh
+# them automatically.
+mkdir -p infra/demo-stand/certs
+sudo install -m644 /etc/letsencrypt/live/bac.example.com/fullchain.pem infra/demo-stand/certs/fullchain.pem
+sudo install -m600 /etc/letsencrypt/live/bac.example.com/privkey.pem  infra/demo-stand/certs/privkey.pem
+sudo chown "$USER:$USER" infra/demo-stand/certs/*.pem
+sudo install -m755 infra/demo-stand/scripts/sync-demo-certs.sh \
+    /etc/letsencrypt/renewal-hooks/deploy/sync-demo-certs.sh
+
+# Bring up from the new checkout. REVISION feeds /__version.
+REVISION=$(git rev-parse --short HEAD) \
+  docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
+curl -k https://localhost/__version
+```
+
+The blocklist ships empty (shadow), so a fresh clone needs no local
+override. Analytics state (`state/`, `reports/`) is gitignored — copy it
+from `abuse-controls.bak.*` to keep history, or start clean. Then install
+the cron line from "Updating a running stand" above.
+
 ## What this does NOT show
 
 - **Hot-reload of the blocklist** (cascade task [В1](https://app.clickup.com/t/86exmk08u)). The demo uses a static blocklist loaded at init.
