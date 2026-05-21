@@ -68,6 +68,17 @@ check(mset.TRACE, nil,   "method_lookup TRACE not listed")
 check(hygiene.method_lookup("GET").GET, true, "method_lookup single string")
 
 -- ===========================================================================
+-- hygiene.header_anomaly() — informational tag heuristic (vision.md T0)
+-- ===========================================================================
+
+check(hygiene.header_anomaly("HTTP/2.0", nil), true,
+    "header_anomaly HTTP/2 no Accept -> true")
+check(hygiene.header_anomaly("HTTP/2.0", "text/html"), false,
+    "header_anomaly HTTP/2 with Accept -> false")
+check(hygiene.header_anomaly("HTTP/1.1", nil), false,
+    "header_anomaly HTTP/1.1 no Accept -> false (not applied)")
+
+-- ===========================================================================
 -- Reporting
 -- ===========================================================================
 

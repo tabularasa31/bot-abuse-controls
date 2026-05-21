@@ -5,7 +5,7 @@
 --      time, resource_id) so latency_ms covers the whole cascade and
 --      log_event.lua can emit the final structured record.
 --   2. Run the L1 `hygiene` stage (hygiene.lua: method_not_allowed /
---      ua_blacklist) — observe-only, never blocks.
+--      ua_blacklist + the hygiene:header_anomaly tag) — observe-only.
 --   3. Run the existing TLS-fingerprint block decision (compute_fp +
 --      cache + blocklist), identical to production.
 --

@@ -12,19 +12,21 @@
 -- absence of data; the hygiene rules are logic-driven, so observe-only is the
 -- only way to preserve Phase 1 semantics for them.)
 --
--- Checks, in order (first match wins, cascade stops):
+-- Informational tag (NOT a rule — emits no verdict, never stops the cascade):
+--   * hygiene:header_anomaly — header combination a real browser does not
+--     send but lazy automation does (base case: HTTP/2 with no Accept). Header
+--     heuristics false-positive easily on unusual-but-legitimate clients, so
+--     this only accumulates in `tags` and is weighed at L5 alongside other
+--     signals (vision.md / rules-reference.md T0 / phase1-spec.md). Always
+--     evaluated, even when a blocking rule also fires — tags accumulate
+--     independently of the verdict.
+--
+-- Blocking checks, in order (first match wins, cascade stops):
 --   1. method_not_allowed — method outside the configured whitelist
 --   2. ua_blacklist       — UA matches the combined regex of ACTIVE patterns
 --                           (staged patterns are not applied — staging is its
 --                           own task, A11; bac_log.add_staging_match is a
 --                           no-op in Phase 1)
---
--- NB: the RFC §A2 "header sanity" check (HTTP/2 with no Accept) is
--- intentionally NOT implemented here. It appears only in the RFC; the
--- product specs that own cascade behaviour (vision.md "Источник правды по
--- поведению", phase1-spec.md, rules-reference.md) define the L1 hygiene rules
--- as method_not_allowed + ua_blacklist only. Add it back if it is promoted
--- into the rules catalogue.
 --
 -- resource_id is intentionally NOT derived here: the edge works from Host
 -- only and the backend enriches resource_id on log ingest (ADR-005,
@@ -58,6 +60,13 @@ function _M.build_combined(ua_list)
     end
     if #active == 0 then return nil end
     return "(" .. table.concat(active, ")|(") .. ")"
+end
+
+-- pure: header anomaly heuristic. Base case (RFC §A2 / vision.md T0): an
+-- HTTP/2 request with no Accept header — real browsers always send Accept on
+-- HTTP/2. Returns true when the request looks anomalous.
+function _M.header_anomaly(server_protocol, accept)
+    return server_protocol == "HTTP/2.0" and not accept
 end
 
 -- pure: lookup set from a method whitelist (array or single string).
@@ -103,6 +112,13 @@ function _M.run()
     if not _M.enabled then return false end
 
     local bac_log = require "bac_log"
+
+    -- Informational tag — evaluated first and unconditionally so it is
+    -- recorded even when a blocking rule fires below (tags accumulate
+    -- independently of the verdict).
+    if _M.header_anomaly(ngx.var.server_protocol, ngx.var.http_accept) then
+        bac_log.add_tag("hygiene:header_anomaly")
+    end
 
     -- 1. method whitelist (only when one is configured).
     if next(_M.method_set) and not _M.method_set[ngx.var.request_method] then
