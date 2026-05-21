@@ -6,20 +6,23 @@
 --      log_event.lua can emit the final structured record.
 --   2. Run the L1 `hygiene` stage (hygiene.lua: method_not_allowed /
 --      ua_blacklist + the hygiene:header_anomaly tag) — observe-only.
---   3. Run the existing TLS-fingerprint block decision (compute_fp +
+--   3. Run the L2 `reputation` stage (reputation.lua: ip_whitelist /
+--      ip_blocklist via lua-resty-ipmatcher) — observe-only.
+--   4. Run the existing TLS-fingerprint block decision (compute_fp +
 --      cache + blocklist), identical to production.
 --
 -- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
--- through the same bac_log contract as hygiene. The remaining Phase 1
--- stages (reputation / rate_limits) are separate tasks. The
+-- through the same bac_log contract as hygiene/reputation. The remaining
+-- Phase 1 stages (rate_limits) are separate tasks. The
 -- stand runs shadow: tls_fp_blocklist.conf ships empty (init.lua seeds the
 -- fp_blocklist dict from it), so verdict is always "allow" and nothing is
 -- blocked. The ngx.exit(403) path stays wired so adding an fp to that
 -- config and restarting flips it to active without code changes.
 
-local ja4     = require "ja4_compute"
-local bac_log = require "bac_log"
-local hygiene = require "hygiene"
+local ja4        = require "ja4_compute"
+local bac_log    = require "bac_log"
+local hygiene    = require "hygiene"
+local reputation = require "reputation"
 
 bac_log.init()
 
@@ -34,6 +37,13 @@ bac_log.init()
 -- later blocks it overwrites the hygiene verdict; otherwise the hygiene
 -- verdict stands.
 hygiene.run()
+
+-- L2 reputation (ip_whitelist / ip_blocklist). Observe-only and, like
+-- hygiene, deliberately does NOT short-circuit the cascade — not even on an
+-- ip_whitelist allow. A fastpass here would let a whitelisted IP skip the
+-- tls_fp block below; on the stand every request must still reach tls_fp.
+-- Last-writer-wins: a later tls_fp block overwrites the reputation verdict.
+reputation.run()
 
 local fp = ja4.compute()
 bac_log.set_tls_fp(fp)
