@@ -31,6 +31,9 @@ services:
       # off → real remote_addr is always used (organic traffic resolves for
       # real on the VM). See README "GeoIP / A6".
       BAC_DEMO_GEO_HEADER: ${BAC_DEMO_GEO_HEADER:-off}
+      # Where geoip.lua looks for the GeoLite2 .mmdb files inside the container.
+      # Defaults to the mount point below; override only if you also remount.
+      BAC_GEOIP_DIR: ${BAC_GEOIP_DIR:-/etc/nginx/geoip}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's

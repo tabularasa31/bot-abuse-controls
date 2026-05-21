@@ -99,19 +99,19 @@ function _M.country_blocked(allow, cc)
     return not allow[cc]
 end
 
--- Resolve the client IP the stage reasons about. Production: the real
--- remote_addr. Stand testing: when BAC_DEMO_GEO_HEADER=on, an X-Demo-IP
--- request header overrides it so a reviewer can simulate a public IP (the
--- local/private client IP has no GeoIP entry). The toggle defaults off, so on
--- a live VM the header is inert and the real remote_addr is always used. See
--- the A6 plan / README for why a single env toggle (no IP allowlist) suffices:
--- the stage is observe-only, so a spoofed IP only mislabels one log line.
-local function client_ip()
+-- IP used for the GeoLite2 lookup only. Production: the real remote_addr.
+-- Stand testing: when BAC_DEMO_GEO_HEADER=on, an X-Demo-IP request header
+-- overrides it so a reviewer can simulate a public IP (a local/private client
+-- IP has no GeoIP entry). The toggle defaults off, so on a live VM the header
+-- is inert. The override applies ONLY to geo enrichment — the ip_whitelist /
+-- ip_blocklist matchers always use the real remote_addr, so a caller-supplied
+-- header can never rewrite a reputation verdict or skew rule metrics.
+local function geo_lookup_ip(remote_addr)
     if _M.demo_geo_header then
         local override = ngx.var.http_x_demo_ip
         if override and override ~= "" then return override end
     end
-    return ngx.var.remote_addr
+    return remote_addr
 end
 
 -- Called once in init_by_lua, after config.load(). Compiles the on-disk IP
@@ -187,7 +187,7 @@ end
 function _M.run()
     if not _M.enabled then return false end
 
-    local ip = client_ip()
+    local ip = ngx.var.remote_addr
     if not ip then return false end
 
     -- bac_log / geoip required lazily (keeps the pure helpers unit-testable
@@ -199,8 +199,9 @@ function _M.run()
     -- Source enrichment + asn_dc tag run for EVERY request, independent of the
     -- verdict (tags accumulate even when a blocking rule fires; the log fields
     -- must be populated regardless). geo is fail-open: nil cc/asn just leaves
-    -- the fields null and the tag unset.
-    local cc, asn = geoip.lookup(ip)
+    -- the fields null and the tag unset. The lookup IP may be an X-Demo-IP
+    -- override (stand testing); the matchers below still use the real ip.
+    local cc, asn = geoip.lookup(geo_lookup_ip(ip))
     bac_log.set_source(asn, cc)
     if asn and _M.asn_dc_set[asn] then
         bac_log.add_tag("reputation:asn_dc")
