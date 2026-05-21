@@ -150,6 +150,10 @@ rules:
 
 # Информационные теги (не правила, не эмитят verdict)
 tags:
+  - id: hygiene:header_anomaly
+    stage: hygiene
+    source: built-in                 # Lua-проверка заголовков (напр. HTTP/2 без Accept)
+
   - id: reputation:asn_dc
     stage: reputation
     source: asn_datacenters.conf
