@@ -2,7 +2,7 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (CDN operator admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. This is the same `infra/nginx-lua-poc/lua/verdict.lua` that ships in production, fronted by the multi-scenario endpoints below. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
+The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. The cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua`); the TLS-fingerprint compute (`ja4_compute.lua`, `ja4_helpers.lua`) is bind-mounted from `infra/nginx-lua-poc/lua/` and shared with the PoC. The multi-scenario endpoints below front this cascade. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
 
 ## Scenarios a reviewer can probe
 
