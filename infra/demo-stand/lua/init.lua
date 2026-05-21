@@ -51,6 +51,7 @@ for _, key in ipairs({
     "verdict_allow_total",
     "cache_hit_total",
     "cache_miss_total",
+    "fp_unique",
 }) do
     metrics:safe_add(key, 0)
 end

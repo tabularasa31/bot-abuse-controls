@@ -8,6 +8,7 @@
 -- requests that actually went through the pipeline.
 
 local bac_log = require "bac_log"
+local recent  = require "recent"
 
 local ctx = ngx.ctx.bac
 if not ctx then return end
@@ -20,5 +21,36 @@ if ngx.ctx.bac_cache_hit then
 else
     m:incr("cache_miss_total", 1, 0)
 end
+
+-- Per-rule counter (which rule fired, on which stage). Key shape
+-- "rule:<stage>:<rule>" — metrics.lua parses it back out. Rule codes and
+-- stage codes contain no ":", so the split is unambiguous.
+if ctx.rule then
+    m:incr("rule:" .. ctx.stage .. ":" .. ctx.rule, 1, 0)
+end
+
+-- fp cardinality: dict:add succeeds only the first time we see an fp, so it
+-- doubles as a first-seen signal for the unique-fp gauge.
+local fp = ctx.tls_fp
+local seen = ngx.shared.fp_seen
+if fp and seen then
+    if seen:add(fp, 1) then
+        m:incr("fp_unique", 1, 0)
+    else
+        seen:incr(fp, 1, 0)
+    end
+end
+
+-- Live ring buffer for /__admin.
+recent.record({
+    t       = ngx.time(),
+    fp      = fp,
+    ip      = ngx.var.remote_addr,
+    ua      = ngx.var.http_user_agent,
+    status  = tonumber(ngx.var.status),
+    stage   = ctx.stage,
+    verdict = ctx.verdict,
+    rule    = ctx.rule,
+})
 
 bac_log.emit()

@@ -1,102 +1,159 @@
--- /__admin status page. Renders a small HTML view of the same data
--- /metrics exposes, plus the actual blocklist contents. Read-only —
--- no mutation surface. Designed for a reviewer to eyeball "what is
--- this stand doing right now" without learning Prometheus query syntax.
+-- /__admin status page. Read-only HTML view of what the stand is doing
+-- right now: counters, the rules that have fired, a live ring buffer of
+-- recent requests, and the blocklist contents. No mutation surface. Lets a
+-- reviewer eyeball the pipeline without learning Prometheus query syntax.
 
-local m = ngx.shared.metrics
-local fp_dict = ngx.shared.fp_blocklist
+local recent  = require "recent"
+local m        = ngx.shared.metrics
+local fp_dict  = ngx.shared.fp_blocklist
 
 local function get(key) return m:get(key) or 0 end
 
-local requests = get("requests_total")
-local passes   = get("verdict_pass_total")
-local blocks   = get("verdict_block_total")
-local hits     = get("cache_hit_total")
-local misses   = get("cache_miss_total")
+local requests   = get("requests_total")
+local passes     = get("verdict_pass_total")
+local blocks     = get("verdict_block_total")
+local challenges = get("verdict_challenge_total")
+local allows     = get("verdict_allow_total")
+local hits       = get("cache_hit_total")
+local misses     = get("cache_miss_total")
+local fp_unique  = get("fp_unique")
+
 local hit_ratio = (hits + misses) > 0
-    and string.format("%.1f%%", 100 * hits / (hits + misses))
-    or "n/a"
+    and string.format("%.1f%%", 100 * hits / (hits + misses)) or "n/a"
 local block_pct = requests > 0
-    and string.format("%.2f%%", 100 * blocks / requests)
-    or "0%"
+    and string.format("%.2f%%", 100 * blocks / requests) or "0%"
+
+local blocklist_keys = fp_dict:get_keys(50)
+local blocklist_n    = #blocklist_keys
+local mode    = blocklist_n > 0 and "ACTIVE" or "SHADOW"
+local edge_id = os.getenv("EDGE_ID") or "stand-bac"
 
 local now = ngx.time()
 local uptime_s = now - (m:get("start_time") or now)
 local uptime_h = string.format("%dh %dm %ds",
-    math.floor(uptime_s / 3600),
-    math.floor(uptime_s / 60) % 60,
-    uptime_s % 60)
+    math.floor(uptime_s / 3600), math.floor(uptime_s / 60) % 60, uptime_s % 60)
 
--- HTML-escape values before injecting into the rendered page. Blocklist
--- entries today come from a static Lua table (trusted source), but the
--- catalog hot-reload (RFC §В1) will pull entries from the sidecar at
--- runtime — at that point an attacker-controlled fp string would be
--- rendered into HTML. Escape now so the demo doesn't become a footgun
--- the moment that pipeline lands.
 local HTML_ESCAPE = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
                       ['"'] = "&quot;", ["'"] = "&#39;" }
-local function html_escape(s)
-    if not s then return "" end
+local function esc(s)
+    if s == nil then return "" end
     return (tostring(s):gsub("[&<>\"']", HTML_ESCAPE))
 end
 
--- List blocklist entries (max 50 shown — anything more is unreadable
--- in HTML and the operator should query the shared_dict directly).
-local keys = fp_dict:get_keys(50)
-local rows = {}
-for _, key in ipairs(keys) do
-    rows[#rows + 1] = string.format(
-        "<tr><td><code>%s</code></td><td>%s</td></tr>",
-        html_escape(key), html_escape(fp_dict:get(key) or "?"))
+-- Rules fired (parsed from "rule:<stage>:<rule>" keys in the metrics dict).
+local rules = {}
+for _, key in ipairs(m:get_keys(0)) do
+    local stage, rule = key:match("^rule:([^:]+):(.+)$")
+    if stage then rules[#rules + 1] = { stage = stage, rule = rule, n = get(key) } end
 end
-local extra = #keys >= 50 and " (showing first 50)" or ""
+table.sort(rules, function(a, b) return a.n > b.n end)
 
-ngx.header.content_type = "text/html; charset=utf-8"
-ngx.say(string.format([[<!doctype html>
+local buf = {}
+local function add(s) buf[#buf + 1] = s end
+
+add([[<!doctype html>
 <html><head><meta charset="utf-8"><title>abuse-controls demo admin</title>
 <style>
-body { font-family: -apple-system, system-ui, sans-serif; max-width: 800px;
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px;
        margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.5; }
 h1, h2 { margin-top: 1.5em; }
-table { border-collapse: collapse; width: 100%%; margin: 0.5em 0; }
+table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee;
-         font-size: 14px; }
-code { background: #f4f4f4; padding: 1px 4px; border-radius: 2px; font-size: 13px; }
+         font-size: 13px; vertical-align: top; }
+code { background: #f4f4f4; padding: 1px 4px; border-radius: 2px; font-size: 12px; }
 .metric { display: inline-block; margin-right: 2em; }
 .metric strong { font-size: 1.4em; }
-hr { border: 0; border-top: 1px solid #eee; margin: 2em 0; }
+.shadow { color: #2e7d32; font-weight: 700; }
+.active { color: #c62828; font-weight: 700; }
+.v-block { color: #c62828; } .v-pass { color: #2e7d32; }
+.v-challenge { color: #e65100; } .v-allow { color: #1565c0; }
 .note { color: #666; font-size: 13px; }
+.empty { color: #888; font-style: italic; }
+hr { border: 0; border-top: 1px solid #eee; margin: 2em 0; }
 </style></head><body>
 
 <h1>abuse-controls demo stand</h1>
-<p class="note">Active blocking; the verdict pipeline runs on every request.
-Same code as production. See
-<a href="https://github.com/tabularasa31/abuse-controls">repo</a> for sources
-and decision records.</p>
+<p class="note">Mode: <span class="]] .. (mode == "ACTIVE" and "active" or "shadow") .. [[">]] .. mode .. [[</span>
+&middot; edge_id <code>]] .. esc(edge_id) .. [[</code>.
+]] .. (mode == "SHADOW"
+    and "The verdict pipeline runs on every request and logs a verdict, but the blocklist is empty so nothing is blocked (200 for everyone)."
+    or  ("Blocking is active on " .. blocklist_n .. " fingerprint(s) — matching clients get 403.")) .. [[
+Same pipeline as production. <a href="https://github.com/tabularasa31/abuse-controls">repo</a>.</p>
 
 <h2>Counters</h2>
-<div class="metric"><strong>%d</strong><br>requests</div>
-<div class="metric"><strong>%d</strong><br>passes</div>
-<div class="metric"><strong>%d</strong><br>blocks (%s)</div>
-<div class="metric"><strong>%s</strong><br>cache hit ratio</div>
-<div class="metric"><strong>%s</strong><br>uptime</div>
+]])
+add('<div class="metric"><strong>' .. requests .. '</strong><br>requests</div>')
+add('<div class="metric"><strong>' .. passes .. '</strong><br>pass</div>')
+add('<div class="metric"><strong>' .. blocks .. '</strong><br>block (' .. block_pct .. ')</div>')
+add('<div class="metric"><strong>' .. challenges .. '</strong><br>challenge</div>')
+add('<div class="metric"><strong>' .. allows .. '</strong><br>allow</div>')
+add('<div class="metric"><strong>' .. fp_unique .. '</strong><br>unique fp</div>')
+add('<div class="metric"><strong>' .. hit_ratio .. '</strong><br>cache hit ratio</div>')
+add('<div class="metric"><strong>' .. esc(uptime_h) .. '</strong><br>uptime</div>')
 
-<h2>Blocklist (%d entries%s)</h2>
-<table><tr><th>fingerprint</th><th>verdict</th></tr>
-%s
-</table>
+-- Rules fired
+add("<h2>Rules fired</h2>")
+if #rules == 0 then
+    add('<p class="empty">No rule has fired yet.</p>')
+else
+    add("<table><tr><th>stage</th><th>rule</th><th>count</th></tr>")
+    for _, r in ipairs(rules) do
+        add("<tr><td>" .. esc(r.stage) .. "</td><td><code>" .. esc(r.rule)
+            .. "</code></td><td>" .. r.n .. "</td></tr>")
+    end
+    add("</table>")
+end
 
-<h2>What to try</h2>
-<ul>
-  <li>Open <a href="/">/</a> in this browser — should be 200 (browser fp is not in the blocklist)</li>
-  <li><code>curl -k https://&lt;this-host&gt;/</code> — should be 403 (curl fp is seeded)</li>
-  <li>Hit <a href="/__fp">/__fp</a> from any client to see its fp</li>
-  <li>Hit <a href="/metrics">/metrics</a> for Prometheus-scrape format</li>
-  <li>Compare <code>wrk</code> against <a href="/">/</a> vs <a href="/baseline/">/baseline/</a>
-      to measure the verdict pipeline overhead</li>
-</ul>
+-- Recent requests (live ring buffer)
+local recs = recent.snapshot(20)
+add("<h2>Recent requests (last " .. #recs .. ")</h2>")
+if #recs == 0 then
+    add('<p class="empty">No requests through the pipeline yet.</p>')
+else
+    add("<table><tr><th>time</th><th>verdict</th><th>rule</th><th>fp</th>"
+        .. "<th>ip</th><th>status</th><th>ua</th></tr>")
+    for _, e in ipairs(recs) do
+        local t = e.t and os.date("!%H:%M:%S", e.t) or "?"
+        local ua = e.ua or ""
+        if #ua > 48 then ua = ua:sub(1, 48) .. "…" end
+        add("<tr><td>" .. esc(t) .. "</td>"
+            .. '<td class="v-' .. esc(e.verdict) .. '">' .. esc(e.verdict) .. "</td>"
+            .. "<td><code>" .. esc(e.rule or "") .. "</code></td>"
+            .. "<td><code>" .. esc(e.fp or "") .. "</code></td>"
+            .. "<td>" .. esc(e.ip) .. "</td>"
+            .. "<td>" .. esc(e.status) .. "</td>"
+            .. "<td>" .. esc(ua) .. "</td></tr>")
+    end
+    add("</table>")
+    add('<p class="note">In-memory ring buffer, newest first; survives no restart. Bypass endpoints (/__fp, /__health, …) are not recorded.</p>')
+end
 
-</body></html>
-]],
-    requests, passes, blocks, block_pct, hit_ratio, uptime_h,
-    #keys, extra, table.concat(rows, "\n")))
+-- Blocklist
+local extra = blocklist_n >= 50 and " (showing first 50)" or ""
+add("<h2>Blocklist (" .. blocklist_n .. " entries" .. extra .. ")</h2>")
+if blocklist_n == 0 then
+    add('<p class="empty">Empty — shadow mode. Seed fps to enable blocking.</p>')
+else
+    add("<table><tr><th>fingerprint</th><th>verdict</th></tr>")
+    for _, key in ipairs(blocklist_keys) do
+        add("<tr><td><code>" .. esc(key) .. "</code></td><td>"
+            .. esc(fp_dict:get(key) or "?") .. "</td></tr>")
+    end
+    add("</table>")
+end
+
+-- What to try
+add("<h2>What to try</h2><ul>")
+add('<li>Open <a href="/">/</a> in a browser — 200 (browser fp is not blocked).</li>')
+if mode == "SHADOW" then
+    add('<li><code>curl -k https://&lt;this-host&gt;/</code> — 200 too (shadow: nothing is blocked); the fp is computed and logged. To enable blocking, seed fps into <code>lua/blocklist.lua</code>.</li>')
+else
+    add('<li><code>curl -k https://&lt;this-host&gt;/</code> — 403 if its fp is in the blocklist above.</li>')
+end
+add('<li>Hit <a href="/__fp">/__fp</a> from any client to see its fp.</li>')
+add('<li>Hit <a href="/metrics">/metrics</a> for Prometheus-scrape format.</li>')
+add('<li>Compare <code>wrk</code> against <a href="/">/</a> vs <a href="/baseline/">/baseline/</a> to measure pipeline overhead.</li>')
+add("</ul></body></html>")
+
+ngx.header.content_type = "text/html; charset=utf-8"
+ngx.say(table.concat(buf))
