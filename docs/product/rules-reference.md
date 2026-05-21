@@ -154,6 +154,7 @@
 
 | #   | Если…                                                                            | То тег…                | Где | Источник                  | Phase   |
 | --- | -------------------------------------------------------------------------------- | ---------------------- | --- | ------------------------- | ------- |
+| T0  | Комбинация заголовков, которую не шлёт настоящий браузер, но шлёт ленивая автоматизация (базовый случай: HTTP/2 без `Accept`) | `hygiene:header_anomaly` | L1 | Проверка заголовков в Lua | Phase 1 |
 | T1  | IP запроса из ASN крупного публичного датацентра (Hetzner/OVH/DO/AWS/GCP/Azure)  | `reputation:asn_dc`    | L2  | Каталог `asn_datacenters` | Phase 1 |
 | T2  | UA содержит явные признаки автоматизации (curl/python-requests и т.п.)           | `tls_fp:automation_ua` | L3  | Lua-проверка UA           | Phase 2 |
 | T3  | Клиент не прислал SNI в TLS-handshake                                            | `tls_fp:no_sni`        | L3  | TLS handshake data        | Phase 2 |
@@ -167,7 +168,7 @@
 
 | Phase       | Активные правила (rule codes)                                                                                                                                                                                            |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Phase 1** | `method_not_allowed`, `ua_blacklist` (пустой), `ip_whitelist` (системный), `ip_blocklist` (пустой), `geo_blocklist` (системный), `rate_ip`, `rate_ip_ua`, `rate_api`, `rate_scan_urls` + тег `reputation:asn_dc`         |
+| **Phase 1** | `method_not_allowed`, `ua_blacklist` (пустой), `ip_whitelist` (системный), `ip_blocklist` (пустой), `geo_blocklist` (системный), `rate_ip`, `rate_ip_ua`, `rate_api`, `rate_scan_urls` + теги `hygiene:header_anomaly`, `reputation:asn_dc`         |
 | **Phase 2** | + `tls_fp_blocklist`, `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `rate_tls_fp` + теги `tls_fp:automation_ua`, `tls_fp:no_sni`, `tls_fp:dc_browser`                                                              |
 | **Phase 3** | + `cookie_valid`*, `bot_verified`, `bot_verified_pending`, `asn_customer`, per-resource `ip_whitelist`/`geo_blocklist`, кастомные паттерны `ua_blacklist` (rule_source=per_resource), `rate_custom` (клиентские правила) |
 | **Phase 4** | + `non_browser_blocked`, `unchallengeable_request`, ветки challenge A/B/C, verdict `permissive`. `cookie_valid` становится реально работающим вместе с L5                                                                |
