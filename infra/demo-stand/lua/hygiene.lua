@@ -18,7 +18,13 @@
 --                           (staged patterns are not applied — staging is its
 --                           own task, A11; bac_log.add_staging_match is a
 --                           no-op in Phase 1)
---   3. header_sanity      — RFC §A2 header checks (HTTP/2 with no Accept)
+--
+-- NB: the RFC §A2 "header sanity" check (HTTP/2 with no Accept) is
+-- intentionally NOT implemented here. It appears only in the RFC; the
+-- product specs that own cascade behaviour (vision.md "Источник правды по
+-- поведению", phase1-spec.md, rules-reference.md) define the L1 hygiene rules
+-- as method_not_allowed + ua_blacklist only. Add it back if it is promoted
+-- into the rules catalogue.
 --
 -- resource_id is intentionally NOT derived here: the edge works from Host
 -- only and the backend enriches resource_id on log ingest (ADR-005,
@@ -32,8 +38,6 @@
 -- before workers fork — so the method set and combined regex are inherited by
 -- every worker for free; no shared dict, no generation handshake (hot-reload
 -- is out of scope).
-
-local header_sanity = require "header_sanity"
 
 local _M = {
     enabled    = true,
@@ -119,16 +123,6 @@ function _M.run()
             bac_log.set_verdict("hygiene", "block", "ua_blacklist")
             return true
         end
-    end
-
-    -- 3. header sanity (RFC §A2).
-    local reason = header_sanity.check(
-        ngx.var.server_protocol,
-        ngx.var.http_accept,
-        ngx.var.http_accept_language)
-    if reason then
-        bac_log.set_verdict("hygiene", "block", "header_sanity")
-        return true
     end
 
     return false

@@ -1,7 +1,7 @@
--- Unit tests for infra/demo-stand/lua/hygiene.lua + header_sanity.lua.
+-- Unit tests for infra/demo-stand/lua/hygiene.lua.
 -- Pure Lua; runs under any luajit / lua 5.1+ with no openresty deps — the
 -- ngx-touching parts (hygiene.run) are exercised on the stand, the pure
--- compile/decision helpers are covered here.
+-- compile helpers are covered here.
 --
 -- Run with:
 --   make test            (host luajit, fastest)
@@ -9,7 +9,6 @@
 
 package.path = "infra/demo-stand/lua/?.lua;./infra/demo-stand/lua/?.lua;" .. package.path
 local hygiene = require "hygiene"
-local header_sanity = require "header_sanity"
 
 local failed, passed = 0, 0
 
@@ -67,19 +66,6 @@ check(mset.GET, true,    "method_lookup GET allowed")
 check(mset.OPTIONS, true, "method_lookup OPTIONS allowed")
 check(mset.TRACE, nil,   "method_lookup TRACE not listed")
 check(hygiene.method_lookup("GET").GET, true, "method_lookup single string")
-
--- ===========================================================================
--- header_sanity.check() — RFC §A2
--- ===========================================================================
-
-check(header_sanity.check("HTTP/2.0", nil, nil), "http2_no_accept",
-    "header_sanity HTTP/2 no Accept -> block")
-check(header_sanity.check("HTTP/2.0", "text/html", nil), nil,
-    "header_sanity HTTP/2 with Accept -> pass")
-check(header_sanity.check("HTTP/1.1", nil, nil), nil,
-    "header_sanity HTTP/1.1 no Accept -> pass (rule not applied)")
-check(header_sanity.check("HTTP/1.1", nil, "en-US"), nil,
-    "header_sanity HTTP/1.1 with Accept-Language -> pass")
 
 -- ===========================================================================
 -- Reporting

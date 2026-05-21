@@ -5,7 +5,7 @@
 --      time, resource_id) so latency_ms covers the whole cascade and
 --      log_event.lua can emit the final structured record.
 --   2. Run the L1 `hygiene` stage (hygiene.lua: method_not_allowed /
---      ua_blacklist / header_sanity) — observe-only, never blocks.
+--      ua_blacklist) — observe-only, never blocks.
 --   3. Run the existing TLS-fingerprint block decision (compute_fp +
 --      cache + blocklist), identical to production.
 --
@@ -23,7 +23,7 @@ local hygiene = require "hygiene"
 
 bac_log.init()
 
--- L1 hygiene (method_not_allowed / ua_blacklist / header_sanity). Phase 1 is
+-- L1 hygiene (method_not_allowed / ua_blacklist). Phase 1 is
 -- observe-only: hygiene.run() records the would-be verdict via bac_log and
 -- returns true when a rule fired. We then stop the cascade (the would-be
 -- final rule is this one) and fall through to origin WITHOUT blocking — no
