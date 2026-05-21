@@ -8,16 +8,18 @@ The stand runs in **shadow mode** — the cascade computes and logs a verdict fo
 
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
-| `/` | a real browser | 200, demo landing page | Browsers are allowed by default. |
-| `/` | `curl -k https://<host>/` | 200 | Shadow mode: the cascade computes curl's fp and logs `would_verdict`, but the empty blocklist means no block. Confirm the computed fp via `/__fp`. |
-| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, not blocked. |
+| `/` (and any path) | a real browser | 200, origin page | Cascade passes → request proxied to `ORIGIN_URL`. The stand is a real edge in front of the origin. |
+| `/` | `curl -k https://<host>/` | 200 | Shadow mode: the cascade computes curl's fp and logs the verdict, but the empty blocklist means no block, so it's proxied to origin. Confirm the fp via `/__fp`. |
+| `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, then proxied. |
 | `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in `/__fp` and the logs. |
 | `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
 | `/__admin` | a real browser | HTML status page | Mode + counters (requests, pass/block/challenge/allow, unique fp, cache hit ratio, uptime), **rules fired**, a **live ring buffer of recent requests** (verdict/rule/fp/ip/ua), and the blocklist. Read-only, no mutation surface. |
 | `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`, `antibot_fp_unique`, `antibot_rule_total{stage,rule}`. No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
-| `/baseline/` | anything | same site, **no** antibot | Bypasses `access_by_lua` entirely. Direct comparison: hit `/` and `/baseline/` with `wrk`, see the latency delta. |
+| `/baseline/` | anything | same origin, **no** antibot | Proxies to the same origin but bypasses `access_by_lua`. Hit `/` vs `/baseline/` with `wrk` — the delta is the cascade overhead. |
+
+**Origin.** The stand is a real reverse proxy: the cascade runs, then (on allow) the request is proxied to an origin (vision Step 6 — antibot in front of origin). The origin is `ORIGIN_URL` (scheme+host, no trailing slash) set in the gitignored `infra/demo-stand/.env` on the VM; it is not committed. When `ORIGIN_URL` is unset the proxied locations return `503`. The `/__*` and `/metrics` endpoints are carved out and served locally.
 
 The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Candidate automation fps to seed it from (curl/python/Go, captured 2026-05-16 on macOS arm64) are documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md); promoting them into the blocklist is a deliberate, data-driven step (see analyze.py HIGH-confidence candidates), not the default.
 
@@ -51,6 +53,10 @@ mkdir -p infra/demo-stand/certs
 cp /your/fullchain.pem infra/demo-stand/certs/fullchain.pem
 cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 
+# Point the cascade at the origin it fronts (gitignored, not committed).
+# Same .env also holds DEMO_BIND_IP / REPORT_* on a real deploy.
+echo 'ORIGIN_URL=https://your-origin.example' > infra/demo-stand/.env
+
 # Bring up. The REVISION env var feeds /__version so reviewers can see
 # what code is actually deployed. Without it the endpoint reports
 # `commit: dev` (the compose default in docker-compose.demo.yml).
@@ -59,7 +65,7 @@ REVISION=$(git rev-parse --short HEAD) \
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # 200 (shadow mode: nothing blocked)
+curl -k https://localhost/                   # 200, proxied to ORIGIN_URL (shadow: nothing blocked)
 curl -k https://localhost/__fp               # see your fp
 curl -k https://localhost/metrics            # prometheus text
 ```
@@ -208,6 +214,6 @@ infra/demo-stand/
 | "Is this AI-generated slop?" | `make ci` passes 61 unit tests + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
 | "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. Measured ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook — see [`docs/lua-poc-results.md`](../../docs/lua-poc-results.md). |
-| "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). Demo shadow-mode-style fallback at [`infra/nginx-shadow/`](../nginx-shadow/) if you want enforcement off but observability on. |
+| "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). The stand already runs shadow (empty blocklist) — observability on, enforcement off — so "shadow vs active" is just whether the blocklist has entries. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
