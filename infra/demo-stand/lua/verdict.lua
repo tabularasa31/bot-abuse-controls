@@ -23,14 +23,17 @@ local hygiene = require "hygiene"
 
 bac_log.init()
 
--- L1 hygiene (method_not_allowed / ua_blacklist). Phase 1 is
--- observe-only: hygiene.run() records the would-be verdict via bac_log and
--- returns true when a rule fired. We then stop the cascade (the would-be
--- final rule is this one) and fall through to origin WITHOUT blocking — no
--- ngx.exit. See hygiene.lua for why this differs from the tls_fp stage below.
-if hygiene.run() then
-    return
-end
+-- L1 hygiene (method_not_allowed / ua_blacklist + hygiene:header_anomaly tag).
+-- Observe-only: records the would-be verdict and tag via bac_log but never
+-- blocks. We deliberately do NOT short-circuit the cascade here — the tls_fp
+-- stage below is the only stage that actually enforces (ngx.exit on a
+-- blocklisted fp), so every request must still reach it. Returning early
+-- would let a request bypass an active tls_fp block simply by also tripping
+-- an (observe-only) hygiene rule. Last-writer-wins on the verdict matches the
+-- phase1-spec "финальное сработавшее правило" logging contract: if tls_fp
+-- later blocks it overwrites the hygiene verdict; otherwise the hygiene
+-- verdict stands.
+hygiene.run()
 
 local fp = ja4.compute()
 bac_log.set_tls_fp(fp)

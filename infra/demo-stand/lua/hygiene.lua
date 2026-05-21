@@ -1,16 +1,21 @@
 -- L1 hygiene stage (rules-reference L1, phase1-spec "hygiene"; RFC §A2).
 --
 -- Runs first in the cascade (cheapest checks). Records the would-be verdict
--- through bac_log and tells the caller to stop the cascade once a rule fires.
+-- (and the informational tag) through bac_log.
 --
 -- Phase 1 is OBSERVE-ONLY: nothing is physically blocked (no ngx.exit) — the
 -- request always reaches origin and the structured log records what WOULD
 -- have happened (phase1-spec: "каскад в MVP только наблюдает, ничего не
 -- блокирует"). Flipping a rule to enforce is the future per-rule-enforce
--- task, not Phase 1. (The tls_fp stage in verdict.lua keeps its ngx.exit
--- wired because it is data-driven and ships an empty blocklist — shadow by
--- absence of data; the hygiene rules are logic-driven, so observe-only is the
--- only way to preserve Phase 1 semantics for them.)
+-- task, not Phase 1.
+--
+-- run() does NOT short-circuit the cascade: the caller (verdict.lua) keeps
+-- going to the tls_fp stage, which is the only stage that actually enforces
+-- (ngx.exit on a blocklisted fp). Stopping here would let a request bypass an
+-- active tls_fp block by also tripping an observe-only hygiene rule. The
+-- bac_log verdict is last-writer-wins, so a later tls_fp block overwrites the
+-- hygiene verdict; otherwise the hygiene verdict stands ("финальное
+-- сработавшее правило").
 --
 -- Informational tag (NOT a rule — emits no verdict, never stops the cascade):
 --   * hygiene:header_anomaly — header combination a real browser does not
@@ -21,7 +26,8 @@
 --     evaluated, even when a blocking rule also fires — tags accumulate
 --     independently of the verdict.
 --
--- Blocking checks, in order (first match wins, cascade stops):
+-- Blocking checks, in order (first hygiene match wins; this only decides which
+-- hygiene rule is recorded — it does not stop the wider cascade):
 --   1. method_not_allowed — method outside the configured whitelist
 --   2. ua_blacklist       — UA matches the combined regex of ACTIVE patterns
 --                           (staged patterns are not applied — staging is its
@@ -106,8 +112,9 @@ function _M.build(config)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the
--- would-be verdict via bac_log and returns true when a rule fired so the
--- caller can stop the cascade. Never blocks the request (observe-only).
+-- header_anomaly tag and the would-be verdict via bac_log. Never blocks the
+-- request and never stops the cascade (observe-only); the boolean return
+-- (true when a hygiene blocking rule matched) is informational only.
 function _M.run()
     if not _M.enabled then return false end
 
