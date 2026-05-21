@@ -60,30 +60,52 @@ function _M.active_values(list)
 end
 
 -- Called once in init_by_lua, after config.load(). Compiles the on-disk IP
--- lists into the per-process ipmatcher objects the request path reads. An
--- empty active list yields a nil matcher (run() skips it) — an empty blocklist
--- is the Phase 1 default and must not error.
+-- lists into the per-process ipmatcher objects the request path reads.
+--
+-- Empty active list => nil matcher (run() skips it); an empty blocklist is the
+-- Phase 1 default and must not error.
+--
+-- A malformed IP/CIDR is FATAL, not fail-open: ipmatcher.new returns nil on a
+-- bad entry, and we error out of init_by_lua (aborting the start) rather than
+-- log-and-nil the whole list. Silently disabling all of ip_whitelist or
+-- ip_blocklist on one bad line is a hard-to-notice protection gap; failing
+-- loudly on a config typo matches config.lua's load-or-die contract ("fail
+-- loudly rather than run a half-configured cascade").
+--
+-- A rule can also be disabled via defaults.conf ([blocking.ip_blocklist] /
+-- [allow.ip_whitelist] enabled=false) — a runtime toggle for rollback /
+-- incident handling, mirroring how hygiene.lua honours blocking.ua_blacklist.
+-- A disabled rule yields a nil matcher (count 0); absent flag means enabled.
 function _M.build(config)
     local ipmatcher = require "resty.ipmatcher"
+    local defaults  = config.defaults or {}
 
-    local function matcher(list)
+    -- enabled unless the rule's defaults.conf section sets enabled=false.
+    local function rule_enabled(section, name)
+        local rule = (defaults[section] or {})[name] or {}
+        return rule.enabled ~= false
+    end
+
+    local function matcher(list, label, enabled)
+        if not enabled then return nil, 0 end
         local values = _M.active_values(list)
         if #values == 0 then return nil, 0 end
         local m, err = ipmatcher.new(values)
         if not m then
-            ngx.log(ngx.ERR, "reputation: ipmatcher.new failed: ", tostring(err))
-            return nil, 0
+            error("reputation: invalid IP/CIDR in " .. label .. ": " .. tostring(err))
         end
         return m, #values
     end
 
     local wl_n, bl_n
-    _M.whitelist, wl_n = matcher(config.whitelist_ip)
-    _M.blocklist, bl_n = matcher(config.blocklist_ip)
+    _M.whitelist, wl_n = matcher(config.whitelist_ip, "whitelist_ip.conf",
+                                 rule_enabled("allow", "ip_whitelist"))
+    _M.blocklist, bl_n = matcher(config.blocklist_ip, "blocklist_ip.conf",
+                                 rule_enabled("blocking", "ip_blocklist"))
 
     -- Stage off when the global kill-switch or the per-stage reputation switch
     -- is set (config-templates.md kill_switch; defaults.conf [kill_switch.*]).
-    local ks = (config.defaults or {}).kill_switch or {}
+    local ks = defaults.kill_switch or {}
     _M.enabled = not ((ks.global or {}).enabled == true
                       or (ks.per_stage or {}).reputation == true)
 
@@ -100,7 +122,10 @@ function _M.run()
     local ip = ngx.var.remote_addr
     if not ip then return false end
 
-    local bac_log = require "bac_log"
+    -- bac_log is required lazily (keeps active_values unit-testable without
+    -- ngx); the package.loaded fast-path avoids the require() call overhead on
+    -- the per-request hot path after the first lookup in a worker.
+    local bac_log = package.loaded["bac_log"] or require "bac_log"
 
     -- whitelist first (vision §2.3): a match wins, blocklist not consulted.
     if _M.whitelist and _M.whitelist:match(ip) then
