@@ -13,6 +13,15 @@ globals = {
     "ngx",
 }
 
+-- Vendored third-party library — linted upstream, not to our conventions.
+-- resty/ipmatcher.lua (A5) happens to pass clean; resty/maxminddb.lua (A6,
+-- anjia0532/lua-resty-maxminddb, Apache-2.0) carries upstream's unused error
+-- constants and FFI scaffolding, so skip the vendor copy wholesale rather than
+-- patch it.
+exclude_files = {
+    "infra/demo-stand/lua/resty/maxminddb.lua",
+}
+
 -- Suppress these warnings repo-wide.
 ignore = {
     "611",  -- "line contains only whitespace" — fights with our doc-comment style

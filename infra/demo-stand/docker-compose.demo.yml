@@ -3,7 +3,14 @@
 
 services:
   nginx-demo:
-    image: openresty/openresty:alpine
+    # Built image = stock openresty/openresty:alpine + libmaxminddb (for the
+    # A6 GeoLite2 FFI lookup). See ./Dockerfile. Rebuild with `--build` after
+    # changing the Dockerfile; Lua/config are bind-mounted so code edits still
+    # just need a reload.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bac-demo-stand:local
     container_name: nginx-demo
     restart: unless-stopped
     # REVISION is exposed via /__version. Override with a real git sha
@@ -19,6 +26,11 @@ services:
       # Upstream the cascade fronts (scheme+host, no trailing slash). Set in
       # the gitignored .env on the VM; when unset the proxied locations 503.
       ORIGIN_URL: ${ORIGIN_URL:-}
+      # When "on", reputation.lua honours an X-Demo-IP request header to
+      # simulate a public client IP for GeoIP lookups (stand testing). Default
+      # off → real remote_addr is always used (organic traffic resolves for
+      # real on the VM). See README "GeoIP / A6".
+      BAC_DEMO_GEO_HEADER: ${BAC_DEMO_GEO_HEADER:-off}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's
@@ -43,5 +55,9 @@ services:
       - ./config:/etc/nginx/config:ro
       - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
+      # GeoLite2 databases for the A6 geo/ASN lookup. License-gated, NOT
+      # committed — populate with scripts/fetch-geoip.sh. If empty the stand
+      # still starts (geoip.lua fail-open); geo is just undetermined.
+      - ./geoip:/etc/nginx/geoip:ro
     # Log via the default json-file driver — fine for the demo. Real
     # production would point to a log aggregator (Loki / fluentd / etc.).
