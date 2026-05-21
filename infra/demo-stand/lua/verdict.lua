@@ -1,15 +1,17 @@
 -- Demo-stand access_by_lua handler.
 --
--- Two responsibilities:
+-- Responsibilities:
 --   1. Initialise the per-request BAC log context (request_id, start
 --      time, resource_id) so latency_ms covers the whole cascade and
 --      log_event.lua can emit the final structured record.
---   2. Run the existing TLS-fingerprint block decision (compute_fp +
+--   2. Run the L1 `hygiene` stage (hygiene.lua: method_not_allowed /
+--      ua_blacklist + the hygiene:header_anomaly tag) — observe-only.
+--   3. Run the existing TLS-fingerprint block decision (compute_fp +
 --      cache + blocklist), identical to production.
 --
 -- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
--- through the same bac_log contract the Phase 1 cascade stages
--- (hygiene / reputation / rate_limits — separate tasks) will use. The
+-- through the same bac_log contract as hygiene. The remaining Phase 1
+-- stages (reputation / rate_limits) are separate tasks. The
 -- stand runs shadow: tls_fp_blocklist.conf ships empty (init.lua seeds the
 -- fp_blocklist dict from it), so verdict is always "allow" and nothing is
 -- blocked. The ngx.exit(403) path stays wired so adding an fp to that
@@ -17,8 +19,21 @@
 
 local ja4     = require "ja4_compute"
 local bac_log = require "bac_log"
+local hygiene = require "hygiene"
 
 bac_log.init()
+
+-- L1 hygiene (method_not_allowed / ua_blacklist + hygiene:header_anomaly tag).
+-- Observe-only: records the would-be verdict and tag via bac_log but never
+-- blocks. We deliberately do NOT short-circuit the cascade here — the tls_fp
+-- stage below is the only stage that actually enforces (ngx.exit on a
+-- blocklisted fp), so every request must still reach it. Returning early
+-- would let a request bypass an active tls_fp block simply by also tripping
+-- an (observe-only) hygiene rule. Last-writer-wins on the verdict matches the
+-- phase1-spec "финальное сработавшее правило" logging contract: if tls_fp
+-- later blocks it overwrites the hygiene verdict; otherwise the hygiene
+-- verdict stands.
+hygiene.run()
 
 local fp = ja4.compute()
 bac_log.set_tls_fp(fp)

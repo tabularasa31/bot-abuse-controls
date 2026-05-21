@@ -12,6 +12,11 @@
 local config = require "config"
 config.load()
 
+-- Compile the L1 hygiene stage (method whitelist + ua_blacklist combined
+-- regex) from the loaded config. Done here in the master so every worker
+-- inherits the compiled state on fork — see hygiene.lua.
+require("hygiene").build(config)
+
 -- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging (staging matches-but-doesn't-block;
 -- the staging path lands with its own task). An empty file => SHADOW mode.
