@@ -7,7 +7,7 @@
 --   make test            (host luajit, fastest)
 --   make test-docker     (inside openresty/openresty:alpine)
 
-package.path = "infra/demo-stand/lua/?.lua;./infra/demo-stand/lua/?.lua;" .. package.path
+package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 local hygiene = require "hygiene"
 
 local failed, passed = 0, 0

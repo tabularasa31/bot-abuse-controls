@@ -31,8 +31,7 @@ test:
 	else echo "luajit not on host; falling back to docker"; $(MAKE) test-docker; fi
 
 test-host:
-	luajit tests/ja4_helpers_test.lua
-	luajit tests/hygiene_test.lua
+	luajit tests/ja4_helpers_test.lua && luajit tests/hygiene_test.lua
 
 test-docker:
 	docker run --rm -v $(PWD):/work -w /work $(OPENRESTY_IMAGE) \
