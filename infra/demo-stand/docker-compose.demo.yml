@@ -16,6 +16,9 @@ services:
       REVISION: ${REVISION:-dev}
       # edge_id stamped into every BAC log record (see bac_log.lua).
       EDGE_ID: ${EDGE_ID:-stand-bac}
+      # Upstream the cascade fronts (scheme+host, no trailing slash). Set in
+      # the gitignored .env on the VM; when unset the proxied locations 503.
+      ORIGIN_URL: ${ORIGIN_URL:-}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's
@@ -41,6 +44,4 @@ services:
       - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
     # Log via the default json-file driver — fine for the demo. Real
-    # production would point to a log aggregator (Loki / fluentd / etc.)
-    # — see infra/nginx-shadow/docker-compose.shadow.yml for the
-    # commented-out loki driver example.
+    # production would point to a log aggregator (Loki / fluentd / etc.).
