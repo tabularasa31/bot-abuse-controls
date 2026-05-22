@@ -13,6 +13,16 @@ services:
     image: bac-demo-stand:local
     container_name: nginx-demo
     restart: unless-stopped
+    # Raise the open-file-descriptor limit. nginx.demo.conf sets
+    # `worker_connections 4096`, but each connection (plus listen sockets,
+    # upstream sockets, log/shm files) is an fd, and Docker's default
+    # RLIMIT_NOFILE is 1024 — so without this the real ceiling is ~1024 and
+    # nginx warns at start ("worker_connections exceed open file resource
+    # limit"). 65535 gives 4096 connections comfortable headroom.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     # REVISION is exposed via /__version. Override with a real git sha
     # on deployment:
     #   REVISION=$(git rev-parse --short HEAD) docker compose -f \
