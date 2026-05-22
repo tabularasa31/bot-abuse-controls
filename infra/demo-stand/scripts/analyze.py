@@ -41,6 +41,10 @@ STATE_DIR = ROOT / "state"
 REPORTS_DIR = ROOT / "reports"
 SEEN_FPS = STATE_DIR / "seen-fps.json"
 IP_CACHE = STATE_DIR / "ip-cache.json"
+# Pre-recreate log snapshots. update.sh dumps `docker logs` here before
+# rebuilding the container (a recreate drops the container's docker-json log
+# history). We fold these back in so a rebuild deploy leaves no gap.
+ARCHIVE_DIR = STATE_DIR / "bac-archive"
 
 # The stand's container. It emits one Phase 1 `BAC_LOG {json}` record per
 # request to docker stdout.
@@ -53,6 +57,9 @@ INIT_RE = re.compile(r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}).*?\[demo\] fp_block
 
 LOG_TS_TZ = timezone.utc
 WINDOW_HOURS = 24
+# Only read archives recent enough to overlap the report window (mirrors the
+# docker-logs --since margin). Older snapshots are aged out by split_24h anyway.
+ARCHIVE_MAX_AGE_HOURS = WINDOW_HOURS + 1
 
 BROWSER_CIPHER_COUNTS = {15, 16, 20}
 BOT_UA_FAMILIES = {"curl", "python", "go", "okhttp", "bot", "scanner"}
@@ -149,6 +156,49 @@ def _parse_iso(ts):
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+def _event_from_bac_line(line):
+    """Parse one `BAC_LOG {json}` line into an event dict, or None if the line
+    is not a usable BAC record (no marker, bad json, or no fingerprint).
+    Shared by the docker-logs reader and the archive reader."""
+    i = line.find("BAC_LOG ")
+    if i < 0:
+        return None
+    try:
+        rec = json.loads(line[i + len("BAC_LOG "):])
+    except Exception:
+        return None
+    fp = rec.get("tls_fp")
+    if not fp or fp == "-":
+        return None  # no fingerprint — skip (bypass endpoints never emit BAC_LOG)
+    status = rec.get("status")
+    d = {
+        "fp": fp,
+        "verdict": rec.get("verdict") or "pass",
+        "status": str(status) if status is not None else "-",
+        "uri": rec.get("path") or "-",
+        "remote": rec.get("ip") or "-",
+        "ua": rec.get("ua") or "-",
+    }
+    ts_iso = rec.get("timestamp") or ""
+    try:
+        d["ts_dt"] = _parse_iso(ts_iso)
+        d["ts"] = d["ts_dt"].strftime("%Y/%m/%d %H:%M:%S")
+    except Exception:
+        d["ts_dt"] = None
+        d["ts"] = ts_iso
+    d["cipher_count"] = parse_cipher_count(fp)
+    cipher_hash, hash_tail = parse_hashes(fp)
+    d["cipher_hash"] = cipher_hash
+    d["hash_tail"] = hash_tail
+    d["ua_family"] = classify_ua(d["ua"])
+    return d
+
+
+def _event_key(e):
+    """Identity for dedup across log sources (docker logs vs archives)."""
+    return (e["ts"], e["remote"], e["uri"], e["fp"])
+
+
 def _fetch_one(container):
     """Pull recent BAC_LOG json records from the stand's docker log.
 
@@ -176,50 +226,57 @@ def _fetch_one(container):
             except Exception:
                 init_ts = None
             continue
-        i = line.find("BAC_LOG ")
-        if i < 0:
-            continue
-        try:
-            rec = json.loads(line[i + len("BAC_LOG "):])
-        except Exception:
-            continue
-        fp = rec.get("tls_fp")
-        if not fp or fp == "-":
-            continue  # no fingerprint — skip (bypass endpoints never emit BAC_LOG)
-        status = rec.get("status")
-        d = {
-            "fp": fp,
-            "verdict": rec.get("verdict") or "pass",
-            "status": str(status) if status is not None else "-",
-            "uri": rec.get("path") or "-",
-            "remote": rec.get("ip") or "-",
-            "ua": rec.get("ua") or "-",
-        }
-        ts_iso = rec.get("timestamp") or ""
-        try:
-            d["ts_dt"] = _parse_iso(ts_iso)
-            d["ts"] = d["ts_dt"].strftime("%Y/%m/%d %H:%M:%S")
-        except Exception:
-            d["ts_dt"] = None
-            d["ts"] = ts_iso
-        d["cipher_count"] = parse_cipher_count(fp)
-        cipher_hash, hash_tail = parse_hashes(fp)
-        d["cipher_hash"] = cipher_hash
-        d["hash_tail"] = hash_tail
-        d["ua_family"] = classify_ua(d["ua"])
-        events.append(d)
+        d = _event_from_bac_line(line)
+        if d is not None:
+            events.append(d)
     return events, blocklist_size, init_ts
 
 
+def _read_archive_events(now_utc):
+    """BAC_LOG events from pre-recreate snapshots in state/bac-archive/.
+
+    A rebuild deploy recreates the container, so `docker logs` only sees the
+    new instance; update.sh first dumps the old container's stream here. Only
+    files recent enough to overlap the report window are read — events outside
+    24h are dropped by split_24h regardless. Returns a (possibly empty) list."""
+    if not ARCHIVE_DIR.is_dir():
+        return []
+    cutoff = (now_utc - timedelta(hours=ARCHIVE_MAX_AGE_HOURS)).timestamp()
+    events = []
+    for path in sorted(ARCHIVE_DIR.glob("*.log")):
+        try:
+            if path.stat().st_mtime < cutoff:
+                continue
+            with path.open("r", errors="replace") as fh:
+                for line in fh:
+                    d = _event_from_bac_line(line)
+                    if d is not None:
+                        events.append(d)
+        except OSError:
+            continue
+    return events
+
+
 def fetch_events():
-    """Pull events from the stand's container. A missing/dead container
-    yields an empty report rather than an error. The 4th return value
-    (per_source) is kept None so the renderers' optional comparison block
-    stays inert — this stand has a single source."""
+    """Pull events from the stand's container, merged with any pre-recreate
+    archives so a rebuild deploy leaves no gap. A missing/dead container yields
+    an empty (archive-only) report rather than an error. The 4th return value
+    (per_source) is kept None so the renderers' optional comparison block stays
+    inert — this stand has a single source."""
     try:
         events, blocklist_size, init_ts = _fetch_one(CONTAINER)
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return [], 0, None, None
+        events, blocklist_size, init_ts = [], 0, None
+    # Fold in archived pre-recreate events, deduped against the live stream
+    # (sources are disjoint in time, but a dedup keeps repeated runs safe).
+    archived = _read_archive_events(datetime.now(timezone.utc))
+    if archived:
+        seen_keys = {_event_key(e) for e in events}
+        for e in archived:
+            k = _event_key(e)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                events.append(e)
     return events, blocklist_size, init_ts, None
 
 
