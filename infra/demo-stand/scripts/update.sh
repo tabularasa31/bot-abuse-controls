@@ -14,6 +14,7 @@ set -euo pipefail
 
 BRANCH="main"
 COMPOSE_FILE="infra/demo-stand/docker-compose.demo.yml"
+DOCKERFILE="infra/demo-stand/Dockerfile"
 NGINX_CONF="infra/demo-stand/nginx.demo.conf"
 SERVICE="nginx-demo"
 
@@ -70,7 +71,7 @@ recreate=0
 if [ -z "$last" ]; then
   recreate=1
 elif ! git diff --quiet "$last" "$head" -- \
-      "infra/demo-stand/Dockerfile" "$COMPOSE_FILE" "$NGINX_CONF"; then
+      "$DOCKERFILE" "$COMPOSE_FILE" "$NGINX_CONF"; then
   recreate=1
 fi
 
@@ -101,7 +102,13 @@ if [ "$recreate" = "1" ]; then
   # nginx.conf changed, thanks to layer caching). init_by_lua re-runs on the
   # fresh container; a bad config makes `up` exit non-zero, so the marker is not
   # advanced and the next tick retries.
-  docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate
+  #
+  # REVISION feeds the env fallback of /__version (it prefers the .revision file
+  # written below, so this only matters before that file exists — e.g. the very
+  # first deploy); passing it matches the README's manual recreate command.
+  # Naming $SERVICE keeps the recreate scoped to the edge if the compose file
+  # ever grows more services.
+  REVISION="${head:0:7}" docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate "$SERVICE"
 else
   # Validate inside the running container BEFORE reloading. A bad config must
   # not take the live stand down.
