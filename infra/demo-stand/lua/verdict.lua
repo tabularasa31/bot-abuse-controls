@@ -23,6 +23,7 @@ local ja4        = require "ja4_compute"
 local bac_log    = require "bac_log"
 local hygiene    = require "hygiene"
 local reputation = require "reputation"
+local rate_limit = require "rate_limit"
 
 bac_log.init()
 
@@ -67,5 +68,12 @@ if verdict == "block" then
     bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
     return ngx.exit(403)
 end
--- allow: fall through. Context keeps its defaults (stage=egress,
--- verdict=pass) — no Phase 1 rule fired on this stand yet.
+
+-- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_scan_urls). Runs last
+-- in the cascade. Observe-only like hygiene/reputation: records the would-be
+-- verdict via bac_log but never returns 429 / delays / short-circuits.
+-- last-writer-wins means a rate block overwrites the egress default here.
+rate_limit.run()
+
+-- Fall through. If no rate profile fired the context keeps its defaults
+-- (stage=egress, verdict=pass).
