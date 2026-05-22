@@ -74,7 +74,10 @@ if [ "$recreate" = "1" ]; then
   # leaves no archive. (Durable persistence is the telemetry-sink task, B9.)
   ARCHIVE_DIR="state/bac-archive"
   mkdir -p "$ARCHIVE_DIR"
-  archive="${ARCHIVE_DIR}/$(date +%Y%m%dT%H%M%S)-${head:0:7}.log"
+  # Name by the OUTGOING (currently running) sha — that's the version that
+  # produced these logs — not the incoming $head we're deploying.
+  outgoing="${last:0:7}"; [ -n "$outgoing" ] || outgoing="unknown"
+  archive="${ARCHIVE_DIR}/$(date +%Y%m%dT%H%M%S)-${outgoing}.log"
   if docker compose -f "$COMPOSE_FILE" logs --no-log-prefix "$SERVICE" \
        > "$archive" 2>/dev/null && [ -s "$archive" ]; then
     echo "$(date -Is) archived pre-recreate logs -> $archive"
