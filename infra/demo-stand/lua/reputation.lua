@@ -171,11 +171,9 @@ function _M.build(config)
     -- Stand-only X-Demo-IP override, off unless explicitly enabled.
     _M.demo_geo_header = (os.getenv("BAC_DEMO_GEO_HEADER") == "on")
 
-    -- Stage off when the global kill-switch or the per-stage reputation switch
-    -- is set (config-templates.md kill_switch; defaults.conf [kill_switch.*]).
-    local ks = defaults.kill_switch or {}
-    _M.enabled = not ((ks.global or {}).enabled == true
-                      or (ks.per_stage or {}).reputation == true)
+    -- Stage off via the shared kill-switch helper (config-templates.md
+    -- kill_switch; defaults.conf [kill_switch.*]).
+    _M.enabled = require("config").stage_enabled(defaults, "reputation")
 
     return _M, wl_n, bl_n
 end

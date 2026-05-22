@@ -91,7 +91,6 @@ end
 function _M.build(config)
     local defaults = config.defaults or {}
     local hygiene_cfg = defaults.hygiene or {}
-    local ks = defaults.kill_switch or {}
 
     _M.method_set = _M.method_lookup(hygiene_cfg.method_whitelist)
 
@@ -103,10 +102,8 @@ function _M.build(config)
         _M.active_re = _M.build_combined(config.ua_blacklist)
     end
 
-    -- Stage off when the global kill-switch or the per-stage hygiene switch
-    -- is set (config-templates.md kill_switch).
-    _M.enabled = not ((ks.global or {}).enabled == true
-                      or (ks.per_stage or {}).hygiene == true)
+    -- Stage off via the shared kill-switch helper (config-templates.md kill_switch).
+    _M.enabled = require("config").stage_enabled(defaults, "hygiene")
 
     return _M
 end

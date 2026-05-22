@@ -42,4 +42,14 @@ function _M.load()
     return _M
 end
 
+-- Shared kill-switch predicate for a cascade stage's build(). True unless the
+-- global kill-switch or this stage's per-stage switch is set (config-templates.md
+-- kill_switch; defaults.conf [kill_switch.*]). Centralised so every stage
+-- (hygiene/reputation/rate_limits/…) computes the toggle identically.
+function _M.stage_enabled(defaults, stage)
+    local ks = (defaults or {}).kill_switch or {}
+    return not ((ks.global or {}).enabled == true
+                or (ks.per_stage or {})[stage] == true)
+end
+
 return _M

@@ -156,11 +156,11 @@ function _M.build(config)
         end
     end
 
-    -- Stage off when the global kill-switch or the per-stage rate_limits switch
-    -- is set (config-templates.md kill_switch; defaults.conf [kill_switch.*]).
-    local ks = defaults.kill_switch or {}
-    _M.enabled = not ((ks.global or {}).enabled == true
-                      or (ks.per_stage or {}).rate_limits == true)
+    -- Stage off via the shared kill-switch helper (config-templates.md
+    -- kill_switch; defaults.conf [kill_switch.*]). Required explicitly rather
+    -- than read off the `config` arg so build() works with any config-shaped
+    -- table, not only the config module instance.
+    _M.enabled = require("config").stage_enabled(defaults, "rate_limits")
 
     return _M, #_M.profiles
 end
@@ -210,14 +210,26 @@ end
 -- counter. Exceeded when the counter passes the threshold. Fixed-window (not
 -- sliding) with the usual boundary doubling is acceptable for the observe-only
 -- stand.
+--
+-- Marker writes are CAPPED at the threshold: once the counter is over the limit
+-- the verdict is already decided, so we stop recording new URL markers. Without
+-- this a scraper hitting tens of thousands of distinct URLs would flood the
+-- shared `rate_limit` dict and, via LRU, evict the GCRA TAT cells of the OTHER
+-- profiles — corrupting their accounting too. The cap bounds markers to ~limit
+-- per (ip, bucket) (a few hundred), so scan traffic can no longer starve the
+-- rest of the stage.
 local function scan_window_exceeded(dict, ip, uri, win)
     if not win then return false end
-    local bucket = math.floor(ngx.now() / win.seconds)
-    local pfx    = "su:" .. win.seconds .. ":" .. bucket .. ":" .. ip
-    local ttl    = win.seconds * 2
-    local added  = dict:add(pfx .. ":" .. bound(uri or ""), true, ttl)
-    if not added then return false end
+    local bucket  = math.floor(ngx.now() / win.seconds)
     local cnt_key = "sc:" .. win.seconds .. ":" .. bucket .. ":" .. ip
+    local ttl     = win.seconds * 2
+
+    local cnt = dict:get(cnt_key)
+    if cnt and cnt > win.limit then return true end   -- decided; stop adding markers
+
+    local marker = "su:" .. win.seconds .. ":" .. bucket .. ":" .. ip
+                   .. ":" .. bound(uri or "")
+    if not dict:add(marker, true, ttl) then return false end
     local n = dict:incr(cnt_key, 1, 0, ttl)
     return (n or 0) > win.limit
 end
@@ -252,8 +264,9 @@ function _M.run()
             local f60 = scan_window_exceeded(dict, ip, uri, p.w60)
             fire = f10 or f60
         else
-            -- rate_api only counts on API paths; skip it elsewhere.
-            if not (p.api_only and not is_api) then
+            -- rate_api only counts on API paths; non-api-only profiles always apply.
+            local applies = (not p.api_only) or is_api
+            if applies then
                 local material = (p.key == "ip_ua") and (ip .. "\0" .. ua) or ip
                 local base = p.rule .. ":" .. bound(material)
                 local f10 = window_exceeded(dict, base .. ":10", p.w10)
