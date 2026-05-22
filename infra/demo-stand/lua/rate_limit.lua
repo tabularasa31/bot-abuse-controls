@@ -1,14 +1,24 @@
--- L4 rate_limits stage (rules-reference L4, phase1-spec "rate_limits"; RFC §A3).
+-- L4 rate_limits stage (rules-reference L4, phase1-spec "rate_limits",
+-- phase2-spec "Влияние на этап rate_limits"; RFC §A3).
 --
--- Phase 1 system profiles, in order (first match wins within the stage):
+-- System profiles, in rules-reference order (first match wins within the stage):
 --   1. rate_ip       — per source IP            (10s>100  || 60s>600)
 --   2. rate_ip_ua    — per source IP + UA pair  (10s>100  || 60s>600)
 --   3. rate_api      — per IP, API paths only   (10s>50   || 60s>300)
---   4. rate_scan_urls— per IP, UNIQUE URLs      (10s>50   || 60s>200)
--- (rate_tls_fp is Phase 2 and is intentionally NOT built here.)
+--   4. rate_tls_fp   — per TLS fingerprint      (10s>50   || 60s>300)  [Phase 2]
+--   5. rate_scan_urls— per IP, UNIQUE URLs      (10s>50   || 60s>200)
 -- Each profile has two windows (10s and 60s); the profile fires if EITHER is
 -- exceeded. Thresholds come from defaults.conf [blocking.rate_*] via the config
 -- module (window_10s / window_60s), so admins retune without code changes.
+--
+-- rate_tls_fp (Phase 2, phase2-spec §"Влияние на этап rate_limits") keys the
+-- GCRA cell on the TLS fingerprint instead of the IP, closing the IP-rotation /
+-- single-TLS-stack class. It is GRACEFUL-SKIP on an fp-cache miss: if the fp was
+-- not computed for this request (no TLS handshake captured ⇒ cipher_count 0, or
+-- an absent/malformed fp), the profile is skipped entirely (no key, no cell, no
+-- verdict) and only the per-IP / per-IP+UA limits apply — exactly as the spec
+-- requires ("Если tls_fp_cache промахнулся ... правило rate_tls_fp не
+-- срабатывает"). The fp is computed once in verdict.lua and passed into run().
 --
 -- Algorithm — GCRA (phase1-spec §"Семантика sliding window"): one float TAT
 -- cell per (profile, window, key) in the `rate_limit` shared_dict, updated with
@@ -61,6 +71,18 @@ function _M.gcra(now, tat, interval, burst)
     end
     local base = (now > tat) and now or tat   -- max(now, tat)
     return true, base + interval, 0
+end
+
+-- pure: is the fp usable as a rate_tls_fp key? True only when fp is a non-empty
+-- string carrying a real handshake — cipher_count > 0. The fp prefix is always
+-- "L<ver:2d><sni:d|i><cipher_cnt:2d>…" (ja4_compute.lua), and a request with no
+-- TLS handshake degenerates to cipher_count 0 ("L00i00…"). A 0 count (or a
+-- prefix that does not parse) means "fp not computed" → graceful skip. Same
+-- parse as tls_fp.cipher_count; inlined to keep this module free of a tls_fp dep.
+function _M.fp_usable(fp)
+    if type(fp) ~= "string" or fp == "" then return false end
+    local cc = fp:match("^L%d%d[di](%d%d)")
+    return cc ~= nil and tonumber(cc) > 0
 end
 
 -- pure: glob match for an api_path pattern. "/api/*" matches any URI under the
@@ -127,14 +149,17 @@ function _M.build(config)
     if type(api) == "string" then api = { api } end
     _M.api = api or {}
 
-    -- Profile order is the rules-reference order minus the Phase 2 rate_tls_fp.
-    -- rate_scan_urls counts UNIQUE URLs, not request rate (kind="scan"); the
-    -- others are plain GCRA request-rate cells (kind="rate"). rate_api is a
-    -- rate cell that only applies on API paths (api_only=true).
+    -- Profile order is the rules-reference order: rate_ip → rate_ip_ua →
+    -- rate_api → rate_tls_fp → rate_scan_urls. rate_scan_urls counts UNIQUE URLs,
+    -- not request rate (kind="scan"); the others are plain GCRA request-rate
+    -- cells (kind="rate"). rate_api is a rate cell that only applies on API paths
+    -- (api_only=true). rate_tls_fp (Phase 2) keys on the TLS fp and is skipped
+    -- when the fp is not usable (graceful skip — see run()).
     local specs = {
         { rule = "rate_ip",        kind = "rate", key = "ip" },
         { rule = "rate_ip_ua",     kind = "rate", key = "ip_ua" },
-        { rule = "rate_api",       kind = "rate", key = "ip",  api_only = true },
+        { rule = "rate_api",       kind = "rate", key = "ip",     api_only = true },
+        { rule = "rate_tls_fp",    kind = "rate", key = "tls_fp" },
         { rule = "rate_scan_urls", kind = "scan", key = "ip" },
     }
 
@@ -237,8 +262,10 @@ end
 -- Called per request from verdict.lua, LAST in the cascade. Observe-only:
 -- records the would-be verdict via bac_log on the first profile that trips,
 -- then returns (first-match-wins). Never blocks, never sleeps, never stops the
--- cascade; the boolean return is informational only.
-function _M.run()
+-- cascade; the boolean return is informational only. `fp` is the TLS
+-- fingerprint computed once in verdict.lua, used to key rate_tls_fp; when it is
+-- not usable that profile is skipped (graceful skip).
+function _M.run(fp)
     if not _M.enabled then return false end
     if #_M.profiles == 0 then return false end
 
@@ -250,6 +277,7 @@ function _M.run()
     local ua  = ngx.var.http_user_agent or ""
     local uri = ngx.var.uri or ""
     local is_api = _M.is_api_path(uri, _M.api)
+    local fp_ok  = _M.fp_usable(fp)
 
     local bac_log = package.loaded["bac_log"] or require "bac_log"
 
@@ -264,10 +292,21 @@ function _M.run()
             local f60 = scan_window_exceeded(dict, ip, uri, p.w60)
             fire = f10 or f60
         else
-            -- rate_api only counts on API paths; non-api-only profiles always apply.
-            local applies = (not p.api_only) or is_api
+            -- Per-profile applicability:
+            --   * rate_api  — only on API paths (api_only).
+            --   * rate_tls_fp — only when the fp was computed (graceful skip on
+            --     an fp-cache miss; phase2-spec). Its key material is the fp.
+            --   * everything else always applies, keyed on ip / ip+ua.
+            local applies, material
+            if p.key == "tls_fp" then
+                applies, material = fp_ok, fp
+            elseif p.api_only then
+                applies, material = is_api, ip
+            else
+                applies = true
+                material = (p.key == "ip_ua") and (ip .. "\0" .. ua) or ip
+            end
             if applies then
-                local material = (p.key == "ip_ua") and (ip .. "\0" .. ua) or ip
                 local base = p.rule .. ":" .. bound(material)
                 local f10 = window_exceeded(dict, base .. ":10", p.w10)
                 local f60 = window_exceeded(dict, base .. ":60", p.w60)

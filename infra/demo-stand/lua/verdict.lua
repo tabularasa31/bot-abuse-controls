@@ -89,11 +89,13 @@ end
 -- cross-layer tls_fp:dc_browser tag can see reputation:asn_dc.
 tls_fp.run(fp)
 
--- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_scan_urls). Runs last
--- in the cascade. Observe-only like hygiene/reputation: records the would-be
--- verdict via bac_log but never returns 429 / delays / short-circuits.
--- last-writer-wins means a rate block overwrites the egress default here.
-rate_limit.run()
+-- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_tls_fp /
+-- rate_scan_urls). Runs last in the cascade. Observe-only like hygiene/
+-- reputation: records the would-be verdict via bac_log but never returns 429 /
+-- delays / short-circuits. last-writer-wins means a rate block overwrites the
+-- egress default here. `fp` is passed so rate_tls_fp can key on it (and skip
+-- gracefully when the fp was not computed for this request).
+rate_limit.run(fp)
 
 -- Fall through. If no rate profile fired the context keeps its defaults
 -- (stage=egress, verdict=pass).
