@@ -1,0 +1,37 @@
+# kill_switch.local.conf — operator override for the demo-stand kill-switch (A12)
+#
+# WHAT THIS IS
+#   The stand's emergency lever. Protection must never take the site down: if
+#   the cascade has a bug or a perf problem, switch it off here. Same INI syntax
+#   and same [kill_switch.*] structure as defaults.conf — values set here OVERRIDE
+#   that git-tracked baseline.
+#
+# HOW TO USE (no Puppet, no container recreate — Channel A on the demo = file/mount)
+#   1. cp kill_switch.local.conf.example kill_switch.local.conf
+#   2. flip the toggle(s) you need below
+#   3. docker compose -f infra/demo-stand/docker-compose.demo.yml \
+#          exec nginx-demo openresty -s reload
+#      (the config dir is a directory bind-mount, so the reload re-reads this
+#       file; init_by_lua re-runs and applies the new toggles)
+#   To revert: set everything back to false (or delete the file) and reload.
+#
+#   The live kill_switch.local.conf is gitignored — operational state, not code.
+#   Leave this .example committed as the template.
+
+# Global kill-switch — whole cascade goes no-op: traffic proxies straight to the
+# origin, NO BAC_LOG records are written. The catastrophe lever (Lua crashing
+# workers, mass false positives, planned maintenance window).
+[kill_switch.global]
+enabled = false
+
+# Per-stage kill — disable a single stage; the rest of the cascade keeps running.
+# Use when one layer regresses (a bug or perf hit in tls_fp, say) while you hotfix.
+# tls_fp killed => fp is not computed, no tls_fp:* tags / soft flags, the
+# blocklist is not consulted, and rate_tls_fp skips gracefully (per-IP rate
+# limits still apply).
+[kill_switch.per_stage]
+hygiene = false
+reputation = false
+tls_fp = false
+rate_limits = false
+verification = false

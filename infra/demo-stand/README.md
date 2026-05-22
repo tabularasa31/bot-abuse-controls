@@ -119,6 +119,58 @@ watch the run log at `state/update.log`.
 `main`. If the stand was deployed by copying files (no `.git`), convert it
 first — see below.
 
+## Emergency kill-switch
+
+Protection must never take the site down. If the cascade misbehaves — a bug, a
+perf regression, a flood of false positives — switch it off. Two levers
+(vision.md §"Аварийные рычаги", A12):
+
+- **Global** — the whole cascade goes no-op: traffic proxies straight to the
+  origin and **no `BAC_LOG` record is written**. The catastrophe lever (Lua
+  crashing workers, mass false positives, a planned maintenance window).
+- **Per-stage** — disables one stage; the rest of the cascade keeps running.
+  For `tls_fp`: fp is not computed, the blocklist is not consulted (no 403), and
+  no `tls_fp:*` tags / soft flags / `tls_*` log fields are written —
+  `rate_tls_fp` skips gracefully while the per-IP rate limits still apply. Use
+  it when one layer regresses while you ship a hotfix.
+
+`defaults.conf [kill_switch.*]` is the git-tracked baseline (everything `false`).
+On the stand you flip the levers **without editing that file and without
+recreating the container** — Channel A on the demo is file/mount, no Puppet. Drop
+a gitignored override into the mounted config dir and reload:
+
+```sh
+cd infra/demo-stand/config
+cp kill_switch.local.conf.example kill_switch.local.conf
+# edit kill_switch.local.conf — set the toggle(s) you need to true
+```
+
+```ini
+# whole cascade off:
+[kill_switch.global]
+enabled = true
+
+# or just one stage (cascade keeps running):
+[kill_switch.per_stage]
+tls_fp = true
+```
+
+```sh
+# apply — re-reads the file via init_by_lua, no container recreate:
+docker compose -f infra/demo-stand/docker-compose.demo.yml \
+    exec nginx-demo openresty -s reload
+```
+
+The config dir is a **directory** bind-mount (unlike `nginx.demo.conf`), so a
+plain `openresty -s reload` picks the file up — no recreate needed. **Revert** by
+setting the toggles back to `false` (or deleting the file) and reloading. Never
+commit `kill_switch.local.conf` — it is operational state, gitignored; only the
+`.example` template is tracked.
+
+**Verify it took:** with the global kill on, requests through the site produce
+no `BAC_LOG` lines (`docker logs --since 1m nginx-demo | grep BAC_LOG`); with the
+`tls_fp` kill on, `BAC_LOG` lines drop their `tls_fp` field and `tls_fp:*` tags.
+
 ## Migrating a snapshot deploy to a git checkout
 
 If `~/abuse-controls` on the VM is a file copy (no `.git`), turn it into a
@@ -218,6 +270,10 @@ infra/demo-stand/
 ├── nginx.demo.conf                 nginx config with all the scenario endpoints
 ├── docker-compose.demo.yml         stock openresty/openresty:alpine + bind mounts
 ├── certs/                          TLS material (gitignored)
+├── config/                         cascade config files, read at init_by_lua (config.lua)
+│   ├── defaults.conf               thresholds, rule toggles, kill_switch baseline (git-tracked)
+│   ├── kill_switch.local.conf.example   operator kill-switch template (copy → .local.conf, gitignored)
+│   └── …                           IP/UA/ASN lists + tls_fp catalogs
 ├── lua/
 │   ├── verdict.lua                 verdict pipeline (production variant; symlink-equivalent of infra/nginx-lua-poc/lua/verdict.lua)
 │   ├── ja4_compute.lua             same compute as production

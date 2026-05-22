@@ -39,6 +39,11 @@ infra/demo-stand/lua/.revision
 # Analyzer report archive (per-day markdown)
 /reports/
 
+# Kill-switch operator override (A12) — operational state, not code. The
+# committed kill_switch.local.conf.example is the template; the live file is
+# dropped on the VM and flipped per incident, never committed.
+infra/demo-stand/config/kill_switch.local.conf
+
 # Python
 __pycache__/
 *.pyc
