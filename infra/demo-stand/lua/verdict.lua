@@ -10,6 +10,8 @@
 --      ip_blocklist via lua-resty-ipmatcher) — observe-only.
 --   4. Run the existing TLS-fingerprint block decision (compute_fp +
 --      cache + blocklist), identical to production.
+--   5. Run the tls_fp soft rules + tls_fp:* tags (tls_fp.lua: A9) — the
+--      observe-only, non-blocking half of the tls_fp stage.
 --
 -- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
 -- through the same bac_log contract as hygiene/reputation. The remaining
@@ -23,6 +25,7 @@ local ja4        = require "ja4_compute"
 local bac_log    = require "bac_log"
 local hygiene    = require "hygiene"
 local reputation = require "reputation"
+local tls_fp     = require "tls_fp"
 local rate_limit = require "rate_limit"
 local fp_state   = require "fp_blocklist_state"
 
@@ -78,6 +81,13 @@ if verdict == "block" then
     bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
     return ngx.exit(403)
 end
+
+-- tls_fp soft rules + tls_fp:* tags (A9). Observe-only: records the would-be
+-- challenge verdict and the soft flags / informational tags via bac_log but
+-- never blocks or short-circuits. Runs after the blocklist check (a
+-- blocklisted fp has already exited above) and after reputation, so the
+-- cross-layer tls_fp:dc_browser tag can see reputation:asn_dc.
+tls_fp.run(fp)
 
 -- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_scan_urls). Runs last
 -- in the cascade. Observe-only like hygiene/reputation: records the would-be

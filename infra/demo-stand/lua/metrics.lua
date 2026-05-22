@@ -71,16 +71,33 @@ antibot_fp_unique %d
     uptime,
     get("fp_unique")))
 
--- Per-rule counters live in the metrics dict under "rule:<stage>:<rule>"
--- keys (written by log_event.lua). Emit them as a labelled counter. Cheap
--- here because the rule code-space is tiny.
-local lines = { "# HELP antibot_rule_total Times each rule fired, by stage.",
-                "# TYPE antibot_rule_total counter" }
+-- Per-rule / per-flag / per-tag counters live in the metrics dict under
+-- "rule:<stage>:<rule>", "flag:<flag>" and "tag:<tag>" keys (written by
+-- log_event.lua). Emit them as labelled counters. Cheap here because the
+-- rule/flag/tag code-spaces are tiny. One get_keys pass classifies all three.
+local rule_lines = { "# HELP antibot_rule_total Times each rule fired, by stage.",
+                     "# TYPE antibot_rule_total counter" }
+local flag_lines = { "# HELP antibot_flag_total Times each soft challenge flag accumulated.",
+                     "# TYPE antibot_flag_total counter" }
+local tag_lines  = { "# HELP antibot_tag_total Times each informational tag was attached.",
+                     "# TYPE antibot_tag_total counter" }
 for _, key in ipairs(m:get_keys(0)) do
     local stage, rule = key:match("^rule:([^:]+):(.+)$")
     if stage then
-        lines[#lines + 1] = string.format(
+        rule_lines[#rule_lines + 1] = string.format(
             'antibot_rule_total{stage="%s",rule="%s"} %d', stage, rule, get(key))
     end
+    local flag = key:match("^flag:(.+)$")
+    if flag then
+        flag_lines[#flag_lines + 1] = string.format(
+            'antibot_flag_total{flag="%s"} %d', flag, get(key))
+    end
+    local tag = key:match("^tag:(.+)$")
+    if tag then
+        tag_lines[#tag_lines + 1] = string.format(
+            'antibot_tag_total{tag="%s"} %d', tag, get(key))
+    end
 end
-ngx.say(table.concat(lines, "\n"))
+ngx.say(table.concat(rule_lines, "\n"))
+ngx.say(table.concat(flag_lines, "\n"))
+ngx.say(table.concat(tag_lines, "\n"))

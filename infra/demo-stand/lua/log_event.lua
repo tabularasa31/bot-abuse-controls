@@ -29,6 +29,19 @@ if ctx.rule then
     m:incr("rule:" .. ctx.stage .. ":" .. ctx.rule, 1, 0)
 end
 
+-- Soft-flag and tag counters (A9). Flags are soft challenge signals
+-- (tls_fp_impersonator / tls_fp_suspicious_ciphers) that may be overwritten as
+-- the terminal `rule`, so they need their own counter to stay observable;
+-- tags (tls_fp:*, reputation:*, hygiene:*) likewise never become `rule`. Key
+-- shapes "flag:<flag>" / "tag:<tag>" — metrics.lua parses them back out. Both
+-- code-spaces are tiny, so iterating the (usually empty) arrays is cheap.
+for _, flag in ipairs(ctx.flags) do
+    m:incr("flag:" .. flag, 1, 0)
+end
+for _, tag in ipairs(ctx.tags) do
+    m:incr("tag:" .. tag, 1, 0)
+end
+
 -- fp cardinality: dict:add succeeds only the first time we see an fp, so it
 -- doubles as a first-seen signal for the unique-fp gauge.
 local fp = ctx.tls_fp
