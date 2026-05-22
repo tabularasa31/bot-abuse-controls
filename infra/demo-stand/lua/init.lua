@@ -23,6 +23,12 @@ require("hygiene").build(config)
 -- startup log below.
 local reputation, rep_wl, rep_bl = require("reputation").build(config)
 
+-- Compile the L4 rate_limits stage (GCRA profiles from defaults.conf
+-- [blocking.rate_*] thresholds) — also in the master so workers inherit the
+-- profile list on fork (see rate_limit.lua; the shared dict holds only per-key
+-- TAT state). Returns the active profile count for the startup log.
+local _, rate_n = require("rate_limit").build(config)
+
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
 -- libmaxminddb) are absent the stand still starts and geo is simply
@@ -65,6 +71,8 @@ for _ in pairs(reputation.asn_dc_set) do asn_dc_n = asn_dc_n + 1 end
 ngx.log(ngx.NOTICE, "[demo] reputation matchers: ip_whitelist=", rep_wl,
     " active, ip_blocklist=", rep_bl, " active, asn_dc=", asn_dc_n,
     " (geo_blocklist dormant — per-resource policy source is Phase 3)")
+ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
+    " active (observe-only — verdict logged, no 429/delay in Phase 1)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
