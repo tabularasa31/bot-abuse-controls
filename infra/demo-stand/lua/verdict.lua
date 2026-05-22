@@ -28,6 +28,17 @@ local reputation = require "reputation"
 local tls_fp     = require "tls_fp"
 local rate_limit = require "rate_limit"
 local fp_state   = require "fp_blocklist_state"
+local config     = require "config"
+
+-- Global kill-switch (A12). When set, the whole cascade is a no-op: we return
+-- before bac_log.init so the request proxies straight to the origin and emits
+-- NO BAC_LOG record (log_event.lua skips when ngx.ctx.bac is unset). This is
+-- the catastrophe lever from vision.md §"Аварийные рычаги" — protection must
+-- never take the site down. Toggled via the gitignored kill_switch.local.conf
+-- (config.lua), applied on `nginx -s reload`, no container recreate.
+if config.global_kill(config.defaults) then
+    return
+end
 
 bac_log.init()
 
@@ -50,44 +61,55 @@ hygiene.run()
 -- Last-writer-wins: a later tls_fp block overwrites the reputation verdict.
 reputation.run()
 
-local fp = ja4.compute()
-bac_log.set_tls_fp(fp)
+-- The tls_fp stage as a whole (fp compute + blocklist block-path + soft rules +
+-- tags) is gated by its per-stage kill-switch (A12). When killed, fp is not
+-- computed, the blocklist is not consulted (no 403), no tls_fp:* tags / soft
+-- flags / tls_* log fields are written — but the rest of the cascade keeps
+-- running. fp stays nil, so rate_limit.run below sees an unusable fp and skips
+-- the rate_tls_fp profile gracefully (A10) while the per-IP / per-IP+UA
+-- profiles still apply.
+local fp
+if config.stage_enabled(config.defaults, "tls_fp") then
+    fp = ja4.compute()
+    bac_log.set_tls_fp(fp)
 
--- §A1 read: pin the generation the catalog pull (§В1) last published and key
--- BOTH the verdict cache and the blocklist by `fp:gen`. Sharing the generation
--- key makes a catalog swap atomic for the cache too: when gen bumps, old-gen
--- cache entries become unreachable and age out on their TTL, so the flip takes
--- effect immediately instead of being masked by a stale bare-fp entry for up
--- to 60s. No pull on the stand yet, so gen stays at the 0 init.lua seeds.
-local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
-local key = fp_state.key(fp, gen)
+    -- §A1 read: pin the generation the catalog pull (§В1) last published and
+    -- key BOTH the verdict cache and the blocklist by `fp:gen`. Sharing the
+    -- generation key makes a catalog swap atomic for the cache too: when gen
+    -- bumps, old-gen cache entries become unreachable and age out on their TTL,
+    -- so the flip takes effect immediately instead of being masked by a stale
+    -- bare-fp entry for up to 60s. No pull on the stand yet, so gen stays at
+    -- the 0 init.lua seeds.
+    local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
+    local key = fp_state.key(fp, gen)
 
-local cache  = ngx.shared.verdict_cache
-local cached = cache:get(key)
-local cache_hit = (cached ~= nil)
+    local cache  = ngx.shared.verdict_cache
+    local cached = cache:get(key)
+    local cache_hit = (cached ~= nil)
 
-local verdict
-if cached == "block" or cached == "allow" then
-    verdict = cached
-else
-    verdict = ngx.shared.fp_blocklist:get(key) or "allow"
-    cache:set(key, verdict, 60)
+    local verdict
+    if cached == "block" or cached == "allow" then
+        verdict = cached
+    else
+        verdict = ngx.shared.fp_blocklist:get(key) or "allow"
+        cache:set(key, verdict, 60)
+    end
+
+    -- Cache outcome is metrics-only; stash it for log_event.lua's counters.
+    ngx.ctx.bac_cache_hit = cache_hit
+
+    if verdict == "block" then
+        bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
+        return ngx.exit(403)
+    end
+
+    -- tls_fp soft rules + tls_fp:* tags (A9). Observe-only: records the would-be
+    -- challenge verdict and the soft flags / informational tags via bac_log but
+    -- never blocks or short-circuits. Runs after the blocklist check (a
+    -- blocklisted fp has already exited above) and after reputation, so the
+    -- cross-layer tls_fp:dc_browser tag can see reputation:asn_dc.
+    tls_fp.run(fp)
 end
-
--- Cache outcome is metrics-only; stash it for log_event.lua's counters.
-ngx.ctx.bac_cache_hit = cache_hit
-
-if verdict == "block" then
-    bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
-    return ngx.exit(403)
-end
-
--- tls_fp soft rules + tls_fp:* tags (A9). Observe-only: records the would-be
--- challenge verdict and the soft flags / informational tags via bac_log but
--- never blocks or short-circuits. Runs after the blocklist check (a
--- blocklisted fp has already exited above) and after reputation, so the
--- cross-layer tls_fp:dc_browser tag can see reputation:asn_dc.
-tls_fp.run(fp)
 
 -- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_tls_fp /
 -- rate_scan_urls). Runs last in the cascade. Observe-only like hygiene/

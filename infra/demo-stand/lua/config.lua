@@ -30,8 +30,40 @@ local function load_or_die(parse, name)
     return result
 end
 
+-- Operator override file for the kill-switch toggles (A12). On the stand
+-- Channel A = file/mount (no Puppet), so an operator flips the global /
+-- per-stage switches by dropping this gitignored file in the config dir and
+-- running `nginx -s reload` — without editing the git-tracked defaults.conf
+-- and without recreating the container. Absent/unreadable => the defaults.conf
+-- [kill_switch.*] baseline stands (this file is optional, unlike the eight
+-- required configs). Only the [kill_switch.*] subtree is read; the file shares
+-- defaults.conf's INI syntax so the same true/false coercion applies.
+local KILL_SWITCH_LOCAL = "kill_switch.local.conf"
+
+local function overlay_kill_switch(defaults)
+    local parsed = loader.parse_ini(path(KILL_SWITCH_LOCAL))
+    if not parsed then return end
+    local ks = parsed.kill_switch
+    if type(ks) ~= "table" then return end
+
+    defaults.kill_switch = defaults.kill_switch or {}
+    local dst = defaults.kill_switch
+
+    if type(ks.global) == "table" and ks.global.enabled ~= nil then
+        dst.global = dst.global or {}
+        dst.global.enabled = ks.global.enabled
+    end
+    if type(ks.per_stage) == "table" then
+        dst.per_stage = dst.per_stage or {}
+        for stage, v in pairs(ks.per_stage) do
+            dst.per_stage[stage] = v
+        end
+    end
+end
+
 function _M.load()
     _M.defaults                = load_or_die(loader.parse_ini,  "defaults.conf")
+    overlay_kill_switch(_M.defaults)
     _M.whitelist_ip            = load_or_die(loader.parse_list, "whitelist_ip.conf")
     _M.blocklist_ip            = load_or_die(loader.parse_list, "blocklist_ip.conf")
     _M.ua_blacklist            = load_or_die(loader.parse_list, "ua_blacklist.conf")
@@ -50,6 +82,18 @@ function _M.stage_enabled(defaults, stage)
     local ks = (defaults or {}).kill_switch or {}
     return not ((ks.global or {}).enabled == true
                 or (ks.per_stage or {})[stage] == true)
+end
+
+-- True when the global kill-switch is set. verdict.lua checks this before the
+-- cascade (and before bac_log.init) so the whole cascade goes no-op: traffic
+-- passes straight to the origin and NO BAC_LOG record is written (vision.md
+-- §"Аварийные рычаги": "Lua-модуль делает no-op ... логов антибота нет").
+-- Distinct from stage_enabled, which folds the global switch into a per-stage
+-- skip — that path still emits a (cascade-bypassing) log; the global gate must
+-- suppress the log entirely.
+function _M.global_kill(defaults)
+    local ks = (defaults or {}).kill_switch or {}
+    return (ks.global or {}).enabled == true
 end
 
 return _M
