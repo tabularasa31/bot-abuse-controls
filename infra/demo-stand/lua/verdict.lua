@@ -24,6 +24,7 @@ local bac_log    = require "bac_log"
 local hygiene    = require "hygiene"
 local reputation = require "reputation"
 local rate_limit = require "rate_limit"
+local fp_state   = require "fp_blocklist_state"
 
 bac_log.init()
 
@@ -49,16 +50,25 @@ reputation.run()
 local fp = ja4.compute()
 bac_log.set_tls_fp(fp)
 
+-- §A1 read: pin the generation the catalog pull (§В1) last published and key
+-- BOTH the verdict cache and the blocklist by `fp:gen`. Sharing the generation
+-- key makes a catalog swap atomic for the cache too: when gen bumps, old-gen
+-- cache entries become unreachable and age out on their TTL, so the flip takes
+-- effect immediately instead of being masked by a stale bare-fp entry for up
+-- to 60s. No pull on the stand yet, so gen stays at the 0 init.lua seeds.
+local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
+local key = fp_state.key(fp, gen)
+
 local cache  = ngx.shared.verdict_cache
-local cached = cache:get(fp)
+local cached = cache:get(key)
 local cache_hit = (cached ~= nil)
 
 local verdict
 if cached == "block" or cached == "allow" then
     verdict = cached
 else
-    verdict = ngx.shared.fp_blocklist:get(fp) or "allow"
-    cache:set(fp, verdict, 60)
+    verdict = ngx.shared.fp_blocklist:get(key) or "allow"
+    cache:set(key, verdict, 60)
 end
 
 -- Cache outcome is metrics-only; stash it for log_event.lua's counters.

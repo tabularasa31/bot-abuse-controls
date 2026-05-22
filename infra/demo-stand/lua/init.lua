@@ -39,11 +39,17 @@ require("geoip").init()
 -- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging (staging matches-but-doesn't-block;
 -- the staging path lands with its own task). An empty file => SHADOW mode.
+--
+-- Keys are written under generation 0 (`fp .. ":" .. 0`, §В1 format) and
+-- fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
+-- The static seed IS generation 0; when the Channel C catalog pull lands
+-- (task 86exmk08u) it bumps to gen 1+ and atomically swaps the set.
+local fp_state = require "fp_blocklist_state"
 local fp_dict = ngx.shared.fp_blocklist
 local n = 0
 for _, entry in ipairs(config.tls_fp_blocklist) do
     if entry.attrs.status ~= "staging" then
-        local ok, err = fp_dict:set(entry.value, "block")
+        local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
         if ok then
             n = n + 1
         else
@@ -51,6 +57,9 @@ for _, entry in ipairs(config.tls_fp_blocklist) do
         end
     end
 end
+-- Publish the generation last (after the keys exist), matching §В1's
+-- write-then-flip order so a reader never resolves to a gen with no keys.
+ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").

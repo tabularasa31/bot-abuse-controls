@@ -3,7 +3,8 @@
 -- recent requests, and the blocklist contents. No mutation surface. Lets a
 -- reviewer eyeball the pipeline without learning Prometheus query syntax.
 
-local recent  = require "recent"
+local recent   = require "recent"
+local fp_state = require "fp_blocklist_state"
 local m        = ngx.shared.metrics
 local fp_dict  = ngx.shared.fp_blocklist
 
@@ -23,8 +24,20 @@ local hit_ratio = (hits + misses) > 0
 local block_pct = requests > 0
     and string.format("%.2f%%", 100 * blocks / requests) or "0%"
 
-local blocklist_keys = fp_dict:get_keys(50)
-local blocklist_n    = #blocklist_keys
+-- Blocklist keys are `fp .. ":" .. gen`; keep only the current generation,
+-- holding the bare fp for display and its verdict (looked up by the full key,
+-- not the stripped one). get_keys(0) returns every key — fine for the stand's
+-- small blocklist — so a generation swap in flight can't truncate the current
+-- set to an arbitrary 50.
+local cur_gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
+local blocklist = {}
+for _, key in ipairs(fp_dict:get_keys(0)) do
+    local fp = fp_state.match(key, cur_gen)
+    if fp then
+        blocklist[#blocklist + 1] = { fp = fp, verdict = fp_dict:get(key) or "?" }
+    end
+end
+local blocklist_n    = #blocklist
 local mode    = blocklist_n > 0 and "ACTIVE" or "SHADOW"
 local edge_id = os.getenv("EDGE_ID") or "stand-bac"
 
@@ -135,9 +148,10 @@ if blocklist_n == 0 then
     add('<p class="empty">Empty — shadow mode. Seed fps to enable blocking.</p>')
 else
     add("<table><tr><th>fingerprint</th><th>verdict</th></tr>")
-    for _, key in ipairs(blocklist_keys) do
-        add("<tr><td><code>" .. esc(key) .. "</code></td><td>"
-            .. esc(fp_dict:get(key) or "?") .. "</td></tr>")
+    for i = 1, math.min(blocklist_n, 50) do
+        local e = blocklist[i]
+        add("<tr><td><code>" .. esc(e.fp) .. "</code></td><td>"
+            .. esc(e.verdict) .. "</td></tr>")
     end
     add("</table>")
 end
