@@ -6,13 +6,13 @@
 -- triggering rule wins (last writer), which is the "финальное
 -- сработавшее правило" the schema asks for.
 --
--- Forward-compatibility: the field set and enums are stable. `tls_fp` is
--- emitted (the stand's daily analyzer keys on it). The `flags` array
--- (soft-rule challenge flags, vision.md v0.5 Step 7) ships as a stable []
--- until soft rules land (A9). The remaining Phase 2 TLS columns
--- (tls_cipher_count, tls_alpn, tls_sni_present) and the Phase 2/3 optional
--- fields (rule_source, client_rule_name) still land with their own tasks,
--- without renaming or reordering these keys.
+-- Forward-compatibility: the field set and enums are stable. `tls_fp` and
+-- its three sub-columns (tls_cipher_count, tls_alpn, tls_sni_present,
+-- parsed from the fp prefix in set_tls_fp) are emitted; the stand's daily
+-- analyzer keys on them. The `flags` array (soft-rule challenge flags,
+-- vision.md v0.5 Step 7) ships as a stable [] until soft rules land (A9).
+-- The Phase 2/3 optional fields (rule_source, client_rule_name) still land
+-- with their own tasks, without renaming or reordering these keys.
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt + null sentinels
@@ -79,6 +79,9 @@ function _M.init()
         asn           = nil,                     -- filled by reputation stage (A6)
         geo_country   = nil,                     -- filled by reputation stage (A6)
         tls_fp        = nil,                     -- set by the tls_fp stage (set_tls_fp)
+        tls_cipher_count = nil,                  -- parsed from the fp prefix (set_tls_fp)
+        tls_alpn         = nil,                  -- parsed from the fp prefix (set_tls_fp)
+        tls_sni_present  = nil,                  -- parsed from the fp prefix (set_tls_fp)
     }
     ngx.ctx.bac = ctx
     return ctx
@@ -140,15 +143,31 @@ function _M.set_source(asn, geo_country)
     ctx.geo_country = geo_country
 end
 
--- Record the computed TLS fingerprint (tls_fp stage). The remaining Phase 2
--- TLS columns (tls_cipher_count, tls_alpn, tls_sni_present) still land with
--- their own task; tls_fp is emitted here because the stand's daily analyzer
--- keys everything on it (scripts/analyze.py) and derives cipher_count from
--- the fp token itself.
+-- Record the computed TLS fingerprint (tls_fp stage) and the three TLS
+-- sub-columns derived from it. We parse them straight out of the fp
+-- prefix rather than re-reading $ssl_* or calling compute() again: the
+-- prefix layout "L<ver><sni><cipher_cnt><alpn>" (ja4_compute.lua) already
+-- encodes them, so the log values are guaranteed consistent with tls_fp
+-- (same source of truth the daily analyzer keys on, scripts/analyze.py).
+--   <ver>        2 digits  (e.g. 13)
+--   <sni>        d = SNI present, i = absent
+--   <cipher_cnt> 2 digits  (%02d, GREASE-stripped, capped at 99)
+--   <alpn>       2 chars   (h2 / h1 / 00 = none)
+-- A malformed/absent fp leaves the sub-columns nil → null in the record.
 function _M.set_tls_fp(fp)
     local ctx = ngx.ctx.bac
     if not ctx then return end
     ctx.tls_fp = fp
+
+    if type(fp) == "string" then
+        local ver, sni, cc, alpn = fp:match("^L(%d%d)([di])(%d%d)(..)_")
+        if ver then
+            ctx.tls_cipher_count = tonumber(cc)
+            ctx.tls_sni_present  = (sni == "d")
+            -- "00" = no ALPN negotiated → null, not the literal token.
+            ctx.tls_alpn = (alpn ~= "00") and alpn or nil
+        end
+    end
 end
 
 -- ISO 8601 with millisecond precision, UTC, e.g. 2026-05-18T14:30:00.123Z
@@ -190,7 +209,10 @@ function _M.emit()
         asn           = ctx.asn or cjson_base.null,
         geo_country   = ctx.geo_country or cjson_base.null,
         ua            = ua or cjson_base.null,
-        tls_fp        = ctx.tls_fp or cjson_base.null,
+        tls_fp           = ctx.tls_fp or cjson_base.null,
+        tls_cipher_count = ctx.tls_cipher_count or cjson_base.null,
+        tls_alpn         = ctx.tls_alpn or cjson_base.null,
+        tls_sni_present  = (ctx.tls_sni_present ~= nil) and ctx.tls_sni_present or cjson_base.null,
         stage         = ctx.stage,
         verdict       = ctx.verdict,
         rule          = ctx.rule or cjson_base.null,
