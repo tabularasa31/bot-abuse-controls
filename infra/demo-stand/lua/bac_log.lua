@@ -187,6 +187,15 @@ function _M.emit()
 
     local now = ngx.now()
 
+    -- Explicit branch, not an `and/or` ternary: tls_sni_present is a
+    -- boolean, and `cond and false or null` would collapse a valid false
+    -- ("SNI absent") into null, making it indistinguishable from "unknown
+    -- / malformed fp". Only nil (never parsed) becomes null.
+    local sni_present = cjson_base.null
+    if ctx.tls_sni_present ~= nil then
+        sni_present = ctx.tls_sni_present
+    end
+
     -- Cap the UA so a pathological multi-KB User-Agent can't push the log
     -- line past PIPE_BUF (4 KB on Linux) and break the atomicity of the
     -- single stdout write below. Legitimate UAs are well under this; the
@@ -212,7 +221,7 @@ function _M.emit()
         tls_fp           = ctx.tls_fp or cjson_base.null,
         tls_cipher_count = ctx.tls_cipher_count or cjson_base.null,
         tls_alpn         = ctx.tls_alpn or cjson_base.null,
-        tls_sni_present  = (ctx.tls_sni_present ~= nil) and ctx.tls_sni_present or cjson_base.null,
+        tls_sni_present  = sni_present,
         stage         = ctx.stage,
         verdict       = ctx.verdict,
         rule          = ctx.rule or cjson_base.null,
