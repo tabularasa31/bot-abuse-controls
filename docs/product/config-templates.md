@@ -387,7 +387,7 @@ profiles:
 
 ```yaml
 # Пример per-resource policy для одного домена
-# Формат внутри каталога backend; на proxy приходит как часть policy катaлога
+# Формат внутри каталога backend; на proxy приходит как часть policy каталога
 
 example.com:
   mode: active                       # shadow | active
