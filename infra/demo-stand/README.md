@@ -72,11 +72,25 @@ curl -k https://localhost/metrics            # prometheus text
 
 ## Updating a running stand
 
-The Lua and nginx config are bind-mounted, so an update is just "pull the
-files + reload" — no image rebuild. [`scripts/update.sh`](scripts/update.sh)
-does it safely: fast-forwards `main`, runs `openresty -t` to validate the
-config, and only then `openresty -s reload` (no dropped connections). It
-no-ops when `main` hasn't moved and is safe to run from cron.
+The Lua and config files are bind-mounted, so most updates are just "pull the
+files + reload". [`scripts/update.sh`](scripts/update.sh) does it safely:
+fast-forwards `main`, runs `openresty -t` to validate the config, and only then
+`openresty -s reload` (no dropped connections). It no-ops when `main` hasn't
+moved and is safe to run from cron.
+
+**`nginx.demo.conf` changes need a container recreate, not a reload.** It is
+bind-mounted as a **single file**, and `git pull` swaps the file's inode — so
+the running container stays pinned to the *old* file and `openresty -s reload`
+re-reads the stale content. A new `lua_shared_dict`, `listen`, location, etc.
+would silently never take effect (this actually bit PR #32: the `rate_limit`
+shared dict didn't deploy until a manual `docker restart`). `update.sh` handles
+this automatically: it `--force-recreate`s the container whenever
+`nginx.demo.conf`, the `Dockerfile`, or the compose file changed since the last
+deploy (otherwise it hot-reloads as before). The recreate path archives the
+container's `BAC_LOG` stream to `state/bac-archive/` first, so log history
+survives. If you ever edit `nginx.demo.conf` and deploy by hand, use
+`docker restart nginx-demo` (or `docker compose ... up -d --force-recreate`) —
+a bare `openresty -s reload` will not pick it up.
 
 **Manual:**
 

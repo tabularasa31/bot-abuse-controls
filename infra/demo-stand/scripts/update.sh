@@ -14,6 +14,7 @@ set -euo pipefail
 
 BRANCH="main"
 COMPOSE_FILE="infra/demo-stand/docker-compose.demo.yml"
+NGINX_CONF="infra/demo-stand/nginx.demo.conf"
 SERVICE="nginx-demo"
 
 # Resolve repo root from this script's location, regardless of CWD.
@@ -49,19 +50,27 @@ fi
 echo "$(date -Is) deploying ${head:0:7}"
 
 # Most deploys are Lua/config edits, picked up by a zero-downtime `openresty
-# -s reload` inside the running container (the source is bind-mounted). But the
-# image itself carries native deps (libmaxminddb) and the compose file defines
-# mounts/env — those only take effect by rebuilding the image and recreating
-# the container. Detect when the build inputs changed since the last successful
-# deploy and recreate in that case; otherwise hot-reload as before.
+# -s reload` inside the running container (the lua/ and config/ DIRECTORY mounts
+# reflect file replacements, so reload re-reads the fresh content). Three kinds
+# of change can't be hot-reloaded and need a container recreate:
+#   * Dockerfile   — native deps (libmaxminddb) baked into the image.
+#   * compose file — mounts / env / ports.
+#   * nginx.demo.conf — it is a SINGLE-FILE bind mount, and git's inode swap on
+#     pull leaves the running container pinned to the OLD file. `openresty -s
+#     reload` re-reads that stale in-container inode, so a new lua_shared_dict /
+#     listen / etc. silently never appears. Only recreating re-resolves the
+#     mount to the new file. (Discovered in prod: PR #32's rate_limit shared
+#     dict never deployed until a manual restart.)
+# Detect when any of these changed since the last successful deploy and recreate
+# in that case; otherwise hot-reload as before.
 #
 # First run (no marker) recreates to be safe — it guarantees the running
-# container matches the current Dockerfile/compose.
+# container matches the current Dockerfile/compose/nginx.conf.
 recreate=0
 if [ -z "$last" ]; then
   recreate=1
 elif ! git diff --quiet "$last" "$head" -- \
-      "infra/demo-stand/Dockerfile" "$COMPOSE_FILE"; then
+      "infra/demo-stand/Dockerfile" "$COMPOSE_FILE" "$NGINX_CONF"; then
   recreate=1
 fi
 
@@ -84,11 +93,15 @@ if [ "$recreate" = "1" ]; then
   else
     rm -f "$archive"
   fi
-  # `up -d --build` rebuilds the image and recreates the service only when its
-  # definition or image changed. init_by_lua re-runs on the fresh container; a
-  # bad config makes `up` exit non-zero, so the marker is not advanced and the
-  # next tick retries.
-  docker compose -f "$COMPOSE_FILE" up -d --build
+  # --force-recreate is required, not optional: a change to the bind-mounted
+  # nginx.demo.conf alters neither the image nor the compose config, so a plain
+  # `up -d` would see "no changes" and skip recreation — leaving the stale-inode
+  # bug in place. We only reach this branch when a build input actually changed,
+  # so forcing recreation here is intended (and a no-op-cost rebuild when only
+  # nginx.conf changed, thanks to layer caching). init_by_lua re-runs on the
+  # fresh container; a bad config makes `up` exit non-zero, so the marker is not
+  # advanced and the next tick retries.
+  docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate
 else
   # Validate inside the running container BEFORE reloading. A bad config must
   # not take the live stand down.
