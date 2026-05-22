@@ -13,16 +13,23 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANALYZE="${HERE}/analyze.py"
 ROOT="${ABUSE_CONTROLS_ROOT:-$(cd "${HERE}/../../.." && pwd)}"
 
-# Local, gitignored env (same file the compose uses for DEMO_BIND_IP).
-# Put REPORT_TO=<routine mailbox> here on the VM — the recipient address
-# is deliberately NOT committed to the repo.
-ENV_FILE="${HERE}/../.env"
-if [ -f "${ENV_FILE}" ]; then
-    set -a
-    # shellcheck source=/dev/null
-    . "${ENV_FILE}"
-    set +a
-fi
+# Local, gitignored env. Two files, sourced in order:
+#   .env         — deploy vars (DEMO_BIND_IP, ORIGIN_URL). The README
+#                  quickstart recreates this with `> .env`, so anything
+#                  written here is liable to be clobbered on redeploy.
+#   .env.report  — report addresses (REPORT_FROM/REPORT_TO). Kept SEPARATE
+#                  precisely so a clobbering `> .env` can't drop them; no
+#                  doc or deploy step ever rewrites this file. Sourced last
+#                  so it wins. Both are gitignored — addresses aren't
+#                  committed.
+for ENV_FILE in "${HERE}/../.env" "${HERE}/../.env.report"; do
+    if [ -f "${ENV_FILE}" ]; then
+        set -a
+        # shellcheck source=/dev/null
+        . "${ENV_FILE}"
+        set +a
+    fi
+done
 
 HTML=$(mktemp)
 trap 'rm -f "${HTML}"' EXIT
@@ -32,8 +39,8 @@ trap 'rm -f "${HTML}"' EXIT
 python3 "${ANALYZE}" --html > "${HTML}"
 SUBJECT=$(cat "${ROOT}/state/last-subject.txt" 2>/dev/null || echo "[abuse-controls] daily report")
 
-# Addresses come from infra/demo-stand/.env (gitignored) — neither is
-# committed:
+# Addresses come from infra/demo-stand/.env.report (gitignored) — neither
+# is committed:
 #   REPORT_FROM = sender; must match the authenticated msmtp account so
 #                 Gmail SPF/DKIM passes. If unset, msmtp fills the From
 #                 header from its own config (~/.msmtprc).
@@ -42,7 +49,7 @@ SUBJECT=$(cat "${ROOT}/state/last-subject.txt" 2>/dev/null || echo "[abuse-contr
 REPORT_FROM="${REPORT_FROM:-}"
 REPORT_TO="${REPORT_TO:-$REPORT_FROM}"
 if [ -z "${REPORT_TO}" ]; then
-    echo "daily-report: REPORT_TO unset — set REPORT_TO (and REPORT_FROM) in ${ENV_FILE}" >&2
+    echo "daily-report: REPORT_TO unset — set REPORT_TO (and REPORT_FROM) in ${HERE}/../.env.report" >&2
     exit 1
 fi
 

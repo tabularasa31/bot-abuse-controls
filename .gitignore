@@ -12,6 +12,7 @@ infra/nginx-shadow/certs/*.crt
 # Local env
 .env
 .env.local
+.env.report
 
 # Mac
 .DS_Store
