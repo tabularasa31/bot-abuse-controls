@@ -33,13 +33,31 @@
 -- matcher (mirrors hygiene's ua_blacklist and init.lua's fp seeding). Recording
 -- staged matches for promotion analytics lands with its own task (A11).
 --
--- ASN/geo (asn_block / geo_whitelist) and per-resource policy ip_whitelist are
--- separate tasks (A6 / B8) and are intentionally not handled here.
+-- A6 additions (geo/ASN, rules-reference L2 #9 + tag T1):
+--   * geo_country / asn log fields — filled every request from a GeoLite2
+--     lookup (geoip.lua) via bac_log.set_source.
+--   * reputation:asn_dc — informational TAG (not a rule, emits no verdict):
+--     request ASN is in asn_datacenters.conf. Accumulates in `tags` like
+--     hygiene:header_anomaly, independent of the verdict.
+--   * geo_blocklist — blocking rule, country NOT in the allowed-countries
+--     whitelist. Its only source is per-resource policy[host].geo_whitelist
+--     (Phase 3); there is no system-wide country list (geo-allow is a
+--     per-resource choice, not global). With no policy catalog on the stand
+--     yet the rule is DORMANT: wired + unit-tested, but its allow-set is empty
+--     so it never fires. Phase 3 supplies the per-host whitelist; the code
+--     here is unchanged. (Same "rule wired, data empty" shape as ua_blacklist
+--     / ip_blocklist.)
+--
+-- Per-resource policy ip_whitelist and verified-bot fastpath are separate
+-- tasks (B8) and are intentionally not handled here.
 
 local _M = {
-    enabled   = true,
-    whitelist = nil,  -- ipmatcher or nil when no active entries
-    blocklist = nil,  -- ipmatcher or nil when no active entries
+    enabled        = true,
+    whitelist      = nil,   -- ipmatcher or nil when no active entries
+    blocklist      = nil,   -- ipmatcher or nil when no active entries
+    asn_dc_set     = {},    -- { ["24940"] = true, ... } from asn_datacenters.conf
+    geo_enabled    = true,  -- [blocking.geo_blocklist].enabled (dormant: no source yet)
+    demo_geo_header = false, -- honour X-Demo-IP override (stand testing); env-gated
 }
 
 -- pure: array of `value` strings from a parsed list (config_loader.parse_list
@@ -57,6 +75,43 @@ function _M.active_values(list)
         end
     end
     return out
+end
+
+-- pure: array of strings -> lookup set { [v] = true }. Used for the
+-- asn_datacenters set (membership test for the reputation:asn_dc tag). No
+-- ngx dependency — unit-tested in tests/reputation_test.lua.
+function _M.to_set(values)
+    local set = {}
+    for _, v in ipairs(values or {}) do
+        if v ~= nil and v ~= "" then set[v] = true end
+    end
+    return set
+end
+
+-- pure: geo_blocklist decision. Block when an allowed-countries whitelist is
+-- configured AND the request country is known AND it is NOT in the whitelist
+-- (rules-reference #9 inverted logic). An empty/absent whitelist (the Phase 1
+-- stand reality — no per-resource policy yet) or an unknown country never
+-- blocks. No ngx dependency — unit-tested.
+function _M.country_blocked(allow, cc)
+    if not allow or not next(allow) then return false end
+    if not cc or cc == "" then return false end
+    return not allow[cc]
+end
+
+-- IP used for the GeoLite2 lookup only. Production: the real remote_addr.
+-- Stand testing: when BAC_DEMO_GEO_HEADER=on, an X-Demo-IP request header
+-- overrides it so a reviewer can simulate a public IP (a local/private client
+-- IP has no GeoIP entry). The toggle defaults off, so on a live VM the header
+-- is inert. The override applies ONLY to geo enrichment — the ip_whitelist /
+-- ip_blocklist matchers always use the real remote_addr, so a caller-supplied
+-- header can never rewrite a reputation verdict or skew rule metrics.
+local function geo_lookup_ip(remote_addr)
+    if _M.demo_geo_header then
+        local override = ngx.var.http_x_demo_ip
+        if override and override ~= "" then return override end
+    end
+    return remote_addr
 end
 
 -- Called once in init_by_lua, after config.load(). Compiles the on-disk IP
@@ -103,6 +158,19 @@ function _M.build(config)
     _M.blocklist, bl_n = matcher(config.blocklist_ip, "blocklist_ip.conf",
                                  rule_enabled("blocking", "ip_blocklist"))
 
+    -- asn_datacenters.conf -> membership set for the reputation:asn_dc tag.
+    -- Reuses active_values (drops blanks/staging). The tag has no enable flag
+    -- of its own (config-templates tags carry no toggle); the per-stage
+    -- kill-switch below disables it along with the rest of the stage.
+    _M.asn_dc_set = _M.to_set(_M.active_values(config.asn_datacenters))
+
+    -- geo_blocklist runtime toggle (rollback/incident), mirroring the IP rules.
+    -- Dormant regardless in Phase 1 — there is no country whitelist source yet.
+    _M.geo_enabled = rule_enabled("blocking", "geo_blocklist")
+
+    -- Stand-only X-Demo-IP override, off unless explicitly enabled.
+    _M.demo_geo_header = (os.getenv("BAC_DEMO_GEO_HEADER") == "on")
+
     -- Stage off when the global kill-switch or the per-stage reputation switch
     -- is set (config-templates.md kill_switch; defaults.conf [kill_switch.*]).
     local ks = defaults.kill_switch or {}
@@ -122,21 +190,47 @@ function _M.run()
     local ip = ngx.var.remote_addr
     if not ip then return false end
 
-    -- bac_log is required lazily (keeps active_values unit-testable without
-    -- ngx); the package.loaded fast-path avoids the require() call overhead on
-    -- the per-request hot path after the first lookup in a worker.
+    -- bac_log / geoip required lazily (keeps the pure helpers unit-testable
+    -- without ngx); the package.loaded fast-path avoids the require() call
+    -- overhead on the per-request hot path after the first lookup in a worker.
     local bac_log = package.loaded["bac_log"] or require "bac_log"
+    local geoip   = package.loaded["geoip"]   or require "geoip"
 
-    -- whitelist first (vision §2.3): a match wins, blocklist not consulted.
+    -- Source enrichment + asn_dc tag run for EVERY request, independent of the
+    -- verdict (tags accumulate even when a blocking rule fires; the log fields
+    -- must be populated regardless). geo is fail-open: nil cc/asn just leaves
+    -- the fields null and the tag unset. The lookup IP may be an X-Demo-IP
+    -- override (stand testing); the matchers below still use the real ip.
+    local cc, asn = geoip.lookup(geo_lookup_ip(ip))
+    bac_log.set_source(asn, cc)
+    if asn and _M.asn_dc_set[asn] then
+        bac_log.add_tag("reputation:asn_dc")
+    end
+
+    -- Verdict rules, first match wins within the stage (allow before blocking,
+    -- vision §2.3 → §2.4 → geo). A match returns so a later same-stage rule
+    -- doesn't overwrite it under bac_log's last-writer-wins.
     if _M.whitelist and _M.whitelist:match(ip) then
         bac_log.set_verdict("reputation", "allow", "ip_whitelist")
         return true
     end
 
-    -- blocklist (vision §2.4).
     if _M.blocklist and _M.blocklist:match(ip) then
         bac_log.set_verdict("reputation", "block", "ip_blocklist")
         return true
+    end
+
+    -- geo_blocklist — dormant in Phase 1: the allowed-countries whitelist comes
+    -- from per-resource policy[host].geo_whitelist (Phase 3), which the stand
+    -- has no source for yet, so `allow` is empty and country_blocked is always
+    -- false. When the policy catalog lands this resolves the per-host set; the
+    -- check below is unchanged.
+    if _M.geo_enabled then
+        local allow = nil  -- Phase 3: policy[host].geo_whitelist for ngx.var.host
+        if _M.country_blocked(allow, cc) then
+            bac_log.set_verdict("reputation", "block", "geo_blocklist")
+            return true
+        end
     end
 
     return false

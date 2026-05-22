@@ -48,14 +48,39 @@ fi
 
 echo "$(date -Is) deploying ${head:0:7}"
 
-# Validate inside the running container BEFORE reloading. A bad config must
-# not take the live stand down.
-if ! docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -t; then
-  echo "$(date -Is) ERROR: openresty -t failed on ${head:0:7}, NOT reloading" >&2
-  exit 1
+# Most deploys are Lua/config edits, picked up by a zero-downtime `openresty
+# -s reload` inside the running container (the source is bind-mounted). But the
+# image itself carries native deps (libmaxminddb) and the compose file defines
+# mounts/env — those only take effect by rebuilding the image and recreating
+# the container. Detect when the build inputs changed since the last successful
+# deploy and recreate in that case; otherwise hot-reload as before.
+#
+# First run (no marker) recreates to be safe — it guarantees the running
+# container matches the current Dockerfile/compose.
+recreate=0
+if [ -z "$last" ]; then
+  recreate=1
+elif ! git diff --quiet "$last" "$head" -- \
+      "infra/demo-stand/Dockerfile" "$COMPOSE_FILE"; then
+  recreate=1
 fi
 
-docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -s reload
+if [ "$recreate" = "1" ]; then
+  echo "$(date -Is) image/compose inputs changed — rebuilding + recreating ${SERVICE}"
+  # `up -d --build` rebuilds the image and recreates the service only when its
+  # definition or image changed. init_by_lua re-runs on the fresh container; a
+  # bad config makes `up` exit non-zero, so the marker is not advanced and the
+  # next tick retries.
+  docker compose -f "$COMPOSE_FILE" up -d --build
+else
+  # Validate inside the running container BEFORE reloading. A bad config must
+  # not take the live stand down.
+  if ! docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -t; then
+    echo "$(date -Is) ERROR: openresty -t failed on ${head:0:7}, NOT reloading" >&2
+    exit 1
+  fi
+  docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -s reload
+fi
 
 # Reload succeeded: expose the live sha to /__version and record success so
 # the next tick no-ops.

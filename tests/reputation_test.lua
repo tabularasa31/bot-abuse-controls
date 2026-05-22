@@ -1,8 +1,9 @@
 -- Unit tests for infra/demo-stand/lua/reputation.lua.
--- Pure Lua; runs under any luajit / lua 5.1+ with no openresty deps — only
--- the pure helper active_values() is covered here. The ipmatcher build and
--- the ngx-touching run() path are exercised on the live stand (the require of
--- resty.ipmatcher is lazy, inside build()/run(), so this file loads cleanly).
+-- Pure Lua; runs under any luajit / lua 5.1+ with no openresty deps — the pure
+-- helpers active_values() / to_set() / country_blocked() are covered here. The
+-- ipmatcher build, the GeoLite2 lookup (geoip.lua) and the ngx-touching run()
+-- path are exercised on the live stand (the requires of resty.ipmatcher and
+-- geoip are lazy, inside build()/run(), so this file loads cleanly).
 --
 -- Run with:
 --   make test            (host luajit, fastest)
@@ -75,6 +76,43 @@ check_arr(
     }),
     { "2001:db8::/32" },
     "active_values drops empty value, keeps ipv6 cidr")
+
+-- ===========================================================================
+-- reputation.to_set() — array -> membership set (asn_datacenters lookup)
+-- ===========================================================================
+
+local function has(set, k) return set[k] == true end
+
+do
+    local s = reputation.to_set({ "24940", "16276", "14061" })
+    check(has(s, "24940"), true,  "to_set contains 24940")
+    check(has(s, "16276"), true,  "to_set contains 16276")
+    check(s["99999"],      nil,   "to_set absent key -> nil")
+end
+
+check(next(reputation.to_set(nil)) == nil, true, "to_set nil -> empty")
+check(next(reputation.to_set({})) == nil,  true, "to_set empty -> empty")
+check(reputation.to_set({ "", "8075" })[""], nil, "to_set drops empty string")
+
+-- ===========================================================================
+-- reputation.country_blocked(allow, cc) — geo_blocklist inverted-whitelist
+-- logic (rules-reference #9). Block iff a whitelist is set AND cc is known AND
+-- cc is not in it. The Phase 1 stand reality is an empty whitelist (no
+-- per-resource policy source yet) -> never blocks (dormant).
+-- ===========================================================================
+
+check(reputation.country_blocked({ RU = true }, "CN"), true,
+    "country_blocked: CN not in {RU} -> block")
+check(reputation.country_blocked({ RU = true, CN = true }, "CN"), false,
+    "country_blocked: CN in whitelist -> pass")
+check(reputation.country_blocked({}, "CN"), false,
+    "country_blocked: empty whitelist -> pass (dormant)")
+check(reputation.country_blocked(nil, "CN"), false,
+    "country_blocked: nil whitelist -> pass (dormant)")
+check(reputation.country_blocked({ RU = true }, nil), false,
+    "country_blocked: unknown country -> pass")
+check(reputation.country_blocked({ RU = true }, ""), false,
+    "country_blocked: blank country -> pass")
 
 -- ===========================================================================
 -- Reporting

@@ -21,7 +21,14 @@ require("hygiene").build(config)
 -- from the loaded config — also in the master so workers inherit the matchers
 -- on fork (see reputation.lua). Returns the active entry counts for the
 -- startup log below.
-local _, rep_wl, rep_bl = require("reputation").build(config)
+local reputation, rep_wl, rep_bl = require("reputation").build(config)
+
+-- Open the GeoLite2 databases (country + asn) once in the master so workers
+-- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
+-- libmaxminddb) are absent the stand still starts and geo is simply
+-- undetermined — geoip.init() logs the reason. Feeds the reputation:asn_dc tag
+-- and the geo_country/asn log fields (A6).
+require("geoip").init()
 
 -- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging (staging matches-but-doesn't-block;
@@ -53,8 +60,11 @@ ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
 ngx.log(ngx.NOTICE, "[demo] fp_blocklist loaded: ", n, " active entries")
 -- Reputation matchers: active (non-staging) entry counts compiled into the
 -- ipmatcher objects. Empty whitelist/blocklist => that check is a no-op.
+local asn_dc_n = 0
+for _ in pairs(reputation.asn_dc_set) do asn_dc_n = asn_dc_n + 1 end
 ngx.log(ngx.NOTICE, "[demo] reputation matchers: ip_whitelist=", rep_wl,
-    " active, ip_blocklist=", rep_bl, " active")
+    " active, ip_blocklist=", rep_bl, " active, asn_dc=", asn_dc_n,
+    " (geo_blocklist dormant — per-resource policy source is Phase 3)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
