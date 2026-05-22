@@ -42,6 +42,14 @@ for _, tag in ipairs(ctx.tags) do
     m:incr("tag:" .. tag, 1, 0)
 end
 
+-- Staged-pattern match counter (A11). Each entry is already "<catalog>:
+-- <pattern_id>"; key shape "staging:<catalog>:<pattern_id>" (metrics.lua parses
+-- it back out). Staging matches feed the promotion workflow, not the verdict,
+-- so they get their own counter like flags/tags. Usually empty → cheap.
+for _, entry in ipairs(ctx.staging_match) do
+    m:incr("staging:" .. entry, 1, 0)
+end
+
 -- fp cardinality: dict:add succeeds only the first time we see an fp, so it
 -- doubles as a first-seen signal for the unique-fp gauge.
 local fp = ctx.tls_fp

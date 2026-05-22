@@ -129,7 +129,9 @@ end
 
 -- Record a staged-catalog pattern that matched but did not affect the
 -- verdict (for promotion analytics). Format "<catalog>:<pattern_id>".
--- No-op in Phase 1 — staged catalogs arrive with A11.
+-- Producers: the tls_fp stage (A11, tls_fp.run) for tls_fp_blocklist /
+-- tls_fp_catalog / tls_fp_browser_profiles. Stays a stable [] when nothing
+-- staged matched.
 function _M.add_staging_match(entry)
     local ctx = ngx.ctx.bac
     if not ctx then return end

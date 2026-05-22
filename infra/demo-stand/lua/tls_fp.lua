@@ -54,16 +54,28 @@
 -- the catalog pull without changing rule names, stage, category or the log
 -- contract.
 --
--- Staging: catalog entries with status=staging are excluded from the active
--- lookup tables (mirrors hygiene's ua_blacklist, reputation's IP lists and
--- init.lua's fp seeding). Recording staged matches into the `staging_match`
--- log slot is a separate task (A11); bac_log.add_staging_match stays a no-op
--- producer until then.
+-- Staging (A11, phase2-spec §"Staged rollout для PR-каталогов"). Catalog
+-- entries with status=staging are kept OUT of the active lookup tables (so they
+-- never produce a verdict/rule even in active mode) and instead compiled into
+-- parallel *_staging tables. When a staged entry matches the same way its
+-- active counterpart would, run() records the fact into the `staging_match` log
+-- slot ("<catalog>:<pattern_id>") via bac_log.add_staging_match — pure
+-- observation for the promotion workflow (staging → active in a separate PR, or
+-- revert). pattern_id per catalog: tls_fp_blocklist = the fp token,
+-- tls_fp_catalog = hash_b, tls_fp_browser_profiles = browser_family. The
+-- blocklist staging set lives here too (not in init.lua's active fp_blocklist
+-- seed) so the whole stage's staging detection is in one place; a staged fp is
+-- absent from the active dict, so verdict.lua never exits on it and the request
+-- always reaches run().
 
 local _M = {
     enabled  = true,
     catalog  = {},   -- { [hash_b] = automation_family } (active entries only)
     profiles = {},   -- { [browser_family] = expected_cipher_cnt } (active only)
+    -- Staging counterparts (status=staging), matched-but-never-verdict:
+    catalog_staging   = {},   -- { [hash_b] = automation_family }
+    profiles_staging  = {},   -- { [browser_family] = expected_cipher_cnt }
+    blocklist_staging = {},   -- { [fp] = true }
 }
 
 -- Browser families we classify a UA into. Automation tools and anything else
@@ -158,6 +170,50 @@ function _M.build_profiles(profiles_cfg)
     return out
 end
 
+-- pure: build the staging hash_b → family map (status=staging only) — the
+-- mirror of build_catalog. Same shape as the active table so the staging match
+-- can reuse is_impersonator; entries with no family are skipped.
+function _M.build_catalog_staging(catalog_cfg)
+    local out = {}
+    for hb, attrs in pairs(catalog_cfg or {}) do
+        if type(attrs) == "table" and attrs.family and attrs.status == "staging" then
+            out[hb] = attrs.family
+        end
+    end
+    return out
+end
+
+-- pure: build the staging family → expected_cipher_cnt map (status=staging
+-- only) — the mirror of build_profiles. A non-numeric expected_cipher_cnt is
+-- skipped. NB the INI section key is the family, so a family can be either
+-- active or staging in a given file, not both; that is the config-format
+-- limit, not enforced here.
+function _M.build_profiles_staging(profiles_cfg)
+    local out = {}
+    for family, attrs in pairs(profiles_cfg or {}) do
+        if type(attrs) == "table" and attrs.status == "staging" then
+            local n = tonumber(attrs.expected_cipher_cnt)
+            if n then out[family] = n end
+        end
+    end
+    return out
+end
+
+-- pure: build the staging fp set (status=staging only) from the parsed
+-- tls_fp_blocklist (config_loader.parse_list output: array of { value=fp,
+-- attrs={status=,…} }). Active fps are seeded into the fp_blocklist shared_dict
+-- by init.lua; the staged ones land here so run() can record them without ever
+-- blocking.
+function _M.build_blocklist_staging(blocklist_list)
+    local out = {}
+    for _, entry in ipairs(blocklist_list or {}) do
+        if entry.value and entry.value ~= "" and entry.attrs and entry.attrs.status == "staging" then
+            out[entry.value] = true
+        end
+    end
+    return out
+end
+
 -- pure: tls_fp_impersonator decision. Fires when the UA claims a browser
 -- family AND the fp's hash_b is a known automation signature in the catalog.
 -- An automation/other UA matching its own automation fp is honest, not an
@@ -204,17 +260,27 @@ function _M.build(config)
     _M.catalog  = _M.build_catalog(config.tls_fp_catalog)
     _M.profiles = _M.build_profiles(config.tls_fp_browser_profiles)
 
+    -- Staged counterparts (status=staging) — matched for staging_match, never
+    -- a verdict (A11).
+    _M.catalog_staging   = _M.build_catalog_staging(config.tls_fp_catalog)
+    _M.profiles_staging  = _M.build_profiles_staging(config.tls_fp_browser_profiles)
+    _M.blocklist_staging = _M.build_blocklist_staging(config.tls_fp_blocklist)
+
     -- Stage off via the shared kill-switch helper (config-templates.md
     -- kill_switch; defaults.conf [kill_switch.*]). The block path
     -- (tls_fp_blocklist in verdict.lua) is governed separately; this toggle
     -- gates only the soft rules + tags this module owns.
     _M.enabled = require("config").stage_enabled(config.defaults or {}, "tls_fp")
 
-    -- Active entry counts for the startup log.
+    -- Active + staging entry counts for the startup log.
     local cat_n, prof_n = 0, 0
     for _ in pairs(_M.catalog)  do cat_n  = cat_n  + 1 end
     for _ in pairs(_M.profiles) do prof_n = prof_n + 1 end
-    return _M, cat_n, prof_n
+    local stg_cat_n, stg_prof_n, stg_bl_n = 0, 0, 0
+    for _ in pairs(_M.catalog_staging)   do stg_cat_n  = stg_cat_n  + 1 end
+    for _ in pairs(_M.profiles_staging)  do stg_prof_n = stg_prof_n + 1 end
+    for _ in pairs(_M.blocklist_staging) do stg_bl_n   = stg_bl_n   + 1 end
+    return _M, cat_n, prof_n, stg_cat_n, stg_prof_n, stg_bl_n
 end
 
 -- Record a soft challenge flag. The flag is always accumulated (vision.md:
@@ -274,6 +340,21 @@ function _M.run(fp)
     end
     if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles) then
         fire_soft(bac_log, ctx, "tls_fp_suspicious_ciphers")
+    end
+
+    -- Staged patterns (A11). A staged entry is matched with the SAME predicate
+    -- its active counterpart uses, so the recorded count reflects what would
+    -- fire after promotion — but it only writes to staging_match, never to
+    -- verdict/rule/flags. Gated by _M.enabled (above) like the rest of the
+    -- stage, so the tls_fp kill-switch silences staging observation too.
+    if _M.is_impersonator(ua_family, hb, _M.catalog_staging) then
+        bac_log.add_staging_match("tls_fp_catalog:" .. hb)
+    end
+    if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles_staging) then
+        bac_log.add_staging_match("tls_fp_browser_profiles:" .. ua_family)
+    end
+    if type(fp) == "string" and _M.blocklist_staging[fp] then
+        bac_log.add_staging_match("tls_fp_blocklist:" .. fp)
     end
 end
 

@@ -34,7 +34,8 @@ local _, rate_n = require("rate_limit").build(config)
 -- so workers inherit the lookup tables on fork (see tls_fp.lua). The blocking
 -- half (tls_fp_blocklist) is seeded separately below. Returns active entry
 -- counts for the startup log.
-local _, tls_cat_n, tls_prof_n = require("tls_fp").build(config)
+local tls_fp, tls_cat_n, tls_prof_n, tls_stg_cat_n, tls_stg_prof_n, tls_stg_bl_n =
+    require("tls_fp").build(config)
 
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
@@ -44,8 +45,9 @@ local _, tls_cat_n, tls_prof_n = require("tls_fp").build(config)
 require("geoip").init()
 
 -- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
--- active unless explicitly status=staging (staging matches-but-doesn't-block;
--- the staging path lands with its own task). An empty file => SHADOW mode.
+-- active unless explicitly status=staging — staged fps match-but-don't-block
+-- and are held in tls_fp.blocklist_staging (recorded into staging_match by the
+-- tls_fp stage, A11), never seeded here. An empty file => SHADOW mode.
 --
 -- Keys are written under generation 0 (`fp .. ":" .. 0`, §В1 format) and
 -- fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
@@ -92,6 +94,11 @@ ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
 ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,
     " active, browser_profiles=", tls_prof_n,
     " active (impersonator/suspicious_ciphers → verdict=challenge, observe-only)")
+-- Staged (status=staging) patterns: matched into staging_match, never a verdict
+-- (A11). Counts let a reviewer confirm a staging PR landed on the stand.
+ngx.log(ngx.NOTICE, "[demo] tls_fp staged: tls_fp_catalog=", tls_stg_cat_n,
+    " browser_profiles=", tls_stg_prof_n, " tls_fp_blocklist=", tls_stg_bl_n,
+    " (observe-only into staging_match, no verdict)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
@@ -118,6 +125,23 @@ for _, key in ipairs({
 }) do
     metrics:safe_add(key, 0)
 end
+
+-- Prime a staging_match counter per staged pattern so /metrics shows it at zero
+-- from the first scrape — the promotion workflow watches these to decide
+-- staging→active. Key shape "staging:<catalog>:<pattern_id>" (log_event.lua
+-- increments, metrics.lua parses). Pattern_ids are dynamic (depend on which
+-- patterns are staged), so unlike the fixed flag/tag list above they are
+-- primed from the compiled staging tables rather than hard-coded.
+for hb in pairs(tls_fp.catalog_staging) do
+    metrics:safe_add("staging:tls_fp_catalog:" .. hb, 0)
+end
+for family in pairs(tls_fp.profiles_staging) do
+    metrics:safe_add("staging:tls_fp_browser_profiles:" .. family, 0)
+end
+for fp_tok in pairs(tls_fp.blocklist_staging) do
+    metrics:safe_add("staging:tls_fp_blocklist:" .. fp_tok, 0)
+end
+
 metrics:set("start_time", ngx.time())
 metrics:set("blocklist_entries", n)
 

@@ -81,6 +81,8 @@ local flag_lines = { "# HELP antibot_flag_total Times each soft challenge flag a
                      "# TYPE antibot_flag_total counter" }
 local tag_lines  = { "# HELP antibot_tag_total Times each informational tag was attached.",
                      "# TYPE antibot_tag_total counter" }
+local stg_lines  = { "# HELP antibot_staging_match_total Times each staged pattern matched (observe-only, feeds the staging→active promotion workflow).",
+                     "# TYPE antibot_staging_match_total counter" }
 for _, key in ipairs(m:get_keys(0)) do
     local stage, rule = key:match("^rule:([^:]+):(.+)$")
     if stage then
@@ -97,7 +99,19 @@ for _, key in ipairs(m:get_keys(0)) do
         tag_lines[#tag_lines + 1] = string.format(
             'antibot_tag_total{tag="%s"} %d', tag, get(key))
     end
+    -- "staging:<catalog>:<pattern_id>" — the pattern label keeps both halves.
+    -- Unlike rule/flag/tag codes (internal constants), a pattern_id can be a
+    -- free-form config token (a tls_fp_blocklist fp), so escape per the
+    -- Prometheus text format — an unescaped " / \ / newline would make the
+    -- whole /metrics output unparseable and break scraping for the target.
+    local pattern = key:match("^staging:(.+)$")
+    if pattern then
+        local label = pattern:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
+        stg_lines[#stg_lines + 1] = string.format(
+            'antibot_staging_match_total{pattern="%s"} %d', label, get(key))
+    end
 end
 ngx.say(table.concat(rule_lines, "\n"))
 ngx.say(table.concat(flag_lines, "\n"))
 ngx.say(table.concat(tag_lines, "\n"))
+ngx.say(table.concat(stg_lines, "\n"))

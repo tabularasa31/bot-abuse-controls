@@ -30,8 +30,9 @@
 -- are unchanged across the phase boundary — only the data source changes.
 --
 -- Staging: blocklist entries with status=staging are excluded from the active
--- matcher (mirrors hygiene's ua_blacklist and init.lua's fp seeding). Recording
--- staged matches for promotion analytics lands with its own task (A11).
+-- matcher (mirrors hygiene's ua_blacklist and init.lua's fp seeding). A11
+-- implemented staging_match for the three tls_fp catalogs (tls_fp.lua);
+-- recording staged ip_blocklist matches is the "и далее" follow-up to that task.
 --
 -- A6 additions (geo/ASN, rules-reference L2 #9 + tag T1):
 --   * geo_country / asn log fields — filled every request from a GeoLite2

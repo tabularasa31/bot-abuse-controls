@@ -29,10 +29,12 @@
 -- Blocking checks, in order (first hygiene match wins; this only decides which
 -- hygiene rule is recorded — it does not stop the wider cascade):
 --   1. method_not_allowed — method outside the configured whitelist
---   2. ua_blacklist       — UA matches the combined regex of ACTIVE patterns
---                           (staged patterns are not applied — staging is its
---                           own task, A11; bac_log.add_staging_match is a
---                           no-op in Phase 1)
+--   2. ua_blacklist       — UA matches the combined regex of ACTIVE patterns.
+--                           Staged patterns are dropped (build_combined skips
+--                           status=staging) and not yet recorded into
+--                           staging_match: A11 implemented staging_match for the
+--                           three tls_fp catalogs (tls_fp.lua); extending it to
+--                           ua_blacklist / ip_blocklist is the "и далее" follow-up.
 --
 -- resource_id is intentionally NOT derived here: the edge works from Host
 -- only and the backend enriches resource_id on log ingest (ADR-005,
