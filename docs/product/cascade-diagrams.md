@@ -141,7 +141,7 @@ flowchart TD
 | ------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------- |
 | `block` (blocking-правило сработало) | Только лог                                                                                | **403** (или 429 для rate-rule с Retry-After) | **403/429**                                                                       |
 | `allow` (allow-правило сработало)    | Лог, каскад идет дальше                                                                   | **Fastpath** — skip L3-L5                     | **Fastpath**                                                                      |
-| **challenge-flag** (soft, накоплен)  | Только лог (verdict=challenge при Standard / verdict=permissive при Permissive — dry-run) | `verdict=permissive`, → cache/origin          | **JS challenge** (если браузер) / **403 `non_browser_blocked*`* (если не браузер) |
+| **challenge-flag** (soft, накоплен)  | Только лог (verdict=challenge при Standard / verdict=permissive при Permissive — dry-run) | `verdict=permissive`, → cache/origin          | **JS challenge** (если браузер) / **403 `non_browser_blocked`** (если не браузер) |
 | `pass` (ни одного срабатывания)      | → cache/origin                                                                            | → cache/origin                                | → cache/origin                                                                    |
 
 
