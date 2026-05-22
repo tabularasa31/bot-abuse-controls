@@ -167,8 +167,14 @@ end
 
 -- One GCRA window against the shared dict. `dict_key` identifies the cell;
 -- `win` is a {interval,burst,seconds} window (or nil → not configured, never
--- blocks). Returns true when this window is exceeded. The cell TTL is 2× the
--- window so idle keys evict and the dict stays bounded.
+-- blocks). Returns true when this window is exceeded.
+--
+-- We only persist the cell on an ALLOWED request, and burst = window - interval
+-- caps how far the TAT can run ahead: a request only conforms while
+-- now >= tat - burst, so the stored new_tat = max(now,tat) + interval is at most
+-- now + burst + interval = now + window. The 2× window TTL therefore always
+-- outlives the cell's own TAT (the cell never points more than one window into
+-- the future) while still letting idle keys evict so the dict stays bounded.
 local function window_exceeded(dict, dict_key, win)
     if not win then return false end
     local now = ngx.now()
@@ -181,20 +187,38 @@ local function window_exceeded(dict, dict_key, win)
     return true
 end
 
+-- Bound a key fragment to a safe length for lua_shared_dict keys (a long URI or
+-- User-Agent must not blow the dict's key-size limit or silently fail set/add).
+-- Anything over 64 bytes is replaced by its md5 hex — collisions are negligible
+-- for rate accounting and the length becomes fixed.
+local function bound(s)
+    if #s > 64 then return ngx.md5(s) end
+    return s
+end
+
 -- rate_scan_urls: count UNIQUE URLs per IP per window. GCRA models request rate,
--- not set cardinality, so this is a fixed-window unique counter instead: a
--- per-(window,ip,uri) marker added with the window TTL fires :add() only the
--- first time that URL is seen in the window, and each first-sight bumps a
--- per-(window,ip) counter. Exceeded when the counter passes the threshold.
--- Fixed-window (not sliding) is acceptable for the observe-only stand.
+-- not set cardinality, so this is a fixed-window unique counter instead.
+--
+-- Keys are bucketed by floor(now/window): both the per-URL marker and the
+-- per-IP counter carry the same bucket number, so each window generation has a
+-- distinct key namespace. That is what keeps the marker and counter lifetimes
+-- consistent — a marker lingering from an earlier bucket cannot suppress
+-- counting in the next one (its key no longer matches), and within a bucket the
+-- counter is created on the first unique URL and lives 2× the window, well
+-- beyond every marker added in that same bucket. The marker fires :add() only
+-- the first time a URL is seen in the bucket; each first-sight bumps the
+-- counter. Exceeded when the counter passes the threshold. Fixed-window (not
+-- sliding) with the usual boundary doubling is acceptable for the observe-only
+-- stand.
 local function scan_window_exceeded(dict, ip, uri, win)
     if not win then return false end
-    local seen_key = "su:" .. win.seconds .. ":" .. ip .. ":" .. (uri or "")
-    -- :add succeeds only if the marker is absent → first sight of this URL.
-    local added = dict:add(seen_key, true, win.seconds)
+    local bucket = math.floor(ngx.now() / win.seconds)
+    local pfx    = "su:" .. win.seconds .. ":" .. bucket .. ":" .. ip
+    local ttl    = win.seconds * 2
+    local added  = dict:add(pfx .. ":" .. bound(uri or ""), true, ttl)
     if not added then return false end
-    local cnt_key = "sc:" .. win.seconds .. ":" .. ip
-    local n = dict:incr(cnt_key, 1, 0, win.seconds)
+    local cnt_key = "sc:" .. win.seconds .. ":" .. bucket .. ":" .. ip
+    local n = dict:incr(cnt_key, 1, 0, ttl)
     return (n or 0) > win.limit
 end
 
@@ -220,16 +244,21 @@ function _M.run()
     for _, p in ipairs(_M.profiles) do
         local fire = false
 
+        -- Both windows are evaluated every request (no `or` short-circuit): each
+        -- window keeps its own cell/counter and must advance independently, else
+        -- tripping the 10s window would stop the 60s window from tracking.
         if p.kind == "scan" then
-            fire = scan_window_exceeded(dict, ip, uri, p.w10)
-                or scan_window_exceeded(dict, ip, uri, p.w60)
+            local f10 = scan_window_exceeded(dict, ip, uri, p.w10)
+            local f60 = scan_window_exceeded(dict, ip, uri, p.w60)
+            fire = f10 or f60
         else
             -- rate_api only counts on API paths; skip it elsewhere.
             if not (p.api_only and not is_api) then
                 local material = (p.key == "ip_ua") and (ip .. "\0" .. ua) or ip
-                local base = p.rule .. ":" .. material
-                fire = window_exceeded(dict, base .. ":10", p.w10)
-                    or window_exceeded(dict, base .. ":60", p.w60)
+                local base = p.rule .. ":" .. bound(material)
+                local f10 = window_exceeded(dict, base .. ":10", p.w10)
+                local f60 = window_exceeded(dict, base .. ":60", p.w60)
+                fire = f10 or f60
             end
         end
 
