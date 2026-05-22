@@ -58,12 +58,11 @@ local verdict
 if cached == "block" or cached == "allow" then
     verdict = cached
 else
-    -- §A1 read: the blocklist is keyed `fp .. ":" .. gen`, where `gen` is the
-    -- generation the catalog pull (§В1) last published in ngx.shared.meta. On
-    -- the stand there is no pull yet, so init.lua seeds generation 0 and gen
-    -- stays 0; reading through the generation key keeps this forward-compatible
-    -- with the pull bumping it (task 86exmk08u) without touching this path.
-    local gen = fp_state.sync(ngx.shared.meta:get("fp_blocklist_gen") or 0)
+    -- §A1 read: pin the generation the catalog pull (§В1) last published, then
+    -- look up under `fp:gen`. No pull on the stand yet, so gen stays at the 0
+    -- init.lua seeds — the key still resolves and the path needs no change once
+    -- the pull starts bumping it.
+    local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
     verdict = ngx.shared.fp_blocklist:get(fp_state.key(fp, gen)) or "allow"
     cache:set(fp, verdict, 60)
 end

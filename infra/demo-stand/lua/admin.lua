@@ -4,6 +4,7 @@
 -- reviewer eyeball the pipeline without learning Prometheus query syntax.
 
 local recent   = require "recent"
+local fp_state = require "fp_blocklist_state"
 local m        = ngx.shared.metrics
 local fp_dict  = ngx.shared.fp_blocklist
 
@@ -23,14 +24,14 @@ local hit_ratio = (hits + misses) > 0
 local block_pct = requests > 0
     and string.format("%.2f%%", 100 * blocks / requests) or "0%"
 
--- Blocklist keys are `fp .. ":" .. gen`; keep only entries in the current
--- generation and strip the suffix so the reviewer sees bare fingerprints.
-local cur_gen = ngx.shared.meta:get("fp_blocklist_gen") or 0
-local gen_suffix = ":" .. cur_gen
+-- Blocklist keys are `fp .. ":" .. gen`; keep only the current generation and
+-- show bare fingerprints (fp_state.match strips the suffix).
+local cur_gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
 local blocklist_keys = {}
 for _, key in ipairs(fp_dict:get_keys(50)) do
-    if key:sub(-#gen_suffix) == gen_suffix then
-        blocklist_keys[#blocklist_keys + 1] = key:sub(1, -#gen_suffix - 1)
+    local fp = fp_state.match(key, cur_gen)
+    if fp then
+        blocklist_keys[#blocklist_keys + 1] = fp
     end
 end
 local blocklist_n    = #blocklist_keys

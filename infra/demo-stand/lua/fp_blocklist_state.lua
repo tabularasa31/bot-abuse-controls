@@ -1,38 +1,28 @@
--- Per-worker generation cursor for the tls_fp blocklist catalog.
+-- Key format for the tls_fp blocklist shared_dict: `fp .. ":" .. gen`.
 --
--- Modelled on §A2's `ua_blacklist_state` (docs/architecture/edge-lua-vs-sidecar.md):
--- a `require`'d module table is cached per worker, so `_M.gen` is stable
--- across requests on the same worker and we can mutate it in place.
---
--- The blocklist shared_dict is keyed by `fp .. ":" .. gen` (§A1 read /
--- §В1 atomic write). Keying by generation lets the catalog pull swap the
--- whole set atomically — it writes the new generation's keys, flips
--- `meta:fp_blocklist_gen`, then drops the old generation — so every reader
--- moves to the new catalog at once without a per-key race.
---
--- On the demo stand there is no Channel C pull yet (that is task 86exmk08u):
--- init.lua seeds the static blocklist under generation 0 and publishes
--- `fp_blocklist_gen = 0`, so `gen` stays 0 until the pull lands. Reading
--- through the generation key today keeps the request path forward-compatible
--- with the pull bumping it to 1+ with no verdict.lua change.
+-- Keying by generation lets a catalog swap (§В1) write the new generation,
+-- flip meta:fp_blocklist_gen, then drop the old one — readers move to the new
+-- set atomically without a per-key race. This module is the single owner of
+-- that format so the §A1 read (verdict.lua), the static seed (init.lua) and
+-- the /__admin view never drift.
 
-local _M = { gen = 0 }
+local _M = {}
 
--- Pure key builder shared by the §A1 read (verdict.lua) and the static seed
--- (init.lua) so both sides always agree on the format.
+-- meta shared_dict key holding the current generation.
+_M.META_GEN_KEY = "fp_blocklist_gen"
+
 function _M.key(fp, gen)
     return fp .. ":" .. gen
 end
 
--- Advance the per-worker cursor to the generation currently published in
--- ngx.shared.meta by the catalog pull (§В1). Returns the generation to use
--- for this request's lookup. The shared_dict read happens in the caller; this
--- keeps the cursor as the single place that tracks generation transitions.
-function _M.sync(cur_gen)
-    if _M.gen ~= cur_gen then
-        _M.gen = cur_gen
+-- Inverse of key(): if `key` belongs to generation `gen` return the bare fp,
+-- else nil. Used by the /__admin view and the §В1 pull's old-generation sweep.
+function _M.match(key, gen)
+    local suffix = ":" .. gen
+    if key:sub(-#suffix) == suffix then
+        return key:sub(1, -#suffix - 1)
     end
-    return cur_gen
+    return nil
 end
 
 return _M

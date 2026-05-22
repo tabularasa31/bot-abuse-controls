@@ -38,25 +38,21 @@ check(fp_state.key("xy", 3) == fp_state.key("xy", 3), true,
     "key() is deterministic for equal inputs")
 
 -- ===========================================================================
--- sync() — advances the per-worker cursor and returns the generation to use.
+-- match() — inverse of key(): bare fp when the key is in `gen`, else nil.
 -- ===========================================================================
 
-check(fp_state.gen, 0, "cursor starts at generation 0")
+check(fp_state.match("abc:0", 0), "abc", "match() strips the suffix in-gen")
+check(fp_state.match(fp_state.key("t13d:weird", 3), 3), "t13d:weird",
+    "match() round-trips a fp that itself contains a colon")
+check(fp_state.match("abc:0", 1), nil, "match() returns nil for a stale gen")
+check(fp_state.match("abc:10", 1), nil,
+    "match() is not fooled by a gen prefix (10 vs 1)")
 
-check(fp_state.sync(0), 0, "sync(0) returns 0 (no pull yet — stand steady state)")
-check(fp_state.gen, 0, "cursor stays 0 when generation is unchanged")
+-- ===========================================================================
+-- META_GEN_KEY — the meta shared_dict key, shared by every reader/writer.
+-- ===========================================================================
 
-check(fp_state.sync(5), 5, "sync() returns the new generation")
-check(fp_state.gen, 5, "cursor advances to the pulled generation")
-
-check(fp_state.sync(5), 5, "sync() is idempotent on a repeated generation")
-check(fp_state.gen, 5, "cursor unchanged on a repeated generation")
-
--- A reader that pinned gen 5 must look up under gen 5, not the new one — but a
--- fresh sync moves the worker forward.
-check(fp_state.sync(6), 6, "sync() advances again on the next bump")
-check(fp_state.key("abc", fp_state.gen), "abc:6",
-    "key() uses the advanced cursor after sync()")
+check(fp_state.META_GEN_KEY, "fp_blocklist_gen", "META_GEN_KEY is stable")
 
 -- ===========================================================================
 

@@ -7,6 +7,8 @@
 -- is intentionally simple — a few counters plus a derived gauge — so a
 -- reviewer can read it and understand what's being measured.
 
+local fp_state = require "fp_blocklist_state"
+
 local m = ngx.shared.metrics
 
 local function get(key) return m:get(key) or 0 end
@@ -65,7 +67,7 @@ antibot_fp_unique %d
     misses,
     cache_hit_ratio,
     get("blocklist_entries"),
-    ngx.shared.meta:get("fp_blocklist_gen") or 0,
+    ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0,
     uptime,
     get("fp_unique")))
 

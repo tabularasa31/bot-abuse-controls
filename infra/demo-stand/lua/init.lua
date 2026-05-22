@@ -59,7 +59,7 @@ for _, entry in ipairs(config.tls_fp_blocklist) do
 end
 -- Publish the generation last (after the keys exist), matching §В1's
 -- write-then-flip order so a reader never resolves to a gen with no keys.
-ngx.shared.meta:set("fp_blocklist_gen", 0)
+ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").
