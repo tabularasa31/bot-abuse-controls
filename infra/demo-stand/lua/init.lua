@@ -104,6 +104,17 @@ for _, key in ipairs({
     "cache_hit_total",
     "cache_miss_total",
     "fp_unique",
+    -- Known soft flags + informational tags, primed so /metrics shows them at
+    -- zero from the first scrape (stable schema) instead of only after the
+    -- first match. log_event.lua increments these per request; metrics.lua
+    -- discovers them from the dict. New flag/tag codes still appear lazily.
+    "flag:tls_fp_impersonator",
+    "flag:tls_fp_suspicious_ciphers",
+    "tag:tls_fp:automation_ua",
+    "tag:tls_fp:no_sni",
+    "tag:tls_fp:dc_browser",
+    "tag:reputation:asn_dc",
+    "tag:hygiene:header_anomaly",
 }) do
     metrics:safe_add(key, 0)
 end

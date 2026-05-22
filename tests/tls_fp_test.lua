@@ -42,6 +42,9 @@ check(tls_fp.classify_ua(CURL),    "other",   "classify_ua curl → other")
 check(tls_fp.classify_ua(PYREQ),   "other",   "classify_ua python-requests → other")
 check(tls_fp.classify_ua(""),      "other",   "classify_ua empty → other")
 check(tls_fp.classify_ua(nil),     "other",   "classify_ua nil → other")
+-- Case-insensitive: a spoof that lowercases the tokens must not slip to "other".
+check(tls_fp.classify_ua("mozilla/5.0 chrome/148.0.0.0 safari/537.36"), "chrome",
+    "classify_ua lowercased Chrome spoof → chrome (no evasion)")
 
 -- ===========================================================================
 -- is_automation_ua — tls_fp:automation_ua tag heuristic
@@ -61,6 +64,8 @@ check(tls_fp.is_automation_ua(""),     false, "automation_ua empty → false")
 local FP = "L13d15h2_a8b9c0d1e2f3_4d5e6f7a8b9c"
 check(tls_fp.hash_b(FP),       "a8b9c0d1e2f3", "hash_b extracts middle segment")
 check(tls_fp.hash_b("garbage"), nil,           "hash_b malformed → nil")
+check(tls_fp.hash_b("L13d15h2_a8b9c0d1e2f3_c_d_e"), "a8b9c0d1e2f3",
+    "hash_b tolerates extra trailing segments")
 check(tls_fp.hash_b(nil),       nil,           "hash_b nil → nil")
 check(tls_fp.cipher_count(FP),  15,            "cipher_count from prefix")
 check(tls_fp.cipher_count("L13d11h2_x_y"), 11, "cipher_count 11")

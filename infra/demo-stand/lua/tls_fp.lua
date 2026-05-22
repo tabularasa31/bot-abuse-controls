@@ -84,18 +84,21 @@ local AUTOMATION_MARKERS = {
 -- pure: classify a UA into a browser family or "other". Order matters because
 -- browser UA tokens nest: Edge carries "Chrome" and "Safari"; Chrome carries
 -- "Safari". Check the most specific marker first.
---   Edge   : Edg/ (desktop), EdgA/ (android), EdgiOS/ (ios)
---   Chrome : Chrome/ (desktop/android), CriOS/ (ios) — and not Edge
---   Firefox: Firefox/, FxiOS/ (ios)
---   Safari : Safari/ + Version/ — and not Chrome (genuine Safari has no Chrome)
+--   Edge   : edg/ (desktop), edga/ (android), edgios/ (ios)
+--   Chrome : chrome/ (desktop/android), crios/ (ios) — and not Edge
+--   Firefox: firefox/, fxios/ (ios)
+--   Safari : safari/ + version/ — and not Chrome (genuine Safari has no Chrome)
+-- Matched against the lowercased UA (like is_automation_ua), so a spoof that
+-- lowercases the tokens still classifies and can't slip past the soft rules.
 function _M.classify_ua(ua)
     if type(ua) ~= "string" or ua == "" then return "other" end
-    local function has(s) return ua:find(s, 1, true) ~= nil end
+    local low = ua:lower()
+    local function has(s) return low:find(s, 1, true) ~= nil end
 
-    if has("Edg/") or has("EdgA/") or has("EdgiOS/") then return "edge" end
-    if has("Chrome/") or has("CriOS/") then return "chrome" end
-    if has("Firefox/") or has("FxiOS/") then return "firefox" end
-    if has("Safari/") and has("Version/") then return "safari" end
+    if has("edg/") or has("edga/") or has("edgios/") then return "edge" end
+    if has("chrome/") or has("crios/") then return "chrome" end
+    if has("firefox/") or has("fxios/") then return "firefox" end
+    if has("safari/") and has("version/") then return "safari" end
     return "other"
 end
 
@@ -110,18 +113,21 @@ function _M.is_automation_ua(ua)
 end
 
 -- pure: extract hash_b (the sorted-cipher hash) from an fp string. Layout
--- (ja4_compute.lua): "L<prefix>_<hash_b>_<hash_c>". Returns nil for a
+-- (ja4_compute.lua): "L<prefix>_<hash_b>_<hash_c>". Anchored only on the
+-- second underscore-delimited segment, not the whole string, so it keeps
+-- working if the fp ever grows trailing segments. Returns nil for a
 -- malformed/absent fp so callers fall through without a catalog lookup.
 function _M.hash_b(fp)
     if type(fp) ~= "string" then return nil end
-    return fp:match("^[^_]+_([^_]+)_[^_]+$")
+    return fp:match("^[^_]+_([^_]+)_")
 end
 
 -- pure: cipher_count from the fp prefix "L<ver><sni><cipher_cnt><alpn>_…"
--- (same parse as bac_log.set_tls_fp). Returns a number or nil.
+-- (same parse as bac_log.set_tls_fp). Matches only as far as the cipher-count
+-- digits so it tolerates changes to the alpn suffix. Returns a number or nil.
 function _M.cipher_count(fp)
     if type(fp) ~= "string" then return nil end
-    local cc = fp:match("^L%d%d[di](%d%d).._")
+    local cc = fp:match("^L%d%d[di](%d%d)")
     return cc and tonumber(cc) or nil
 end
 
