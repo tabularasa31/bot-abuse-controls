@@ -61,13 +61,11 @@ hygiene.run()
 -- Last-writer-wins: a later tls_fp block overwrites the reputation verdict.
 reputation.run()
 
--- The tls_fp stage as a whole (fp compute + blocklist block-path + soft rules +
--- tags) is gated by its per-stage kill-switch (A12). When killed, fp is not
--- computed, the blocklist is not consulted (no 403), no tls_fp:* tags / soft
--- flags / tls_* log fields are written — but the rest of the cascade keeps
--- running. fp stays nil, so rate_limit.run below sees an unusable fp and skips
--- the rate_tls_fp profile gracefully (A10) while the per-IP / per-IP+UA
--- profiles still apply.
+-- Per-stage kill-switch for tls_fp (A12). This gate covers the fp compute +
+-- blocklist block-path that live inline here (not in tls_fp.lua, which gates
+-- its own soft rules via _M.enabled). When killed, fp stays nil — which is the
+-- same "fp not computed" signal rate_limit.run treats as a graceful skip of the
+-- rate_tls_fp profile (A10), so the per-IP profiles keep working.
 local fp
 if config.stage_enabled(config.defaults, "tls_fp") then
     fp = ja4.compute()
