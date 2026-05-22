@@ -255,9 +255,10 @@ function _M.run(fp)
     end
     -- dc_browser: browser-shaped fp (L3) + datacenter ASN (L2). reputation.lua
     -- ran earlier in the cascade and added reputation:asn_dc when the IP's ASN
-    -- is in asn_datacenters.conf.
-    if _M.fp_looks_like_browser(cc, _M.profiles)
-       and _M.has_tag(ctx.tags, "reputation:asn_dc") then
+    -- is in asn_datacenters.conf. Check the cheap asn_dc tag FIRST so the
+    -- (rare) DC case is the only one that pays for the profile scan.
+    if _M.has_tag(ctx.tags, "reputation:asn_dc")
+       and _M.fp_looks_like_browser(cc, _M.profiles) then
         bac_log.add_tag("tls_fp:dc_browser")
     end
 
@@ -265,7 +266,10 @@ function _M.run(fp)
     -- signals). impersonator is evaluated first, so suspicious_ciphers wins the
     -- terminal `rule` when both fire — `rule` is the last/terminal rule, the
     -- full set lives in `flags`.
-    if _M.is_impersonator(ua_family, _M.hash_b(fp), _M.catalog) then
+    -- Only parse hash_b for a browser-family UA — is_impersonator rejects
+    -- non-browser UAs anyway, so the common case skips the string.match.
+    local hb = BROWSER_FAMILIES[ua_family] and _M.hash_b(fp) or nil
+    if _M.is_impersonator(ua_family, hb, _M.catalog) then
         fire_soft(bac_log, ctx, "tls_fp_impersonator")
     end
     if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles) then
