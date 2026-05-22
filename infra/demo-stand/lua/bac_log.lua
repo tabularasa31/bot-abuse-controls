@@ -10,7 +10,8 @@
 -- its three sub-columns (tls_cipher_count, tls_alpn, tls_sni_present,
 -- parsed from the fp prefix in set_tls_fp) are emitted; the stand's daily
 -- analyzer keys on them. The `flags` array (soft-rule challenge flags,
--- vision.md v0.5 Step 7) ships as a stable [] until soft rules land (A9).
+-- vision.md v0.5 Step 7) is populated by the tls_fp soft rules (A9) and
+-- stays a stable [] when none fire.
 -- The Phase 2/3 optional fields (rule_source, client_rule_name) still land
 -- with their own tasks, without renaming or reordering these keys.
 
@@ -74,7 +75,7 @@ function _M.init()
         verdict       = "pass",
         rule          = nil,
         tags          = tags,
-        flags         = flags,                   -- soft-rule challenge flags; stays [] until soft rules land (A9)
+        flags         = flags,                   -- soft-rule challenge flags (A9 tls_fp); [] when none fire
         staging_match = staging_match,           -- populated once staged catalogs land (A11)
         asn           = nil,                     -- filled by reputation stage (A6)
         geo_country   = nil,                     -- filled by reputation stage (A6)
@@ -118,8 +119,8 @@ end
 -- accumulate across stages independently of the terminal verdict/rule:
 -- the cascade short-circuits only on a blocking/allow rule, while soft
 -- flags seen along the way are all kept for analytics (vision.md Step 7).
--- No-op producer in Phase 1 — soft rules arrive with A9; the field still
--- ships as a stable [] so the sink schema is forward-compatible.
+-- Producers: the tls_fp soft rules (A9, tls_fp.lua). The field stays a
+-- stable [] when no soft rule fires, so the sink schema is unchanged.
 function _M.add_flag(flag)
     local ctx = ngx.ctx.bac
     if not ctx then return end

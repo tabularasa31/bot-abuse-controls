@@ -29,6 +29,13 @@ local reputation, rep_wl, rep_bl = require("reputation").build(config)
 -- TAT state). Returns the active profile count for the startup log.
 local _, rate_n = require("rate_limit").build(config)
 
+-- Compile the L3 tls_fp soft-rule stage (hash_b → automation-family catalog +
+-- browser cipher-count profiles from the loaded config) — also in the master
+-- so workers inherit the lookup tables on fork (see tls_fp.lua). The blocking
+-- half (tls_fp_blocklist) is seeded separately below. Returns active entry
+-- counts for the startup log.
+local _, tls_cat_n, tls_prof_n = require("tls_fp").build(config)
+
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
 -- libmaxminddb) are absent the stand still starts and geo is simply
@@ -82,6 +89,9 @@ ngx.log(ngx.NOTICE, "[demo] reputation matchers: ip_whitelist=", rep_wl,
     " (geo_blocklist dormant — per-resource policy source is Phase 3)")
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
+ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,
+    " active, browser_profiles=", tls_prof_n,
+    " active (impersonator/suspicious_ciphers → verdict=challenge, observe-only)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
