@@ -32,31 +32,32 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-antibot} -d ${POSTGRES_DB:-antibot}"]
-      interval: 10s
+      interval: 3s
       timeout: 3s
       retries: 5
+      start_period: 5s
     restart: unless-stopped
 
+  # The pair the real Go backend ([B2]/[B15]) replaces. They depend on Postgres
+  # so the topology matches the real service even though the placeholder image
+  # doesn't touch the DB.
   backend-1:
-    image: nginx:alpine
+    image: &backend_image nginx:alpine
     container_name: antibot-backend-1
     hostname: backend-1
-    depends_on:
+    depends_on: &backend_depends
       postgres:
         condition: service_healthy
-    volumes:
+    volumes: &backend_volumes
       - ./nginx/backend.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
 
   backend-2:
-    image: nginx:alpine
+    image: *backend_image
     container_name: antibot-backend-2
     hostname: backend-2
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./nginx/backend.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: *backend_depends
+    volumes: *backend_volumes
     restart: unless-stopped
 
   # Small LB / TLS front, per config-distribution §HA ("DNS round-robin or a
@@ -67,8 +68,10 @@ services:
     depends_on:
       - backend-1
       - backend-2
+    # DEMO_BIND_IP mirrors demo-stand: set it to a per-stack IP when sharing a VM
+    # so this :443 doesn't clash with the demo-stand's own :443.
     ports:
-      - "443:443"
+      - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
     volumes:
       - ./nginx/lb.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/certs:ro

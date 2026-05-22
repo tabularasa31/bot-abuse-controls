@@ -26,8 +26,10 @@ else
     bad "pg_isready — Postgres not accepting connections"
 fi
 
+CURL=(curl -sk --connect-timeout 3 --max-time 5)
+
 echo "2. Edge -> backend HTTPS path (:443)"
-code="$(curl -sk -o /dev/null -w '%{http_code}' "https://${HOST}/health" || echo 000)"
+code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health" || echo 000)"
 if [ "${code}" = "200" ]; then
     pass "GET https://${HOST}/health -> 200"
 else
@@ -35,8 +37,8 @@ else
 fi
 
 echo "3. HA round-robin across backend instances"
-seen="$(for _ in 1 2 3 4; do
-    curl -sk "https://${HOST}/health" 2>/dev/null \
+seen="$(for _ in 1 2 3 4 5 6 7 8; do
+    "${CURL[@]}" "https://${HOST}/health" 2>/dev/null \
         | grep -o '"instance":"[^"]*"' || true
 done | sort -u | wc -l | tr -d ' ')"
 if [ "${seen}" -ge 2 ]; then

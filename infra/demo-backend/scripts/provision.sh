@@ -58,4 +58,15 @@ fi
 log "starting Postgres + HA backend pair + TLS LB"
 docker compose -f "${COMPOSE_FILE}" up -d
 
+# `up -d` returns once containers start, not once nginx serves. Wait for the LB
+# to actually answer so a verify.sh run straight after doesn't race startup.
+log "waiting for the LB to serve HTTPS"
+for _ in $(seq 1 15); do
+    if curl -sk --connect-timeout 2 --max-time 3 -o /dev/null \
+            "https://localhost/health"; then
+        break
+    fi
+    sleep 1
+done
+
 log "done. Verify with: ${HERE}/verify.sh"

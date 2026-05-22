@@ -77,4 +77,6 @@ distribution §Auth) — the directives are present but commented in
 ## Secrets
 
 `.env` and `certs/` are gitignored. `provision.sh` generates a random
-`POSTGRES_PASSWORD` and a self-signed cert on first run; never commit either.
+`POSTGRES_PASSWORD` and a self-signed cert (`certs/{fullchain,privkey}.pem`, same
+naming as demo-stand so a certbot deploy-hook can refresh it) on first run; never
+commit either.
