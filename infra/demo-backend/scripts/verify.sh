@@ -17,19 +17,34 @@ fail=0
 
 pass() { printf '  [ok]   %s\n' "$*"; }
 bad()  { printf '  [FAIL] %s\n' "$*"; fail=1; }
+skip() { printf '  [skip] %s\n' "$*"; }
+
+# Strip any :port so the host part can be matched against the local names.
+host_only="${HOST%%:*}"
 
 echo "1. PostgreSQL reachable"
-if docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        pg_isready -U "${POSTGRES_USER:-antibot}" >/dev/null 2>&1; then
-    pass "pg_isready"
-else
-    bad "pg_isready — Postgres not accepting connections"
-fi
+case "${host_only}" in
+    localhost | 127.0.0.1 | ::1)
+        # The Postgres check uses the local compose stack, so it only makes sense
+        # on the backend host itself. When verifying the HTTPS path from a remote
+        # edge VM (BACKEND_HOST set to a real host), there is no local stack to
+        # exec into — run this step on the backend host instead.
+        if docker compose -f "${COMPOSE_FILE}" exec -T postgres \
+                pg_isready -U "${POSTGRES_USER:-antibot}" -d "${POSTGRES_DB:-antibot}" >/dev/null 2>&1; then
+            pass "pg_isready"
+        else
+            bad "pg_isready — Postgres not accepting connections"
+        fi
+        ;;
+    *)
+        skip "remote host ${host_only} — run step 1 on the backend host"
+        ;;
+esac
 
 CURL=(curl -sk --connect-timeout 3 --max-time 5)
 
 echo "2. Edge -> backend HTTPS path (:443)"
-code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health" || echo 000)"
+code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
 if [ "${code}" = "200" ]; then
     pass "GET https://${HOST}/health -> 200"
 else
