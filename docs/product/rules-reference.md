@@ -1,8 +1,8 @@
 # Bot & Abuse Controls — каталог всех правил каскада
 
-Полный перечень правил в формате «**Если** условие → **то** вердикт», по порядку прохождения слоёв L1→L5. Источник правды по поведению — [vision.md](vision.md); этот документ — плоский справочник «что на что срабатывает».
+Полный перечень правил в формате «Если условие → то вердикт», по порядку прохождения слоев L1→L5. Источник правды по поведению — [vision.md](vision.md); этот документ — плоский справочник «что на что срабатывает».
 
-**Как читать.** Каждое правило эмитит один из вердиктов: `block` / `allow` / `challenge` / `permissive` / (или ничего — для тегов). Категория правила (blocking / allow / soft) задаёт, какой вердикт оно даёт. Поведение по фазам (когда вердикт физически исполняется) зафиксировано в спеках Phase 1/2.
+**Как читать.** Каждое правило эмитит один из вердиктов: `block` / `allow` / `challenge` / `permissive` / (или ничего — для тегов). Категория правила (blocking / allow / soft) задает, какой вердикт оно дает. Поведение по фазам (когда вердикт физически исполняется) зафиксировано в спеках Phase 1/2.
 
 Обозначения:
 
@@ -14,31 +14,31 @@
 
 ## L1 — Hygiene (этап `hygiene`)
 
-Базовая гигиена запроса. Дешёвые проверки, первыми.
+Базовая гигиена запроса. Дешевые проверки, первыми.
 
 
 | #   | Если…                                                                                                                                                                                                                        | То…                                                                  | Категория | Источник                                                      | Phase   |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | --------- | ------------------------------------------------------------- | ------- |
-| 1   | HTTP-метод запроса **не** в whitelist (по умолчанию `GET`, `HEAD`, `POST`, `OPTIONS`) — например `TRACE`, `PUT`, `DELETE`                                                                                                    | `verdict=block, rule=method_not_allowed`                             | blocking  | Конфиг каскада (`defaults.conf`)                              | Phase 1 |
-| 2   | User-Agent запроса совпадает с паттерном глобального `ua_blacklist` (автоматизация, сканеры, известные плохие боты)                                                                                                          | `verdict=block, rule=ua_blacklist` (поле `rule_source=system`)       | blocking  | Каталог `ua_blacklist` (**пуст в Phase 1/2**, наполняется PR) | Phase 1 |
-| 2a  | User-Agent совпадает с **кастомным** паттерном клиента (клиент добавил свои строки/регулярки в дашборде; тоггл «Block known bad bots» включает применение глобального списка к ресурсу + textarea для собственных паттернов) | `verdict=block, rule=ua_blacklist` (поле `rule_source=per_resource`) | blocking  | Каталог `policy` (custom-паттерны клиента)                    | Phase 3 |
+| 1   | HTTP-метод запроса не в whitelist (по умолчанию `GET`, `HEAD`, `POST`, `OPTIONS`) — например `TRACE`, `PUT`, `DELETE`                                                                                                    | `verdict=block, rule=method_not_allowed`                             | blocking  | Конфиг каскада (`defaults.conf`)                              | Phase 1 |
+| 2   | User-Agent запроса совпадает с паттерном глобального `ua_blacklist` (автоматизация, сканеры, известные плохие боты)                                                                                                          | `verdict=block, rule=ua_blacklist` (поле `rule_source=system`)       | blocking  | Каталог `ua_blacklist` (пуст в Phase 1/2, наполняется PR) | Phase 1 |
+| 2a  | User-Agent совпадает с кастомным паттерном клиента (клиент добавил свои строки/регулярки в дашборде; тоггл «Block known bad bots» включает применение глобального списка к ресурсу + textarea для собственных паттернов) | `verdict=block, rule=ua_blacklist` (поле `rule_source=per_resource`) | blocking  | Каталог `policy` (custom-паттерны клиента)                    | Phase 3 |
 
 
 ---
 
 ## L2 — Reputation (этап `reputation`)
 
-Репутация источника. Здесь же — пассивные allow-правила (фастпас), которые прекращают каскад досрочно.
+Репутация источника. Здесь же — allow-правила (фастпас). `bot_verified` и `ip_whitelist` дают полный фастпас (skip L3/L4/L5). `cookie_valid` — частичный: пропускает L3 и L5, но L4 (rate-limits) применяется.
 
 ### Allow-правила (фастпас, проверяются первыми)
 
 
 | #   | Если…                                                                                                                                                                | То…                                                                                                                            | Категория | Источник                                                    | Phase                                        |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------- | ----------------------------------------------------------- | -------------------------------------------- |
-| 3   | У запроса есть cookie `tf_clearance` с валидной HMAC-подписью и не истёкшим TTL **И** для этого host'a `attack_mode=off`                                             | `verdict=allow, rule=cookie_valid` — фастпас, остальные слои пропускаются                                                      | allow     | HMAC secret (Channel A) + Lua-проверка                      | Phase 4                                      |
+| 3   | У запроса есть cookie `tf_clearance` с валидной HMAC-подписью и не истекшим TTL И для этого host'a `attack_mode=off`                                             | Пропускает L3 и L5, но НЕ L4 (rate-limits применяются). Если на L4 чисто → `verdict=allow, rule=cookie_valid`; иначе выигрывает правило L4                                                      | allow     | HMAC secret (Channel A) + Lua-проверка                      | Phase 4                                      |
 | 4   | IP запроса есть в каталоге `bot_verification_status` со статусом `verified` (rDNS подтвердил поисковый бот)                                                          | `verdict=allow, rule=bot_verified` — фастпас                                                                                   | allow     | Каталог `bot_verification_status` (rDNS-воркер)             | Phase 3                                      |
-| 5   | UA запроса похож на поискового бота (Googlebot/bingbot/YandexBot/DuckDuckBot), но IP **отсутствует** в каталоге `bot_verification_status` (ни verified, ни rejected) | `verdict=allow, rule=bot_verified_pending` — provisional фастпас на КАЖДЫЙ запрос, пока backend не опубликует финальный статус | allow     | Каталог `bot_verification_status` (через отсутствие записи) | Phase 3                                      |
-| 6   | IP запроса есть в системном `ip_whitelist` (мониторинг, чек-сервисы) **ИЛИ** в per-resource IP-whitelist клиента (`policy[host].ip_whitelist`)                       | `verdict=allow, rule=ip_whitelist` (поле `rule_source` = `system` или `per_resource`) — фастпас                                | allow     | Каталог `ip_whitelist` + `policy`                           | Phase 1 (системный) / Phase 3 (per-resource) |
+| 5   | UA запроса похож на поискового бота (Googlebot/bingbot/YandexBot/DuckDuckBot), но IP отсутствует в каталоге `bot_verification_status` (ни verified, ни rejected) | `verdict=allow, rule=bot_verified_pending` — provisional фастпас на КАЖДЫЙ запрос, пока backend не опубликует финальный статус | allow     | Каталог `bot_verification_status` (через отсутствие записи) | Phase 3                                      |
+| 6   | IP запроса есть в системном `ip_whitelist` (мониторинг, чек-сервисы) ИЛИ в per-resource IP-whitelist клиента (`policy[host].ip_whitelist`)                       | `verdict=allow, rule=ip_whitelist` (поле `rule_source` = `system` или `per_resource`) — фастпас                                | allow     | Каталог `ip_whitelist` + `policy`                           | Phase 1 (системный) / Phase 3 (per-resource) |
 
 
 ### Blocking-правила
@@ -46,9 +46,9 @@
 
 | #   | Если…                                                                                                                      | То…                                 | Категория | Источник                                                    | Phase                                        |
 | --- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | --------- | ----------------------------------------------------------- | -------------------------------------------- |
-| 7   | IP запроса есть в каталоге `ip_blocklist`                                                                                  | `verdict=block, rule=ip_blocklist`  | blocking  | Каталог `ip_blocklist` (**пуст на старте**, наполняется PR) | Phase 1                                      |
+| 7   | IP запроса есть в каталоге `ip_blocklist`                                                                                  | `verdict=block, rule=ip_blocklist`  | blocking  | Каталог `ip_blocklist` (пуст на старте, наполняется PR) | Phase 1                                      |
 | 8   | ASN запроса есть в per-resource ASN-блоке клиента (`policy[host].asn_block`)                                               | `verdict=block, rule=asn_customer`  | blocking  | Каталог `policy`                                            | Phase 3                                      |
-| 9   | Страна запроса (по MaxMind GeoIP) **не входит** в per-resource whitelist разрешённых стран клиента (если клиент его задал) | `verdict=block, rule=geo_blocklist` | blocking  | `policy` + MaxMind GeoIP                                    | Phase 1 (системный) / Phase 3 (per-resource) |
+| 9   | Страна запроса (по MaxMind GeoIP) не входит в per-resource whitelist разрешенных стран клиента (если клиент его задал) | `verdict=block, rule=geo_blocklist` | blocking  | `policy` + MaxMind GeoIP                                    | Phase 1 (системный) / Phase 3 (per-resource) |
 
 
 ---
@@ -60,7 +60,7 @@
 
 | #   | Если…                                                                                                                                                                   | То…                                                                    | Категория | Источник                                                            | Phase   |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------- | ------------------------------------------------------------------- | ------- |
-| 10  | Вычисленный TLS-fp запроса есть в каталоге `tls_fp_blocklist`                                                                                                           | `verdict=block, rule=tls_fp_blocklist`                                 | blocking  | Каталог `tls_fp_blocklist` (**пуст на старте**, PR, staged rollout) | Phase 2 |
+| 10  | Вычисленный TLS-fp запроса есть в каталоге `tls_fp_blocklist`                                                                                                           | `verdict=block, rule=tls_fp_blocklist`                                 | blocking  | Каталог `tls_fp_blocklist` (пуст на старте, PR, staged rollout) | Phase 2 |
 | 11  | UA-семейство утверждает одно (например, Chrome), но `hash_b` TLS-fp совпадает с известной сигнатурой автоматизации (curl/python-requests/Go/okhttp) из `tls_fp_catalog` | накапливает challenge-flag `tls_fp_impersonator` (решение на L5)       | soft      | Каталог `tls_fp_catalog` (PR, staged rollout)                       | Phase 2 |
 | 12  | UA похож на браузер, но `cipher_cnt` TLS-fp не совпадает с ожидаемым для этого семейства браузера (`tls_fp_browser_profiles`: chrome=15, firefox=16, safari=20)         | накапливает challenge-flag `tls_fp_suspicious_ciphers` (решение на L5) | soft      | Каталог `tls_fp_browser_profiles` (PR, staged rollout)              | Phase 2 |
 
@@ -69,7 +69,7 @@
 
 ## L4 — Rate-limits (этап `rate_limits`)
 
-Поведенческие лимиты. **Сначала проверяются клиентские правила, потом системные** — первое совпадение выигрывает.
+Поведенческие лимиты. Сначала проверяются клиентские правила, потом системные — первое совпадение выигрывает.
 
 ### Клиентские правила (проверяются ПЕРВЫМИ)
 
@@ -86,11 +86,11 @@
 
 | #   | Если…                                                                                                    | То…                                  | Категория | Источник                | Phase   |
 | --- | -------------------------------------------------------------------------------------------------------- | ------------------------------------ | --------- | ----------------------- | ------- |
-| 14  | С одного IP за 10с > 100 запросов **ИЛИ** за 60с > 600 запросов                                          | `verdict=block, rule=rate_ip`        | blocking  | Локальные счётчики edge | Phase 1 |
-| 15  | С одной пары IP+UA за 10с > 100 **ИЛИ** за 60с > 600 запросов                                            | `verdict=block, rule=rate_ip_ua`     | blocking  | Локальные счётчики edge | Phase 1 |
-| 16  | С одного IP на API-путях (паттерны из `defaults.conf`) за 10с > 50 **ИЛИ** за 60с > 300 запросов         | `verdict=block, rule=rate_api`       | blocking  | Локальные счётчики edge | Phase 1 |
-| 17  | С одного TLS-fp за 10с > 50 **ИЛИ** за 60с > 300 запросов (если fp вычислен; иначе правило пропускается) | `verdict=block, rule=rate_tls_fp`    | blocking  | Локальные счётчики edge | Phase 2 |
-| 18  | С одного IP за 10с > 50 **ИЛИ** за 60с > 200 уникальных URL (индикатор скрейпинга)                       | `verdict=block, rule=rate_scan_urls` | blocking  | Локальные счётчики edge | Phase 1 |
+| 14  | С одного IP за 10с > 100 запросов ИЛИ за 60с > 600 запросов                                          | `verdict=block, rule=rate_ip`        | blocking  | Локальные счетчики proxy | Phase 1 |
+| 15  | С одной пары IP+UA за 10с > 100 ИЛИ за 60с > 600 запросов                                            | `verdict=block, rule=rate_ip_ua`     | blocking  | Локальные счетчики proxy | Phase 1 |
+| 16  | С одного IP на API-путях (паттерны из `defaults.conf`) за 10с > 50 ИЛИ за 60с > 300 запросов         | `verdict=block, rule=rate_api`       | blocking  | Локальные счетчики proxy | Phase 1 |
+| 17  | С одного TLS-fp за 10с > 50 ИЛИ за 60с > 300 запросов (если fp вычислен; иначе правило пропускается) | `verdict=block, rule=rate_tls_fp`    | blocking  | Локальные счетчики proxy | Phase 2 |
+| 18  | С одного IP за 10с > 50 ИЛИ за 60с > 200 уникальных URL (индикатор скрейпинга)                       | `verdict=block, rule=rate_scan_urls` | blocking  | Локальные счетчики proxy | Phase 1 |
 
 
 ---
@@ -101,48 +101,48 @@
 
 ### `should_challenge()` — вычисляемая функция, не конфиг-флаг
 
-Это **не** записанное где-то значение и не отдельный тоггл. Это функция, которую L5 **вычисляет** на каждый запрос из трёх входов: `attack_mode[host]` + набор накопленных challenge-flags + `Strictness[host]` (с учётом типа флага — системный vs клиентское правило). Сами флаги на L3/L4 challenge **не выдают** — они только помечают запрос; единственная точка, где принимается решение «выдавать верификацию или нет» — этот вызов на L5.
+Это не записанное где-то значение и не отдельный тоггл. Это функция, которую L5 вычисляет на каждый запрос из трех входов: `attack_mode[host]` + набор накопленных challenge-flags + `Strictness[host]` (с учетом типа флага — системный vs клиентское правило). Сами флаги на L3/L4 challenge не выдают — они только помечают запрос; единственная точка, где принимается решение «выдавать верификацию или нет» — этот вызов на L5.
 
-`**should_challenge()` возвращает `true`, если выполнено любое из:**
+`should_challenge()` возвращает `true`, если выполнено любое из:
 
 
 | Вход                                   | Условие → `true`                                                                                                                                                        |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `attack_mode`                          | `attack_mode[host]=on` → `true` для **любого** запроса, дошедшего до L5, независимо от флагов и Strictness                                                              |
-| Системные challenge-flags + Strictness | Накоплен хотя бы один системный flag (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, L4 системные rate-rules с action=challenge) **И** `Strictness[host]=Standard` |
-| Клиентское rate-rule                   | Сработало клиентское rate-rule с `action=challenge` — **всегда** `true`, даже при `Strictness=Permissive` (явная настройка клиента уважается)                           |
+| `attack_mode`                          | `attack_mode[host]=on` → `true` для любого запроса, дошедшего до L5, независимо от флагов и Strictness                                                              |
+| Системные challenge-flags + Strictness | Накоплен хотя бы один системный flag (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, L4 системные rate-rules с action=challenge) И `Strictness[host]=Standard` |
+| Клиентское rate-rule                   | Сработало клиентское rate-rule с `action=challenge` — всегда `true`, даже при `Strictness=Permissive` (явная настройка клиента уважается)                           |
 
 
-`**should_challenge()` возвращает `false`, если:**
+`should_challenge()` возвращает `false`, если:
 
 
 | Вход               | Условие → `false`                                                                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Permissive подавил | Накоплены **только системные** flags **И** `Strictness[host]=Permissive` → `false`, в лог `verdict=permissive, rule=<имя последнего soft-флага>` |
-| Нет повода         | Challenge-flags не накоплены **И** `attack_mode=off` → `false`, `verdict=pass`                                                                   |
+| Permissive подавил | Накоплены только системные flags И `Strictness[host]=Permissive` → `false`, в лог `verdict=permissive, rule=<имя последнего soft-флага>` |
+| Нет повода         | Challenge-flags не накоплены И `attack_mode=off` → `false`, `verdict=pass`                                                                   |
 
 
-### Что происходит дальше (Шаг 5.1 → 5.2)
+### Что происходит дальше (Этап 5.1 → 5.2)
 
-- `should_challenge()=false` → `verdict=pass` или `verdict=permissive` (см. выше), запрос идёт дальше в prod-edge-flow.
+- `should_challenge()=false` → `verdict=pass` или `verdict=permissive` (см. выше), запрос идет дальше в prod-edge-flow.
 - `should_challenge()=true` → разводка по веткам A/B/C по типу клиента (ниже).
 
-### Ветки выдачи (Шаг 5.2), когда `should_challenge()=true`
+### Ветки выдачи (Этап 5.2), когда `should_challenge()=true`
 
 
 | #   | Если…                                                                                                                               | То…                                                               | Категория | Phase   |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------- | ------- |
-| 19  | Клиент похож на браузер (UA Mozilla/Chrome/Safari/Firefox/Edge + базовые header-проверки)                                           | **Ветка A:** `verdict=challenge` — выдаётся JS challenge-страница | —         | Phase 4 |
-| 20  | Клиент **не** браузер (UA curl/python/Go/SDK или нет стандартных browser-заголовков)                                                | **Ветка B:** `verdict=block, rule=non_browser_blocked`            | blocking  | Phase 4 |
+| 19  | Клиент похож на браузер (UA Mozilla/Chrome/Safari/Firefox/Edge + базовые header-проверки)                                           | **Ветка A:** `verdict=challenge` — выдается JS challenge-страница | —         | Phase 4 |
+| 20  | Клиент не браузер (UA curl/python/Go/SDK или нет стандартных browser-заголовков)                                                | **Ветка B:** `verdict=block, rule=non_browser_blocked`            | blocking  | Phase 4 |
 | 21  | Запрос протокольно несовместим с JS challenge: метод не GET, WebSocket-upgrade, `Accept` без `text/html` (UA может быть браузерным) | **Ветка C:** `verdict=block, rule=unchallengeable_request`        | blocking  | Phase 4 |
 
 
-### Under Attack mode (Шаг 5.3)
+### Under Attack mode (Этап 5.3)
 
 
 | Если…                       | То…                                                                                                                                                                                                  |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `attack_mode=on` для host'a | Cookie verify на L2.1 пропускается (заранее выданные cookie не фастпасят); verified-bot и IP-whitelist продолжают фастпасить; всё, что дошло до L5 → ветки A/B/C; новые cookie выписываются с TTL=1ч |
+| `attack_mode=on` для host'a | Cookie verify на L2.1: cookie, выданные до начала атаки, не фастпасят (выданные во время атаки — фастпасят); verified-bot и IP-whitelist продолжают фастпасить; все, что дошло до L5 → ветки A/B/C; новые cookie выписываются с TTL=1ч |
 
 
 ---
@@ -154,7 +154,7 @@
 
 | #   | Если…                                                                            | То тег…                | Где | Источник                  | Phase   |
 | --- | -------------------------------------------------------------------------------- | ---------------------- | --- | ------------------------- | ------- |
-| T0  | Комбинация заголовков, которую не шлёт настоящий браузер, но шлёт ленивая автоматизация (базовый случай: HTTP/2 без `Accept`) | `hygiene:header_anomaly` | L1 | Проверка заголовков в Lua | Phase 1 |
+| T0  | Комбинация заголовков, которую не шлет настоящий браузер, но шлет ленивая автоматизация (базовый случай: HTTP/2 без `Accept`) | `hygiene:header_anomaly` | L1 | Проверка заголовков в Lua | Phase 1 |
 | T1  | IP запроса из ASN крупного публичного датацентра (Hetzner/OVH/DO/AWS/GCP/Azure)  | `reputation:asn_dc`    | L2  | Каталог `asn_datacenters` | Phase 1 |
 | T2  | UA содержит явные признаки автоматизации (curl/python-requests и т.п.)           | `tls_fp:automation_ua` | L3  | Lua-проверка UA           | Phase 2 |
 | T3  | Клиент не прислал SNI в TLS-handshake                                            | `tls_fp:no_sni`        | L3  | TLS handshake data        | Phase 2 |

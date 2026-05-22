@@ -45,7 +45,7 @@ rules:
   blocking:
     method_not_allowed:
       stage: hygiene
-      source: built-in              # хардкод в коде edge
+      source: built-in              # хардкод в коде proxy
 
     ua_blacklist:
       stage: hygiene
@@ -114,12 +114,16 @@ rules:
     cookie_valid:                     # Phase 4+, не lookup, а HMAC verify
       stage: reputation
       source: built-in                # Lua-логика
+      # ВАЖНО: cookie_valid — ЧАСТИЧНЫЙ фастпас. Пропускает L3 (tls_fp) и L5 (verification),
+      # но НЕ L4: rate-limits применяются к держателю cookie. verdict=allow,rule=cookie_valid
+      # выставляется, только если L4 чист; иначе выигрывает сработавшее правило L4.
+      # Полный фастпас (skip L3/L4/L5) — только у bot_verified и ip_whitelist.
       cookie_name: tf_clearance
       secret_source: challenge_secret # см. отдельный файл
       ttl_seconds_normal: 86400       # 24 часа — обычный режим
       ttl_seconds_under_attack: 3600  # 1 час — при attack_mode=on
       # Значения TTL — системные константы, общие для всего пула; клиент в дашборде их не настраивает.
-      # Выбор per-request на L5: edge смотрит attack_mode ИМЕННО для того host'a, на который пришел запрос.
+      # Выбор per-request на L5: proxy смотрит attack_mode ИМЕННО для того host'a, на который пришел запрос.
       #   attack_mode[host]=on  → выписывает cookie с ttl_under_attack
       #   attack_mode[host]=off → выписывает cookie с ttl_normal
       # Включение attack_mode у одного клиента не затрагивает TTL cookie других клиентов:
@@ -219,11 +223,11 @@ kill_switch:
 # Пустой на старте. PR для добавления, обязательно через staged rollout (см. ниже).
 
 # Формат:
-# <ip-or-cidr>  status=staging|active  added=<date>  reason=<short>  pr=<link>
+# <ip-or-cidr>  status=staging|active  reason=<short>
 
 # Примеры (после первых PR):
-# 203.0.113.42  status=active   added=2026-06-01  reason=brute-force /login  pr=#42
-# 198.51.100.0/24  status=staging  added=2026-06-15  reason=scanner-pattern  pr=#71
+# 203.0.113.42  status=active  reason=brute-force /login
+# 198.51.100.0/24  status=staging  reason=scanner-pattern
 ```
 
 **Staged rollout:** новые IP сначала добавляются с `status=staging` — матчатся, пишутся в `staging_match` лога, но не блокируют. После 24-48ч анализа FP-rate (отсутствие срабатываний на легитимном трафике) — отдельный PR с переводом в `status=active`.
@@ -239,14 +243,14 @@ kill_switch:
 # Пустой на старте. PR для добавления, обязательно через staged rollout.
 
 # Формат:
-# <regex-pattern>  status=staging|active  added=<date>  reason=<short>  pr=<link>
+# <regex-pattern>  status=staging|active  reason=<short>
 
 # Примеры (после первых PR):
-# (?i)\bsqlmap/[\d\.]+   status=active   added=2026-06-01  reason=SQL-scanner   pr=#48
-# (?i)\bAhrefsBot\b      status=staging  added=2026-06-15  reason=SEO-crawler-competitor  pr=#80
+# (?i)\bsqlmap/[\d\.]+   status=active  reason=SQL-scanner
+# (?i)\bAhrefsBot\b      status=staging  reason=SEO-crawler-competitor
 ```
 
-**Подсказка по составлению:** на стороне backend паттерны склеиваются в один combined regex для O(1)-матчинга на edge. Формат на стороне backend.
+**Подсказка по составлению:** на стороне backend паттерны склеиваются в один combined regex для O(1)-матчинга на proxy. Формат на стороне backend.
 
 ---
 
@@ -292,11 +296,11 @@ kill_switch:
 # Пустой на старте. PR для добавления, через staged rollout.
 
 # Формат:
-# <fp-string>  status=staging|active  added=<date>  reason=<short>  pr=<link>
+# <fp-string>  status=staging|active  reason=<short>
 
 # Примеры (после первых PR):
-# L12d11h1_abc123def456_xyz789  status=active   added=2026-07-01  reason=scrapy-3.x  pr=#94
-# L13d15h2_qweasdzxc987_lmnopq  status=staging  added=2026-07-15  reason=newly-seen-pattern  pr=#102
+# L12d11h1_abc123def456_xyz789  status=active  reason=scrapy-3.x
+# L13d15h2_qweasdzxc987_lmnopq  status=staging  reason=newly-seen-pattern
 ```
 
 ---
@@ -313,21 +317,15 @@ kill_switch:
 # hash_b: <12-hex-chars>
 # family: <name>
 # status: staging | active
-# added: <date>
-# pr: <link>
 
 entries:
   # - hash_b: 1ed0482b9b4c
   #   family: python-requests
   #   status: active
-  #   added: 2026-07-01
-  #   pr: '#96'
 
   # - hash_b: a1b2c3d4e5f6
   #   family: curl
   #   status: staging
-  #   added: 2026-07-20
-  #   pr: '#108'
 ```
 
 ---
@@ -353,7 +351,7 @@ profiles:
     expected_cipher_cnt: 20
     status: active
 
-  edge:
+  proxy:
     expected_cipher_cnt: 15           # обычно совпадает с Chrome
     status: active
 ```
@@ -367,7 +365,7 @@ profiles:
 Не файл со списком — это одна строка секрета. Доставляется через Puppet (Channel A) как env-переменная или защищенный файл. Один общий для всего edge-пула.
 
 ```bash
-# Пример доставки через env (на edge при старте nginx):
+# Пример доставки через env (на proxy при старте nginx):
 # CHALLENGE_HMAC_SECRET=<32-bytes-base64-encoded-random-string>
 
 # Или через файл (Puppet хранит content шифрованно):
@@ -385,11 +383,11 @@ profiles:
 
 ## 10. `policy/<host>.yaml` — per-resource policy (Phase 3+)
 
-**Не хранится на edge как файл** — приходит из backend через Channel C как часть каталога `policy`. Каталог = map `host → policy_json`. Здесь — структура одной записи в map'е для информации.
+**Не хранится на proxy как файл** — приходит из backend через Channel C как часть каталога `policy`. Каталог = map `host → policy_json`. Здесь — структура одной записи в map'е для информации.
 
 ```yaml
 # Пример per-resource policy для одного домена
-# Формат внутри каталога backend; на edge приходит как часть policy катaлога
+# Формат внутри каталога backend; на proxy приходит как часть policy катaлога
 
 example.com:
   mode: active                       # shadow | active
@@ -447,10 +445,10 @@ example.com:
 Для всех каталогов с `status` field (ua_blacklist, ip_blocklist, tls_fp_blocklist, tls_fp_catalog, tls_fp_browser_profiles):
 
 1. **Новые паттерны/записи всегда добавляются с `status: staging`.**
-2. Период наблюдения — **минимум 24 часа** после доставки на edge (что-то более коротковременное не даст репрезентативной выборки).
+2. Период наблюдения — минимум 24 часа после доставки на proxy (что-то более коротковременное не даст репрезентативной выборки).
 3. После наблюдения — отдельный PR с переводом `status: staging` → `status: active`.
 4. Если в `staging`-периоде паттерн дал false-positive — revert исходного PR (не оставляем в staging, чтобы не накапливать «забытые» записи).
 
-Промоут паттерна — это отдельный, осознанный шаг, не автоматический.
+Промоут паттерна — это отдельный, осознанный этап, не автоматический.
 
 ---
