@@ -7,10 +7,12 @@
 -- сработавшее правило" the schema asks for.
 --
 -- Forward-compatibility: the field set and enums are stable. `tls_fp` is
--- emitted (the stand's daily analyzer keys on it). The remaining Phase 2
--- TLS columns (tls_cipher_count, tls_alpn, tls_sni_present) and the Phase
--- 2/3 optional fields (rule_source, client_rule_name) still land with
--- their own tasks, without renaming or reordering these keys.
+-- emitted (the stand's daily analyzer keys on it). The `flags` array
+-- (soft-rule challenge flags, vision.md v0.5 Step 7) ships as a stable []
+-- until soft rules land (A9). The remaining Phase 2 TLS columns
+-- (tls_cipher_count, tls_alpn, tls_sni_present) and the Phase 2/3 optional
+-- fields (rule_source, client_rule_name) still land with their own tasks,
+-- without renaming or reordering these keys.
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt + null sentinels
@@ -59,6 +61,7 @@ function _M.init()
     -- Force empty arrays to encode as JSON [] rather than an object {}.
     local tags = setmetatable({}, cjson_base.empty_array_mt)
     local staging_match = setmetatable({}, cjson_base.empty_array_mt)
+    local flags = setmetatable({}, cjson_base.empty_array_mt)
 
     -- NB: resource_id is intentionally NOT set here. The edge works from
     -- Host only; the backend enriches the record with resource_id from
@@ -71,6 +74,7 @@ function _M.init()
         verdict       = "pass",
         rule          = nil,
         tags          = tags,
+        flags         = flags,                   -- soft-rule challenge flags; stays [] until soft rules land (A9)
         staging_match = staging_match,           -- populated once staged catalogs land (A11)
         asn           = nil,                     -- filled by reputation stage (A6)
         geo_country   = nil,                     -- filled by reputation stage (A6)
@@ -105,6 +109,18 @@ function _M.add_tag(tag)
     local ctx = ngx.ctx.bac
     if not ctx then return end
     ctx.tags[#ctx.tags + 1] = tag
+end
+
+-- Append a soft-rule challenge flag (e.g. tls_fp_impersonator). Flags
+-- accumulate across stages independently of the terminal verdict/rule:
+-- the cascade short-circuits only on a blocking/allow rule, while soft
+-- flags seen along the way are all kept for analytics (vision.md Step 7).
+-- No-op producer in Phase 1 — soft rules arrive with A9; the field still
+-- ships as a stable [] so the sink schema is forward-compatible.
+function _M.add_flag(flag)
+    local ctx = ngx.ctx.bac
+    if not ctx then return end
+    ctx.flags[#ctx.flags + 1] = flag
 end
 
 -- Record a staged-catalog pattern that matched but did not affect the
@@ -182,6 +198,7 @@ function _M.emit()
         mode          = MODE,
         latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
         tags          = ctx.tags,
+        flags         = ctx.flags,
         staging_match = ctx.staging_match,
     }
 
