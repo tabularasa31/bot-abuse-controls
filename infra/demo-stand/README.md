@@ -164,11 +164,23 @@ location, so it tracks `main` like everything else:
 0 8 * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/daily-report.sh >> /home/ubuntu/abuse-controls/state/cron.log 2>&1
 ```
 
-Addresses live in `infra/demo-stand/.env` (gitignored, same file as
-`DEMO_BIND_IP`) — neither is committed. Set `REPORT_FROM=<sender>` (must
-match the authenticated msmtp account) and `REPORT_TO=<routine mailbox>`;
-`daily-report.sh` sources that `.env`. `REPORT_TO` falls back to
-`REPORT_FROM`; the run aborts if neither is set.
+Report addresses live in their **own** gitignored file
+`infra/demo-stand/.env.report` — deliberately separate from `.env` so the
+quickstart's `> .env` (which rewrites `.env` from scratch on redeploy)
+can't drop them. Set `REPORT_FROM=<sender>` (must match the authenticated
+msmtp account) and `REPORT_TO=<routine mailbox>` there:
+
+```sh
+cat > infra/demo-stand/.env.report <<'EOT'
+REPORT_FROM=sender@example.com
+REPORT_TO=recipient@example.com
+EOT
+```
+
+`daily-report.sh` sources `.env` then `.env.report` (the latter wins).
+`REPORT_TO` falls back to `REPORT_FROM`; the run aborts if neither is set.
+Legacy deploys that still keep `REPORT_*` in `.env` keep working, but move
+them to `.env.report` so a redeploy doesn't lose them.
 
 Scoring: impersonator +3 · suspicious cipher count +2 · automation UA +1
 · multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 days +1 · recon URI +1.
