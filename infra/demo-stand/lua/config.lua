@@ -40,6 +40,20 @@ end
 -- defaults.conf's INI syntax so the same true/false coercion applies.
 local KILL_SWITCH_LOCAL = "kill_switch.local.conf"
 
+-- Take an override value only when it coerced to a boolean. A typo
+-- (`tls_fp = on`) leaves the parser with a non-boolean, and the kill checks
+-- below test `== true`, so it would silently fail to kill — dangerous on an
+-- emergency lever edited under incident pressure. We keep the baseline and log
+-- loudly instead of swallowing the typo.
+local function apply_toggle(dst, key, v, where)
+    if type(v) == "boolean" then
+        dst[key] = v
+    else
+        ngx.log(ngx.ERR, "config: ignoring non-boolean ", where,
+            " in ", KILL_SWITCH_LOCAL, " (got ", type(v), "); baseline kept")
+    end
+end
+
 local function overlay_kill_switch(defaults)
     local parsed = loader.parse_ini(path(KILL_SWITCH_LOCAL))
     if not parsed then return end
@@ -51,12 +65,12 @@ local function overlay_kill_switch(defaults)
 
     if type(ks.global) == "table" and ks.global.enabled ~= nil then
         dst.global = dst.global or {}
-        dst.global.enabled = ks.global.enabled
+        apply_toggle(dst.global, "enabled", ks.global.enabled, "global.enabled")
     end
     if type(ks.per_stage) == "table" then
         dst.per_stage = dst.per_stage or {}
         for stage, v in pairs(ks.per_stage) do
-            dst.per_stage[stage] = v
+            apply_toggle(dst.per_stage, stage, v, "per_stage." .. stage)
         end
     end
 end
