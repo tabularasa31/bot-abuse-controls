@@ -67,6 +67,20 @@ fi
 
 if [ "$recreate" = "1" ]; then
   echo "$(date -Is) image/compose inputs changed — rebuilding + recreating ${SERVICE}"
+  # Recreating the container drops its docker-json log history, which is where
+  # the BAC_LOG request stream lives (analyze.py reads it via `docker logs`).
+  # Snapshot that stream to a host file first so a rebuild deploy does not lose
+  # accumulated data. Best-effort: a not-yet-created container or empty log just
+  # leaves no archive. (Durable persistence is the telemetry-sink task, B9.)
+  ARCHIVE_DIR="state/bac-archive"
+  mkdir -p "$ARCHIVE_DIR"
+  archive="${ARCHIVE_DIR}/$(date +%Y%m%dT%H%M%S)-${head:0:7}.log"
+  if docker compose -f "$COMPOSE_FILE" logs --no-log-prefix "$SERVICE" \
+       > "$archive" 2>/dev/null && [ -s "$archive" ]; then
+    echo "$(date -Is) archived pre-recreate logs -> $archive"
+  else
+    rm -f "$archive"
+  fi
   # `up -d --build` rebuilds the image and recreates the service only when its
   # definition or image changed. init_by_lua re-runs on the fresh container; a
   # bad config makes `up` exit non-zero, so the marker is not advanced and the
