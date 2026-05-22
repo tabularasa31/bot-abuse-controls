@@ -12,11 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run ja4_helpers unit tests
+      - name: Run unit tests
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
             openresty/openresty:alpine \
-            luajit tests/ja4_helpers_test.lua
+            sh -c "luajit tests/ja4_helpers_test.lua && \
+                   luajit tests/hygiene_test.lua && \
+                   luajit tests/reputation_test.lua && \
+                   luajit tests/rate_limit_test.lua && \
+                   luajit tests/fp_blocklist_state_test.lua"
 
   lint-lua:
     name: Lint Lua (luacheck)

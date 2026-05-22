@@ -24,6 +24,7 @@ local bac_log    = require "bac_log"
 local hygiene    = require "hygiene"
 local reputation = require "reputation"
 local rate_limit = require "rate_limit"
+local fp_state   = require "fp_blocklist_state"
 
 bac_log.init()
 
@@ -57,7 +58,13 @@ local verdict
 if cached == "block" or cached == "allow" then
     verdict = cached
 else
-    verdict = ngx.shared.fp_blocklist:get(fp) or "allow"
+    -- §A1 read: the blocklist is keyed `fp .. ":" .. gen`, where `gen` is the
+    -- generation the catalog pull (§В1) last published in ngx.shared.meta. On
+    -- the stand there is no pull yet, so init.lua seeds generation 0 and gen
+    -- stays 0; reading through the generation key keeps this forward-compatible
+    -- with the pull bumping it (task 86exmk08u) without touching this path.
+    local gen = fp_state.sync(ngx.shared.meta:get("fp_blocklist_gen") or 0)
+    verdict = ngx.shared.fp_blocklist:get(fp_state.key(fp, gen)) or "allow"
     cache:set(fp, verdict, 60)
 end
 

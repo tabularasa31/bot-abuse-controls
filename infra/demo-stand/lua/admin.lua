@@ -3,7 +3,7 @@
 -- recent requests, and the blocklist contents. No mutation surface. Lets a
 -- reviewer eyeball the pipeline without learning Prometheus query syntax.
 
-local recent  = require "recent"
+local recent   = require "recent"
 local m        = ngx.shared.metrics
 local fp_dict  = ngx.shared.fp_blocklist
 
@@ -23,7 +23,16 @@ local hit_ratio = (hits + misses) > 0
 local block_pct = requests > 0
     and string.format("%.2f%%", 100 * blocks / requests) or "0%"
 
-local blocklist_keys = fp_dict:get_keys(50)
+-- Blocklist keys are `fp .. ":" .. gen`; keep only entries in the current
+-- generation and strip the suffix so the reviewer sees bare fingerprints.
+local cur_gen = ngx.shared.meta:get("fp_blocklist_gen") or 0
+local gen_suffix = ":" .. cur_gen
+local blocklist_keys = {}
+for _, key in ipairs(fp_dict:get_keys(50)) do
+    if key:sub(-#gen_suffix) == gen_suffix then
+        blocklist_keys[#blocklist_keys + 1] = key:sub(1, -#gen_suffix - 1)
+    end
+end
 local blocklist_n    = #blocklist_keys
 local mode    = blocklist_n > 0 and "ACTIVE" or "SHADOW"
 local edge_id = os.getenv("EDGE_ID") or "stand-bac"
