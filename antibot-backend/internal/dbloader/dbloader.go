@@ -67,7 +67,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		// пул живой → соседняя реплика блокируется до того, как pgxpool
 		// отпустит коннект (MaxConnLifetime, по умолчанию час+). PR #43
 		// review (Angle B).
-		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// context.WithoutCancel: сохраняем values из родителя (трейсинг,
+		// логгер-keys), но рвём cancellation — нужно ИМЕННО чтобы
+		// canceled-родитель не задушил unlock-Exec.
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
 		_, _ = conn.Exec(releaseCtx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
 	}()
