@@ -46,26 +46,38 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/catalog/")
 	if name == "" || strings.Contains(name, "/") {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "not_found"})
 		return
 	}
 	if _, ok := knownCatalogs[name]; !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error":   "unknown_catalog",
-			"catalog": name,
-		})
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "unknown_catalog", Catalog: name})
 		return
 	}
 	// Контракт ETag/If-None-Match и тело — задача B3.
-	writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error":   "not_implemented",
-		"catalog": name,
-		"note":    "Channel C catalog body lands in B3 (HTTP+ETag) over B4 (schema)",
+	writeJSON(w, http.StatusNotImplemented, errorBody{
+		Error:   "not_implemented",
+		Catalog: name,
+		Note:    "Channel C catalog body lands in B3 (HTTP+ETag) over B4 (schema)",
 	})
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
+// errorBody — типизированное тело, чтобы json.Encode не получал `any`
+// (errchkjson по делу: канал/функция в any падает в рантайме).
+type errorBody struct {
+	Error   string `json:"error"`
+	Catalog string `json:"catalog,omitempty"`
+	Note    string `json:"note,omitempty"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, body errorBody) {
+	// json.Marshal на errorBody (только строки) не может вернуть ошибку,
+	// но errchkjson хочет явной проверки — пусть будет.
+	data, err := json.Marshal(body)
+	if err != nil {
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	_, _ = w.Write(data)
 }

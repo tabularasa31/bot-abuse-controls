@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,7 +22,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -36,11 +36,18 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := run(logger); err != nil {
+		logger.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
 
+// run возвращает ошибку вместо os.Exit, чтобы defer'ы (cancel ctx, закрытие
+// pgxpool) реально отрабатывали при ранних обломах.
+func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("config load", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("config: %w", err)
 	}
 	logger = logger.With("instance", cfg.Instance)
 	logger.Info("starting antibot-backend",
@@ -55,12 +62,10 @@ func main() {
 	// DB — опциональна на скелете. Если DSN задан и недоступна — это явная
 	// ошибка деплоя, валимся: B1-substrate гарантирует, что postgres рядом
 	// и healthy до старта backend (depends_on/condition: service_healthy).
-	var pool *pgxpool.Pool
 	if cfg.PostgresDSN != "" {
-		pool, err = db.Open(ctx, cfg.PostgresDSN)
+		pool, err := db.Open(ctx, cfg.PostgresDSN)
 		if err != nil {
-			logger.Error("postgres open", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("postgres open: %w", err)
 		}
 		defer pool.Close()
 		logger.Info("postgres connected")
@@ -69,7 +74,10 @@ func main() {
 	}
 
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", health.Handler(cfg.Instance))
@@ -106,9 +114,11 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	var runErr error
 	select {
 	case err := <-serverErr:
 		logger.Error("http server error", "err", err)
+		runErr = err
 	case sig := <-sigCh:
 		logger.Info("shutdown signal", "signal", sig.String())
 	}
@@ -121,4 +131,5 @@ func main() {
 	cancel() // останавливает rDNS-воркер
 	wg.Wait()
 	logger.Info("antibot-backend stopped")
+	return runErr
 }

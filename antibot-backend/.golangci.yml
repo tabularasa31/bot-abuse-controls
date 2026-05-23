@@ -1,18 +1,76 @@
-# Базовый набор линтеров для antibot-backend. Зеркалит то, что уже стоит
-# в репо для Lua/shell (см. .github/workflows/ci.yml): только enabled-by-default
-# + несколько проверок корректности. Стилистика и эстетика — не сюда.
+# Жёсткий, но без аэстетики набор линтеров для antibot-backend.
+# Принцип: линтер должен ловить баг (correctness, security, ресурсы), а не вкус.
+# Сознательно НЕ включены: длина/сложность функций, naming, расстановка пустых
+# строк, "одинаковые строки → константа", "нет globals/init" и т.п.
 run:
-  timeout: 3m
+  timeout: 5m
 
 linters:
   disable-all: true
   enable:
-    - errcheck     # необработанные ошибки
-    - govet        # go vet
-    - ineffassign  # неиспользованные присваивания
-    - staticcheck  # ловит SA1019 (deprecated) и пр.
-    - unused       # мёртвый код
-    - gosimple     # упрощения
-    - misspell     # опечатки в комментах
-    - bodyclose    # незакрытые HTTP body
-    - errorlint    # некорректная работа с errors.Is/As
+    # ---- baseline correctness ----
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosimple
+
+    # ---- bugs / ресурсы / контекст ----
+    - bidichk                    # Unicode-trojan source (CVE-2021-42574)
+    - bodyclose                  # незакрытый resp.Body
+    - contextcheck               # передача context, не background посреди цепочки
+    - durationcheck              # умножение time.Duration на time.Duration
+    - errchkjson                 # необработанные ошибки json.Marshal
+    - errorlint                  # ==err / type-assert вместо errors.Is/As, %w
+    - gocheckcompilerdirectives  # //go: с опечатками
+    - makezero                   # make([]T, n) с n>0 и потом append — частая ошибка
+    - nilerr                     # `return nil` после `if err != nil`
+    - noctx                      # http.NewRequest без контекста
+    - predeclared                # переменные/функции с именами builtin'ов
+    - reassign                   # переприсваивание pkg-уровневых var из stdlib
+    - rowserrcheck               # sql.Rows.Err() не проверен
+    - sqlclosecheck              # sql.Rows / sql.Stmt не закрыт
+    - unconvert                  # бесполезные приведения типов
+    - unparam                    # неиспользуемые параметры / возвращаемые значения
+    - usestdlibvars              # http.StatusOK вместо 200 и т.п.
+
+    # ---- security ----
+    - gosec                      # SQL-инъекции, weak crypto, file-perms, hardcoded creds
+
+    # ---- качество (умеренно) ----
+    - gocritic                   # большой бандл, дефолт-набор разумен
+    - misspell                   # английские опечатки
+    - nakedret                   # naked return в длинных функциях
+    - prealloc                   # слайсы с известной длиной — preallocate
+
+    # ---- формат ----
+    - gofmt
+    - gofumpt
+    - goimports
+
+linters-settings:
+  errcheck:
+    # Не требуем проверять ошибки от Write в ResponseWriter / json.NewEncoder.Encode:
+    # они приходят со сломанного коннекта, реагировать поздно и некуда.
+    exclude-functions:
+      - (net/http.ResponseWriter).Write
+      - (*encoding/json.Encoder).Encode
+  gosec:
+    excludes:
+      - G104  # дубль errcheck
+  gocritic:
+    disabled-checks:
+      - ifElseChain   # subjective
+      - singleCaseSwitch  # часто намеренно (готовим к расширению)
+  nakedret:
+    max-func-lines: 20
+  goimports:
+    local-prefixes: github.com/tabularasa31/antibot-backend
+
+issues:
+  # Не глушим ничего по умолчанию (golangci-lint глушит часть в exclude-rules
+  # для тестов — оставляем, разумно).
+  exclude-use-default: true
+  max-issues-per-linter: 0
+  max-same-issues: 0

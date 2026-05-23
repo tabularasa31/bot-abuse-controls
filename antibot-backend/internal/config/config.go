@@ -67,4 +67,3 @@ func mustHostname() string {
 	}
 	return h
 }
-
