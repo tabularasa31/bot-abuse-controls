@@ -319,6 +319,20 @@ local function read_file(path)
     return data
 end
 
+-- preload_mtls — call from init_by_lua (master, pre-privilege-drop). Reads
+-- the PEM files as root, parses to cdata, and stashes on the module. Workers
+-- forked from the master inherit `_M.parsed_cert` / `_M.parsed_key` (Lua
+-- state + OpenSSL X509 cdata pointers are COW-shared on fork). Idempotent:
+-- already-loaded material isn't re-read.
+--
+-- Why not just call from start() in init_worker: the worker phase runs after
+-- nginx drops to the configured `user` (typically nobody), at which point
+-- 0600 root-owned client keys are unreadable and mTLS silently disables.
+function _M.preload_mtls(cert_path, key_path)
+    if _M.parsed_cert and _M.parsed_key then return end
+    _M.parsed_cert, _M.parsed_key = _M.load_mtls_material(cert_path, key_path)
+end
+
 function _M.load_mtls_material(cert_path, key_path)
     if not cert_path or cert_path == "" or not key_path or key_path == "" then
         return nil, nil
@@ -373,13 +387,16 @@ function _M.start(opts)
     _M.interval            = opts.interval or 30
     local catalogs         = opts.catalogs or { "fp_blocklist" }
 
-    -- [B6] mTLS material: parse once per worker startup. Both paths must be
-    -- set (and parse cleanly) for the cdata to be attached to req_opts.
+    -- [B6] mTLS material: preferred to be preloaded by init_by_lua (so 0600
+    -- root-owned keys are readable before privilege drop). preload_mtls is
+    -- idempotent; this call is a safety net for callers that wire start()
+    -- without a preload step.
     local cert_path = opts.client_cert_path or os.getenv("ANTIBOT_BACKEND_CLIENT_CERT")
     local key_path  = opts.client_priv_key_path or os.getenv("ANTIBOT_BACKEND_CLIENT_KEY")
-    _M.parsed_cert, _M.parsed_key = _M.load_mtls_material(cert_path, key_path)
+    _M.preload_mtls(cert_path, key_path)
     if _M.parsed_cert and _M.parsed_key then
-        ngx.log(ngx.NOTICE, "catalog_pull: mTLS client cert loaded from ", cert_path)
+        ngx.log(ngx.NOTICE, "catalog_pull: mTLS client cert active",
+            cert_path and (" (cert=" .. cert_path .. ")") or "")
     end
 
     if not _M.http_module then

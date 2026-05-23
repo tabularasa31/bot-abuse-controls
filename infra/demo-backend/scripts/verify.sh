@@ -39,6 +39,15 @@ skip() { printf '  [skip] %s\n' "$*"; }
 # Strip any :port so the host part can be matched against the local names.
 host_only="${HOST%%:*}"
 
+# [B6] AUTH_MODE — pick up from .env if not set in the environment, so that
+# AUTH_MODE in .env (which actually drives the LB at compose-up) is the
+# source of truth and we don't mis-verify a stack that's already on mtls
+# with the ip-allowlist default. Env > .env > hardcoded default.
+if [ -z "${AUTH_MODE:-}" ] && [ -f "${ROOT}/.env" ]; then
+    AUTH_MODE="$(grep -E '^AUTH_MODE=' "${ROOT}/.env" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+fi
+AUTH_MODE="${AUTH_MODE:-ip-allowlist}"
+
 echo "1. PostgreSQL reachable"
 case "${host_only}" in
     localhost | 127.0.0.1 | ::1)
@@ -58,7 +67,20 @@ case "${host_only}" in
         ;;
 esac
 
+# [B6] When the LB runs AUTH_MODE=mtls, EVERY check (#2–#6) must present a
+# client cert — otherwise nginx rejects with 400 No required SSL certificate
+# and the rest of verify.sh reports false failures (codex review). The "no
+# cert" negative path in #7 uses a separate bare-curl invocation.
 CURL=(curl -sk --connect-timeout 3 --max-time 5)
+if [ "${AUTH_MODE}" = "mtls" ]; then
+    cert="${ROOT}/certs/edge-client.crt"
+    key="${ROOT}/certs/edge-client.key"
+    if [ -f "${cert}" ] && [ -f "${key}" ]; then
+        CURL+=(--cert "${cert}" --key "${key}")
+    else
+        echo "WARN: AUTH_MODE=mtls but ${cert}/${key} missing — run scripts/gen-certs.sh" >&2
+    fi
+fi
 
 echo "2. Edge -> backend HTTPS path (:443)"
 code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
@@ -111,9 +133,8 @@ else
     bad "antibot_backend_rdns_ticks_total missing from /metrics"
 fi
 
-echo "7. Channel C auth (AUTH_MODE=${AUTH_MODE:-ip-allowlist})"
-auth_mode="${AUTH_MODE:-ip-allowlist}"
-case "${auth_mode}" in
+echo "7. Channel C auth (AUTH_MODE=${AUTH_MODE})"
+case "${AUTH_MODE}" in
     ip-allowlist)
         # Loopback is in auth/allow.list.example by default — happy path.
         code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
@@ -159,35 +180,31 @@ case "${auth_mode}" in
         esac
         ;;
     mtls)
-        cert="${ROOT}/certs/edge-client.crt"
-        key="${ROOT}/certs/edge-client.key"
-        # Negative path: no client cert → nginx rejects (400 No required SSL cert,
-        # or curl exits non-zero on handshake). We accept either.
-        code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
+        # Negative path: use a BARE curl (no --cert/--key) — even though CURL
+        # is mtls-augmented above for checks #2–#6, here we explicitly probe
+        # the "no client cert" case. nginx rejects with 400 No required SSL
+        # certificate; OpenSSL may also fail the handshake → curl exit non-zero.
+        code="$(curl -sk --connect-timeout 3 --max-time 5 \
+            -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
         if [ "${code}" = "400" ] || [ "${code}" = "000" ] || [ "${code}" = "496" ]; then
             pass "no client cert rejected (code=${code})"
         else
             bad "no client cert accepted with code=${code} (expected 400/000/496)"
         fi
-        # Happy path: present edge-client.{crt,key}.
-        if [ -f "${cert}" ] && [ -f "${key}" ]; then
-            code="$(curl -sk --connect-timeout 3 --max-time 5 \
-                --cert "${cert}" --key "${key}" \
-                -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
-            if [ "${code}" = "200" ]; then
-                pass "edge-client cert accepted (${code})"
-            else
-                bad "edge-client cert rejected (${code})"
-            fi
+        # Happy path: the augmented ${CURL[@]} already carries --cert/--key
+        # (set up at the top when AUTH_MODE=mtls), so reuse it.
+        code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
+        if [ "${code}" = "200" ]; then
+            pass "edge-client cert accepted (${code})"
         else
-            skip "edge-client.{crt,key} missing — run scripts/gen-certs.sh"
+            bad "edge-client cert rejected (${code})"
         fi
         ;;
     off)
         skip "AUTH_MODE=off — no auth check (debug only, not for any reachable deploy)"
         ;;
     *)
-        bad "unknown AUTH_MODE=${auth_mode}; expected mtls|ip-allowlist|off"
+        bad "unknown AUTH_MODE=${AUTH_MODE}; expected mtls|ip-allowlist|off"
         ;;
 esac
 

@@ -44,6 +44,16 @@ local tls_fp, tls_cat_n, tls_prof_n, tls_stg_cat_n, tls_stg_prof_n, tls_stg_bl_n
 -- and the geo_country/asn log fields (A6).
 require("geoip").init()
 
+-- [B6] Channel C mTLS client cert — parse in the master (pre-privilege-drop)
+-- so 0600 root-owned PEMs are readable. Workers inherit the parsed cdata on
+-- fork, so catalog_pull.fetch() in init_worker_by_lua never re-opens the file
+-- (codex review: workers run as nobody and can't read 0600 root keys).
+-- Both paths must be set + parse cleanly; otherwise mTLS stays disabled and
+-- catalog_pull falls into the existing fail-stale path.
+require("catalog_pull").preload_mtls(
+    os.getenv("ANTIBOT_BACKEND_CLIENT_CERT"),
+    os.getenv("ANTIBOT_BACKEND_CLIENT_KEY"))
+
 -- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging — staged fps match-but-don't-block
 -- and are held in tls_fp.blocklist_staging (recorded into staging_match by the
