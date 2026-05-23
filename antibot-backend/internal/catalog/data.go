@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -125,6 +126,44 @@ func LoadYAML(path string) (*Data, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return d, nil
+}
+
+// normalize приводит Data к каноничному виду: сортирует все срезы (для
+// детерминизма payload'а и стабильности ETag) и дедуплицирует ASN'ы.
+// Вызывается один раз при загрузке (LoadYAML) и в Store.Replace — на
+// hot-path build*-функции читают уже подготовленные данные.
+func normalize(d *Data) {
+	sortStrings(d.UABlacklist)
+	sortStrings(d.IPWhitelist)
+	d.ASNDatacenters = dedupSortUint32(d.ASNDatacenters)
+	for h, p := range d.Policy {
+		sortStrings(p.UABlacklist)
+		sortStrings(p.IPWhitelist)
+		sortStrings(p.IPBlocklist)
+		sortStrings(p.GeoWhitelist)
+		p.ASNBlock = dedupSortUint32(p.ASNBlock)
+		d.Policy[h] = p
+	}
+}
+
+func sortStrings(s []string) {
+	if len(s) > 1 {
+		sort.Strings(s)
+	}
+}
+
+func dedupSortUint32(s []uint32) []uint32 {
+	if len(s) < 2 {
+		return s
+	}
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	out := s[:1]
+	for _, v := range s[1:] {
+		if v != out[len(out)-1] {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // validatePatterns прогоняет каждый regex (системный и per-resource) через

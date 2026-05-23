@@ -541,11 +541,73 @@ func TestETagMatcher(t *testing.T) {
 		{`W/"abc"`, `"abc"`, true}, // weak в запросе — допустим
 		{``, `"abc"`, false},
 		{`  "abc"  `, `"abc"`, true},
+		{`"foo,bar"`, `"foo,bar"`, true},           // запятая внутри quoted-string
+		{`"a", "foo,bar"`, `"foo,bar"`, true},      // запятая внутри второго токена
+		{`"a", "foo,bar", "c"`, `"foo,bar"`, true}, // в середине списка
+		{`"a,b", "c,d"`, `"c,d"`, true},
+		{`"esc\"ape", "other"`, `"esc\"ape"`, true}, // quoted-pair: \" не закрывает
 	}
 	for _, tc := range cases {
 		if got := etagMatches(tc.header, tc.etag); got != tc.match {
 			t.Errorf("etagMatches(%q, %q) = %v want %v", tc.header, tc.etag, got, tc.match)
 		}
+	}
+}
+
+// TestStoreNotLoaded503: до Replace Store отдаёт defaultVersion; handler
+// должен ответить 503 с Retry-After, а не "успешный" 200 с пустым телом —
+// иначе эдж перезатёр бы свой fail-stale-кэш (codex review).
+func TestStoreNotLoaded503(t *testing.T) {
+	srv := New() // без Replace
+	mux := http.NewServeMux()
+	srv.Register(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503 на эмпти-Store", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Catalog-Version"); got != defaultVersion {
+		t.Errorf("X-Catalog-Version=%q want %q", got, defaultVersion)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Errorf("Retry-After не выставлен на 503")
+	}
+
+	// После Replace тот же endpoint становится доступен.
+	srv.Store().Replace(sampleData())
+	r2 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 после Replace", r2.StatusCode)
+	}
+}
+
+// TestIfNoneMatchMultipleHeaders: клиент имеет право прислать
+// If-None-Match несколько раз; handler должен учитывать ВСЕ значения.
+func TestIfNoneMatchMultipleHeaders(t *testing.T) {
+	ts := newTestServer(t, sampleData())
+
+	r1 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	r1.Body.Close()
+	etag := r1.Header.Get("ETag")
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		ts.URL+"/catalog/fp_blocklist", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add("If-None-Match", `"deadbeef"`)
+	req.Header.Add("If-None-Match", etag) // второй заголовок с актуальным etag
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("status=%d want 304 при etag во втором If-None-Match", resp.StatusCode)
 	}
 }
 

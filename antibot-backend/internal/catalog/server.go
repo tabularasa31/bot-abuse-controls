@@ -9,6 +9,8 @@
 //   - If-None-Match: "<etag>"        — 304 без тела, если payload не менялся.
 //   - X-Catalog-Version: <semver>    — версия схемы payload (RFC §В1).
 //   - ETag: "<sha256-hex>"           — strong, content-hash.
+//   - 503 Service Unavailable        — Store пуст (никто не вызвал Replace);
+//     fail-closed, чтобы эдж не "успешно" принимал пустые катаолги.
 //
 // Хранилище — *Store (in-memory, atomic-swap). Реальный YAML/Postgres
 // загрузчик подаётся снаружи: B3 ставит in-memory + YAML, B4 заменит на pgx
@@ -17,7 +19,9 @@ package catalog
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 )
 
 // knownCatalogs — восемь каталогов из config-distribution.md §"The 'catalog'
@@ -74,33 +78,49 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// штатно отдаёт дефолт.
 	site := r.URL.Query().Get("site")
 	if len(site) > 253 {
-		// RFC 1035 §2.3.4: максимальная длина doman name — 253 октета.
+		// RFC 1035 §2.3.4: максимальная длина domain name — 253 октета.
 		writeErr(w, http.StatusBadRequest, "site_too_long", "")
 		return
 	}
 
-	snap, ok := s.store.Snapshot(name, site)
-	if !ok {
-		// Не должно случиться (имя уже в knownCatalogs), но defense-in-depth:
-		// если кто-то добавит каталог в knownCatalogs и забудет в Store —
-		// 500 заметнее в логах эджа, чем 200 с пустым телом.
-		writeErr(w, http.StatusInternalServerError, "catalog_not_built", name)
+	snap, err := s.store.Snapshot(name, site)
+	if err != nil {
+		var unk errUnknownCatalog
+		if errors.As(err, &unk) {
+			// Не должно случиться (имя уже в knownCatalogs), но defense-in-depth:
+			// если кто-то добавит каталог в knownCatalogs и забудет в Store —
+			// 500 заметнее в логах эджа, чем 200 с пустым телом.
+			writeErr(w, http.StatusInternalServerError, "catalog_not_built", name)
+			return
+		}
+		// json.Marshal на нашей форме не должен падать; если упал — лучше
+		// явный 500, чем процессовая паника (PR #42 review).
+		writeErr(w, http.StatusInternalServerError, "serialize_failed", name)
 		return
 	}
 
-	// Контракт §В1: X-Catalog-Version всегда (даже на эмпти-Store: Data
-	// заведена с defaultVersion="0.0.0", чтобы wire-форма "header present"
-	// никогда не отличалась от "header absent"), ETag всегда, тело — только
+	// Fail-closed: пустой Store (Version=defaultVersion, никто не звал
+	// Replace) → 503 Service Unavailable. Так эдж по логике fail-stale
+	// (docs/architecture/config-distribution.md §"Channel C / Failure mode")
+	// держит последний хороший каталог, а не перезаписывает его нашим
+	// "успешным" пустым ответом (codex review).
+	if snap.Version == defaultVersion {
+		w.Header().Set("X-Catalog-Version", snap.Version)
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, http.StatusServiceUnavailable, "catalog_not_loaded", name)
+		return
+	}
+
+	// Контракт §В1: X-Catalog-Version всегда, ETag всегда, тело — только
 	// если If-None-Match не совпал.
 	h := w.Header()
 	h.Set("X-Catalog-Version", snap.Version)
 	h.Set("ETag", snap.ETag)
 	// Cache-Control: эдж сам решает (timer.every(30s)), но запрещаем
-	// промежуточным прокси кэшировать — иначе at-most-once-per-edge
-	// сломается.
+	// промежуточным прокси кэшировать — иначе at-most-once-per-edge сломается.
 	h.Set("Cache-Control", "no-store")
 
-	if match := r.Header.Get("If-None-Match"); match != "" && etagMatches(match, snap.ETag) {
+	if anyETagMatches(r.Header.Values("If-None-Match"), snap.ETag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -110,27 +130,34 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(snap.Body)
 }
 
-// etagMatches реализует совпадение по RFC 7232 §3.1: If-None-Match может
-// содержать список через запятую и "*". Слабые валидаторы (W/"...") в наших
-// ответах не используются, но в запросе допустимы — для not-modified strong
-// и weak-сравнение совпадают.
+// anyETagMatches проверяет совпадение по RFC 7232 §3.2 поверх ВСЕХ значений
+// If-None-Match. Клиент имеет право прислать заголовок несколько раз
+// (http.Header.Values вернёт их раздельно) или один раз со списком через
+// запятую — поддерживаем оба случая.
+func anyETagMatches(headers []string, etag string) bool {
+	for _, h := range headers {
+		if etagMatches(h, etag) {
+			return true
+		}
+	}
+	return false
+}
+
+// etagMatches парсит один If-None-Match по RFC 7232 §3.2: список через
+// запятую, "*", опциональный prefix `W/`. Принципиально: запятая ВНУТРИ
+// quoted-string не разделяет токены — ETag `"foo,bar"` валидный. Поэтому
+// токенайзер ведёт state-машину по DQUOTE, а не slice'ит по indexByte
+// (PR #42 review).
 func etagMatches(header, etag string) bool {
-	header = trimSpace(header)
+	header = strings.TrimSpace(header)
 	if header == "*" {
 		return true
 	}
-	for len(header) > 0 {
-		var token string
-		if idx := indexByte(header, ','); idx >= 0 {
-			token = trimSpace(header[:idx])
-			header = header[idx+1:]
-		} else {
-			token = trimSpace(header)
-			header = ""
-		}
+	for _, token := range splitETagList(header) {
 		// strip W/ prefix — weak/strong сравнение для not-modified эквивалентно.
-		if len(token) >= 2 && token[0] == 'W' && token[1] == '/' {
-			token = token[2:]
+		token = strings.TrimPrefix(token, "W/")
+		if token == "" {
+			continue
 		}
 		if token == etag {
 			return true
@@ -139,23 +166,33 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-func indexByte(s string, b byte) int {
+// splitETagList разбивает значение If-None-Match на токены, уважая
+// quoted-string по RFC 7230 §3.2.6 (quoted-pair `\X` внутри тоже
+// поглощается). Пустые токены отбрасываются.
+func splitETagList(s string) []string {
+	var out []string
+	inQuotes := false
+	start := 0
 	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
+		c := s[i]
+		switch {
+		case c == '"':
+			inQuotes = !inQuotes
+		case c == '\\' && inQuotes && i+1 < len(s):
+			// quoted-pair: пропускаем следующий байт целиком, чтобы `\"`
+			// не закрывал quoted-string.
+			i++
+		case c == ',' && !inQuotes:
+			if tok := strings.TrimSpace(s[start:i]); tok != "" {
+				out = append(out, tok)
+			}
+			start = i + 1
 		}
 	}
-	return -1
+	if tok := strings.TrimSpace(s[start:]); tok != "" {
+		out = append(out, tok)
+	}
+	return out
 }
 
 // errorBody — типизированное тело, чтобы json.Marshal не получал `any`

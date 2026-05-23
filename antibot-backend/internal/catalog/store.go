@@ -6,33 +6,37 @@
 // Snapshot собирается на каждое чтение: при ~12 req/s (config-distribution
 // §Channel C / Load) кэшировать ради экономии хэша смысла нет, а ETag-кэш
 // добавил бы инвалидацию.
+//
+// Детерминизм payload'а нужен для ETag-стабильности и работает за счёт двух
+// инвариантов:
+//   - все срезы в Data отсортированы Normalize()'ом на входе (один раз на
+//     load, не на каждый запрос — см. PR #42 review);
+//   - все map'ы сериализуются через json.Marshal, который с Go 1.12 пишет
+//     ключи в лексикографическом порядке.
 
 package catalog
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
-	"strings"
 	"sync/atomic"
 )
 
 // Snapshot — то, что отдаём в HTTP-ответ. Body уже сериализован; etag
-// посчитан по нему же — детерминированно для одинаковой Data+site (см.
-// сортировку ключей в build*).
+// посчитан по нему же — детерминированно для одинаковой Data+site.
 type Snapshot struct {
 	Body    []byte
 	ETag    string
 	Version string
 }
 
-// Store — read-mostly хранилище. Создаётся с пустыми каталогами и валидным
-// Version="", любая операция чтения до Replace вернёт детерминированно
-// пустой snapshot — HTTP-слой ответит 200 с пустым телом, не паникнет.
+// Store — read-mostly хранилище. Создаётся с пустыми каталогами и
+// Version=defaultVersion ("0.0.0"); сервер по этому версиону отвечает 503,
+// пока Replace не положил реальный snapshot — иначе эдж залип бы на пустых
+// данных, видя "успешный" 200 (см. server.handle).
 type Store struct {
 	data atomic.Pointer[Data]
 }
@@ -45,20 +49,22 @@ func NewStore() *Store {
 
 // Replace меняет данные целиком. Безопасно из любого числа горутин (но в
 // реальной топологии писатель один — YAML-reloader / B4 db-poller).
+// Нормализует d перед публикацией: сортирует все срезы и дедуплицирует ASN,
+// чтобы build*-функции на hot-path просто читали уже подготовленный массив.
 func (s *Store) Replace(d *Data) {
 	if d == nil {
 		d = emptyData()
 	}
+	normalize(d)
 	s.data.Store(d)
 }
 
-// Snapshot собирает payload для (catalog, site). ok=false для неизвестного
-// имени каталога — handler ответит 404, не 200 с пустым телом (важно: 200
-// "" неотличимо от "каталог пуст", и эдж бы залип на пустых данных).
+// Snapshot собирает payload для (catalog, site). err != nil для неизвестного
+// имени каталога или ошибки сериализации; handler разделяет 404 / 500.
 //
 // site="" — глобальный payload (для каталогов, где per-tenant не применим,
 // payload идентичен запросу с любым site).
-func (s *Store) Snapshot(catalog, site string) (Snapshot, bool) {
+func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 	d := s.data.Load()
 	if d == nil {
 		// Не должно случаться — emptyData ставится в NewStore. Защита от
@@ -66,174 +72,173 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, bool) {
 		d = emptyData()
 	}
 
-	var body []byte
+	var (
+		body []byte
+		err  error
+	)
 	switch catalog {
 	case "fp_blocklist":
-		body = buildFPBlocklist(d)
+		body, err = jsonBytes(d.FPBlocklist)
 	case "ua_blacklist":
-		body = buildUABlacklist(d, site)
+		body, err = buildUABlacklist(d, site)
 	case "ip_blocklist":
-		body = buildIPBlocklist(d, site)
+		body, err = buildIPBlocklist(d, site)
 	case "ip_whitelist":
-		body = buildIPWhitelist(d, site)
+		body, err = buildIPWhitelist(d, site)
 	case "asn_datacenters":
-		body = buildASNDatacenters(d)
+		body = buildASNDatacenters(d) // ручная сборка ради числовой сортировки, ошибок нет
 	case "verified_bot_ips":
-		body = buildVerifiedBotIPs(d)
+		body, err = jsonBytes(d.VerifiedBotIPs)
 	case "policy":
-		body = buildPolicy(d, site)
+		body, err = buildPolicy(d, site)
 	case "attack_mode":
-		body = buildAttackMode(d, site)
+		body, err = buildAttackMode(d, site)
 	default:
-		return Snapshot{}, false
+		return Snapshot{}, errUnknownCatalog{name: catalog}
+	}
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("build %s: %w", catalog, err)
 	}
 
 	sum := sha256.Sum256(body)
 	// Strong ETag (без слабого W/) — payload собран детерминированно, побайтовое
 	// равенство = семантическое равенство, никаких whitespace-различий.
 	etag := `"` + hex.EncodeToString(sum[:]) + `"`
-	return Snapshot{Body: body, ETag: etag, Version: d.Version}, true
+	return Snapshot{Body: body, ETag: etag, Version: d.Version}, nil
 }
+
+// errUnknownCatalog различает 404 (имя не из списка) от 500 (сериализация
+// упала): handler смотрит errors.As, чтобы не лить 500 при опечатке в URL.
+type errUnknownCatalog struct{ name string }
+
+func (e errUnknownCatalog) Error() string { return "unknown catalog: " + e.name }
 
 // ----- builders -------------------------------------------------------------
 //
 // Каждый builder обязан быть детерминированным по содержимому Data+site —
 // иначе ETag будет «дёргаться» на каждом запросе и If-None-Match сломается.
-// Поэтому везде sort.Strings/Sort'им ключи, не полагаясь на map-iteration.
-
-func buildFPBlocklist(d *Data) []byte {
-	return jsonObjectString(sortedKeysString(d.FPBlocklist), d.FPBlocklist)
-}
 
 // buildUABlacklist собирает combined regex из глобальных UABlacklist +
 // (если site задан и policy[site].UABlacklist непуст) кастомных паттернов
 // клиента и отдаёт ОДНУ JSON-строку — ровно та форма, которую обещает
 // config-distribution.md §"The 'catalog' concept" (shape = "combined regex
-// string"). Edge парсит JSON, получает goluang/lua-строку с regex'ом,
-// компилирует её один раз на swap.
+// string"). Edge парсит JSON, получает строку с regex'ом, компилирует её
+// один раз на swap.
 //
-// Каждый паттерн валидируется в LoadYAML через regexp.Compile, так что
-// в combined regex попадает только синтаксически корректный RE2.
-func buildUABlacklist(d *Data, site string) []byte {
-	system := append([]string(nil), d.UABlacklist...)
-	sort.Strings(system)
-
-	var perResource []string
+// Каждый паттерн валидируется в LoadYAML через regexp.Compile, так что в
+// combined regex попадает только синтаксически корректный RE2.
+func buildUABlacklist(d *Data, site string) ([]byte, error) {
+	// Срезы уже отсортированы normalize(). Просто конкатенируем — порядок
+	// "system, потом per-resource" фиксирован: если поменяем, не забыть про
+	// X-Catalog-Version major.
+	patterns := make([]string, 0, len(d.UABlacklist)+4)
+	patterns = append(patterns, d.UABlacklist...)
 	if site != "" {
 		if p, ok := d.Policy[site]; ok {
-			perResource = append(perResource, p.UABlacklist...)
-			sort.Strings(perResource)
+			patterns = append(patterns, p.UABlacklist...)
 		}
 	}
 
-	all := make([]string, 0, len(system)+len(perResource))
-	all = append(all, system...)
-	all = append(all, perResource...)
-
-	parts := make([]string, 0, len(all))
-	for _, p := range all {
+	var combined string
+	for _, p := range patterns {
 		if p == "" {
 			continue
 		}
+		if combined != "" {
+			combined += "|"
+		}
 		// Non-capturing group: нам не нужны $1/$2 на edge, но альтернация
 		// должна биндиться к одному паттерну, не к произвольному `|` внутри.
-		parts = append(parts, "(?:"+p+")")
+		combined += "(?:" + p + ")"
 	}
-	return mustJSON(strings.Join(parts, "|"))
+	return jsonBytes(combined)
 }
 
-func buildIPBlocklist(d *Data, site string) []byte {
+func buildIPBlocklist(d *Data, site string) ([]byte, error) {
 	// Системный ip_blocklist + per-resource policy[site].IPBlocklist. Эдж
 	// различит источник по rule_source через отдельный лог-маппинг — здесь
 	// просто объединяем; контракт payload — `{cidr: "block"}`.
-	out := make(map[string]string, len(d.IPBlocklist))
+	if site == "" {
+		return jsonBytes(d.IPBlocklist)
+	}
+	p, ok := d.Policy[site]
+	if !ok || len(p.IPBlocklist) == 0 {
+		return jsonBytes(d.IPBlocklist)
+	}
+	out := make(map[string]string, len(d.IPBlocklist)+len(p.IPBlocklist))
 	for k, v := range d.IPBlocklist {
 		out[k] = v
 	}
-	if site != "" {
-		if p, ok := d.Policy[site]; ok {
-			for _, cidr := range p.IPBlocklist {
-				out[cidr] = "block"
-			}
-		}
+	for _, cidr := range p.IPBlocklist {
+		out[cidr] = "block"
 	}
-	return jsonObjectString(sortedKeysString(out), out)
+	return jsonBytes(out)
 }
 
-func buildIPWhitelist(d *Data, site string) []byte {
-	// Аналогично blocklist — системный + per-resource. Дедуп через set.
-	set := make(map[string]struct{}, len(d.IPWhitelist))
+func buildIPWhitelist(d *Data, site string) ([]byte, error) {
+	// Системный + per-resource. Дедуп через set: оба источника могут
+	// независимо иметь один и тот же CIDR (например, корпоративная подсеть).
+	if site == "" {
+		return jsonBytes(d.IPWhitelist)
+	}
+	p, ok := d.Policy[site]
+	if !ok || len(p.IPWhitelist) == 0 {
+		return jsonBytes(d.IPWhitelist)
+	}
+	seen := make(map[string]struct{}, len(d.IPWhitelist)+len(p.IPWhitelist))
+	merged := make([]string, 0, len(d.IPWhitelist)+len(p.IPWhitelist))
 	for _, c := range d.IPWhitelist {
-		set[c] = struct{}{}
-	}
-	if site != "" {
-		if p, ok := d.Policy[site]; ok {
-			for _, c := range p.IPWhitelist {
-				set[c] = struct{}{}
-			}
+		if _, dup := seen[c]; !dup {
+			seen[c] = struct{}{}
+			merged = append(merged, c)
 		}
 	}
-	out := make([]string, 0, len(set))
-	for c := range set {
-		out = append(out, c)
+	for _, c := range p.IPWhitelist {
+		if _, dup := seen[c]; !dup {
+			seen[c] = struct{}{}
+			merged = append(merged, c)
+		}
 	}
-	sort.Strings(out)
-	return mustJSON(out)
+	sortStrings(merged)
+	return jsonBytes(merged)
 }
 
+// buildASNDatacenters пишет JSON-объект руками: ключи — числа,
+// json.Marshal(map[uint32]int) выдал бы их в лексикографическом порядке
+// ("10" < "2"), а контракт §В1 — числовой порядок (читаемее в diff'ах
+// между версиями каталога).
 func buildASNDatacenters(d *Data) []byte {
-	// Set ASN → 1 по контракту config-distribution. JSON-ключи — строки.
-	keys := make([]string, 0, len(d.ASNDatacenters))
-	seen := make(map[uint32]struct{}, len(d.ASNDatacenters))
-	for _, asn := range d.ASNDatacenters {
-		if _, dup := seen[asn]; dup {
-			continue
-		}
-		seen[asn] = struct{}{}
-		keys = append(keys, strconv.FormatUint(uint64(asn), 10))
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		// сортируем по числовому значению, не лексикографически — иначе
-		// "10" < "2", и ETag в pair'е с числовой сортировкой в B4 разойдётся.
-		ai, _ := strconv.ParseUint(keys[i], 10, 32)
-		bj, _ := strconv.ParseUint(keys[j], 10, 32)
-		return ai < bj
-	})
-
-	var buf bytes.Buffer
-	buf.WriteByte('{')
-	for i, k := range keys {
+	asns := d.ASNDatacenters // уже sorted+deduped в normalize()
+	buf := make([]byte, 0, len(asns)*16+2)
+	buf = append(buf, '{')
+	for i, asn := range asns {
 		if i > 0 {
-			buf.WriteByte(',')
+			buf = append(buf, ',')
 		}
-		buf.WriteByte('"')
-		buf.WriteString(k)
-		buf.WriteString(`":1`)
+		buf = append(buf, '"')
+		buf = strconv.AppendUint(buf, uint64(asn), 10)
+		buf = append(buf, '"', ':', '1')
 	}
-	buf.WriteByte('}')
-	return buf.Bytes()
+	buf = append(buf, '}')
+	return buf
 }
 
-func buildVerifiedBotIPs(d *Data) []byte {
-	return jsonObjectString(sortedKeysString(d.VerifiedBotIPs), d.VerifiedBotIPs)
-}
-
-func buildPolicy(d *Data, site string) []byte {
+func buildPolicy(d *Data, site string) ([]byte, error) {
 	if site != "" {
-		// Per-tenant: один host. Отсутствие = пустой policy, не 404: эдж
+		// Per-tenant: один host. Отсутствие = пустой Policy, не 404: эдж
 		// должен различать "host не зарегистрирован → дефолтная policy" и
 		// "каталога вообще нет".
 		if p, ok := d.Policy[site]; ok {
-			return mustJSON(p)
+			return jsonBytes(p)
 		}
-		return mustJSON(Policy{})
+		return jsonBytes(Policy{})
 	}
 	// Без site — полный map. На практике эдж всегда зовёт с site (он знает
 	// $host), но контракт оставляет lookup-режим для дашборда [B10] / аудита.
-	return mustJSON(d.Policy)
+	return jsonBytes(d.Policy)
 }
 
-func buildAttackMode(d *Data, site string) []byte {
+func buildAttackMode(d *Data, site string) ([]byte, error) {
 	// Single source-of-truth: policy[host].AttackMode. Дублирующего top-level
 	// map'а больше нет — два источника создавали split-brain (OR-merge не
 	// давал выключить флаг через один источник, если в другом он остался).
@@ -244,7 +249,7 @@ func buildAttackMode(d *Data, site string) []byte {
 		if p, ok := d.Policy[site]; ok {
 			on = p.AttackMode
 		}
-		return mustJSON(map[string]bool{"on": on})
+		return jsonBytes(map[string]bool{"on": on})
 	}
 	// Без site — полная карта host→on. Включаем явный false тоже: дашборд
 	// должен видеть "управляется, но выключен" отдельно от "не настроен".
@@ -252,84 +257,17 @@ func buildAttackMode(d *Data, site string) []byte {
 	for h, p := range d.Policy {
 		out[h] = p.AttackMode
 	}
-	return jsonObjectBool(sortedKeysBool(out), out)
+	return jsonBytes(out)
 }
 
-// ----- json helpers ---------------------------------------------------------
-//
-// json.Marshal для map[string]X не гарантирует порядок ключей внутри одной
-// версии Go, и хотя de-facto stdlib сортирует — лучше не зависеть. Свои
-// маленькие хелперы дают побайтовую стабильность для строковых map'ов.
-
-func sortedKeysString(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sortedKeysBool(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func jsonObjectString(keys []string, m map[string]string) []byte {
-	var buf bytes.Buffer
-	buf.WriteByte('{')
-	for i, k := range keys {
-		if i > 0 {
-			buf.WriteByte(',')
-		}
-		writeJSONString(&buf, k)
-		buf.WriteByte(':')
-		writeJSONString(&buf, m[k])
-	}
-	buf.WriteByte('}')
-	return buf.Bytes()
-}
-
-func jsonObjectBool(keys []string, m map[string]bool) []byte {
-	var buf bytes.Buffer
-	buf.WriteByte('{')
-	for i, k := range keys {
-		if i > 0 {
-			buf.WriteByte(',')
-		}
-		writeJSONString(&buf, k)
-		buf.WriteByte(':')
-		if m[k] {
-			buf.WriteString("true")
-		} else {
-			buf.WriteString("false")
-		}
-	}
-	buf.WriteByte('}')
-	return buf.Bytes()
-}
-
-func writeJSONString(buf *bytes.Buffer, s string) {
-	// Используем encoding/json для эскейпинга — никаких ручных проб
-	// (бэкслеши, контрол-символы, юникод).
-	b, err := json.Marshal(s)
-	if err != nil {
-		// json.Marshal(string) не возвращает ошибку для валидного UTF-8.
-		// Падать тут — единственно честный путь: alternative — отдать
-		// битый JSON в catalog, эдж его не распарсит, fail-stale поможет.
-		panic(fmt.Sprintf("json.Marshal(string) returned error: %v", err))
-	}
-	buf.Write(b)
-}
-
-func mustJSON(v any) []byte {
+// jsonBytes — обёртка над json.Marshal, чтобы вызывающий код был
+// единообразен. Не паникует на ошибку: builders возвращают её наверх,
+// handler отвечает 500 — это лучше, чем уронить процесс из-за нашей
+// неожиданной структуры (PR #42 review: error path, not panic).
+func jsonBytes(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		panic(fmt.Sprintf("json.Marshal: %v", err))
+		return nil, fmt.Errorf("json.Marshal: %w", err)
 	}
-	return b
+	return b, nil
 }
