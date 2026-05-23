@@ -34,9 +34,26 @@ edge (demo-stand)  ──HTTPS:443──►  lb (nginx, TLS term)  ──RR─�
 ## Quickstart (on the demo VM)
 
 ```bash
-cd infra/demo-backend
+# Repo must be a real git checkout (so scripts/update.sh can `git pull`).
+# Generate a deploy key on this VM, add the public half to the repo's
+# Deploy Keys (read-only is enough), then:
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/abuse-controls-deploy
+# → paste ~/.ssh/abuse-controls-deploy.pub into GitHub Settings → Deploy keys
+cat >> ~/.ssh/config <<EOF
+Host github-abuse
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/abuse-controls-deploy
+  IdentitiesOnly yes
+EOF
+git clone git@github-abuse:tabularasa31/abuse-controls.git ~/abuse-controls
+cd ~/abuse-controls/infra/demo-backend
+
 ./scripts/provision.sh        # docker + compose, ufw 443, .env, cert, stack up
 ./scripts/verify.sh           # acceptance checks
+
+# Optional: enable cron auto-pull (see "Auto-pull from main every minute" below).
+( crontab -l 2>/dev/null; echo "* * * * * /home/$(whoami)/abuse-controls/infra/demo-backend/scripts/update.sh >> /home/$(whoami)/abuse-controls/state/backend-update.log 2>&1" ) | crontab -
 ```
 
 `provision.sh` is idempotent. To run the steps by hand instead:
@@ -50,6 +67,85 @@ docker compose -f docker-compose.backend.yml up -d
 
 Tear down: `docker compose -f docker-compose.backend.yml down`
 (add `-v` to drop the Postgres volume).
+
+## Auto-pull from `main` every minute
+
+The backend VM, like the edge, can keep itself synchronised with `main`
+through a cron job. [`scripts/update.sh`](scripts/update.sh) does it
+safely:
+
+- Single-flight (`flock`); skips when a previous run is still in progress.
+- Refuses to merge over local commits — `git merge --ff-only`.
+- Only rebuilds when a **build input** path actually changed
+  (`antibot-backend/`, the compose file, `nginx/`, `auth/`). Doc-only
+  commits no-op without disturbing the running stack.
+- On rebuild: `docker compose up -d --build`, with `docker-compose.override.yml`
+  (see below) merged automatically so per-deploy overrides survive.
+- Marker file `state/.backend-last-deployed-sha` advances only after a
+  successful `up`; a transient build failure is retried on the next tick.
+
+Cron line (one minute cadence — matches edge):
+
+```cron
+* * * * * /home/ubuntu/abuse-controls/infra/demo-backend/scripts/update.sh \
+    >> /home/ubuntu/abuse-controls/state/backend-update.log 2>&1
+```
+
+The checkout this script lives in must be a real `git` working copy with
+read access to the repo (deploy key on GitHub, or PAT-baked HTTPS remote).
+A pre-baked tarball will fail at `git fetch`. The script is symmetric to
+[`../demo-stand/scripts/update.sh`](../demo-stand/scripts/update.sh) — same
+flock / marker / ff-only / fail-on-up-error invariants.
+
+## Local override
+
+Per-deploy customisations (single-backend setup, custom allowlist file,
+substitute LB config) live in `infra/demo-backend/docker-compose.override.yml`
+on the host. Docker Compose auto-merges this file with the committed
+`docker-compose.backend.yml` on every `up`, so the override survives every
+auto-pull without touching the tracked tree. `.gitignore` lists the override
+plus a `nginx/lb.local.conf` slot used by the most common case below.
+
+**Example: single-backend demo VM** (the production setup wants HA, but a
+single-instance demo on its own VM is enough to validate the pipeline). Two
+files on the host:
+
+```yaml
+# infra/demo-backend/docker-compose.override.yml — disables backend-2
+# and remaps the LB's bind-mount to a single-backend lb.conf.
+services:
+  backend-2:
+    # Compose has no "delete service" knob, but we can stop the service
+    # from running by overriding its restart policy + a no-op command.
+    # The cleaner alternative is profiles — see comment below.
+    restart: "no"
+    command: ["true"]
+    healthcheck:
+      disable: true
+    depends_on: []
+  lb:
+    volumes:
+      - ./nginx/lb.local.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./auth/${AUTH_MODE:-ip-allowlist}.conf:/etc/nginx/conf.d/auth.conf:ro
+      - ./auth/allow.list:/etc/nginx/conf.d/allow.list:ro
+    depends_on:
+      - backend-1
+```
+
+```nginx
+# infra/demo-backend/nginx/lb.local.conf — copy of nginx/lb.conf with
+# backend-2 stripped from the upstream so nginx doesn't fail on DNS
+# resolution at startup.
+upstream antibot_backend {
+    server backend-1:8080 max_fails=3 fail_timeout=10s;
+}
+# ... rest identical to nginx/lb.conf
+```
+
+Both files are gitignored, so update.sh runs cleanly forever. To go back
+to HA, delete both files and `docker compose up -d` — the committed
+two-backend topology comes back.
 
 ## Acceptance
 
