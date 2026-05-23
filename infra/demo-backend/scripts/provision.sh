@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# [B1] Provision the antibot-backend demo substrate on a fresh Debian/Ubuntu VM:
+# Provision the antibot-backend demo stack on a fresh Debian/Ubuntu VM:
 # docker + compose plugin, firewall for the edge -> backend HTTPS path, TLS cert,
-# .env, and the Postgres + HA backend pair stack. Idempotent: safe to re-run.
+# .env, and the Postgres + HA backend pair (real Go service from B2) behind the
+# TLS LB. Idempotent: safe to re-run.
 #
 # Run on the demo VM (needs sudo for host setup):
 #   ./scripts/provision.sh
 #
-# What it does NOT do: allocate the VM itself, or deploy the real Go backend
-# ([B2]/[B15]). It prepares the substrate the acceptance criteria check.
+# What it does NOT do: allocate the VM itself, or run DB migrations ([B15]).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,7 +56,7 @@ fi
 
 # ---- bring up the stack ----
 log "starting Postgres + HA backend pair + TLS LB"
-docker compose -f "${COMPOSE_FILE}" up -d
+docker compose -f "${COMPOSE_FILE}" up -d --build
 
 # `up -d` returns once containers start, not once nginx serves. Wait for the LB
 # to actually answer so a verify.sh run straight after doesn't race startup.
