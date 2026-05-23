@@ -173,9 +173,13 @@ func LoadYAML(path string) (*Data, error) {
 // Store.Replace (защитный slot — на случай, если данные пришли не из
 // LoadYAML, например из B4 pgx-loader'а). Идемпотентен.
 func normalize(d *Data) {
-	d.UABlacklist = dedupSortStrings(d.UABlacklist)
-	d.IPWhitelist = dedupSortStrings(d.IPWhitelist)
-	d.ASNDatacenters = dedupSortUint32(d.ASNDatacenters)
+	// Системные slice'ы: dedup+sort + nil-coerce. Без ensure* json.Marshal
+	// эмитил бы `null` на пустой БД (DB-loader не инициализирует пустые
+	// срезы — append-loop пуст), и ETag дрейфил бы между «никогда не было
+	// записей» и «была одна, удалили». PR #43 review (follow-up).
+	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
+	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
+	d.ASNDatacenters = ensureUint32Slice(dedupSortUint32(d.ASNDatacenters))
 	for h, p := range d.Policy {
 		// Все []T поля: dedup+sort, потом nil → пустой slice. Coerce nil →
 		// `[]T{}` критичен для JSON-стабильности: операторская запись
@@ -243,7 +247,10 @@ func dedupSortUint32(s []uint32) []uint32 {
 // Validate проверяет:
 //   - UA-regex (системные и per-host) через regexp.Compile;
 //   - CIDR-строки (системные ip_blocklist / ip_whitelist и per-host
-//     варианты) через netip.ParsePrefix.
+//     варианты) через `validateCIDR`, которая повторяет терпимость
+//     lua-resty-ipmatcher: голый IP без `/N` принимается как host-route
+//     (/32 для v4, /128 для v6), а CIDR с заданными host-битами
+//     (`10.0.0.5/8`) — тоже валиден, ipmatcher всё равно их маскирует.
 //
 // Regex: RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с общим
 // подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
@@ -252,8 +259,9 @@ func dedupSortUint32(s []uint32) []uint32 {
 //
 // CIDR: миграции 0001 НЕ держат `inet`-колонки (комментарий в схеме:
 // "validation lives in the loader" — PR #43 review закрыл это обещание).
-// netip.ParsePrefix принимает IPv4/IPv6 prefix в строгой форме — то же
-// подмножество, которое грузит lua-resty-ipmatcher на edge.
+// Валидация специально симметрична edge'у: иначе backend стал бы строже,
+// и оператор, вставивший `203.0.113.5` без `/32`, ловил бы fail-stale
+// несмотря на то, что ipmatcher принял бы запись.
 //
 // Экспортирована, чтобы любой источник *Data (LoadYAML, dbloader.Load,
 // будущий B10 admin API) обязан был дёргать её до Store.Replace —
@@ -265,13 +273,13 @@ func Validate(d *Data) error {
 		}
 	}
 	for cidr := range d.IPBlocklist {
-		if _, err := netip.ParsePrefix(cidr); err != nil {
-			return fmt.Errorf("ip_blocklist[%q]: invalid CIDR: %w", cidr, err)
+		if err := validateCIDR(cidr); err != nil {
+			return fmt.Errorf("ip_blocklist[%q]: %w", cidr, err)
 		}
 	}
 	for i, cidr := range d.IPWhitelist {
-		if _, err := netip.ParsePrefix(cidr); err != nil {
-			return fmt.Errorf("ip_whitelist[%d]: invalid CIDR %q: %w", i, cidr, err)
+		if err := validateCIDR(cidr); err != nil {
+			return fmt.Errorf("ip_whitelist[%d] %q: %w", i, cidr, err)
 		}
 	}
 	for host, pol := range d.Policy {
@@ -281,15 +289,30 @@ func Validate(d *Data) error {
 			}
 		}
 		for i, cidr := range pol.IPBlocklist {
-			if _, err := netip.ParsePrefix(cidr); err != nil {
-				return fmt.Errorf("policy[%s].ip_blocklist[%d]: invalid CIDR %q: %w", host, i, cidr, err)
+			if err := validateCIDR(cidr); err != nil {
+				return fmt.Errorf("policy[%s].ip_blocklist[%d] %q: %w", host, i, cidr, err)
 			}
 		}
 		for i, cidr := range pol.IPWhitelist {
-			if _, err := netip.ParsePrefix(cidr); err != nil {
-				return fmt.Errorf("policy[%s].ip_whitelist[%d]: invalid CIDR %q: %w", host, i, cidr, err)
+			if err := validateCIDR(cidr); err != nil {
+				return fmt.Errorf("policy[%s].ip_whitelist[%d] %q: %w", host, i, cidr, err)
 			}
 		}
 	}
 	return nil
+}
+
+// validateCIDR принимает либо «сырой» IP («1.2.3.4», «2001:db8::1»),
+// либо префикс («10.0.0.0/8», «10.0.0.5/8» с заданными host-битами).
+// Это симметрично lua-resty-ipmatcher на edge: тот принимает то же
+// подмножество и сам маскирует host-биты. netip.ParsePrefix отдельно от
+// netip.ParseAddr строже, поэтому пробуем оба.
+func validateCIDR(s string) error {
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return nil
+	}
+	if _, err := netip.ParseAddr(s); err == nil {
+		return nil
+	}
+	return fmt.Errorf("invalid IP/CIDR")
 }

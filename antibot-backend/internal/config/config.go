@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -64,10 +65,13 @@ func Load() (Config, error) {
 		cfg.CatalogReloadInterval = d
 	}
 	if v := os.Getenv("MIGRATE_ON_STARTUP"); v != "" {
-		// strconv.ParseBool принимает 1/t/T/TRUE/true/True и 0/f/F/FALSE/false/False
-		// — идиоматичный набор, который ставят из YAML/k8s-secret'ов. Ручной
-		// switch'е раньше отказывал на 'True'/'FALSE' (PR #43 review).
-		b, err := strconv.ParseBool(v)
+		// Принимаем:
+		//   - всё, что понимает strconv.ParseBool (1/t/T/TRUE/true/True и
+		//     0/f/F/FALSE/false/False — идиоматично для YAML/k8s-secret'ов);
+		//   - историческое 'yes'/'no' (case-insensitive) — раньше брал
+		//     ручной switch, ParseBool их не знает. Не ломаем чужие
+		//     compose/manifest'ы из-за чистоты Go-парсера. PR #43 review.
+		b, err := parseBoolWithYesNo(v)
 		if err != nil {
 			return cfg, fmt.Errorf("MIGRATE_ON_STARTUP: %w", err)
 		}
@@ -98,6 +102,20 @@ func Load() (Config, error) {
 		return cfg, fmt.Errorf("CATALOG_RELOAD_INTERVAL must be > 0, got %s", cfg.CatalogReloadInterval)
 	}
 	return cfg, nil
+}
+
+// parseBoolWithYesNo расширяет strconv.ParseBool — добавляет
+// case-insensitive 'yes'/'no', которые принимал предыдущий ручной
+// switch и которые до сих пор встречаются в k8s/YAML конфигах.
+// PR #43 follow-up.
+func parseBoolWithYesNo(v string) (bool, error) {
+	switch strings.ToLower(v) {
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	}
+	return strconv.ParseBool(v)
 }
 
 func getenv(key, def string) string {

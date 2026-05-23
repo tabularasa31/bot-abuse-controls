@@ -14,6 +14,7 @@ package dbloader
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -22,6 +23,14 @@ import (
 
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 )
+
+// bootstrapTimeout — отдельный (более щедрый) бюджет на первый
+// синхронный Reload в Bootstrap. Cold pool делает TCP + TLS handshake +
+// pgxpool session-setup + восемь SELECT'ов, на slow link / cold cache
+// это легко уходит за r.interval (типично 5 с). На периодический тик
+// per-tick deadline = r.interval (см. tickContext) остается — чтобы
+// зависший Postgres не замораживал Run-горутину. PR #43 follow-up.
+const bootstrapTimeout = 60 * time.Second
 
 type Reloader struct {
 	pool     *pgxpool.Pool
@@ -44,7 +53,14 @@ func NewReloader(
 	interval time.Duration,
 	logger *slog.Logger,
 	reg prometheus.Registerer,
-) *Reloader {
+) (*Reloader, error) {
+	if interval <= 0 {
+		// Defense-in-depth: config-слой уже валидирует, но альтернативные
+		// callers (тесты, future hot-reload code) могут промахнуться.
+		// `time.NewTicker(0)` паникует, `context.WithTimeout(ctx, 0)` сразу
+		// expired — обе ветки дают мусорные сообщения. Лучше явный refuse.
+		return nil, fmt.Errorf("dbloader: reload interval must be > 0, got %s", interval)
+	}
 	r := &Reloader{
 		pool:     pool,
 		store:    store,
@@ -69,7 +85,7 @@ func NewReloader(
 		}),
 	}
 	reg.MustRegister(r.reloadOK, r.reloadFail, r.reloadDur, r.lastReload)
-	return r
+	return r, nil
 }
 
 // Run блокируется до ctx.Done(), периодически перегружая каталоги с
@@ -87,7 +103,11 @@ func (r *Reloader) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := r.tick(ctx); err != nil {
+			// Per-tick deadline = r.interval применяем ТОЛЬКО на горячем
+			// пути Run: без него зависший pgx (half-open TCP / NAT-таймаут)
+			// заблокировал бы горутину, ticker'ы коалесцировались, и
+			// reloadFail не инкрементировался бы — оператору ни сигнала.
+			if err := r.tickWith(ctx, r.interval); err != nil {
 				r.logger.Error("catalog reload failed", "err", err)
 			}
 		}
@@ -97,18 +117,18 @@ func (r *Reloader) Run(ctx context.Context) {
 // Bootstrap — синхронный первый Reload до старта HTTP-сервера. Если БД
 // пустая или битая, main падает; это сознательно: backend без каталогов
 // не должен принимать трафик с эджа.
+//
+// Бюджет — bootstrapTimeout (60 с), а НЕ r.interval: cold pool +
+// первый Acquire с TCP/TLS handshake + восемь SELECT'ов на холодном
+// buffer cache легко уходят за периодический 5-секундный тик. Поделить
+// этот budget с горячим путём — значит крашить backend на старте на
+// медленном link'е. PR #43 review (Angle A follow-up).
 func (r *Reloader) Bootstrap(ctx context.Context) error {
-	return r.tick(ctx)
+	return r.tickWith(ctx, bootstrapTimeout)
 }
 
-func (r *Reloader) tick(ctx context.Context) error {
-	// Per-tick deadline: без него зависший pgx (half-open TCP, NAT-таймаут)
-	// заблокировал бы горутину Run, ticker'ы скоалесцировались, и
-	// reloadFail НЕ инкрементировался бы — никакого сигнала оператору.
-	// Лимит = r.interval: тик, не уложившийся в свой бюджет, всё равно
-	// мешал бы следующему, лучше провалить его с ctx.DeadlineExceeded.
-	// PR #43 review (Angle A).
-	tickCtx, cancel := context.WithTimeout(ctx, r.interval)
+func (r *Reloader) tickWith(ctx context.Context, timeout time.Duration) error {
+	tickCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()

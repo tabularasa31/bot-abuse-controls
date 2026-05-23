@@ -20,12 +20,16 @@ func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
 		{"1", true},
 		{"t", true},
 		{"T", true},
+		{"yes", true}, // legacy — PR #43 follow-up
+		{"YES", true},
 		{"false", false},
 		{"False", false},
 		{"FALSE", false},
 		{"0", false},
 		{"f", false},
 		{"F", false},
+		{"no", false},
+		{"NO", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

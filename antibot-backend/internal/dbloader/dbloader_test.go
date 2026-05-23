@@ -285,6 +285,18 @@ func TestLoad_NormalizesJSONBNull(t *testing.T) {
 	}
 }
 
+func TestNewReloader_RejectsZeroInterval(t *testing.T) {
+	// Defense-in-depth: альтернативный caller с interval=0 раньше повесил
+	// бы Bootstrap на already-expired ctx и `time.NewTicker(0)` запаниковал
+	// бы в Run. Сейчас NewReloader явно отказывает. PR #43 review follow-up.
+	if _, err := dbloader.NewReloader(nil, catalog.NewStore(), 0, discardLogger(t), discardReg()); err == nil {
+		t.Fatal("NewReloader: ожидалась ошибка при interval=0")
+	}
+	if _, err := dbloader.NewReloader(nil, catalog.NewStore(), -1, discardLogger(t), discardReg()); err == nil {
+		t.Fatal("NewReloader: ожидалась ошибка при interval<0")
+	}
+}
+
 func TestReloader_BootstrapAndTick(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -292,7 +304,10 @@ func TestReloader_BootstrapAndTick(t *testing.T) {
 	resetSchema(t, ctx, pool)
 
 	store := catalog.NewStore()
-	r := dbloader.NewReloader(pool, store, 50*time.Millisecond, discardLogger(t), discardReg())
+	r, err := dbloader.NewReloader(pool, store, 50*time.Millisecond, discardLogger(t), discardReg())
+	if err != nil {
+		t.Fatalf("NewReloader: %v", err)
+	}
 	if err := r.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}

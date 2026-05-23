@@ -16,6 +16,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,9 +60,16 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("pg_advisory_lock: %w", err)
 	}
 	defer func() {
-		// best-effort unlock; коннект и так уйдёт в пул, но явный unlock
-		// быстрее освобождает соседнюю реплику.
-		_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
+		// Best-effort unlock. Используем СВОЙ короткий ctx, а не родительский
+		// (родительский может быть уже cancel'нут — SIGTERM в середине
+		// миграции), иначе `conn.Exec(canceled, …)` тихо возвращает ошибку
+		// БЕЗ отправки SQL, лок остаётся на сессии, conn уезжает обратно в
+		// пул живой → соседняя реплика блокируется до того, как pgxpool
+		// отпустит коннект (MaxConnLifetime, по умолчанию час+). PR #43
+		// review (Angle B).
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer releaseCancel()
+		_, _ = conn.Exec(releaseCtx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
 	}()
 
 	entries, err := migrationsFS.ReadDir("migrations")

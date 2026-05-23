@@ -104,7 +104,10 @@ func run(logger *slog.Logger) error {
 			}
 			logger.Info("catalog migrations applied")
 		}
-		reloader = dbloader.NewReloader(pool, catalogSrv.Store(), cfg.CatalogReloadInterval, logger, reg)
+		reloader, err = dbloader.NewReloader(pool, catalogSrv.Store(), cfg.CatalogReloadInterval, logger, reg)
+		if err != nil {
+			return fmt.Errorf("catalog reloader: %w", err)
+		}
 		// Первый Bootstrap синхронно — если БД пустая или схема битая,
 		// backend не должен подниматься "успешно" с 503 на каждый
 		// /catalog/* до первого тика.
