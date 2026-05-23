@@ -588,6 +588,76 @@ do
 end
 
 -- ===========================================================================
+-- start() env knobs: empty string treated as unset (compose's `${VAR:-}`
+-- emits empty strings, which are truthy in Lua and would otherwise produce
+-- "bad uri" on every tick), and ANTIBOT_BACKEND_SSL_VERIFY env override.
+-- ===========================================================================
+
+do
+    -- Save / restore the real os.getenv around the test.
+    local real_getenv = os.getenv
+    local env_stub = {}
+    os.getenv = function(k) return env_stub[k] end
+
+    -- Stub the http module so start() doesn't actually try to require resty.http
+    -- and doesn't wire ngx.timer.
+    local fake_http = {}
+    cp.http_module = fake_http
+
+    -- Empty string from compose default: not the "antibot-backend:8080" hard
+    -- fallback either — empty must be treated as nil so the fallback URL kicks
+    -- in (or, when nginx.demo.conf gates on it, the timer is skipped). The
+    -- contract here is just that backend_url is NOT "" after start().
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_URL = "" }
+    cp.start({ catalogs = {} })
+    check_false(cp.backend_url == "",
+        "start: empty ANTIBOT_BACKEND_URL → not literally empty string")
+    check(cp.backend_url, "http://antibot-backend:8080",
+        "start: empty ANTIBOT_BACKEND_URL → hard fallback used")
+
+    -- Empty string host header: treated as nil so the Host header isn't
+    -- emitted at all (was silently emitting `Host: ` before the nonempty fix).
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_HOST = "" }
+    cp.start({ catalogs = {} })
+    check(cp.backend_host_header, nil,
+        "start: empty ANTIBOT_BACKEND_HOST → backend_host_header nil")
+
+    -- ssl_verify defaults to true.
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = {}
+    cp.start({ catalogs = {} })
+    check(cp.ssl_verify, true, "start: ssl_verify default = true")
+
+    -- Various falsy ANTIBOT_BACKEND_SSL_VERIFY values.
+    for _, v in ipairs({ "false", "FALSE", "0", "no", "off" }) do
+        cp.parsed_cert = nil; cp.parsed_key = nil
+        env_stub = { ANTIBOT_BACKEND_SSL_VERIFY = v }
+        cp.start({ catalogs = {} })
+        check(cp.ssl_verify, false,
+            "start: ANTIBOT_BACKEND_SSL_VERIFY=" .. v .. " → ssl_verify false")
+    end
+
+    -- Empty env string keeps default (true).
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_SSL_VERIFY = "" }
+    cp.start({ catalogs = {} })
+    check(cp.ssl_verify, true,
+        "start: empty ANTIBOT_BACKEND_SSL_VERIFY → ssl_verify default true")
+
+    -- opts.ssl_verify overrides env (callers still authoritative).
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_SSL_VERIFY = "false" }
+    cp.start({ catalogs = {}, ssl_verify = true })
+    check(cp.ssl_verify, true,
+        "start: opts.ssl_verify=true overrides env false")
+
+    os.getenv = real_getenv
+    cp.http_module = nil
+end
+
+-- ===========================================================================
 
 if failed > 0 then
     io.stderr:write(string.format("\n%d passed, %d FAILED\n", passed, failed))
