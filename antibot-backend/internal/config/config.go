@@ -26,6 +26,11 @@ type Config struct {
 	RDNSInterval time.Duration
 	// ShutdownTimeout — таймаут graceful-shutdown HTTP-сервера.
 	ShutdownTimeout time.Duration
+	// CatalogYAMLPath — путь до YAML с восемью каталогами Channel C (B3).
+	// Пустая строка = не грузим (Store остаётся с defaultVersion="0.0.0" и
+	// пустыми наборами; X-Catalog-Version честно отдаёт это эджу — пусть
+	// решит, ходить ли пока в fail-stale). B4 заменит на pgx-источник.
+	CatalogYAMLPath string
 }
 
 func Load() (Config, error) {
@@ -35,6 +40,7 @@ func Load() (Config, error) {
 		PostgresDSN:     os.Getenv("POSTGRES_DSN"),
 		RDNSInterval:    30 * time.Minute,
 		ShutdownTimeout: 10 * time.Second,
+		CatalogYAMLPath: os.Getenv("CATALOG_YAML"),
 	}
 	if v := os.Getenv("RDNS_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)

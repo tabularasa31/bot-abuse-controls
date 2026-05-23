@@ -88,12 +88,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Контракт §В1: X-Catalog-Version всегда, ETag всегда, тело — только
+	// Контракт §В1: X-Catalog-Version всегда (даже на эмпти-Store: Data
+	// заведена с defaultVersion="0.0.0", чтобы wire-форма "header present"
+	// никогда не отличалась от "header absent"), ETag всегда, тело — только
 	// если If-None-Match не совпал.
 	h := w.Header()
-	if snap.Version != "" {
-		h.Set("X-Catalog-Version", snap.Version)
-	}
+	h.Set("X-Catalog-Version", snap.Version)
 	h.Set("ETag", snap.ETag)
 	// Cache-Control: эдж сам решает (timer.every(30s)), но запрещаем
 	// промежуточным прокси кэшировать — иначе at-most-once-per-edge

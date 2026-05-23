@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -62,8 +63,11 @@ func sampleData() *Data {
 			Mode:       "shadow",
 			Strictness: "permissive",
 		},
+		"alerts.example.com": {
+			Mode:       "active",
+			AttackMode: true,
+		},
 	}
-	d.AttackMode = map[string]bool{"alerts.example.com": true}
 	return d
 }
 
@@ -207,34 +211,39 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 func TestMultiTenantUABlacklistCombinesRegex(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// Без site — только системные.
+	// Контракт shape — одна JSON-строка (config-distribution.md "combined
+	// regex string"). Без site — только системные паттерны, обёрнутые в
+	// non-capturing групп.
 	r1 := httpGet(t, ts.URL+"/catalog/ua_blacklist")
-	body1, _ := readJSON[map[string]any](r1)
+	pat1, err := readJSON[string](r1)
 	etag1 := r1.Header.Get("ETag")
 	r1.Body.Close()
-	sys := int(body1["system_count"].(float64))
-	per := int(body1["per_resource_count"].(float64))
-	if sys != 2 || per != 0 {
-		t.Errorf("без site: system_count=%d per_resource_count=%d want 2,0", sys, per)
+	if err != nil {
+		t.Fatalf("без site: body не JSON-строка: %v", err)
 	}
-	pat1, _ := body1["pattern"].(string)
 	if !strings.Contains(pat1, "curl/.*") || !strings.Contains(pat1, "python-requests/.*") {
 		t.Errorf("без site: pattern не содержит системных regex'ов: %q", pat1)
+	}
+	if strings.Contains(pat1, "evil-scraper/.*") {
+		t.Errorf("без site: pattern содержит per-resource паттерн: %q", pat1)
 	}
 
 	// С site=shop — добавляется кастомный.
 	r2 := httpGet(t, ts.URL+"/catalog/ua_blacklist?site=shop.example.com")
-	body2, _ := readJSON[map[string]any](r2)
+	pat2, err := readJSON[string](r2)
 	etag2 := r2.Header.Get("ETag")
 	r2.Body.Close()
-	sys = int(body2["system_count"].(float64))
-	per = int(body2["per_resource_count"].(float64))
-	if sys != 2 || per != 1 {
-		t.Errorf("с site=shop: system_count=%d per_resource_count=%d want 2,1", sys, per)
+	if err != nil {
+		t.Fatalf("site=shop: body не JSON-строка: %v", err)
 	}
-	pat2, _ := body2["pattern"].(string)
 	if !strings.Contains(pat2, "evil-scraper/.*") {
-		t.Errorf("с site=shop: pattern не содержит кастомного regex'a: %q", pat2)
+		t.Errorf("site=shop: pattern не содержит кастомного regex'a: %q", pat2)
+	}
+
+	// Результат должен быть компилируемым regex (мы валидируем компоненты в
+	// LoadYAML, но имеет смысл проверить, что обёртка тоже не ломает).
+	if _, err := regexp.Compile(pat2); err != nil {
+		t.Errorf("combined regex не компилируется: %v (pattern=%q)", err, pat2)
 	}
 
 	if etag1 == etag2 {
@@ -279,7 +288,7 @@ func TestMultiTenantAttackMode(t *testing.T) {
 		on   bool
 	}{
 		{"shop.example.com", true},     // через policy.AttackMode
-		{"alerts.example.com", true},   // через AttackMode map
+		{"alerts.example.com", true},   // только через policy.AttackMode
 		{"blog.example.com", false},    // присутствует, но off
 		{"unknown.example.com", false}, // не зарегистрирован
 	}
@@ -446,8 +455,6 @@ policy:
     ua_blacklist:
       - "evil/.*"
     attack_mode: true
-attack_mode:
-  manual.example.com: true
 `
 	dir := t.TempDir()
 	p := filepath.Join(dir, "catalogs.yaml")
@@ -467,8 +474,36 @@ attack_mode:
 	if pol := d.Policy["shop.example.com"]; pol.Mode != "active" || !pol.AttackMode {
 		t.Errorf("policy[shop] = %+v", pol)
 	}
-	if !d.AttackMode["manual.example.com"] {
-		t.Errorf("attack_mode[manual] не загружен")
+}
+
+func TestLoadYAMLInvalidRegex(t *testing.T) {
+	// Сломанный regex на любой стороне (системный или per-resource) должен
+	// валить старт сервиса — иначе одна опечатка в YAML тихо роняет всю
+	// UA-стадию на эджах после следующего pull'а.
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			"system unclosed bracket",
+			"version: \"1.0.0\"\nua_blacklist:\n  - \"bot[a-z\"\n",
+		},
+		{
+			"per-resource trailing backslash",
+			"version: \"1.0.0\"\npolicy:\n  shop.example.com:\n    ua_blacklist:\n      - \"evil\\\\\"\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, "c.yaml")
+			if err := os.WriteFile(p, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadYAML(p); err == nil {
+				t.Fatal("LoadYAML с битым regex должен возвращать ошибку")
+			}
+		})
 	}
 }
 

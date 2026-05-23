@@ -3,24 +3,30 @@
 // (§"The 'catalog' concept"). Здесь только in-memory представление и YAML-
 // загрузчик; HTTP-доставка — в server.go, snapshot-сборка — в store.go.
 //
-// Per-resource данные (`policy`, `attack_mode`, кастомные UA-паттерны) живут
-// в map[host]…; общие списки — в плоских структурах. По решению config-
+// Per-resource данные (`policy`, кастомные UA-паттерны, attack_mode) живут
+// в map[host]Policy; общие списки — в плоских структурах. По решению config-
 // distribution per-resource ключ — `host`, не `cdn_resource_id`.
 package catalog
 
 import (
 	"fmt"
 	"os"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
+
+// defaultVersion — semver, который Store отдаёт до первой загрузки. Он же
+// уходит в X-Catalog-Version (заголовок ставится всегда — контракт §В1).
+// "0.0.0" по semver значит "пред-релиз / пусто"; edge может опираться на
+// смену major-сегмента, чтобы понять breaking-change схемы payload'а.
+const defaultVersion = "0.0.0"
 
 // Data — снимок всего хранилища каталогов. Меняется целиком атомарно через
 // Store.Replace; ссылки на старую *Data корректны на время чтения, никаких
 // частичных обновлений между каталогами нет.
 type Data struct {
-	// Version — semver, кладётся в X-Catalog-Version всех ответов. Контракт §В1:
-	// edge сравнивает major, чтобы детектить breaking-change схемы payload.
+	// Version — semver, кладётся в X-Catalog-Version всех ответов.
 	// Меняется руками или дашбордом, не автогенерация: для эджа важно различать
 	// "схема та же, контент новый" (только ETag меняется) и "схема новая"
 	// (parser нужно обновлять). За свежесть контента отвечает ETag, не Version.
@@ -32,32 +38,32 @@ type Data struct {
 	IPWhitelist    []string          `yaml:"ip_whitelist"`     // CIDR (системный)
 	ASNDatacenters []uint32          `yaml:"asn_datacenters"`  // ASN-номера
 	VerifiedBotIPs map[string]string `yaml:"verified_bot_ips"` // IP → "google|bing|yandex|ddg"
-	Policy         map[string]Policy `yaml:"policy"`           // host → policy
-	AttackMode     map[string]bool   `yaml:"attack_mode"`      // host → on/off
+	Policy         map[string]Policy `yaml:"policy"`           // host → policy (включая attack_mode)
 }
 
-// Policy — per-resource настройки одного host'a. Минимум полей, которых
-// сейчас касается B3-контракт: UA-расширения для combined regex и IP-листы
-// для per_resource rule_source (entities-reference §"Каталоги/policy"). Остальное
-// (mode, strictness, asn_block, geo_whitelist, rate_rules) добавим под нужду
-// в дашборде [B10] и edge-стороне A1/A2/A3/A4/A5.
+// Policy — per-resource настройки одного host'a. ВСЕ поля без omitempty:
+// контракт `/catalog/policy?site=…` обещает map(host → policy json) c
+// предсказуемой формой; consumer (дашборд/edge) должен видеть "field = zero"
+// и "field absent" одинаково, не различая. Если поле появится позже —
+// заведём для него отдельный major bump Version.
 type Policy struct {
-	Mode         string   `yaml:"mode,omitempty"`          // shadow / active
-	Strictness   string   `yaml:"strictness,omitempty"`    // standard / permissive
-	UABlacklist  []string `yaml:"ua_blacklist,omitempty"`  // кастомные regex клиента
-	IPWhitelist  []string `yaml:"ip_whitelist,omitempty"`  // per-resource allow CIDR
-	IPBlocklist  []string `yaml:"ip_blocklist,omitempty"`  // per-resource deny CIDR
-	ASNBlock     []uint32 `yaml:"asn_block,omitempty"`     // per-resource deny ASN
-	GeoWhitelist []string `yaml:"geo_whitelist,omitempty"` // ISO 3166-1 alpha-2
-	AttackMode   bool     `yaml:"attack_mode,omitempty"`   // дублирует AttackMode[host]; см. ниже
+	Mode         string   `yaml:"mode" json:"mode"`                 // shadow / active
+	Strictness   string   `yaml:"strictness" json:"strictness"`     // standard / permissive
+	UABlacklist  []string `yaml:"ua_blacklist" json:"ua_blacklist"` // кастомные regex клиента
+	IPWhitelist  []string `yaml:"ip_whitelist" json:"ip_whitelist"` // per-resource allow CIDR
+	IPBlocklist  []string `yaml:"ip_blocklist" json:"ip_blocklist"` // per-resource deny CIDR
+	ASNBlock     []uint32 `yaml:"asn_block" json:"asn_block"`       // per-resource deny ASN
+	GeoWhitelist []string `yaml:"geo_whitelist" json:"geo_whitelist"`
+	AttackMode   bool     `yaml:"attack_mode" json:"attack_mode"` // единственный источник; map'а сверху больше нет
 }
 
-// emptyData — нулевая Data, чтобы Store до первого Replace выдавал детермини-
-// рованный пустой ответ, а не nil-map-панику в build*. Version пустой
-// специально: эдж по `""` поймёт "no data loaded yet" и не закроет cold-start
-// раньше времени.
+// emptyData — детерминированный нуль для Store до первого Replace.
+// Version=defaultVersion (не ""), чтобы X-Catalog-Version был валидным
+// semver'ом даже на эмпти-инстансе — edge не должен различать "header
+// present" vs "header absent" по wire.
 func emptyData() *Data {
 	return &Data{
+		Version:        defaultVersion,
 		FPBlocklist:    map[string]string{},
 		UABlacklist:    nil,
 		IPBlocklist:    map[string]string{},
@@ -65,7 +71,6 @@ func emptyData() *Data {
 		ASNDatacenters: nil,
 		VerifiedBotIPs: map[string]string{},
 		Policy:         map[string]Policy{},
-		AttackMode:     map[string]bool{},
 	}
 }
 
@@ -74,6 +79,11 @@ func emptyData() *Data {
 //
 // Strict: KnownFields => true, чтобы опечатки в ключе (`fp_block_list`)
 // валились на проде, а не молча превращались в пустой каталог.
+//
+// Regex-валидация: каждый паттерн ua_blacklist (системный + per-resource)
+// прогоняется через regexp.Compile перед публикацией. Одна сломанная
+// строка в YAML иначе доедет до edge внутри combined regex и положит
+// всю UA-стадию по всем pull'ам — лучше упасть на старте.
 func LoadYAML(path string) (*Data, error) {
 	f, err := os.Open(path) //nolint:gosec // путь приходит из конфига оператора, не из запроса
 	if err != nil {
@@ -81,7 +91,10 @@ func LoadYAML(path string) (*Data, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	d := emptyData()
+	// Декодируем в "сырой" Data (не emptyData): дефолтный Version в YAML
+	// допустим не должен, операторская ошибка "забыл version:" обязана
+	// падать. defaultVersion применяется ТОЛЬКО к Store до первого Replace.
+	d := &Data{}
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
 	if err := dec.Decode(d); err != nil {
@@ -92,6 +105,7 @@ func LoadYAML(path string) (*Data, error) {
 		// Лучше упасть на старте, чем тянуть пустой X-Catalog-Version.
 		return nil, fmt.Errorf("%s: required field 'version' missing", path)
 	}
+
 	// Нормализуем nil-maps, которые decoder оставит, если ключа нет в YAML —
 	// иначе build* словит nil-map в range/lookup.
 	if d.FPBlocklist == nil {
@@ -106,8 +120,31 @@ func LoadYAML(path string) (*Data, error) {
 	if d.Policy == nil {
 		d.Policy = map[string]Policy{}
 	}
-	if d.AttackMode == nil {
-		d.AttackMode = map[string]bool{}
+
+	if err := validatePatterns(d); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return d, nil
+}
+
+// validatePatterns прогоняет каждый regex (системный и per-resource) через
+// regexp.Compile. RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с
+// общим подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
+// trailing `\`) ловятся одинаково. Если edge захочет PCRE-specific фичу
+// (lookarounds), её нужно гейтить в спеке отдельно — пока консервативно
+// бьёмся за RE2-валидность.
+func validatePatterns(d *Data) error {
+	for i, p := range d.UABlacklist {
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("ua_blacklist[%d]: invalid regex %q: %w", i, p, err)
+		}
+	}
+	for host, pol := range d.Policy {
+		for i, p := range pol.UABlacklist {
+			if _, err := regexp.Compile(p); err != nil {
+				return fmt.Errorf("policy[%s].ua_blacklist[%d]: invalid regex %q: %w", host, i, p, err)
+			}
+		}
+	}
+	return nil
 }

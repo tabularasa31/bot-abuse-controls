@@ -107,11 +107,13 @@ func buildFPBlocklist(d *Data) []byte {
 
 // buildUABlacklist собирает combined regex из глобальных UABlacklist +
 // (если site задан и policy[site].UABlacklist непуст) кастомных паттернов
-// клиента. Эдж получает одну строку (p1)|(p2)|… — компиляция один раз
-// на старте/swap, не на каждый запрос.
+// клиента и отдаёт ОДНУ JSON-строку — ровно та форма, которую обещает
+// config-distribution.md §"The 'catalog' concept" (shape = "combined regex
+// string"). Edge парсит JSON, получает goluang/lua-строку с regex'ом,
+// компилирует её один раз на swap.
 //
-// Payload: {"pattern": "...", "system_count": N, "per_resource_count": M}.
-// Эджу нужна сама строка; счётчики — для аналитики и rule_source.
+// Каждый паттерн валидируется в LoadYAML через regexp.Compile, так что
+// в combined regex попадает только синтаксически корректный RE2.
 func buildUABlacklist(d *Data, site string) []byte {
 	system := append([]string(nil), d.UABlacklist...)
 	sort.Strings(system)
@@ -133,21 +135,11 @@ func buildUABlacklist(d *Data, site string) []byte {
 		if p == "" {
 			continue
 		}
-		// Каждый паттерн оборачиваем в group — иначе альтернация съест
-		// неэскейпленный `|` внутри пользовательского regex.
-		parts = append(parts, "("+p+")")
+		// Non-capturing group: нам не нужны $1/$2 на edge, но альтернация
+		// должна биндиться к одному паттерну, не к произвольному `|` внутри.
+		parts = append(parts, "(?:"+p+")")
 	}
-
-	type payload struct {
-		Pattern          string `json:"pattern"`
-		SystemCount      int    `json:"system_count"`
-		PerResourceCount int    `json:"per_resource_count"`
-	}
-	return mustJSON(payload{
-		Pattern:          strings.Join(parts, "|"),
-		SystemCount:      len(system),
-		PerResourceCount: len(perResource),
-	})
+	return mustJSON(strings.Join(parts, "|"))
 }
 
 func buildIPBlocklist(d *Data, site string) []byte {
@@ -242,33 +234,25 @@ func buildPolicy(d *Data, site string) []byte {
 }
 
 func buildAttackMode(d *Data, site string) []byte {
+	// Single source-of-truth: policy[host].AttackMode. Дублирующего top-level
+	// map'а больше нет — два источника создавали split-brain (OR-merge не
+	// давал выключить флаг через один источник, если в другом он остался).
+	// Emergency-override от B10 должен идти ТЕМ ЖЕ путём (записывая Policy),
+	// тогда поведение наблюдаемо одним catalog'ом.
 	if site != "" {
-		// Per-host bool. Source-of-truth — policy[site].AttackMode, чтобы
-		// дашборд правил его в одном месте; AttackMode map оставлен на случай
-		// emergency-override через отдельный endpoint в B10.
 		on := false
-		if p, ok := d.Policy[site]; ok && p.AttackMode {
-			on = true
-		}
-		if v, ok := d.AttackMode[site]; ok && v {
-			on = true
+		if p, ok := d.Policy[site]; ok {
+			on = p.AttackMode
 		}
 		return mustJSON(map[string]bool{"on": on})
 	}
-	// Без site — весь map (объединение). Для дашборда: одним запросом
-	// видно, на каких host'ах включено.
-	merged := make(map[string]bool, len(d.AttackMode)+len(d.Policy))
-	for h, v := range d.AttackMode {
-		if v {
-			merged[h] = true
-		}
-	}
+	// Без site — полная карта host→on. Включаем явный false тоже: дашборд
+	// должен видеть "управляется, но выключен" отдельно от "не настроен".
+	out := make(map[string]bool, len(d.Policy))
 	for h, p := range d.Policy {
-		if p.AttackMode {
-			merged[h] = true
-		}
+		out[h] = p.AttackMode
 	}
-	return jsonObjectBool(sortedKeysBool(merged), merged)
+	return jsonObjectBool(sortedKeysBool(out), out)
 }
 
 // ----- json helpers ---------------------------------------------------------

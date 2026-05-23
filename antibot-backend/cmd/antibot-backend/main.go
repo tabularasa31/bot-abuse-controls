@@ -86,7 +86,27 @@ func run(logger *slog.Logger) error {
 	// дёргать /metrics чем-то кроме GET — тоже не повод трогать registry.
 	mux.HandleFunc("GET /health", health.Handler(cfg.Instance, healthPinger(pool)))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	catalog.New().Register(mux)
+
+	catalogSrv := catalog.New()
+	if cfg.CatalogYAMLPath != "" {
+		// Падаем на старте, если YAML битый: пустой Store отдаёт всем
+		// эджам defaultVersion и пустые наборы — это валидный wire-стейт,
+		// но операторы хотят знать, что конфигурация не доехала, не
+		// гадать по prometheus'у.
+		d, err := catalog.LoadYAML(cfg.CatalogYAMLPath)
+		if err != nil {
+			return fmt.Errorf("catalog load: %w", err)
+		}
+		catalogSrv.Store().Replace(d)
+		logger.Info("catalog loaded",
+			"path", cfg.CatalogYAMLPath,
+			"version", d.Version,
+			"hosts_with_policy", len(d.Policy),
+		)
+	} else {
+		logger.Warn("CATALOG_YAML not set — catalog server returns empty payloads with version=" + "0.0.0" + " (B4 will replace YAML loader with pgx)")
+	}
+	catalogSrv.Register(mux)
 	logs.New(reg).Register(mux)
 
 	srv := &http.Server{
