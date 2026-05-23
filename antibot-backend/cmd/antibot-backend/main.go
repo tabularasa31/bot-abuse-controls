@@ -23,7 +23,12 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/logger"
 )
 
-func main() {
+func main() { os.Exit(realMain()) }
+
+// realMain — отдельная функция, чтобы defer'ы (signal.Stop через stop())
+// действительно отрабатывали: os.Exit в main мимо них (gocritic
+// exitAfterDefer).
+func realMain() int {
 	log := logger.New()
 
 	// signal.NotifyContext: ctx закрывается на SIGINT/SIGTERM, app.Run
@@ -34,11 +39,12 @@ func main() {
 	a, err := app.New(ctx, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if err := a.Run(ctx); err != nil {
 		log.Error("fatal", "err", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

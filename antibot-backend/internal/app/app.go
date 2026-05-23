@@ -228,7 +228,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.logger.Info("shutdown signal received")
 	}
 
-	a.shutdown(cancel, &wg)
+	a.shutdown(ctx, cancel, &wg)
 	a.logger.Info("antibot-backend stopped")
 	return runErr
 }
@@ -243,9 +243,12 @@ func (a *App) Run(ctx context.Context) error {
 //     висеть на сети — не даём им задержать выход.
 //  4. pgxpool.Close под deadline: блокирует на активных коннектах, B3/B7
 //     принесут их — ограничиваем по тому же бюджету.
-func (a *App) shutdown(cancelWorkers context.CancelFunc, wg *sync.WaitGroup) {
+func (a *App) shutdown(parent context.Context, cancelWorkers context.CancelFunc, wg *sync.WaitGroup) {
+	// parent уже отменён сигналом — нам нужен fresh ctx с deadline, но
+	// унаследовавший values (tracing/log). WithoutCancel + WithDeadline —
+	// тот же приём, что в advisory_unlock из B4 (contextcheck).
 	deadline := time.Now().Add(a.cfg.ShutdownTimeout)
-	shutdownCtx, cancel := context.WithDeadline(context.Background(), deadline)
+	shutdownCtx, cancel := context.WithDeadline(context.WithoutCancel(parent), deadline)
 	defer cancel()
 
 	a.logger.Info("shutdown: draining HTTP", "deadline", a.cfg.ShutdownTimeout)
