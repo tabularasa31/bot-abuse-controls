@@ -73,3 +73,97 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work \
             koalaman/shellcheck:stable \
             $(find scripts infra -name '*.sh')
+
+  smoke-demo-stand:
+    name: Smoke (demo-stand brings up)
+    # Catches broken Dockerfile / nginx.demo.conf / init_by_lua / Lua module
+    # imports that would crash a `update.sh --force-recreate` on the live edge
+    # but pass luacheck/unit tests. Without this gate, a bad commit on main
+    # would auto-deploy to every edge VM via cron and crash-loop them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate self-signed TLS cert
+        # nginx.demo.conf hard-requires fullchain.pem / privkey.pem in
+        # infra/demo-stand/certs/. Gitignored on a real deploy, but on a fresh
+        # CI checkout we just mint a throwaway one for the smoke.
+        run: |
+          mkdir -p infra/demo-stand/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout infra/demo-stand/certs/privkey.pem \
+            -out   infra/demo-stand/certs/fullchain.pem \
+            -subj "/CN=ci-smoke" \
+            -addext "subjectAltName=DNS:ci-smoke"
+      - name: docker compose up + wait for /__health
+        env:
+          REVISION: ${{ github.sha }}
+          DEMO_BIND_IP: 127.0.0.1
+        run: |
+          cd infra/demo-stand
+          docker compose -f docker-compose.demo.yml up -d --build
+          # Poll /__health for up to 60 s — nginx-demo has no Docker healthcheck
+          # defined, and a Lua init failure would show up as a container that
+          # has started but isn't serving. Curl with `--retry-connrefused`
+          # handles the brief gap between bind and accept.
+          for i in $(seq 1 30); do
+            if curl -sk --max-time 2 https://127.0.0.1/__health | grep -q ok; then
+              echo "smoke ok after ${i} probes"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::nginx-demo did not respond to /__health within 60 s"
+          docker compose -f docker-compose.demo.yml ps
+          docker compose -f docker-compose.demo.yml logs --no-color nginx-demo
+          exit 1
+      - name: Tear down
+        if: always()
+        run: |
+          cd infra/demo-stand
+          docker compose -f docker-compose.demo.yml down -v --remove-orphans
+
+  smoke-demo-backend:
+    name: Smoke (demo-backend brings up)
+    # Catches broken Dockerfile / Go service init / compose / nginx-lb config
+    # before main lands on the backend VM. `update.sh` on the backend VM is
+    # safer than the edge's (no --force-recreate; failed `up` keeps old
+    # containers alive), but a bad commit still produces an infinite retry
+    # loop in the cron log and blocks any future deploy until reverted.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap certs + .env
+        run: |
+          cd infra/demo-backend
+          ./scripts/gen-certs.sh    # server cert + edge-CA + sample client cert
+          cat > .env <<EOF
+          POSTGRES_DB=antibot
+          POSTGRES_USER=antibot
+          POSTGRES_PASSWORD=ci-smoke-$(openssl rand -hex 8)
+          AUTH_MODE=ip-allowlist
+          EOF
+          chmod 600 .env
+      - name: docker compose up + wait for /health
+        run: |
+          cd infra/demo-backend
+          docker compose -f docker-compose.backend.yml up -d --build
+          # Poll /health on the LB for up to 120 s. The Go service applies
+          # migrations on startup and won't accept until they finish; the
+          # postgres healthcheck adds another ~5 s on the front. 60 probes
+          # × 2 s = 120 s budget.
+          for i in $(seq 1 60); do
+            if curl -sk --max-time 2 https://127.0.0.1/health | grep -q '"instance"'; then
+              echo "smoke ok after ${i} probes"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::backend LB did not respond to /health within 120 s"
+          docker compose -f docker-compose.backend.yml ps
+          docker compose -f docker-compose.backend.yml logs --no-color
+          exit 1
+      - name: Tear down
+        if: always()
+        run: |
+          cd infra/demo-backend
+          docker compose -f docker-compose.backend.yml down -v --remove-orphans
