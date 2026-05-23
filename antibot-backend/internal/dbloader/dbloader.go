@@ -158,7 +158,7 @@ func loadUint32List(ctx context.Context, tx pgx.Tx, dst *[]uint32, sql string) e
 		if n < 0 || n > 0xFFFFFFFF {
 			return fmt.Errorf("asn out of uint32 range: %d", n)
 		}
-		*dst = append(*dst, uint32(n))
+		*dst = append(*dst, uint32(n)) //nolint:gosec // G115: bounds checked on the line above
 	}
 	return rows.Err()
 }
