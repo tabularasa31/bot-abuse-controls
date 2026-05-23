@@ -1,2 +1,5 @@
 .env
 certs/
+# [B6] operator-edited allow.list (seeded from auth/allow.list.example by
+# scripts/provision.sh). Never commit per-deploy IP ranges.
+auth/allow.list

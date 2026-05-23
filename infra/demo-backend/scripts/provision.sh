@@ -45,14 +45,32 @@ if [ ! -f "${ROOT}/.env" ]; then
         echo "POSTGRES_DB=antibot"
         echo "POSTGRES_USER=antibot"
         echo "POSTGRES_PASSWORD=${pw}"
+        # [B6] Default Channel C auth mode (config-distribution §Auth/transport).
+        # ip-allowlist is the safe demo default — flip to mtls once edge clients
+        # have edge-client.{crt,key} (see scripts/gen-certs.sh + README).
+        echo "AUTH_MODE=ip-allowlist"
     } > "${ROOT}/.env"
     chmod 600 "${ROOT}/.env"
 else
     log ".env already present — leaving as-is"
+    if ! grep -q '^AUTH_MODE=' "${ROOT}/.env"; then
+        log "adding AUTH_MODE=ip-allowlist to existing .env (B6 default)"
+        echo "AUTH_MODE=ip-allowlist" >> "${ROOT}/.env"
+    fi
 fi
 
-# ---- TLS cert for the LB ----
+# ---- TLS cert for the LB (+ edge-CA + sample client cert from B6) ----
 "${HERE}/gen-certs.sh"
+
+# ---- [B6] allow.list seed ----
+# docker-compose.backend.yml always bind-mounts auth/allow.list (compose
+# refuses to start if the source file is missing, even when AUTH_MODE=mtls
+# means nginx never includes it). Seed from the committed example on first
+# run; never overwrite an operator's edits.
+if [ ! -f "${ROOT}/auth/allow.list" ]; then
+    log "seeding auth/allow.list from auth/allow.list.example"
+    cp "${ROOT}/auth/allow.list.example" "${ROOT}/auth/allow.list"
+fi
 
 # ---- bring up the stack ----
 log "starting Postgres + HA backend pair + TLS LB"

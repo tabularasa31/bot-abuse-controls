@@ -278,6 +278,15 @@ function _M.fetch(catalog_name)
         headers  = headers,
         ssl_verify = _M.ssl_verify,
     }
+    -- [B6] mTLS — pass the pre-parsed client cert/key if start() managed to
+    -- load them. Either both or neither (verified at load time); a partial
+    -- parse leaves _M.parsed_cert == nil so we silently fall back to HTTPS
+    -- without a client cert, which the backend will reject with a handshake
+    -- error when AUTH_MODE=mtls — caught by the standard fail-stale path.
+    if _M.parsed_cert and _M.parsed_key then
+        req_opts.ssl_client_cert = _M.parsed_cert
+        req_opts.ssl_client_priv_key = _M.parsed_key
+    end
     local res, err = httpc:request_uri(_M.backend_url .. cat.endpoint, req_opts)
 
     -- pcall — handle_response может бросить из cat.apply/cat.sweep
@@ -289,6 +298,59 @@ function _M.fetch(catalog_name)
         ngx.log(ngx.ERR, "catalog_pull ", catalog_name,
             ": handle_response raised: ", perr)
     end
+end
+
+-- load_mtls_material — read PEM files and parse into the cdata form
+-- lua-resty-http expects (ssl_client_cert / ssl_client_priv_key, returned by
+-- ngx.ssl.parse_pem_cert / parse_pem_priv_key). Called once from start() in
+-- init_worker_by_lua_block where ngx.ssl is available.
+--
+-- Failure mode: any error (file missing, parse failed, ngx.ssl absent) logs
+-- and returns nil — _M.parsed_cert stays nil and fetch() proceeds without
+-- mTLS. If the backend's AUTH_MODE=mtls that handshake fails and falls into
+-- the normal fail-stale path (skip + previous gen preserved); operator sees
+-- the error in error.log + a stuck staleness gauge in /metrics.
+local function read_file(path)
+    local f, ferr = io.open(path, "rb")
+    if not f then return nil, ferr end
+    local data, rerr = f:read("*a")
+    f:close()
+    if not data then return nil, rerr end
+    return data
+end
+
+function _M.load_mtls_material(cert_path, key_path)
+    if not cert_path or cert_path == "" or not key_path or key_path == "" then
+        return nil, nil
+    end
+    local ok_ssl, ssl = pcall(require, "ngx.ssl")
+    if not ok_ssl then
+        ngx.log(ngx.ERR, "catalog_pull: ngx.ssl not available — mTLS disabled")
+        return nil, nil
+    end
+
+    local cert_pem, cerr = read_file(cert_path)
+    if not cert_pem then
+        ngx.log(ngx.ERR, "catalog_pull: read client cert ", cert_path, " failed: ", cerr)
+        return nil, nil
+    end
+    local key_pem, kerr = read_file(key_path)
+    if not key_pem then
+        ngx.log(ngx.ERR, "catalog_pull: read client key ", key_path, " failed: ", kerr)
+        return nil, nil
+    end
+
+    local parsed_cert, perr = ssl.parse_pem_cert(cert_pem)
+    if not parsed_cert then
+        ngx.log(ngx.ERR, "catalog_pull: parse_pem_cert failed: ", perr)
+        return nil, nil
+    end
+    local parsed_key, kperr = ssl.parse_pem_priv_key(key_pem)
+    if not parsed_key then
+        ngx.log(ngx.ERR, "catalog_pull: parse_pem_priv_key failed: ", kperr)
+        return nil, nil
+    end
+    return parsed_cert, parsed_key
 end
 
 -- start — call from init_worker_by_lua_block. Wires one ngx.timer.every per
@@ -310,6 +372,15 @@ function _M.start(opts)
     end
     _M.interval            = opts.interval or 30
     local catalogs         = opts.catalogs or { "fp_blocklist" }
+
+    -- [B6] mTLS material: parse once per worker startup. Both paths must be
+    -- set (and parse cleanly) for the cdata to be attached to req_opts.
+    local cert_path = opts.client_cert_path or os.getenv("ANTIBOT_BACKEND_CLIENT_CERT")
+    local key_path  = opts.client_priv_key_path or os.getenv("ANTIBOT_BACKEND_CLIENT_KEY")
+    _M.parsed_cert, _M.parsed_key = _M.load_mtls_material(cert_path, key_path)
+    if _M.parsed_cert and _M.parsed_key then
+        ngx.log(ngx.NOTICE, "catalog_pull: mTLS client cert loaded from ", cert_path)
+    end
 
     if not _M.http_module then
         local ok, mod = pcall(require, "resty.http")
