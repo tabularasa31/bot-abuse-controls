@@ -78,6 +78,16 @@ services:
     volumes:
       - ./nginx/lb.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/certs:ro
+      # [B6] auth.conf — mTLS / IP allowlist / off, selected by AUTH_MODE.
+      # Default is ip-allowlist (config-distribution §Channel C fallback);
+      # flip AUTH_MODE=mtls in .env once edge clients have edge-client.{crt,key}.
+      - ./auth/${AUTH_MODE:-ip-allowlist}.conf:/etc/nginx/conf.d/auth.conf:ro
+      # Only read for AUTH_MODE=ip-allowlist (mtls/off do not include it),
+      # but the bind-mount is unconditional — auth/allow.list ships committed
+      # with safe loopback + RFC1918 defaults so the bind always has a real
+      # file as its source (Docker would otherwise create the path as an empty
+      # directory and nginx `include` would fail on it).
+      - ./auth/allow.list:/etc/nginx/conf.d/allow.list:ro
     restart: unless-stopped
 
 volumes:

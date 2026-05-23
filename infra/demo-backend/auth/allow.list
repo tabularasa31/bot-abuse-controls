@@ -1,0 +1,29 @@
+# [B6] allow-list for AUTH_MODE=ip-allowlist. **Committed baseline** — operators
+# edit in place per deploy and reload (`docker compose exec lb nginx -s reload`).
+# Local edits typically stay on the deploy VM; commit only changes that should
+# apply to every demo.
+#
+# Why committed instead of seeded by provision.sh (code-review F1):
+# docker-compose.backend.yml bind-mounts this path unconditionally, and Docker
+# silently creates a stand-in DIRECTORY when the host source is absent —
+# nginx then trips on `include /etc/nginx/conf.d/allow.list` (directory, not
+# file) and the LB container crash-loops. A committed file with safe loopback
+# defaults sidesteps the trap.
+#
+# По умолчанию пускаем loopback (acceptance verify.sh бьет по https://localhost)
+# и RFC1918-диапазоны (типичный egress эджей в private-сети демо-VM). Для prod —
+# заменить на конкретный egress-range prod-edge (config-distribution §Channel C
+# "Auth/transport: ... IP allowlist from CDN operator's egress range").
+
+# Loopback (verify.sh, локальные curl'ы на самой backend-VM).
+allow 127.0.0.1;
+allow ::1;
+
+# RFC1918 (docker bridge сети, edge-VM в той же private сети).
+allow 10.0.0.0/8;
+allow 172.16.0.0/12;
+allow 192.168.0.0/16;
+
+# Prod: добавь сюда конкретный CIDR egress'а prod-edge эджей и удали RFC1918,
+# если backend смотрит наружу.
+# allow 198.51.100.0/24;

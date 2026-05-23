@@ -44,6 +44,13 @@ services:
       # Where geoip.lua looks for the GeoLite2 .mmdb files inside the container.
       # Defaults to the mount point below; override only if you also remount.
       BAC_GEOIP_DIR: ${BAC_GEOIP_DIR:-/etc/nginx/geoip}
+      # [B6] Channel C backend URL + optional mTLS client cert. ANTIBOT_BACKEND_URL
+      # unset → catalog_pull skips the timer (static seed only). For mTLS, drop
+      # edge-client.{crt,key} into ./certs (already mounted) and set both paths.
+      ANTIBOT_BACKEND_URL: ${ANTIBOT_BACKEND_URL:-}
+      ANTIBOT_BACKEND_HOST: ${ANTIBOT_BACKEND_HOST:-}
+      ANTIBOT_BACKEND_CLIENT_CERT: ${ANTIBOT_BACKEND_CLIENT_CERT:-}
+      ANTIBOT_BACKEND_CLIENT_KEY: ${ANTIBOT_BACKEND_CLIENT_KEY:-}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's

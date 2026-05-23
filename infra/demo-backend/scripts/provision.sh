@@ -45,14 +45,31 @@ if [ ! -f "${ROOT}/.env" ]; then
         echo "POSTGRES_DB=antibot"
         echo "POSTGRES_USER=antibot"
         echo "POSTGRES_PASSWORD=${pw}"
+        # [B6] Default Channel C auth mode (config-distribution §Auth/transport).
+        # ip-allowlist is the safe demo default — flip to mtls once edge clients
+        # have edge-client.{crt,key} (see scripts/gen-certs.sh + README).
+        echo "AUTH_MODE=ip-allowlist"
     } > "${ROOT}/.env"
     chmod 600 "${ROOT}/.env"
 else
     log ".env already present — leaving as-is"
+    if ! grep -q '^AUTH_MODE=' "${ROOT}/.env"; then
+        log "adding AUTH_MODE=ip-allowlist to existing .env (B6 default)"
+        # Ensure a trailing newline before appending — a hand-written .env like
+        # `printf 'POSTGRES_PASSWORD=secret' > .env` lacks one, and `>>` would
+        # concatenate onto the previous line (corrupting POSTGRES_PASSWORD with
+        # the AUTH_MODE suffix). Code-review F3.
+        if [ -n "$(tail -c1 "${ROOT}/.env" 2>/dev/null)" ]; then
+            echo >> "${ROOT}/.env"
+        fi
+        echo "AUTH_MODE=ip-allowlist" >> "${ROOT}/.env"
+    fi
 fi
 
-# ---- TLS cert for the LB ----
+# ---- TLS cert for the LB (+ edge-CA + sample client cert from B6) ----
 "${HERE}/gen-certs.sh"
+
+# auth/allow.list ships committed (see auth/allow.list) — no seed step needed.
 
 # ---- bring up the stack ----
 log "starting Postgres + HA backend pair + TLS LB"
