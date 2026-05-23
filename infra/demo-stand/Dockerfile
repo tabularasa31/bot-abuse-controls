@@ -37,16 +37,33 @@ RUN apk add --no-cache libmaxminddb libmaxminddb-dev ca-certificates
 # OpenResty's default lua_package_path. Three files ship in lib/resty/:
 # http.lua, http_headers.lua, http_connect.lua.
 #
+# lua-resty-openssl is a hard requirement for the mTLS path: lua-resty-http
+# v0.17.x calls `require "resty.openssl.x509.chain"` to validate the client
+# cert before handing it to ssl handshake. Without it, http_connect.lua emits
+# `mTLS isn't supported without lua-resty-openssl` and the fetch falls into
+# fail-stale (verified on the <EDGE_VM_IP> stand: gauge stuck at -1, log
+# fires on every tick). We unpack only the `resty/` subtree — keeping the
+# image lean — and pin the same way.
+#
 # curl is install-only — pulled in as a virtual build-deps package and removed
-# in the same RUN to keep it out of the final image (gemini review).
+# in the same RUN to keep it out of the final image (gemini review). curl also
+# happens to be a transitive dep of libmaxminddb, so the final image keeps it
+# regardless; the virtual marker still documents intent.
 ARG LUA_RESTY_HTTP_VERSION=v0.17.2
+ARG LUA_RESTY_OPENSSL_VERSION=1.7.1
 RUN set -eux; \
     apk add --no-cache --virtual .build-deps curl; \
-    mkdir -p /usr/local/openresty/site/lualib/resty; \
+    mkdir -p /usr/local/openresty/site/lualib; \
     curl -fsSL "https://github.com/ledgetech/lua-resty-http/archive/refs/tags/${LUA_RESTY_HTTP_VERSION}.tar.gz" \
-        | tar xzf - -C /usr/local/openresty/site/lualib/resty \
-            --strip-components=3 \
-            "lua-resty-http-${LUA_RESTY_HTTP_VERSION#v}/lib/resty/"; \
+        | tar xzf - -C /usr/local/openresty/site/lualib \
+            --strip-components=2 \
+            "lua-resty-http-${LUA_RESTY_HTTP_VERSION#v}/lib/"; \
     chmod 0644 /usr/local/openresty/site/lualib/resty/http*.lua; \
     ls -1 /usr/local/openresty/site/lualib/resty/http*.lua; \
+    curl -fsSL "https://github.com/fffonion/lua-resty-openssl/archive/refs/tags/${LUA_RESTY_OPENSSL_VERSION}.tar.gz" \
+        | tar xzf - -C /usr/local/openresty/site/lualib \
+            --strip-components=2 \
+            "lua-resty-openssl-${LUA_RESTY_OPENSSL_VERSION}/lib/"; \
+    find /usr/local/openresty/site/lualib/resty/openssl -type f -name '*.lua' -exec chmod 0644 {} +; \
+    test -f /usr/local/openresty/site/lualib/resty/openssl/x509/chain.lua; \
     apk del .build-deps
