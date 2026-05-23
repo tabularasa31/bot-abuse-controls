@@ -26,8 +26,9 @@ FROM openresty/openresty:alpine
 # fails and geo silently disables. libmaxminddb (the tools pkg) is kept for the
 # `mmdblookup` CLI, handy for debugging the .mmdb on the stand.
 #
-# curl + ca-certificates are pulled in for the lua-resty-http fetch step below.
-RUN apk add --no-cache libmaxminddb libmaxminddb-dev curl ca-certificates
+# ca-certificates is runtime: lua-resty-http needs trusted roots for HTTPS to
+# antibot-backend on the production path.
+RUN apk add --no-cache libmaxminddb libmaxminddb-dev ca-certificates
 
 # lua-resty-http for Channel C (catalog_pull.lua). Pin to v0.17.2 (the latest
 # stable as of 2026-05) — bump intentionally and rebuild. We pull the raw
@@ -35,15 +36,17 @@ RUN apk add --no-cache libmaxminddb libmaxminddb-dev curl ca-certificates
 # and drop them under /usr/local/openresty/site/lualib/resty/, which is on
 # OpenResty's default lua_package_path. Three files ship in lib/resty/:
 # http.lua, http_headers.lua, http_connect.lua.
+#
+# curl is install-only — pulled in as a virtual build-deps package and removed
+# in the same RUN to keep it out of the final image (gemini review).
 ARG LUA_RESTY_HTTP_VERSION=v0.17.2
 RUN set -eux; \
-    tmpdir="$(mktemp -d)"; \
-    curl -fsSL "https://github.com/ledgetech/lua-resty-http/archive/refs/tags/${LUA_RESTY_HTTP_VERSION}.tar.gz" \
-        -o "${tmpdir}/src.tar.gz"; \
-    tar xzf "${tmpdir}/src.tar.gz" -C "${tmpdir}"; \
+    apk add --no-cache --virtual .build-deps curl; \
     mkdir -p /usr/local/openresty/site/lualib/resty; \
-    cp "${tmpdir}/lua-resty-http-${LUA_RESTY_HTTP_VERSION#v}"/lib/resty/*.lua \
-        /usr/local/openresty/site/lualib/resty/; \
+    curl -fsSL "https://github.com/ledgetech/lua-resty-http/archive/refs/tags/${LUA_RESTY_HTTP_VERSION}.tar.gz" \
+        | tar xzf - -C /usr/local/openresty/site/lualib/resty \
+            --strip-components=3 \
+            "lua-resty-http-${LUA_RESTY_HTTP_VERSION#v}/lib/resty/"; \
     chmod 0644 /usr/local/openresty/site/lualib/resty/http*.lua; \
     ls -1 /usr/local/openresty/site/lualib/resty/http*.lua; \
-    rm -rf "${tmpdir}"
+    apk del .build-deps
