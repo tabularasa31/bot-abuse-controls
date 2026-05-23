@@ -58,12 +58,18 @@ RUN set -eux; \
         | tar xzf - -C /usr/local/openresty/site/lualib \
             --strip-components=2 \
             "lua-resty-http-${LUA_RESTY_HTTP_VERSION#v}/lib/"; \
-    chmod 0644 /usr/local/openresty/site/lualib/resty/http*.lua; \
     ls -1 /usr/local/openresty/site/lualib/resty/http*.lua; \
     curl -fsSL "https://github.com/fffonion/lua-resty-openssl/archive/refs/tags/${LUA_RESTY_OPENSSL_VERSION}.tar.gz" \
         | tar xzf - -C /usr/local/openresty/site/lualib \
             --strip-components=2 \
             "lua-resty-openssl-${LUA_RESTY_OPENSSL_VERSION}/lib/"; \
-    find /usr/local/openresty/site/lualib/resty/openssl -type f -name '*.lua' -exec chmod 0644 {} +; \
     test -f /usr/local/openresty/site/lualib/resty/openssl/x509/chain.lua; \
+    test -f /usr/local/openresty/site/lualib/resty/openssl.lua; \
+    # Single chmod over the whole site/lualib/resty subtree — catches http*.lua,
+    # openssl.lua (entry point), and resty/openssl/**/*.lua. site/lualib is
+    # ours-only (base image's resty/ lives under lualib/, not site/lualib/),
+    # so this is safe to broaden. Fixes gemini-review on PR #47: openssl.lua
+    # was landing with 664 because the previous find rooted at resty/openssl/
+    # missed it.
+    find /usr/local/openresty/site/lualib/resty -type f -name '*.lua' -exec chmod 0644 {} +; \
     apk del .build-deps
