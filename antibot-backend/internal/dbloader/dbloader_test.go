@@ -273,8 +273,10 @@ func TestLoad_NormalizesJSONBNull(t *testing.T) {
 	}
 	body := string(snap.Body)
 	// Без normalize — это были бы `"ua_blacklist":null` и т.д.
-	for _, field := range []string{"ua_blacklist", "ip_whitelist", "ip_blocklist",
-		"asn_block", "geo_whitelist", "rate_rules"} {
+	for _, field := range []string{
+		"ua_blacklist", "ip_whitelist", "ip_blocklist",
+		"asn_block", "geo_whitelist", "rate_rules",
+	} {
 		nullForm := `"` + field + `":null`
 		if strings.Contains(body, nullForm) {
 			t.Errorf("payload содержит %q — normalize не coerce'нул jsonb-null в []: %s",

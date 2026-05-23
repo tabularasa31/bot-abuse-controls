@@ -14,8 +14,18 @@ func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"true", true}, {"True", true}, {"TRUE", true}, {"1", true}, {"t", true}, {"T", true},
-		{"false", false}, {"False", false}, {"FALSE", false}, {"0", false}, {"f", false}, {"F", false},
+		{"true", true},
+		{"True", true},
+		{"TRUE", true},
+		{"1", true},
+		{"t", true},
+		{"T", true},
+		{"false", false},
+		{"False", false},
+		{"FALSE", false},
+		{"0", false},
+		{"f", false},
+		{"F", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
