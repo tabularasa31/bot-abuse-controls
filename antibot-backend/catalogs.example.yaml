@@ -44,4 +44,13 @@ policy:
   #     - "192.0.2.10/32"
   #   asn_block: []
   #   geo_whitelist: []
+  #   rate_rules:
+  #     - path: "/login"
+  #       methods: ["POST"]
+  #       rps: 5
+  #       burst: 10
+  #       action: challenge       # block | challenge | log_only
   #   attack_mode: false
+#
+# Незарегистрированный host НЕ требует записи: backend отдаёт дефолт пула
+# (mode=shadow, observe-only) при запросе /catalog/policy?site=<unknown>.

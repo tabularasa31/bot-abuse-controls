@@ -1,6 +1,6 @@
 # infra/ — what each directory is
 
-Three directories, three distinct roles. They are **not** competing "stands".
+Three directories — два живых стенда и one historical marker. They are **not** competing "stands".
 
 ## `demo-stand/` — the live demo
 
@@ -9,12 +9,12 @@ runs the full verdict cascade and proxies to an origin (`ORIGIN_URL`). Runs
 in **shadow** (empty blocklist — computes and logs verdicts, blocks nothing).
 This is the one thing we actually deploy and keep alive. Has its own
 observability (`/__admin`, `/metrics`), structured `BAC_LOG`, analytics
-(`scripts/analyze.py`), and a cron auto-update loop. See
+(`scripts/analyze.py`), and a cron auto-update loop. См.
 [`demo-stand/README.md`](demo-stand/README.md).
 
 Источник правды fp-кода ([`lua/ja4_compute.lua`](demo-stand/lua/ja4_compute.lua),
-[`lua/ja4_helpers.lua`](demo-stand/lua/ja4_helpers.lua)) теперь лежит здесь
-же — рядом с остальным каскадом.
+[`lua/ja4_helpers.lua`](demo-stand/lua/ja4_helpers.lua)) лежит здесь же —
+рядом с остальным каскадом.
 
 ## `demo-backend/` — antibot-backend HA-стек
 
@@ -26,9 +26,9 @@ ADR-005 / config-distribution. См. [`demo-backend/README.md`](demo-backend/REA
 
 Был отдельный спайк PoC #2 (`access_by_lua` verdict path benchmark). После
 переезда `ja4_compute.lua` / `ja4_helpers.lua` в `demo-stand/lua/` папка
-полностью удалена; компоуз `docker-compose.lua-poc.yml`, пробник
-`scripts/lua-poc-probe.sh` и результаты `docs/lua-poc-results.md` /
-`docs/phase2-fp-catalog.md` — тоже.
+полностью удалена; сопутствующее (`docker-compose.lua-poc.yml`,
+`scripts/lua-poc-probe.sh`, `docs/lua-poc-results.md`,
+`docs/phase2-fp-catalog.md`) — тоже.
 
 ## Not here anymore
 

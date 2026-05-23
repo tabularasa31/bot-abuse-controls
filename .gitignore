@@ -1,13 +1,4 @@
 # TLS material — generate locally with openssl
-infra/nginx-lua-poc/certs/*.pem
-infra/nginx-lua-poc/certs/*.key
-infra/nginx-lua-poc/certs/*.crt
-infra/nginx-lua-poc/spikes/*/certs/*.pem
-infra/nginx-lua-poc/spikes/*/certs/*.key
-infra/nginx-lua-poc/spikes/*/certs/*.crt
-infra/nginx-shadow/certs/*.pem
-infra/nginx-shadow/certs/*.key
-infra/nginx-shadow/certs/*.crt
 
 # Local env
 .env
@@ -17,9 +8,6 @@ infra/nginx-shadow/certs/*.crt
 # Mac
 .DS_Store
 
-# Go build artifacts (in case antibot/ gets compiled locally)
-antibot/antibot
-antibot/*.test
 *.out
 
 # Docker logs / volumes

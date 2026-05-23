@@ -10,6 +10,7 @@ package catalog
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"regexp"
 	"sort"
@@ -48,14 +49,45 @@ type Data struct {
 // и "field absent" одинаково, не различая. Если поле появится позже —
 // заведём для него отдельный major bump Version.
 type Policy struct {
-	Mode         string   `yaml:"mode" json:"mode"`                 // shadow / active
-	Strictness   string   `yaml:"strictness" json:"strictness"`     // standard / permissive
-	UABlacklist  []string `yaml:"ua_blacklist" json:"ua_blacklist"` // кастомные regex клиента
-	IPWhitelist  []string `yaml:"ip_whitelist" json:"ip_whitelist"` // per-resource allow CIDR
-	IPBlocklist  []string `yaml:"ip_blocklist" json:"ip_blocklist"` // per-resource deny CIDR
-	ASNBlock     []uint32 `yaml:"asn_block" json:"asn_block"`       // per-resource deny ASN
-	GeoWhitelist []string `yaml:"geo_whitelist" json:"geo_whitelist"`
-	AttackMode   bool     `yaml:"attack_mode" json:"attack_mode"` // единственный источник; map'а сверху больше нет
+	Mode         string     `yaml:"mode" json:"mode"`                   // shadow / active
+	Strictness   string     `yaml:"strictness" json:"strictness"`       // standard / permissive
+	UABlacklist  []string   `yaml:"ua_blacklist" json:"ua_blacklist"`   // кастомные regex клиента
+	IPWhitelist  []string   `yaml:"ip_whitelist" json:"ip_whitelist"`   // per-resource allow CIDR
+	IPBlocklist  []string   `yaml:"ip_blocklist" json:"ip_blocklist"`   // per-resource deny CIDR
+	ASNBlock     []uint32   `yaml:"asn_block" json:"asn_block"`         // per-resource deny ASN
+	GeoWhitelist []string   `yaml:"geo_whitelist" json:"geo_whitelist"` // если задан — все остальные блокируются
+	RateRules    []RateRule `yaml:"rate_rules" json:"rate_rules"`       // клиентские per-path rate-rules
+	AttackMode   bool       `yaml:"attack_mode" json:"attack_mode"`     // единственный источник; map'а сверху больше нет
+}
+
+// RateRule — одна клиентская rate-rule из docs/product/config-templates.md
+// §"policy/<host>.yaml". На стенде Lua пока не читает это поле (edge B11);
+// backend хранит и отдаёт as-is для дашборда [B10] и для будущих фаз.
+type RateRule struct {
+	Path    string   `yaml:"path" json:"path"`
+	Methods []string `yaml:"methods" json:"methods"`
+	RPS     int      `yaml:"rps" json:"rps"`
+	Burst   int      `yaml:"burst" json:"burst"`
+	Action  string   `yaml:"action" json:"action"` // block | challenge | log_only
+}
+
+// PoolDefault — то, что отдаётся для незарегистрированного host'a:
+// "новый домен без записи → дефолт пула (mode=shadow, observe-only)"
+// (config-distribution §"Per-resource lookup", задача B4). Реализована
+// как функция, а не как глобальная переменная: каждый вызов даёт новый
+// slice'ный nil-zero — никто из вызывающих не может случайно мутировать
+// общий объект.
+func PoolDefault() Policy {
+	return Policy{
+		Mode:         "shadow",
+		Strictness:   "standard",
+		UABlacklist:  []string{},
+		IPWhitelist:  []string{},
+		IPBlocklist:  []string{},
+		ASNBlock:     []uint32{},
+		GeoWhitelist: []string{},
+		RateRules:    []RateRule{},
+	}
 }
 
 // emptyData — детерминированный нуль для Store до первого Replace.
@@ -122,7 +154,7 @@ func LoadYAML(path string) (*Data, error) {
 		d.Policy = map[string]Policy{}
 	}
 
-	if err := validatePatterns(d); err != nil {
+	if err := Validate(d); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// Каноничный вид сразу на выходе из LoadYAML: тесты и тулинг, который
@@ -141,17 +173,47 @@ func LoadYAML(path string) (*Data, error) {
 // Store.Replace (защитный slot — на случай, если данные пришли не из
 // LoadYAML, например из B4 pgx-loader'а). Идемпотентен.
 func normalize(d *Data) {
-	d.UABlacklist = dedupSortStrings(d.UABlacklist)
-	d.IPWhitelist = dedupSortStrings(d.IPWhitelist)
-	d.ASNDatacenters = dedupSortUint32(d.ASNDatacenters)
+	// Системные slice'ы: dedup+sort + nil-coerce. Без ensure* json.Marshal
+	// эмитил бы `null` на пустой БД (DB-loader не инициализирует пустые
+	// срезы — append-loop пуст), и ETag дрейфил бы между «никогда не было
+	// записей» и «была одна, удалили». PR #43 review (follow-up).
+	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
+	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
+	d.ASNDatacenters = ensureUint32Slice(dedupSortUint32(d.ASNDatacenters))
 	for h, p := range d.Policy {
-		p.UABlacklist = dedupSortStrings(p.UABlacklist)
-		p.IPWhitelist = dedupSortStrings(p.IPWhitelist)
-		p.IPBlocklist = dedupSortStrings(p.IPBlocklist)
-		p.GeoWhitelist = dedupSortStrings(p.GeoWhitelist)
-		p.ASNBlock = dedupSortUint32(p.ASNBlock)
+		// Все []T поля: dedup+sort, потом nil → пустой slice. Coerce nil →
+		// `[]T{}` критичен для JSON-стабильности: операторская запись
+		// `ua_blacklist = 'null'::jsonb` через DB-loader приходит как
+		// nil-slice; json.Marshal сериализует её как `null`, ETag отличается
+		// от логически эквивалентной записи с пустым массивом / от
+		// `PoolDefault()`. Закрываем PR #43 review (Angle A).
+		p.UABlacklist = ensureStringSlice(dedupSortStrings(p.UABlacklist))
+		p.IPWhitelist = ensureStringSlice(dedupSortStrings(p.IPWhitelist))
+		p.IPBlocklist = ensureStringSlice(dedupSortStrings(p.IPBlocklist))
+		p.GeoWhitelist = ensureStringSlice(dedupSortStrings(p.GeoWhitelist))
+		p.ASNBlock = ensureUint32Slice(dedupSortUint32(p.ASNBlock))
+		// RateRules — порядок задаётся оператором (приоритет правил),
+		// сортировать нельзя; дедуп тоже не делаем (две одинаковые
+		// записи могли быть осознанным повтором).
+		if p.RateRules == nil {
+			p.RateRules = []RateRule{}
+		}
 		d.Policy[h] = p
 	}
+}
+
+func ensureStringSlice(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func ensureUint32Slice(s []uint32) []uint32 {
+	if s == nil {
+		return []uint32{}
+	}
+	return s
 }
 
 func dedupSortStrings(s []string) []string {
@@ -182,16 +244,42 @@ func dedupSortUint32(s []uint32) []uint32 {
 	return out
 }
 
-// validatePatterns прогоняет каждый regex (системный и per-resource) через
-// regexp.Compile. RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с
-// общим подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
+// Validate проверяет:
+//   - UA-regex (системные и per-host) через regexp.Compile;
+//   - CIDR-строки (системные ip_blocklist / ip_whitelist и per-host
+//     варианты) через `validateCIDR`, которая повторяет терпимость
+//     lua-resty-ipmatcher: голый IP без `/N` принимается как host-route
+//     (/32 для v4, /128 для v6), а CIDR с заданными host-битами
+//     (`10.0.0.5/8`) — тоже валиден, ipmatcher всё равно их маскирует.
+//
+// Regex: RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с общим
+// подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
 // trailing `\`) ловятся одинаково. Если edge захочет PCRE-specific фичу
-// (lookarounds), её нужно гейтить в спеке отдельно — пока консервативно
-// бьёмся за RE2-валидность.
-func validatePatterns(d *Data) error {
+// (lookarounds), её нужно гейтить в спеке отдельно.
+//
+// CIDR: миграции 0001 НЕ держат `inet`-колонки (комментарий в схеме:
+// "validation lives in the loader" — PR #43 review закрыл это обещание).
+// Валидация специально симметрична edge'у: иначе backend стал бы строже,
+// и оператор, вставивший `203.0.113.5` без `/32`, ловил бы fail-stale
+// несмотря на то, что ipmatcher принял бы запись.
+//
+// Экспортирована, чтобы любой источник *Data (LoadYAML, dbloader.Load,
+// будущий B10 admin API) обязан был дёргать её до Store.Replace —
+// fail-stale работает только если битый паттерн ловится ДО публикации.
+func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("ua_blacklist[%d]: invalid regex %q: %w", i, p, err)
+		}
+	}
+	for cidr := range d.IPBlocklist {
+		if err := validateCIDR(cidr); err != nil {
+			return fmt.Errorf("ip_blocklist[%q]: %w", cidr, err)
+		}
+	}
+	for i, cidr := range d.IPWhitelist {
+		if err := validateCIDR(cidr); err != nil {
+			return fmt.Errorf("ip_whitelist[%d] %q: %w", i, cidr, err)
 		}
 	}
 	for host, pol := range d.Policy {
@@ -200,6 +288,31 @@ func validatePatterns(d *Data) error {
 				return fmt.Errorf("policy[%s].ua_blacklist[%d]: invalid regex %q: %w", host, i, p, err)
 			}
 		}
+		for i, cidr := range pol.IPBlocklist {
+			if err := validateCIDR(cidr); err != nil {
+				return fmt.Errorf("policy[%s].ip_blocklist[%d] %q: %w", host, i, cidr, err)
+			}
+		}
+		for i, cidr := range pol.IPWhitelist {
+			if err := validateCIDR(cidr); err != nil {
+				return fmt.Errorf("policy[%s].ip_whitelist[%d] %q: %w", host, i, cidr, err)
+			}
+		}
 	}
 	return nil
+}
+
+// validateCIDR принимает либо «сырой» IP («1.2.3.4», «2001:db8::1»),
+// либо префикс («10.0.0.0/8», «10.0.0.5/8» с заданными host-битами).
+// Это симметрично lua-resty-ipmatcher на edge: тот принимает то же
+// подмножество и сам маскирует host-биты. netip.ParsePrefix отдельно от
+// netip.ParseAddr строже, поэтому пробуем оба.
+func validateCIDR(s string) error {
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return nil
+	}
+	if _, err := netip.ParseAddr(s); err == nil {
+		return nil
+	}
+	return fmt.Errorf("invalid IP/CIDR")
 }

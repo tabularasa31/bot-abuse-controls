@@ -21,7 +21,7 @@ The stand runs in **shadow mode** — the cascade computes and logs a verdict fo
 
 **Origin.** The stand is a real reverse proxy: the cascade runs, then (on allow) the request is proxied to an origin (vision Step 6 — antibot in front of origin). The origin is `ORIGIN_URL` (scheme+host, no trailing slash) set in the gitignored `infra/demo-stand/.env` on the VM; it is not committed. When `ORIGIN_URL` is **unset**, `/` falls back to the bundled landing page (the cascade still runs, so the demo works out-of-box without an upstream); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally.
 
-The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Candidate automation fps to seed it from (curl/python/Go, captured 2026-05-16 on macOS arm64) are documented in [`docs/phase2-fp-catalog.md`](../../docs/phase2-fp-catalog.md); promoting them into the blocklist is a deliberate, data-driven step (see analyze.py HIGH-confidence candidates), not the default.
+The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Promoting candidate automation fps into it is a deliberate, data-driven step (see `analyze.py` HIGH-confidence candidates), not the default.
 
 ## Structured log (Phase 1 schema)
 
@@ -295,7 +295,7 @@ infra/demo-stand/
 |---|---|
 | "Is this AI-generated slop?" | `make ci` passes 61 unit tests + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
-| "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. PoC #2 mеасured ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен). |
+| "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен). |
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). The stand already runs shadow (empty blocklist) — observability on, enforcement off — so "shadow vs active" is just whether the blocklist has entries. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
