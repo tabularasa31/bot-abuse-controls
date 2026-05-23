@@ -180,9 +180,9 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, d *catalog.Data) error {
 	defer rows.Close()
 	for rows.Next() {
 		var (
-			host                                                           string
-			p                                                              catalog.Policy
-			uaJSON, ipWLJSON, ipBLJSON, asnJSON, geoJSON, rateRulesJSON   []byte
+			host                                                        string
+			p                                                           catalog.Policy
+			uaJSON, ipWLJSON, ipBLJSON, asnJSON, geoJSON, rateRulesJSON []byte
 		)
 		if err := rows.Scan(
 			&host, &p.Mode, &p.Strictness, &p.AttackMode,

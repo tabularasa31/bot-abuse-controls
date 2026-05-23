@@ -29,10 +29,10 @@ type Reloader struct {
 	interval time.Duration
 	logger   *slog.Logger
 
-	reloadOK    prometheus.Counter
-	reloadFail  prometheus.Counter
-	reloadDur   prometheus.Histogram
-	lastReload  prometheus.Gauge // unix seconds, для дебага «когда последний раз»
+	reloadOK   prometheus.Counter
+	reloadFail prometheus.Counter
+	reloadDur  prometheus.Histogram
+	lastReload prometheus.Gauge // unix seconds, для дебага «когда последний раз»
 }
 
 func NewReloader(
