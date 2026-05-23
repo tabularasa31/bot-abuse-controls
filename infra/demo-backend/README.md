@@ -84,11 +84,12 @@ safely:
 - Marker file `state/.backend-last-deployed-sha` advances only after a
   successful `up`; a transient build failure is retried on the next tick.
 
-Cron line (one minute cadence — matches edge):
+Cron line (one minute cadence — matches edge; replace `<USER>` with the
+account that owns the checkout, e.g. `ubuntu` on the demo VMs):
 
 ```cron
-* * * * * /home/ubuntu/abuse-controls/infra/demo-backend/scripts/update.sh \
-    >> /home/ubuntu/abuse-controls/state/backend-update.log 2>&1
+* * * * * /home/<USER>/abuse-controls/infra/demo-backend/scripts/update.sh \
+    >> /home/<USER>/abuse-controls/state/backend-update.log 2>&1
 ```
 
 The checkout this script lives in must be a real `git` working copy with

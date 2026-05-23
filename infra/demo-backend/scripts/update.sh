@@ -77,10 +77,20 @@ if [ "$redeploy" = "1" ]; then
   # changed and recreates only the services whose image/config differs.
   # Postgres volume is named (pgdata) — survives recreates. lb config /
   # auth templates / certs are bind-mounted, so a compose `up` picks them
-  # up without an explicit force-recreate. If the host has a
-  # docker-compose.override.yml (per-deploy single-backend, custom mounts),
-  # compose auto-merges it.
-  if ! docker compose -f "$COMPOSE_FILE" up -d --build; then
+  # up without an explicit force-recreate.
+  #
+  # Override handling (gemini-review): `docker compose -f <file>` DISABLES
+  # the automatic discovery of `docker-compose.override.yml` that the
+  # bare `docker compose` command would do. We MUST pass the override
+  # explicitly via a second `-f` for it to take effect — otherwise the
+  # per-deploy customisations promised in README "Local override" would
+  # silently never apply.
+  compose_args=("-f" "$COMPOSE_FILE")
+  override="infra/demo-backend/docker-compose.override.yml"
+  if [ -f "$override" ]; then
+    compose_args+=("-f" "$override")
+  fi
+  if ! docker compose "${compose_args[@]}" up -d --build; then
     echo "$(date -Is) backend: ERROR compose up failed, NOT advancing marker" >&2
     exit 1
   fi
