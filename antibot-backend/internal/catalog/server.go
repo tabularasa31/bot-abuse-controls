@@ -99,12 +99,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail-closed: пустой Store (Version=defaultVersion, никто не звал
-	// Replace) → 503 Service Unavailable. Так эдж по логике fail-stale
-	// (docs/architecture/config-distribution.md §"Channel C / Failure mode")
-	// держит последний хороший каталог, а не перезаписывает его нашим
-	// "успешным" пустым ответом (codex review).
-	if snap.Version == defaultVersion {
+	// Fail-closed: Store ни разу не звался Replace'ом → 503 Service Unavailable.
+	// Эдж по логике fail-stale (docs/architecture/config-distribution.md
+	// §"Channel C / Failure mode") держит последний хороший каталог, а не
+	// перезаписывает его нашим "успешным" пустым ответом (codex review).
+	// Проверка через флаг Store.IsLoaded, а не по сравнению Version с
+	// defaultVersion — иначе оператор, поставивший в YAML `version: "0.0.0"`,
+	// видел бы 503 на легитимном payload'е.
+	if !s.store.IsLoaded() {
 		w.Header().Set("X-Catalog-Version", snap.Version)
 		w.Header().Set("Retry-After", "5")
 		writeErr(w, http.StatusServiceUnavailable, "catalog_not_loaded", name)

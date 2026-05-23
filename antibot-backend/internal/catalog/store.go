@@ -11,8 +11,8 @@
 // инвариантов:
 //   - все срезы в Data отсортированы Normalize()'ом на входе (один раз на
 //     load, не на каждый запрос — см. PR #42 review);
-//   - все map'ы сериализуются через json.Marshal, который с Go 1.12 пишет
-//     ключи в лексикографическом порядке.
+//   - все map'ы сериализуются через json.Marshal — encoding/json
+//     документированно пишет ключи map'ов в лексикографическом порядке.
 
 package catalog
 
@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"sync/atomic"
 )
@@ -39,6 +40,12 @@ type Snapshot struct {
 // данных, видя "успешный" 200 (см. server.handle).
 type Store struct {
 	data atomic.Pointer[Data]
+	// loaded — отдельный сигнал "данные положены хотя бы раз" вместо сравнения
+	// Version с defaultVersion. Иначе оператор, который легитимно ставит
+	// `version: "0.0.0"` в YAML (bootstrap / pre-release), получал бы 503
+	// до бесконечности — handler не различал бы "ещё не загружали" от "загрузили
+	// данные с этим версионом" (PR #42 follow-up).
+	loaded atomic.Bool
 }
 
 func NewStore() *Store {
@@ -57,7 +64,13 @@ func (s *Store) Replace(d *Data) {
 	}
 	normalize(d)
 	s.data.Store(d)
+	s.loaded.Store(true)
 }
+
+// IsLoaded возвращает true, когда Replace вызывался хотя бы один раз.
+// Handler по нему решает 200 vs 503 — не по сравнению Version с защитной
+// сентинелью, чтобы не падать на легитимном version: "0.0.0".
+func (s *Store) IsLoaded() bool { return s.loaded.Load() }
 
 // Snapshot собирает payload для (catalog, site). err != nil для неизвестного
 // имени каталога или ошибки сериализации; handler разделяет 404 / 500.
@@ -199,7 +212,7 @@ func buildIPWhitelist(d *Data, site string) ([]byte, error) {
 			merged = append(merged, c)
 		}
 	}
-	sortStrings(merged)
+	sort.Strings(merged) // обе ветки уже sorted из normalize, но merge порядок ломает
 	return jsonBytes(merged)
 }
 

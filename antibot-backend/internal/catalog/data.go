@@ -125,31 +125,47 @@ func LoadYAML(path string) (*Data, error) {
 	if err := validatePatterns(d); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	// Каноничный вид сразу на выходе из LoadYAML: тесты и тулинг, который
+	// читает результат напрямую (не через Store.Replace), получают тот же
+	// порядок и тот же дедуп, что увидит build*-слой.
+	normalize(d)
 	return d, nil
 }
 
-// normalize приводит Data к каноничному виду: сортирует все срезы (для
-// детерминизма payload'а и стабильности ETag) и дедуплицирует ASN'ы.
-// Вызывается один раз при загрузке (LoadYAML) и в Store.Replace — на
-// hot-path build*-функции читают уже подготовленные данные.
+// normalize приводит Data к каноничному виду: сортирует все срезы и
+// дедуплицирует их (для детерминизма payload'а и стабильности ETag —
+// две одинаковые записи в YAML не должны раздувать combined regex и не
+// должны давать разный ETag по сравнению с одной записью).
+//
+// Вызывается из LoadYAML (источник правды для in-memory v1) и из
+// Store.Replace (защитный slot — на случай, если данные пришли не из
+// LoadYAML, например из B4 pgx-loader'а). Идемпотентен.
 func normalize(d *Data) {
-	sortStrings(d.UABlacklist)
-	sortStrings(d.IPWhitelist)
+	d.UABlacklist = dedupSortStrings(d.UABlacklist)
+	d.IPWhitelist = dedupSortStrings(d.IPWhitelist)
 	d.ASNDatacenters = dedupSortUint32(d.ASNDatacenters)
 	for h, p := range d.Policy {
-		sortStrings(p.UABlacklist)
-		sortStrings(p.IPWhitelist)
-		sortStrings(p.IPBlocklist)
-		sortStrings(p.GeoWhitelist)
+		p.UABlacklist = dedupSortStrings(p.UABlacklist)
+		p.IPWhitelist = dedupSortStrings(p.IPWhitelist)
+		p.IPBlocklist = dedupSortStrings(p.IPBlocklist)
+		p.GeoWhitelist = dedupSortStrings(p.GeoWhitelist)
 		p.ASNBlock = dedupSortUint32(p.ASNBlock)
 		d.Policy[h] = p
 	}
 }
 
-func sortStrings(s []string) {
-	if len(s) > 1 {
-		sort.Strings(s)
+func dedupSortStrings(s []string) []string {
+	if len(s) < 2 {
+		return s
 	}
+	sort.Strings(s)
+	out := s[:1]
+	for _, v := range s[1:] {
+		if v != out[len(out)-1] {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func dedupSortUint32(s []uint32) []uint32 {

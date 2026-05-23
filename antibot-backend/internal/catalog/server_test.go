@@ -554,6 +554,77 @@ func TestETagMatcher(t *testing.T) {
 	}
 }
 
+// TestStoreLoadedFlagNotVersion: 503 решается по флагу Store.IsLoaded, а
+// не по сравнению Version с defaultVersion — иначе оператор, который
+// поставит `version: "0.0.0"` в YAML, получал бы 503 на легитимном payload'е.
+func TestStoreLoadedFlagNotVersion(t *testing.T) {
+	srv := New()
+	d := emptyData() // Version уже = defaultVersion ("0.0.0")
+	srv.Store().Replace(d)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 на Replace с version=%q (бывший сентинель)", resp.StatusCode, defaultVersion)
+	}
+	if got := resp.Header.Get("X-Catalog-Version"); got != defaultVersion {
+		t.Errorf("X-Catalog-Version=%q want %q", got, defaultVersion)
+	}
+}
+
+// TestNormalizeDedupStrings: дубликат CIDR в YAML не должен раздувать
+// catalog payload — normalize дедуплицирует строковые срезы наряду с ASN.
+func TestNormalizeDedupStrings(t *testing.T) {
+	d := emptyData()
+	d.Version = "1.0.0"
+	d.IPWhitelist = []string{"10.0.0.0/8", "10.0.0.0/8", "192.168.0.0/16"}
+	d.UABlacklist = []string{"curl/.*", "curl/.*"}
+	d.Policy = map[string]Policy{
+		"shop.example.com": {IPBlocklist: []string{"192.0.2.10/32", "192.0.2.10/32"}},
+	}
+	srv := New()
+	srv.Store().Replace(d)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	r := httpGet(t, ts.URL+"/catalog/ip_whitelist")
+	var wl []string
+	if err := json.NewDecoder(r.Body).Decode(&wl); err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if len(wl) != 2 {
+		t.Errorf("ip_whitelist len=%d want 2 (дубликат 10.0.0.0/8 не схлопнут): %v", len(wl), wl)
+	}
+
+	r = httpGet(t, ts.URL+"/catalog/ua_blacklist")
+	pat, _ := readJSON[string](r)
+	r.Body.Close()
+	if strings.Count(pat, "curl/") != 1 {
+		t.Errorf("ua_blacklist содержит дубликат curl/: %q", pat)
+	}
+
+	r = httpGet(t, ts.URL+"/catalog/ip_blocklist?site=shop.example.com")
+	var bl map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&bl); err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	// map дедуплицирует по природе, но если бы normalize оставил дубликат
+	// в slice'е, jsonBytes(map) всё равно был бы корректен; проверяем сам факт
+	// нормализации Policy на уровне Data.
+	got := srv.Store().data.Load()
+	if l := len(got.Policy["shop.example.com"].IPBlocklist); l != 1 {
+		t.Errorf("policy[shop].IPBlocklist дубликат не схлопнут: len=%d", l)
+	}
+}
+
 // TestStoreNotLoaded503: до Replace Store отдаёт defaultVersion; handler
 // должен ответить 503 с Retry-After, а не "успешный" 200 с пустым телом —
 // иначе эдж перезатёр бы свой fail-stale-кэш (codex review).
