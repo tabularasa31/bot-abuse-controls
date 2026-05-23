@@ -59,14 +59,19 @@ echo 'ORIGIN_URL=https://your-origin.example' > infra/demo-stand/.env
 
 # (Optional, B6) Connect to antibot-backend for live Channel C catalog pulls.
 # Without these the stand runs on the static fp_blocklist seed only.
-#   ANTIBOT_BACKEND_URL — scheme+host[:port], no trailing slash
-#   ANTIBOT_BACKEND_HOST — Host header override (if URL is an IP)
+#   ANTIBOT_BACKEND_URL — scheme+host[:port], no trailing slash. UNSET or
+#     empty → no timer fires (out-of-box: static seed, clean error.log).
+#   ANTIBOT_BACKEND_HOST — Host header override (if URL is an IP).
 #   ANTIBOT_BACKEND_CLIENT_CERT / _KEY — paths inside the container; for mTLS
-#     install the cert pair via scripts/install-edge-client-cert.sh
+#     install the cert pair via scripts/install-edge-client-cert.sh.
+#   ANTIBOT_BACKEND_SSL_VERIFY — set to "false" when backend uses a
+#     self-signed cert that the container's CA bundle won't validate.
+#     Default true (production-path).
 cat >> infra/demo-stand/.env <<EOF
 # ANTIBOT_BACKEND_URL=https://antibot.internal:443
 # ANTIBOT_BACKEND_CLIENT_CERT=/etc/nginx/certs/edge-client.crt
 # ANTIBOT_BACKEND_CLIENT_KEY=/etc/nginx/certs/edge-client.key
+# ANTIBOT_BACKEND_SSL_VERIFY=false   # only with self-signed backend cert
 EOF
 
 # Bring up. The REVISION env var feeds /__version so reviewers can see

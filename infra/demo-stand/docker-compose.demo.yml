@@ -51,6 +51,11 @@ services:
       ANTIBOT_BACKEND_HOST: ${ANTIBOT_BACKEND_HOST:-}
       ANTIBOT_BACKEND_CLIENT_CERT: ${ANTIBOT_BACKEND_CLIENT_CERT:-}
       ANTIBOT_BACKEND_CLIENT_KEY: ${ANTIBOT_BACKEND_CLIENT_KEY:-}
+      # Set to "false" in .env when the backend uses a self-signed cert that
+      # wouldn't validate against the container's CA bundle (typical for our
+      # demo-backend on a side VM). Default unset → catalog_pull keeps
+      # ssl_verify=true (production-path).
+      ANTIBOT_BACKEND_SSL_VERIFY: ${ANTIBOT_BACKEND_SSL_VERIFY:-}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's

@@ -397,18 +397,46 @@ end
 -- requested catalog, guarded to worker 0 so an N-worker pool issues N×
 -- fewer pulls (each catalog has one timer per machine, not per worker;
 -- shared dicts are process-wide so a single writer suffices).
+-- nonempty — treat empty strings the same as nil. Docker Compose's
+-- `${VAR:-}` substitution produces empty strings when an env-var is unset
+-- in .env, and an empty backend URL would otherwise be truthy in Lua and
+-- send fetch() into the "bad uri" loop every 30s on every stand that
+-- doesn't actually have a backend wired.
+local function nonempty(s)
+    if s == nil or s == "" then return nil end
+    return s
+end
+
+-- truthy_env — coerce env strings to bool. Anything in (false|0|no|off) is
+-- false; nil/empty/anything else is the default. Used for
+-- ANTIBOT_BACKEND_SSL_VERIFY so the demo can opt into ssl_verify=false from
+-- .env without on-host hacks in nginx.demo.conf (the previous approach made
+-- update.sh's git merge --ff-only fragile).
+local function truthy_env(s, default)
+    s = nonempty(s)
+    if s == nil then return default end
+    s = s:lower()
+    if s == "false" or s == "0" or s == "no" or s == "off" then return false end
+    return true
+end
+
 function _M.start(opts)
     opts = opts or {}
-    _M.backend_url         = opts.backend_url
-                             or os.getenv("ANTIBOT_BACKEND_URL")
+    -- `nonempty()` is applied to opts as well as envs (gemini-review): a
+    -- caller passing `start({ backend_url = "" })` — typically because they
+    -- plumbed an env-var through code that didn't normalise it — should
+    -- fall through to env / hard default rather than produce a "bad uri"
+    -- loop. Same reasoning for the cert paths below.
+    _M.backend_url         = nonempty(opts.backend_url)
+                             or nonempty(os.getenv("ANTIBOT_BACKEND_URL"))
                              or "http://antibot-backend:8080"
-    _M.backend_host_header = opts.backend_host_header
-                             or os.getenv("ANTIBOT_BACKEND_HOST")
+    _M.backend_host_header = nonempty(opts.backend_host_header)
+                             or nonempty(os.getenv("ANTIBOT_BACKEND_HOST"))
     _M.timeout_ms          = opts.timeout_ms or 5000
     if opts.ssl_verify ~= nil then
         _M.ssl_verify = opts.ssl_verify
     else
-        _M.ssl_verify = true
+        _M.ssl_verify = truthy_env(os.getenv("ANTIBOT_BACKEND_SSL_VERIFY"), true)
     end
     _M.interval            = opts.interval or 30
     local catalogs         = opts.catalogs or { "fp_blocklist" }
@@ -417,8 +445,10 @@ function _M.start(opts)
     -- root-owned keys are readable before privilege drop). preload_mtls is
     -- idempotent; this call is a safety net for callers that wire start()
     -- without a preload step.
-    local cert_path = opts.client_cert_path or os.getenv("ANTIBOT_BACKEND_CLIENT_CERT")
-    local key_path  = opts.client_priv_key_path or os.getenv("ANTIBOT_BACKEND_CLIENT_KEY")
+    local cert_path = nonempty(opts.client_cert_path)
+                      or nonempty(os.getenv("ANTIBOT_BACKEND_CLIENT_CERT"))
+    local key_path  = nonempty(opts.client_priv_key_path)
+                      or nonempty(os.getenv("ANTIBOT_BACKEND_CLIENT_KEY"))
     _M.preload_mtls(cert_path, key_path)
     if _M.parsed_cert and _M.parsed_key then
         ngx.log(ngx.NOTICE, "catalog_pull: mTLS client cert active",
