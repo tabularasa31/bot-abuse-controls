@@ -80,7 +80,7 @@ from [`nginx/lb.conf`](nginx/lb.conf):
 
 | `AUTH_MODE` | What it does | When to use |
 |---|---|---|
-| `ip-allowlist` (default) | `auth/ip-allowlist.conf` → `include allow.list; deny all;`. Edit `auth/allow.list` (seeded from `allow.list.example` by provision) and `docker compose exec lb nginx -s reload`. | Demo default. config-distribution §Channel C "Auth/transport" names it as the fallback to mTLS. |
+| `ip-allowlist` (default) | `auth/ip-allowlist.conf` → `include allow.list; deny all;`. `auth/allow.list` ships with safe loopback + RFC1918 defaults (committed baseline); edit per deploy and `docker compose exec lb nginx -s reload` to apply. | Demo default. config-distribution §Channel C "Auth/transport" names it as the fallback to mTLS. |
 | `mtls` | `auth/mtls.conf` → `ssl_client_certificate /etc/nginx/certs/edge-ca.crt; ssl_verify_client on;`. Edges must present a cert signed by edge-CA (`scripts/gen-certs.sh` rolls a sample pair). | Production-path per the doc. Switch once edges have `edge-client.{crt,key}`. |
 | `off` | Empty `auth.conf` — no application-layer auth. **Not for any reachable deploy.** | Local debugging only. |
 
@@ -102,19 +102,29 @@ Per config-distribution §Channel C, client certs are distributed to edges
 through Channel A (Puppet). Rotation without an outage:
 
 1. **Issue new client cert** against the existing edge-CA:
-   `EDGE_CLIENT_CN=edge-prod-v2 ./scripts/gen-certs.sh` (rm the old
-   `edge-client.{crt,key}` first to replace in-place; for a rolling cutover
-   keep both side-by-side and pick on the edge side).
-2. **Distribute** via Channel A — e.g. edge-puppet
-   `modules/nginx/files/antibot/edge-client.{crt,key}` → Puppet agent run on
-   the edge nodes → `nginx -s reload` per edge.
+   `EDGE_CLIENT_CN=edge-prod-v2 ./scripts/gen-certs.sh`. To replace in place
+   delete BOTH `edge-client.crt` and `edge-client.key` first — the script
+   refuses to run on a half-pair (it would overwrite the surviving half and
+   silently produce a cert/key mismatch). For a rolling cutover keep both
+   sides intact and stage the new files under different names.
+2. **Distribute**:
+   - **Prod**: via Channel A — e.g. edge-puppet
+     `modules/nginx/files/antibot/edge-client.{crt,key}` → Puppet agent run on
+     the edge nodes → `nginx -s reload` per edge.
+   - **Demo**: there's no Puppet, so the edge VM operator runs
+     [`infra/demo-stand/scripts/install-edge-client-cert.sh`](../demo-stand/scripts/install-edge-client-cert.sh)
+     which scp's the pair from this host and checks the modulus matches
+     before installing. Then `.env` gets the two `ANTIBOT_BACKEND_CLIENT_*`
+     paths and the demo-stand container is recreated.
 3. **CA rotation** (rarer): generate a new CA, sign the new client cert
    against it, drop a bundle `edge-ca.crt` containing both old + new into
    `certs/`, reload LB. After all edges have flipped to the new client cert,
    drop the old CA from the bundle and reload.
 4. **Sanity-check** with `AUTH_MODE=mtls ./scripts/verify.sh` after each step
    — assertion #7 confirms "no client cert" still rejects and "valid cert"
-   still passes.
+   still passes. The script hard-exits at the top if the local
+   `certs/edge-client.{crt,key}` are missing, so a stale `verify.sh` won't
+   bury the real cause in cascaded false failures.
 
 ### Channel C staleness SLA
 

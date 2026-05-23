@@ -478,6 +478,114 @@ do
 end
 
 -- ===========================================================================
+-- [B6] mTLS: preload_mtls + load_mtls_material + fetch() ssl_client_cert
+-- passthrough. Code-review F4: the original PR added these without coverage,
+-- so a typo in field names would still pass `make test`.
+-- ===========================================================================
+
+do
+    -- Stub ngx.ssl with sentinel parsers — capture the PEM bytes that get
+    -- passed in, and return distinguishable cdata-like sentinels so we can
+    -- assert they round-trip into req_opts.
+    local seen_cert_pem, seen_key_pem
+    local CERT_SENTINEL = { _kind = "parsed_cert" }
+    local KEY_SENTINEL  = { _kind = "parsed_key"  }
+    package.loaded["ngx.ssl"] = {
+        parse_pem_cert = function(pem)
+            seen_cert_pem = pem
+            return CERT_SENTINEL
+        end,
+        parse_pem_priv_key = function(pem)
+            seen_key_pem = pem
+            return KEY_SENTINEL
+        end,
+    }
+
+    -- Write two temp PEM files. Content is opaque to the stubbed parser;
+    -- load_mtls_material reads the bytes and hands them to parse_pem_*.
+    local function write_tmp(content)
+        local path = os.tmpname()
+        local f = assert(io.open(path, "wb"))
+        f:write(content); f:close()
+        return path
+    end
+    local cert_path = write_tmp("-----CERT PEM BODY-----")
+    local key_path  = write_tmp("-----KEY  PEM BODY-----")
+
+    -- Reset the module-level mTLS state so a previous test (or load order)
+    -- doesn't make preload short-circuit.
+    cp.parsed_cert = nil
+    cp.parsed_key  = nil
+
+    cp.preload_mtls(cert_path, key_path)
+    check(cp.parsed_cert, CERT_SENTINEL, "preload_mtls: parsed_cert is sentinel")
+    check(cp.parsed_key,  KEY_SENTINEL,  "preload_mtls: parsed_key is sentinel")
+    check(seen_cert_pem, "-----CERT PEM BODY-----",
+        "preload_mtls: cert PEM bytes handed to ngx.ssl.parse_pem_cert")
+    check(seen_key_pem,  "-----KEY  PEM BODY-----",
+        "preload_mtls: key PEM bytes handed to ngx.ssl.parse_pem_priv_key")
+
+    -- Idempotency: second call must not re-parse.
+    seen_cert_pem = nil
+    cp.preload_mtls(cert_path, key_path)
+    check(seen_cert_pem, nil, "preload_mtls: idempotent on second call")
+
+    -- fetch() must thread the parsed cdata into req_opts.ssl_client_cert /
+    -- ssl_client_priv_key. Stub httpc to capture req_opts and skip the rest.
+    reset_state()
+    local captured_opts
+    local httpc_stub = {}
+    function httpc_stub:set_timeout(_) end
+    function httpc_stub:request_uri(_, opts)
+        captured_opts = opts
+        return { status = 304, body = "", headers = {} }, nil
+    end
+    cp.http_module = { new = function() return httpc_stub end }
+    cp.backend_url = "https://stub:0"
+    cp.timeout_ms  = 1000
+    cp.ssl_verify  = true
+    cp.fetch("fp_blocklist")
+    check(captured_opts and captured_opts.ssl_client_cert, CERT_SENTINEL,
+        "fetch: req_opts.ssl_client_cert is parsed cert")
+    check(captured_opts and captured_opts.ssl_client_priv_key, KEY_SENTINEL,
+        "fetch: req_opts.ssl_client_priv_key is parsed key")
+    cp.http_module = nil
+
+    -- Negative: if parsed_cert is nil (no mTLS configured), fetch must NOT
+    -- attach the keys to req_opts.
+    cp.parsed_cert = nil
+    cp.parsed_key  = nil
+    captured_opts = nil
+    cp.http_module = { new = function() return httpc_stub end }
+    cp.fetch("fp_blocklist")
+    check(captured_opts and captured_opts.ssl_client_cert, nil,
+        "fetch: no ssl_client_cert when mTLS not configured")
+    check(captured_opts and captured_opts.ssl_client_priv_key, nil,
+        "fetch: no ssl_client_priv_key when mTLS not configured")
+    cp.http_module = nil
+
+    -- Missing/empty paths: load_mtls_material returns nil,nil silently
+    -- (used by init.lua when env vars unset).
+    local pc, pk = cp.load_mtls_material(nil, nil)
+    check(pc, nil, "load_mtls_material(nil,nil): cert nil")
+    check(pk, nil, "load_mtls_material(nil,nil): key nil")
+    pc, pk = cp.load_mtls_material("", "")
+    check(pc, nil, "load_mtls_material('',''): cert nil")
+    check(pk, nil, "load_mtls_material('',''): key nil")
+
+    -- File-missing path: log + nil return, no crash.
+    pc, pk = cp.load_mtls_material("/nonexistent/cert.pem", "/nonexistent/key.pem")
+    check(pc, nil, "load_mtls_material(missing): cert nil")
+    check(pk, nil, "load_mtls_material(missing): key nil")
+    check_true(log_contains("read client cert"),
+        "load_mtls_material(missing): logs the read failure")
+
+    os.remove(cert_path)
+    os.remove(key_path)
+    package.loaded["ngx.ssl"] = nil
+end
+
+-- ===========================================================================
 
 if failed > 0 then
     io.stderr:write(string.format("\n%d passed, %d FAILED\n", passed, failed))

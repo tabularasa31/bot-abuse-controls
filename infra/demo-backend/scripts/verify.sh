@@ -43,8 +43,15 @@ host_only="${HOST%%:*}"
 # AUTH_MODE in .env (which actually drives the LB at compose-up) is the
 # source of truth and we don't mis-verify a stack that's already on mtls
 # with the ip-allowlist default. Env > .env > hardcoded default.
+#
+# F7: tolerate `AUTH_MODE=mtls   # rolled 2026-05-23` and CRLF .env edits.
+# Strip (in order): everything after `#`, surrounding double/single quotes,
+# leading+trailing whitespace, trailing CR.
 if [ -z "${AUTH_MODE:-}" ] && [ -f "${ROOT}/.env" ]; then
-    AUTH_MODE="$(grep -E '^AUTH_MODE=' "${ROOT}/.env" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+    AUTH_MODE="$(grep -E '^AUTH_MODE=' "${ROOT}/.env" \
+        | tail -1 \
+        | sed -E 's/^AUTH_MODE=//; s/[[:space:]]*#.*$//; s/^["'"'"']//; s/["'"'"']$//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+        | tr -d '\r' || true)"
 fi
 AUTH_MODE="${AUTH_MODE:-ip-allowlist}"
 
@@ -71,6 +78,10 @@ esac
 # client cert — otherwise nginx rejects with 400 No required SSL certificate
 # and the rest of verify.sh reports false failures (codex review). The "no
 # cert" negative path in #7 uses a separate bare-curl invocation.
+#
+# F5: hard-exit rather than continue with bare CURL when certs are missing —
+# the cascading false failures from #2–#6 mask the real root cause (missing
+# client material) and burn operator time.
 CURL=(curl -sk --connect-timeout 3 --max-time 5)
 if [ "${AUTH_MODE}" = "mtls" ]; then
     cert="${ROOT}/certs/edge-client.crt"
@@ -78,7 +89,12 @@ if [ "${AUTH_MODE}" = "mtls" ]; then
     if [ -f "${cert}" ] && [ -f "${key}" ]; then
         CURL+=(--cert "${cert}" --key "${key}")
     else
-        echo "WARN: AUTH_MODE=mtls but ${cert}/${key} missing — run scripts/gen-certs.sh" >&2
+        echo "error: AUTH_MODE=mtls requires ${cert} and ${key} on this host." >&2
+        echo "       Generate them on the backend with scripts/gen-certs.sh," >&2
+        echo "       or copy them from there (see README §mTLS rotation)." >&2
+        echo "       Refusing to run checks #2–#6 with a bare curl — every one" >&2
+        echo "       would false-fail at the TLS handshake." >&2
+        exit 2
     fi
 fi
 

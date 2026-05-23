@@ -61,7 +61,24 @@ fi
 # ---- 3. Sample edge client cert (B6) ----
 # Signed by the edge-CA above. Copy edge-client.crt + edge-client.key to the
 # edge VM (gitignored on this side, distributed via Channel A in prod).
-if [ -f "${CERT_DIR}/edge-client.crt" ] && [ -f "${CERT_DIR}/edge-client.key" ]; then
+#
+# Half-pair guard (code-review F2): if exactly one of crt/key exists, bail out.
+# Otherwise the openssl req -newkey below would overwrite the surviving key
+# (or leave a stale cert paired with a fresh key), silently producing a
+# cert/key mismatch that breaks mTLS on every edge still holding the other
+# half. Force the operator to delete both or restore both.
+crt_present=0; key_present=0
+[ -f "${CERT_DIR}/edge-client.crt" ] && crt_present=1
+[ -f "${CERT_DIR}/edge-client.key" ] && key_present=1
+if [ "$((crt_present + key_present))" = "1" ]; then
+    echo "error: edge-client cert/key pair is half-present in ${CERT_DIR}" >&2
+    echo "       (crt=${crt_present}, key=${key_present}). Refusing to regenerate," >&2
+    echo "       which would overwrite the surviving half and produce a silent" >&2
+    echo "       cert/key mismatch on edges holding the other half." >&2
+    echo "       Either restore the missing file, or delete BOTH and re-run." >&2
+    exit 1
+fi
+if [ "${crt_present}" = "1" ] && [ "${key_present}" = "1" ]; then
     echo "edge client cert already present — leaving as-is"
 else
     # CSR + sign with edge-CA. Two steps so we can pin CN and extensions.
