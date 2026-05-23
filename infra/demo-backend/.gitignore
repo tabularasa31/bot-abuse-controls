@@ -1,2 +1,7 @@
 .env
 certs/
+# Per-deploy local overrides for docker compose (single-backend setup,
+# custom mounts, custom allowlists). Picked up automatically by compose.
+# Documented in README.md "Local override".
+docker-compose.override.yml
+nginx/lb.local.conf
