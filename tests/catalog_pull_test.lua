@@ -653,6 +653,29 @@ do
     check(cp.ssl_verify, true,
         "start: opts.ssl_verify=true overrides env false")
 
+    -- Empty-string opts: same treatment as empty-string envs (gemini-review).
+    -- A caller plumbing `os.getenv("…")` straight into `start({ backend_url = … })`
+    -- without normalising would otherwise pin an empty URL.
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_URL = "https://from-env.example" }
+    cp.start({ catalogs = {}, backend_url = "" })
+    check(cp.backend_url, "https://from-env.example",
+        "start: empty opts.backend_url falls through to env")
+
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_HOST = "from.env" }
+    cp.start({ catalogs = {}, backend_host_header = "" })
+    check(cp.backend_host_header, "from.env",
+        "start: empty opts.backend_host_header falls through to env")
+
+    cp.parsed_cert = nil; cp.parsed_key = nil
+    env_stub = { ANTIBOT_BACKEND_URL = "", ANTIBOT_BACKEND_HOST = "" }
+    cp.start({ catalogs = {}, backend_url = "", backend_host_header = "" })
+    check(cp.backend_url, "http://antibot-backend:8080",
+        "start: both opts+env empty for URL → hard fallback")
+    check(cp.backend_host_header, nil,
+        "start: both opts+env empty for host header → nil (no Host override)")
+
     os.getenv = real_getenv
     cp.http_module = nil
 end
