@@ -16,7 +16,7 @@ The stand runs in **shadow mode** — the cascade computes and logs a verdict fo
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
 | `/__version` | anything | git sha + uptime | What code is actually deployed. |
 | `/__admin` | a real browser | HTML status page | Mode + counters (requests, pass/block/challenge/allow, unique fp, cache hit ratio, uptime), **rules fired**, a **live ring buffer of recent requests** (verdict/rule/fp/ip/ua), and the blocklist. Read-only, no mutation surface. |
-| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`, `antibot_fp_unique`, `antibot_rule_total{stage,rule}`. **Channel C health (B5/B6):** `antibot_edge_catalog_staleness_seconds{catalog="…"}` — seconds since the last successful pull, `-1` if no pull has ever succeeded since worker start; SLA contract is ≤30s for fast catalogs / ≤15m for PR-merged catalogs (alertmanager rule lives in whatever scrapes this, per [demo-backend README §Channel C staleness SLA](../demo-backend/README.md#channel-c-staleness-sla)). No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
+| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`, `antibot_fp_unique`, `antibot_rule_total{stage,rule}`. **Channel C health (B5/B6):** `antibot_edge_catalog_staleness_seconds{catalog="…"}` — seconds since the last successful **contact** with antibot-backend (200 or 304, both healthy answers), `-1` if no contact has succeeded since worker start. This is a **liveness** signal (alert on dead channel), not a freshness one — see [demo-backend README §Channel C staleness SLA](../demo-backend/README.md#channel-c-staleness-sla). No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same origin, **no** antibot | Proxies to the same origin but bypasses `access_by_lua`. Hit `/` vs `/baseline/` with `wrk` — the delta is the cascade overhead. |
 
 **Origin.** The stand is a real reverse proxy: the cascade runs, then (on allow) the request is proxied to an origin (vision Step 6 — antibot in front of origin). The origin is `ORIGIN_URL` (scheme+host, no trailing slash) set in the gitignored `infra/demo-stand/.env` on the VM; it is not committed. When `ORIGIN_URL` is **unset**, `/` falls back to the bundled landing page (the cascade still runs, so the demo works out-of-box without an upstream); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally.
@@ -56,6 +56,18 @@ cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 # Point the cascade at the origin it fronts (gitignored, not committed).
 # Same .env also holds DEMO_BIND_IP / REPORT_* on a real deploy.
 echo 'ORIGIN_URL=https://your-origin.example' > infra/demo-stand/.env
+
+# (Optional, B6) Connect to antibot-backend for live Channel C catalog pulls.
+# Without these the stand runs on the static fp_blocklist seed only.
+#   ANTIBOT_BACKEND_URL — scheme+host[:port], no trailing slash
+#   ANTIBOT_BACKEND_HOST — Host header override (if URL is an IP)
+#   ANTIBOT_BACKEND_CLIENT_CERT / _KEY — paths inside the container; for mTLS
+#     install the cert pair via scripts/install-edge-client-cert.sh
+cat >> infra/demo-stand/.env <<EOF
+# ANTIBOT_BACKEND_URL=https://antibot.internal:443
+# ANTIBOT_BACKEND_CLIENT_CERT=/etc/nginx/certs/edge-client.crt
+# ANTIBOT_BACKEND_CLIENT_KEY=/etc/nginx/certs/edge-client.key
+EOF
 
 # Bring up. The REVISION env var feeds /__version so reviewers can see
 # what code is actually deployed. Without it the endpoint reports
