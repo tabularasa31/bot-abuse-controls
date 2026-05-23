@@ -1,0 +1,39 @@
+package config_test
+
+import (
+	"testing"
+
+	"github.com/tabularasa31/antibot-backend/internal/config"
+)
+
+// TestLoad_MigrateOnStartup_AcceptsCaseVariants — PR #43 review (Angle A):
+// раньше switch'е по литералам отказывал на 'True'/'False'/'FALSE', хотя
+// они идиоматичны для YAML/k8s-secret. Сейчас через strconv.ParseBool.
+func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"true", true}, {"True", true}, {"TRUE", true}, {"1", true}, {"t", true}, {"T", true},
+		{"false", false}, {"False", false}, {"FALSE", false}, {"0", false}, {"f", false}, {"F", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Setenv("MIGRATE_ON_STARTUP", tc.in)
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.MigrateOnStartup != tc.want {
+				t.Errorf("MIGRATE_ON_STARTUP=%q → %v, want %v", tc.in, cfg.MigrateOnStartup, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_MigrateOnStartup_RejectsGarbage(t *testing.T) {
+	t.Setenv("MIGRATE_ON_STARTUP", "maybe")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("Load: ожидалась ошибка для невалидного MIGRATE_ON_STARTUP")
+	}
+}

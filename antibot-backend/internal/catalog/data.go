@@ -10,6 +10,7 @@ package catalog
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"regexp"
 	"sort"
@@ -176,21 +177,39 @@ func normalize(d *Data) {
 	d.IPWhitelist = dedupSortStrings(d.IPWhitelist)
 	d.ASNDatacenters = dedupSortUint32(d.ASNDatacenters)
 	for h, p := range d.Policy {
-		p.UABlacklist = dedupSortStrings(p.UABlacklist)
-		p.IPWhitelist = dedupSortStrings(p.IPWhitelist)
-		p.IPBlocklist = dedupSortStrings(p.IPBlocklist)
-		p.GeoWhitelist = dedupSortStrings(p.GeoWhitelist)
-		p.ASNBlock = dedupSortUint32(p.ASNBlock)
+		// Все []T поля: dedup+sort, потом nil → пустой slice. Coerce nil →
+		// `[]T{}` критичен для JSON-стабильности: операторская запись
+		// `ua_blacklist = 'null'::jsonb` через DB-loader приходит как
+		// nil-slice; json.Marshal сериализует её как `null`, ETag отличается
+		// от логически эквивалентной записи с пустым массивом / от
+		// `PoolDefault()`. Закрываем PR #43 review (Angle A).
+		p.UABlacklist = ensureStringSlice(dedupSortStrings(p.UABlacklist))
+		p.IPWhitelist = ensureStringSlice(dedupSortStrings(p.IPWhitelist))
+		p.IPBlocklist = ensureStringSlice(dedupSortStrings(p.IPBlocklist))
+		p.GeoWhitelist = ensureStringSlice(dedupSortStrings(p.GeoWhitelist))
+		p.ASNBlock = ensureUint32Slice(dedupSortUint32(p.ASNBlock))
 		// RateRules — порядок задаётся оператором (приоритет правил),
 		// сортировать нельзя; дедуп тоже не делаем (две одинаковые
-		// записи могли быть осознанным повтором для теста). Но
-		// заменяем nil на пустой slice, чтобы JSON был стабильно `[]`,
-		// не null (важно для ETag-стабильности между null и []).
+		// записи могли быть осознанным повтором).
 		if p.RateRules == nil {
 			p.RateRules = []RateRule{}
 		}
 		d.Policy[h] = p
 	}
+}
+
+func ensureStringSlice(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func ensureUint32Slice(s []uint32) []uint32 {
+	if s == nil {
+		return []uint32{}
+	}
+	return s
 }
 
 func dedupSortStrings(s []string) []string {
@@ -221,26 +240,54 @@ func dedupSortUint32(s []uint32) []uint32 {
 	return out
 }
 
-// Validate прогоняет каждый regex (системный и per-resource) через
-// regexp.Compile. RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с
-// общим подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
+// Validate проверяет:
+//   - UA-regex (системные и per-host) через regexp.Compile;
+//   - CIDR-строки (системные ip_blocklist / ip_whitelist и per-host
+//     варианты) через netip.ParsePrefix.
+//
+// Regex: RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с общим
+// подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
 // trailing `\`) ловятся одинаково. Если edge захочет PCRE-specific фичу
-// (lookarounds), её нужно гейтить в спеке отдельно — пока консервативно
-// бьёмся за RE2-валидность.
+// (lookarounds), её нужно гейтить в спеке отдельно.
+//
+// CIDR: миграции 0001 НЕ держат `inet`-колонки (комментарий в схеме:
+// "validation lives in the loader" — PR #43 review закрыл это обещание).
+// netip.ParsePrefix принимает IPv4/IPv6 prefix в строгой форме — то же
+// подмножество, которое грузит lua-resty-ipmatcher на edge.
 //
 // Экспортирована, чтобы любой источник *Data (LoadYAML, dbloader.Load,
 // будущий B10 admin API) обязан был дёргать её до Store.Replace —
-// fail-stale работает только если битый regex отлавливается ДО публикации.
+// fail-stale работает только если битый паттерн ловится ДО публикации.
 func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("ua_blacklist[%d]: invalid regex %q: %w", i, p, err)
 		}
 	}
+	for cidr := range d.IPBlocklist {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return fmt.Errorf("ip_blocklist[%q]: invalid CIDR: %w", cidr, err)
+		}
+	}
+	for i, cidr := range d.IPWhitelist {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return fmt.Errorf("ip_whitelist[%d]: invalid CIDR %q: %w", i, cidr, err)
+		}
+	}
 	for host, pol := range d.Policy {
 		for i, p := range pol.UABlacklist {
 			if _, err := regexp.Compile(p); err != nil {
 				return fmt.Errorf("policy[%s].ua_blacklist[%d]: invalid regex %q: %w", host, i, p, err)
+			}
+		}
+		for i, cidr := range pol.IPBlocklist {
+			if _, err := netip.ParsePrefix(cidr); err != nil {
+				return fmt.Errorf("policy[%s].ip_blocklist[%d]: invalid CIDR %q: %w", host, i, cidr, err)
+			}
+		}
+		for i, cidr := range pol.IPWhitelist {
+			if _, err := netip.ParsePrefix(cidr); err != nil {
+				return fmt.Errorf("policy[%s].ip_whitelist[%d]: invalid CIDR %q: %w", host, i, cidr, err)
 			}
 		}
 	}

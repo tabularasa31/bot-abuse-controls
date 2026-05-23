@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -63,14 +64,14 @@ func Load() (Config, error) {
 		cfg.CatalogReloadInterval = d
 	}
 	if v := os.Getenv("MIGRATE_ON_STARTUP"); v != "" {
-		switch v {
-		case "0", "false", "no":
-			cfg.MigrateOnStartup = false
-		case "1", "true", "yes":
-			cfg.MigrateOnStartup = true
-		default:
-			return cfg, fmt.Errorf("MIGRATE_ON_STARTUP must be true/false, got %q", v)
+		// strconv.ParseBool принимает 1/t/T/TRUE/true/True и 0/f/F/FALSE/false/False
+		// — идиоматичный набор, который ставят из YAML/k8s-secret'ов. Ручной
+		// switch'е раньше отказывал на 'True'/'FALSE' (PR #43 review).
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("MIGRATE_ON_STARTUP: %w", err)
 		}
+		cfg.MigrateOnStartup = b
 	}
 	if v := os.Getenv("RDNS_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)

@@ -26,11 +26,44 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// migrateAdvisoryLockKey — произвольный 64-битный const'a для
+// `pg_advisory_lock`. Изоляция от чужих lock'ов через random magic;
+// `crc64(...)`-подобной схемы не используем, чтобы не зависеть от того,
+// как именно генерируется ключ.
+const migrateAdvisoryLockKey int64 = 0x616E7469626F7402 // "antibo\x02"
+
 // Migrate выполняет встроенные SQL-файлы из migrations/ в лексикографическом
 // порядке. Файлы написаны идемпотентно через CREATE TABLE IF NOT EXISTS,
 // так что переприменение безопасно. Тяжёлую миграционную инфраструктуру
 // (схема версий, down-шаги) принесёт B15 — пока хватает дёшевого ratchet'a.
+//
+// Concurrency: HA-пара backend'ов из `infra/demo-backend/` стартует обе
+// реплики одновременно. На сегодняшнем 0001 это безвредно (только
+// IF NOT EXISTS + ON CONFLICT DO NOTHING), но первая же non-idempotent DDL
+// в 0002 даст один реплике 'relation already exists' и crash-loop.
+// Берём session-scoped pg_advisory_lock — вторая реплика блокируется,
+// пока первая не закончит, потом просто видит, что всё уже есть.
+// PR #43 review (Angle B).
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	// Берём один коннект из пула и держим advisory lock в его scope;
+	// pg_advisory_unlock на defer гарантирует, что лок отпустится даже
+	// если миграция упала (а если коннект всё равно дропается — Postgres
+	// автоматически снимает session-locks при close).
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire conn for migrate: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrateAdvisoryLockKey); err != nil {
+		return fmt.Errorf("pg_advisory_lock: %w", err)
+	}
+	defer func() {
+		// best-effort unlock; коннект и так уйдёт в пул, но явный unlock
+		// быстрее освобождает соседнюю реплику.
+		_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
+	}()
+
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		return fmt.Errorf("read embed migrations: %w", err)
@@ -46,7 +79,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		// Один Exec на весь файл — pgx умеет multi-statement strings.
 		// Если оператор ломает файл (синтаксис), валимся на старте,
 		// не делая backend живым с частично применённой схемой.
-		if _, err := pool.Exec(ctx, string(body)); err != nil {
+		if _, err := conn.Exec(ctx, string(body)); err != nil {
 			return fmt.Errorf("apply %s: %w", e.Name(), err)
 		}
 	}

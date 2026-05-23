@@ -10,6 +10,7 @@ package dbloader_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,6 +205,81 @@ func TestLoad_RejectsInvalidRegex(t *testing.T) {
 	}
 	if _, err := dbloader.Load(ctx, pool); err == nil {
 		t.Fatal("Load: per-host битый regex тоже должен валить загрузку")
+	}
+}
+
+func TestLoad_RejectsInvalidCIDR(t *testing.T) {
+	// PR #43 review (Angle B): схема не держит inet-тип (валидация
+	// делегирована loader'у), значит catalog.Validate ОБЯЗАН ловить
+	// мусор. Проверяем системный ip_blocklist и per-host ip_whitelist.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := openPool(t, ctx)
+	resetSchema(t, ctx, pool)
+
+	if _, err := pool.Exec(ctx, `INSERT INTO ip_blocklist (cidr) VALUES ('999.0.0.0/33')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbloader.Load(ctx, pool); err == nil {
+		t.Fatal("Load: ожидалась ошибка валидации CIDR (системный ip_blocklist)")
+	}
+
+	if _, err := pool.Exec(ctx, `DELETE FROM ip_blocklist`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO policy (host, ip_whitelist)
+		VALUES ('shop.example.com', '["not-a-cidr"]')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbloader.Load(ctx, pool); err == nil {
+		t.Fatal("Load: ожидалась ошибка валидации CIDR (per-host ip_whitelist)")
+	}
+}
+
+func TestLoad_NormalizesJSONBNull(t *testing.T) {
+	// PR #43 review (Angle A): jsonb-null в JSONB-колонке policy.* при
+	// загрузке через unmarshalIfNonEmpty приходил как nil-slice, дальше
+	// json.Marshal сериализовал его в `null`, а не `[]`. После фикса
+	// normalize (в Store.Replace) должен coerce'нить nil → []T{}, чтобы
+	// шов «нет записи vs nil-slice vs []» был незаметен наружу — payload
+	// эджа стабильный, ETag не дрейфит.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := openPool(t, ctx)
+	resetSchema(t, ctx, pool)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO policy (host, mode, strictness, ua_blacklist,
+		                    ip_whitelist, ip_blocklist, asn_block,
+		                    geo_whitelist, rate_rules)
+		VALUES ('shop.example.com', 'shadow', 'standard',
+		        'null'::jsonb, 'null'::jsonb, 'null'::jsonb,
+		        'null'::jsonb, 'null'::jsonb, 'null'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	d, err := dbloader.Load(ctx, pool)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Прогон через Store.Replace вызывает normalize(); проверяем
+	// итоговый payload, не сырое значение из Load.
+	store := catalog.NewStore()
+	store.Replace(d)
+	snap, err := store.Snapshot("policy", "shop.example.com")
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	body := string(snap.Body)
+	// Без normalize — это были бы `"ua_blacklist":null` и т.д.
+	for _, field := range []string{"ua_blacklist", "ip_whitelist", "ip_blocklist",
+		"asn_block", "geo_whitelist", "rate_rules"} {
+		nullForm := `"` + field + `":null`
+		if strings.Contains(body, nullForm) {
+			t.Errorf("payload содержит %q — normalize не coerce'нул jsonb-null в []: %s",
+				nullForm, body)
+		}
 	}
 }
 

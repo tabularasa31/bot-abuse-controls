@@ -31,7 +31,10 @@ type Reloader struct {
 
 	reloadOK   prometheus.Counter
 	reloadFail prometheus.Counter
-	reloadDur  prometheus.Histogram
+	// reloadDur — labelled `outcome={success,failure}`, чтобы p99 в дашбордах
+	// не смешивал хорошие тики с теми, где Load висел до per-tick deadline
+	// (см. tick про context.WithTimeout). PR #43 review (Angle A).
+	reloadDur  *prometheus.HistogramVec
 	lastReload prometheus.Gauge // unix seconds, для дебага «когда последний раз»
 }
 
@@ -55,11 +58,11 @@ func NewReloader(
 			Name: "antibot_backend_catalog_reload_failures_total",
 			Help: "Failed catalog reloads (fail-stale: Store untouched).",
 		}),
-		reloadDur: prometheus.NewHistogram(prometheus.HistogramOpts{
+		reloadDur: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "antibot_backend_catalog_reload_duration_seconds",
-			Help:    "Wall time of a single catalog reload tick.",
+			Help:    "Wall time of a single catalog reload tick, labelled by outcome.",
 			Buckets: prometheus.DefBuckets,
-		}),
+		}, []string{"outcome"}),
 		lastReload: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "antibot_backend_catalog_last_reload_unixtime",
 			Help: "Unix timestamp of the last successful reload (0 if never).",
@@ -99,13 +102,24 @@ func (r *Reloader) Bootstrap(ctx context.Context) error {
 }
 
 func (r *Reloader) tick(ctx context.Context) error {
+	// Per-tick deadline: без него зависший pgx (half-open TCP, NAT-таймаут)
+	// заблокировал бы горутину Run, ticker'ы скоалесцировались, и
+	// reloadFail НЕ инкрементировался бы — никакого сигнала оператору.
+	// Лимит = r.interval: тик, не уложившийся в свой бюджет, всё равно
+	// мешал бы следующему, лучше провалить его с ctx.DeadlineExceeded.
+	// PR #43 review (Angle A).
+	tickCtx, cancel := context.WithTimeout(ctx, r.interval)
+	defer cancel()
+
 	start := time.Now()
-	d, err := Load(ctx, r.pool)
-	r.reloadDur.Observe(time.Since(start).Seconds())
+	d, err := Load(tickCtx, r.pool)
+	dur := time.Since(start).Seconds()
 	if err != nil {
+		r.reloadDur.WithLabelValues("failure").Observe(dur)
 		r.reloadFail.Inc()
 		return err
 	}
+	r.reloadDur.WithLabelValues("success").Observe(dur)
 	r.store.Replace(d)
 	r.reloadOK.Inc()
 	r.lastReload.Set(float64(time.Now().Unix()))
