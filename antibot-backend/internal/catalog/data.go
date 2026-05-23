@@ -48,14 +48,45 @@ type Data struct {
 // и "field absent" одинаково, не различая. Если поле появится позже —
 // заведём для него отдельный major bump Version.
 type Policy struct {
-	Mode         string   `yaml:"mode" json:"mode"`                 // shadow / active
-	Strictness   string   `yaml:"strictness" json:"strictness"`     // standard / permissive
-	UABlacklist  []string `yaml:"ua_blacklist" json:"ua_blacklist"` // кастомные regex клиента
-	IPWhitelist  []string `yaml:"ip_whitelist" json:"ip_whitelist"` // per-resource allow CIDR
-	IPBlocklist  []string `yaml:"ip_blocklist" json:"ip_blocklist"` // per-resource deny CIDR
-	ASNBlock     []uint32 `yaml:"asn_block" json:"asn_block"`       // per-resource deny ASN
-	GeoWhitelist []string `yaml:"geo_whitelist" json:"geo_whitelist"`
-	AttackMode   bool     `yaml:"attack_mode" json:"attack_mode"` // единственный источник; map'а сверху больше нет
+	Mode         string     `yaml:"mode" json:"mode"`                   // shadow / active
+	Strictness   string     `yaml:"strictness" json:"strictness"`       // standard / permissive
+	UABlacklist  []string   `yaml:"ua_blacklist" json:"ua_blacklist"`   // кастомные regex клиента
+	IPWhitelist  []string   `yaml:"ip_whitelist" json:"ip_whitelist"`   // per-resource allow CIDR
+	IPBlocklist  []string   `yaml:"ip_blocklist" json:"ip_blocklist"`   // per-resource deny CIDR
+	ASNBlock     []uint32   `yaml:"asn_block" json:"asn_block"`         // per-resource deny ASN
+	GeoWhitelist []string   `yaml:"geo_whitelist" json:"geo_whitelist"` // если задан — все остальные блокируются
+	RateRules    []RateRule `yaml:"rate_rules" json:"rate_rules"`       // клиентские per-path rate-rules
+	AttackMode   bool       `yaml:"attack_mode" json:"attack_mode"`     // единственный источник; map'а сверху больше нет
+}
+
+// RateRule — одна клиентская rate-rule из docs/product/config-templates.md
+// §"policy/<host>.yaml". На стенде Lua пока не читает это поле (edge B11);
+// backend хранит и отдаёт as-is для дашборда [B10] и для будущих фаз.
+type RateRule struct {
+	Path    string   `yaml:"path" json:"path"`
+	Methods []string `yaml:"methods" json:"methods"`
+	RPS     int      `yaml:"rps" json:"rps"`
+	Burst   int      `yaml:"burst" json:"burst"`
+	Action  string   `yaml:"action" json:"action"` // block | challenge | log_only
+}
+
+// PoolDefault — то, что отдаётся для незарегистрированного host'a:
+// "новый домен без записи → дефолт пула (mode=shadow, observe-only)"
+// (config-distribution §"Per-resource lookup", задача B4). Реализована
+// как функция, а не как глобальная переменная: каждый вызов даёт новый
+// slice'ный nil-zero — никто из вызывающих не может случайно мутировать
+// общий объект.
+func PoolDefault() Policy {
+	return Policy{
+		Mode:         "shadow",
+		Strictness:   "standard",
+		UABlacklist:  []string{},
+		IPWhitelist:  []string{},
+		IPBlocklist:  []string{},
+		ASNBlock:     []uint32{},
+		GeoWhitelist: []string{},
+		RateRules:    []RateRule{},
+	}
 }
 
 // emptyData — детерминированный нуль для Store до первого Replace.
@@ -150,6 +181,14 @@ func normalize(d *Data) {
 		p.IPBlocklist = dedupSortStrings(p.IPBlocklist)
 		p.GeoWhitelist = dedupSortStrings(p.GeoWhitelist)
 		p.ASNBlock = dedupSortUint32(p.ASNBlock)
+		// RateRules — порядок задаётся оператором (приоритет правил),
+		// сортировать нельзя; дедуп тоже не делаем (две одинаковые
+		// записи могли быть осознанным повтором для теста). Но
+		// заменяем nil на пустой slice, чтобы JSON был стабильно `[]`,
+		// не null (важно для ETag-стабильности между null и []).
+		if p.RateRules == nil {
+			p.RateRules = []RateRule{}
+		}
 		d.Policy[h] = p
 	}
 }

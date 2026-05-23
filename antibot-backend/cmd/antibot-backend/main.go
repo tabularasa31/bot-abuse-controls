@@ -30,6 +30,7 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 	"github.com/tabularasa31/antibot-backend/internal/config"
 	"github.com/tabularasa31/antibot-backend/internal/db"
+	"github.com/tabularasa31/antibot-backend/internal/dbloader"
 	"github.com/tabularasa31/antibot-backend/internal/health"
 	"github.com/tabularasa31/antibot-backend/internal/logs"
 	"github.com/tabularasa31/antibot-backend/internal/rdns"
@@ -88,23 +89,44 @@ func run(logger *slog.Logger) error {
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
 	catalogSrv := catalog.New()
-	if cfg.CatalogYAMLPath != "" {
-		// Падаем на старте, если YAML битый: пустой Store отдаёт всем
-		// эджам defaultVersion и пустые наборы — это валидный wire-стейт,
-		// но операторы хотят знать, что конфигурация не доехала, не
-		// гадать по prometheus'у.
+	// Источник каталогов выбирается по наличию pool'a: если БД подключена
+	// (B4), идём через dbloader (миграции + периодический Reload). YAML
+	// остаётся как dev-fallback на случай работы вне demo-backend
+	// compose'a — но если задан И POSTGRES_DSN, и CATALOG_YAML, побеждает БД
+	// (single source of truth, иначе оператор гадал бы по prometheus'у,
+	// какой именно payload отдан эджу).
+	var reloader *dbloader.Reloader
+	switch {
+	case pool != nil:
+		if cfg.MigrateOnStartup {
+			if err := dbloader.Migrate(ctx, pool); err != nil {
+				return fmt.Errorf("catalog migrate: %w", err)
+			}
+			logger.Info("catalog migrations applied")
+		}
+		reloader = dbloader.NewReloader(pool, catalogSrv.Store(), cfg.CatalogReloadInterval, logger, reg)
+		// Первый Bootstrap синхронно — если БД пустая или схема битая,
+		// backend не должен подниматься "успешно" с 503 на каждый
+		// /catalog/* до первого тика.
+		if err := reloader.Bootstrap(ctx); err != nil {
+			return fmt.Errorf("catalog bootstrap: %w", err)
+		}
+		logger.Info("catalog loaded from postgres",
+			"reload_interval", cfg.CatalogReloadInterval,
+		)
+	case cfg.CatalogYAMLPath != "":
 		d, err := catalog.LoadYAML(cfg.CatalogYAMLPath)
 		if err != nil {
 			return fmt.Errorf("catalog load: %w", err)
 		}
 		catalogSrv.Store().Replace(d)
-		logger.Info("catalog loaded",
+		logger.Info("catalog loaded from yaml",
 			"path", cfg.CatalogYAMLPath,
 			"version", d.Version,
 			"hosts_with_policy", len(d.Policy),
 		)
-	} else {
-		logger.Warn("CATALOG_YAML not set — catalog server returns empty payloads with version=" + "0.0.0" + " (B4 will replace YAML loader with pgx)")
+	default:
+		logger.Warn("no catalog source — set POSTGRES_DSN (preferred) or CATALOG_YAML; Store stays empty and Channel C returns 503")
 	}
 	catalogSrv.Register(mux)
 	logs.New(reg).Register(mux)
@@ -126,6 +148,15 @@ func run(logger *slog.Logger) error {
 		defer wg.Done()
 		rdns.New(reg, logger, cfg.RDNSInterval).Run(ctx)
 	}()
+
+	// Catalog-reloader (B4): тикает Load → Store.Replace.
+	if reloader != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reloader.Run(ctx)
+		}()
+	}
 
 	// HTTP-сервер.
 	serverErr := make(chan error, 1)

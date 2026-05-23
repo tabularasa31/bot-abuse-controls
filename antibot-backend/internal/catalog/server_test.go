@@ -265,7 +265,9 @@ func TestMultiTenantPolicy(t *testing.T) {
 		t.Errorf("policy[shop] = %+v, want mode=active attack_mode=true", p)
 	}
 
-	// Неизвестный host — дефолтная пустая policy, не 404.
+	// Неизвестный host — дефолт пула (B4): mode=shadow, observe-only.
+	// НЕ пустой Policy{}: edge не должен видеть mode="" и падать на
+	// switch'е, см. PoolDefault.
 	r2 := httpGet(t, ts.URL+"/catalog/policy?site=unknown.example.com")
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("policy?site=unknown: status=%d want 200 (дефолт, не 404)", r2.StatusCode)
@@ -275,8 +277,11 @@ func TestMultiTenantPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	r2.Body.Close()
-	if p2.Mode != "" {
-		t.Errorf("policy[unknown] should be empty Policy, got %+v", p2)
+	if p2.Mode != "shadow" || p2.Strictness != "standard" {
+		t.Errorf("policy[unknown] = %+v, want pool default (mode=shadow, strictness=standard)", p2)
+	}
+	if p2.AttackMode {
+		t.Errorf("policy[unknown].attack_mode must be false in pool default, got %+v", p2)
 	}
 }
 

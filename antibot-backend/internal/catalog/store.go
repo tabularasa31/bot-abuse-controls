@@ -238,13 +238,15 @@ func buildASNDatacenters(d *Data) []byte {
 
 func buildPolicy(d *Data, site string) ([]byte, error) {
 	if site != "" {
-		// Per-tenant: один host. Отсутствие = пустой Policy, не 404: эдж
-		// должен различать "host не зарегистрирован → дефолтная policy" и
-		// "каталога вообще нет".
+		// Per-tenant: один host. Отсутствие записи = дефолт пула из B4
+		// (mode=shadow, observe-only), не 404 и не пустой Policy{} —
+		// edge должен сразу видеть валидный mode и не падать на "" в
+		// switch'е по режиму. См. PoolDefault и config-distribution.md
+		// §"Per-resource lookup — keyed by Host".
 		if p, ok := d.Policy[site]; ok {
 			return jsonBytes(p)
 		}
-		return jsonBytes(Policy{})
+		return jsonBytes(PoolDefault())
 	}
 	// Без site — полный map. На практике эдж всегда зовёт с site (он знает
 	// $host), но контракт оставляет lookup-режим для дашборда [B10] / аудита.
