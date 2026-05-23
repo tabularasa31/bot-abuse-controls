@@ -177,6 +177,36 @@ func TestLoad_StagingFiltered(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsInvalidRegex(t *testing.T) {
+	// Codex PR-43 review (P1): DB-источник обязан валидировать regex'ы
+	// так же, как LoadYAML — иначе битый паттерн в `ua_blacklist` уехал
+	// бы в combined regex на edge и положил UA-стадию по всему пулу.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool := openPool(t, ctx)
+	resetSchema(t, ctx, pool)
+
+	// Системный ua_blacklist с битым regex'ом.
+	if _, err := pool.Exec(ctx, `INSERT INTO ua_blacklist (pattern) VALUES ('bot[a-z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbloader.Load(ctx, pool); err == nil {
+		t.Fatal("Load: ожидалась ошибка валидации regex, получили nil")
+	}
+
+	// Чистим, кладём такой же мусор уже в per-host policy.ua_blacklist.
+	if _, err := pool.Exec(ctx, `DELETE FROM ua_blacklist`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO policy (host, ua_blacklist) VALUES ('shop.example.com', '["(unbalanced"]')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbloader.Load(ctx, pool); err == nil {
+		t.Fatal("Load: per-host битый regex тоже должен валить загрузку")
+	}
+}
+
 func TestReloader_BootstrapAndTick(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

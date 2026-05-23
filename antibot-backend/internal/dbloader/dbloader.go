@@ -109,6 +109,14 @@ func Load(ctx context.Context, pool *pgxpool.Pool) (*catalog.Data, error) {
 	if err := loadPolicy(ctx, tx, d); err != nil {
 		return nil, err
 	}
+	// Те же regex-валидации, что в catalog.LoadYAML: один битый паттерн в
+	// `ua_blacklist` / `policy[*].ua_blacklist` иначе уехал бы на edge внутри
+	// combined regex и положил UA-стадию по всему пулу. Лучше fail-stale на
+	// одном тике reloader'a, чем сломанный edge — Store при ошибке Load
+	// не обновляется (см. Reloader.tick).
+	if err := catalog.Validate(d); err != nil {
+		return nil, fmt.Errorf("validate: %w", err)
+	}
 	return d, nil
 }
 

@@ -153,7 +153,7 @@ func LoadYAML(path string) (*Data, error) {
 		d.Policy = map[string]Policy{}
 	}
 
-	if err := validatePatterns(d); err != nil {
+	if err := Validate(d); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// Каноничный вид сразу на выходе из LoadYAML: тесты и тулинг, который
@@ -221,13 +221,17 @@ func dedupSortUint32(s []uint32) []uint32 {
 	return out
 }
 
-// validatePatterns прогоняет каждый regex (системный и per-resource) через
+// Validate прогоняет каждый regex (системный и per-resource) через
 // regexp.Compile. RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с
 // общим подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
 // trailing `\`) ловятся одинаково. Если edge захочет PCRE-specific фичу
 // (lookarounds), её нужно гейтить в спеке отдельно — пока консервативно
 // бьёмся за RE2-валидность.
-func validatePatterns(d *Data) error {
+//
+// Экспортирована, чтобы любой источник *Data (LoadYAML, dbloader.Load,
+// будущий B10 admin API) обязан был дёргать её до Store.Replace —
+// fail-stale работает только если битый regex отлавливается ДО публикации.
+func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("ua_blacklist[%d]: invalid regex %q: %w", i, p, err)
