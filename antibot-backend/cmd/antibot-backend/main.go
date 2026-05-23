@@ -32,14 +32,15 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/db"
 	"github.com/tabularasa31/antibot-backend/internal/dbloader"
 	"github.com/tabularasa31/antibot-backend/internal/health"
+	"github.com/tabularasa31/antibot-backend/internal/logger"
 	"github.com/tabularasa31/antibot-backend/internal/logs"
 	"github.com/tabularasa31/antibot-backend/internal/rdns"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(logger); err != nil {
-		logger.Error("fatal", "err", err)
+	log := logger.New()
+	if err := run(log); err != nil {
+		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
