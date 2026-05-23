@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -53,21 +54,22 @@ func run(logger *slog.Logger) error {
 	logger.Info("starting antibot-backend",
 		"http_addr", cfg.HTTPAddr,
 		"rdns_interval", cfg.RDNSInterval,
+		"shutdown_timeout", cfg.ShutdownTimeout,
 		"postgres", cfg.PostgresDSN != "",
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
 
 	// DB — опциональна на скелете. Если DSN задан и недоступна — это явная
 	// ошибка деплоя, валимся: B1-substrate гарантирует, что postgres рядом
 	// и healthy до старта backend (depends_on/condition: service_healthy).
+	var pool *pgxpool.Pool
 	if cfg.PostgresDSN != "" {
-		pool, err := db.Open(ctx, cfg.PostgresDSN)
+		pool, err = db.Open(ctx, cfg.PostgresDSN)
 		if err != nil {
 			return fmt.Errorf("postgres open: %w", err)
 		}
-		defer pool.Close()
 		logger.Info("postgres connected")
 	} else {
 		logger.Warn("POSTGRES_DSN not set — running without DB (skeleton mode; B3/B6/B7 will require it)")
@@ -112,8 +114,12 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
+	// Ловим SIGINT/SIGTERM. signal.Stop вызываем явно — пригодится, если когда-то
+	// run() будут звать из тестов или из обёртки (а не из main()).
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	var runErr error
 	select {
 	case err := <-serverErr:
@@ -123,13 +129,65 @@ func run(logger *slog.Logger) error {
 		logger.Info("shutdown signal", "signal", sig.String())
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("http shutdown", "err", err)
-	}
-	cancel() // останавливает rDNS-воркер
-	wg.Wait()
+	shutdown(logger, cfg.ShutdownTimeout, srv, cancelCtx, &wg, pool)
 	logger.Info("antibot-backend stopped")
 	return runErr
+}
+
+// shutdown — упорядоченное завершение под общим бюджетом cfg.ShutdownTimeout.
+// Шаги идут последовательно и каждый знает про общий deadline:
+//  1. HTTP: srv.Shutdown дренирует in-flight; если не уложился — srv.Close()
+//     рвёт хвост, иначе systemd прибьёт SIGKILL'ом без grace.
+//  2. ctx cancel: останавливает фоновые воркеры (rDNS сейчас, B6 disk-queue
+//     потом).
+//  3. wg.Wait под deadline: B7 принесёт реальные DNS-запросы, которые могут
+//     висеть на сети — не даём им задержать выход.
+//  4. pgxpool.Close под deadline: блокирует на активных коннектах, B3/B7
+//     принесут их — ограничиваем по тому же бюджету.
+func shutdown(
+	logger *slog.Logger,
+	timeout time.Duration,
+	srv *http.Server,
+	cancelCtx context.CancelFunc,
+	wg *sync.WaitGroup,
+	pool *pgxpool.Pool,
+) {
+	deadline := time.Now().Add(timeout)
+	shutdownCtx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	logger.Info("shutdown: draining HTTP", "deadline", timeout)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("shutdown: http drain failed — forcing close", "err", err)
+		if closeErr := srv.Close(); closeErr != nil {
+			logger.Error("shutdown: http force-close failed", "err", closeErr)
+		}
+	}
+
+	logger.Info("shutdown: stopping background workers")
+	cancelCtx()
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-shutdownCtx.Done():
+		logger.Error("shutdown: workers did not exit within deadline")
+	}
+
+	if pool != nil {
+		logger.Info("shutdown: closing postgres pool")
+		closedDone := make(chan struct{})
+		go func() {
+			pool.Close()
+			close(closedDone)
+		}()
+		select {
+		case <-closedDone:
+		case <-shutdownCtx.Done():
+			logger.Error("shutdown: postgres pool did not close within deadline")
+		}
+	}
 }
