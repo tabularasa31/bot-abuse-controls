@@ -51,7 +51,12 @@ type App struct {
 //
 // Ctx используется только под bootstrap (миграции, первый Load); фоновые
 // воркеры получат свой ctx в Run.
-func New(ctx context.Context, logger *slog.Logger) (*App, error) {
+//
+// Named return — чтобы defer'ом подчищать pgxpool на любом error-пути ПОСЛЕ
+// db.Open. В main() это в основном маскируется os.Exit(1), но App.New
+// позиционируется как callable из тестов и обёрток — там утечка горутин/
+// коннектов pool'a была бы реальной.
+func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -64,7 +69,7 @@ func New(ctx context.Context, logger *slog.Logger) (*App, error) {
 		"postgres", cfg.PostgresDSN != "",
 	)
 
-	a := &App{cfg: cfg, logger: logger}
+	a = &App{cfg: cfg, logger: logger}
 
 	// БД — опциональна на скелете. Если DSN задан и недоступна — это явная
 	// ошибка деплоя, валимся: B1-substrate гарантирует, что postgres рядом
@@ -75,6 +80,16 @@ func New(ctx context.Context, logger *slog.Logger) (*App, error) {
 			return nil, fmt.Errorf("postgres open: %w", err)
 		}
 		a.pool = pool
+		// Cleanup-on-error: любой возврат с retErr != nil после этой точки
+		// (миграции, reloader-init, bootstrap каталога) должен закрыть pool —
+		// иначе in-process caller (тест / обёртка) утаскивает живые коннекты
+		// и фоновые pgx-горутины.
+		defer func() {
+			if retErr != nil {
+				pool.Close()
+				a.pool = nil
+			}
+		}()
 		logger.Info("postgres connected")
 	} else {
 		logger.Warn("POSTGRES_DSN not set — running without DB (skeleton mode; B3/B6/B7 will require it)")
