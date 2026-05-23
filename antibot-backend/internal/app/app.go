@@ -83,11 +83,13 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		// Cleanup-on-error: любой возврат с retErr != nil после этой точки
 		// (миграции, reloader-init, bootstrap каталога) должен закрыть pool —
 		// иначе in-process caller (тест / обёртка) утаскивает живые коннекты
-		// и фоновые pgx-горутины.
+		// и фоновые pgx-горутины. Замыкаемся на локальный `pool`, а не на
+		// `a.pool`: тело функции делает `return nil, err`, что зануляет
+		// именованный возврат `a`, и обращение к `a.pool` в defer'е дало бы
+		// nil-deref панику ровно на error-пути, который мы пытаемся убрать.
 		defer func() {
 			if retErr != nil {
 				pool.Close()
-				a.pool = nil
 			}
 		}()
 		logger.Info("postgres connected")
@@ -226,6 +228,18 @@ func (a *App) Run(ctx context.Context) error {
 		runErr = err
 	case <-ctx.Done():
 		a.logger.Info("shutdown signal received")
+		// Гонка: между тем, как сигнал закрыл ctx.Done и тем, как мы успели
+		// вызвать srv.Shutdown, listener мог вернуть НЕ-ErrServerClosed
+		// ошибку (accept loop EMFILE, network fault, recovered panic).
+		// HTTP-горутина запишет её в буферизованный serverErr (cap=1),
+		// но никто уже не читает — без drain'а ошибка тихо потеряется,
+		// Run вернёт nil, оператор после инцидента не найдёт причину.
+		select {
+		case err := <-serverErr:
+			a.logger.Error("late http server error during shutdown", "err", err)
+			runErr = err
+		default:
+		}
 	}
 
 	a.shutdown(ctx, cancel, &wg)

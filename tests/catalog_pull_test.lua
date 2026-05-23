@@ -427,6 +427,57 @@ do
 end
 
 -- ===========================================================================
+-- In-flight guard: concurrent fetch() calls for the same catalog must skip
+-- (rather than interleave apply/flip/sweep with a stale tick). Regression
+-- from review finding: slow backend can let ngx.timer.every fire while a
+-- previous tick is still inside httpc:request_uri.
+-- ===========================================================================
+
+do
+    reset_state()
+    -- Stub the http module: capture the in-flight state at the moment the
+    -- "request" starts. We don't actually return — we let the call NOT be
+    -- made by setting in_flight from a nested fetch attempt and verifying
+    -- it short-circuits.
+    local httpc_stub = {}
+    function httpc_stub:set_timeout(_) end
+    function httpc_stub:request_uri(_, _)
+        -- While the "first" tick is still in flight, attempt a second tick
+        -- for the SAME catalog. It must short-circuit at the in_flight guard
+        -- without making a real call.
+        local outcomes_before = #logged
+        cp.fetch("fp_blocklist")
+        local outcomes_after = #logged
+        check_true(outcomes_after > outcomes_before,
+            "in-flight guard: nested fetch logs the skip")
+        check_true(log_contains("still in flight"),
+            "in-flight guard: log mentions 'still in flight'")
+        return { status = 304, body = "", headers = {} }, nil
+    end
+    cp.http_module = { new = function() return httpc_stub end }
+    cp.backend_url = "http://stub:0"
+    cp.timeout_ms  = 1000
+    cp.ssl_verify  = false
+
+    -- Outer tick: this one makes the "real" call (via the stub), and from
+    -- inside the stub we recursively try fetch() again to model overlap.
+    cp.fetch("fp_blocklist")
+
+    -- After the outer fetch returns, in_flight must be cleared so the next
+    -- tick can proceed normally.
+    httpc_stub.request_uri = function(_, _, _)
+        return { status = 304, body = "", headers = {} }, nil
+    end
+    local before = #logged
+    cp.fetch("fp_blocklist")  -- this one must NOT short-circuit
+    check_false(log_contains("still in flight") and #logged > before
+                and logged[#logged]:find("still in flight", 1, true),
+        "in-flight guard: cleared after outer tick returns")
+
+    cp.http_module = nil  -- restore for other tests
+end
+
+-- ===========================================================================
 
 if failed > 0 then
     io.stderr:write(string.format("\n%d passed, %d FAILED\n", passed, failed))

@@ -71,15 +71,22 @@ _M.catalogs = {
         -- отметила, что на десятках тысяч ключей блокировка станет видна на
         -- p99 — тогда поедем на side-index "keys-of-gen-N" в отдельном ключе
         -- meta'и. Пока что 100% RFC §В1 алгоритм + комментарий.
+        --
+        -- Матчим через fp_state.match() (типизированный инверс key()) вместо
+        -- сырого `:<gen>` суффикса: если в этот dict когда-нибудь начнёт
+        -- писать что-то ещё (admin.lua, со-tenant каталог), сырой суффикс
+        -- удалил бы их по совпадению хвоста (например, `manual_override:1`
+        -- при sweep(1)). fp_state.match возвращает nil на любом ключе, чей
+        -- хвост не соответствует ИМЕННО формату fp_blocklist'a — sweep
+        -- останется сфокусированным на своих записях.
         sweep = function(dict, old_gen)
             -- old_gen == 0 is the static seed from init.lua; sweeping it on
             -- the first pull is intentional — once the live catalog lands,
             -- the seed becomes redundant.
             if old_gen < 0 then return 0 end
-            local suffix = ":" .. old_gen
             local n = 0
             for _, k in ipairs(dict:get_keys(0)) do
-                if k:sub(-#suffix) == suffix then
+                if fp_state.match(k, old_gen) then
                     dict:delete(k)
                     n = n + 1
                 end
@@ -209,6 +216,18 @@ function _M.handle_response(cat, dict, meta, res, err)
     return "ok"
 end
 
+-- Per-catalog in-flight guard. ngx.timer.every fires on its own schedule
+-- regardless of whether the previous tick has finished; if a fetch takes
+-- longer than the interval (slow backend, DNS retries, total per-step
+-- timeout > interval), two ticks can run concurrently inside the worker
+-- and interleave apply/flip/sweep on the same catalog. Worst observed
+-- case: tick B's sweep(old_gen) deletes tick A's just-written entries
+-- while requests already pinned to that gen are mid-lookup, briefly
+-- falling through to "allow". Since OpenResty Lua is single-threaded
+-- per worker (yields only on I/O), a plain table flag is enough — no
+-- semaphore needed.
+local in_flight = {}
+
 -- fetch — one tick for one catalog. Resolves shared dicts, builds the
 -- httpc, sends the conditional GET, hands the result to handle_response.
 -- Any uncaught error inside is swallowed by the pcall in tick() so the
@@ -219,16 +238,30 @@ function _M.fetch(catalog_name)
         ngx.log(ngx.ERR, "catalog_pull: unknown catalog ", tostring(catalog_name))
         return
     end
+
+    -- In-flight guard: skip this tick if the previous one for the same
+    -- catalog is still inside httpc:request_uri / handle_response. The
+    -- skipped tick is just lost cadence — next ngx.timer.every firing
+    -- will retry. No mutex contention because of single-threaded Lua.
+    if in_flight[catalog_name] then
+        ngx.log(ngx.NOTICE, "catalog_pull ", catalog_name,
+            ": previous tick still in flight — skipping this one")
+        return
+    end
+    in_flight[catalog_name] = true
+
     local dict = ngx.shared[cat.dict_name]
     local meta = ngx.shared.meta
     if not dict or not meta then
         ngx.log(ngx.ERR, "catalog_pull: missing shared_dict for ", catalog_name)
+        in_flight[catalog_name] = nil
         return
     end
 
     local httpc_mod = _M.http_module
     if not httpc_mod then
         ngx.log(ngx.ERR, "catalog_pull: http module not configured")
+        in_flight[catalog_name] = nil
         return
     end
     local httpc = httpc_mod.new()
@@ -247,7 +280,15 @@ function _M.fetch(catalog_name)
     }
     local res, err = httpc:request_uri(_M.backend_url .. cat.endpoint, req_opts)
 
-    _M.handle_response(cat, dict, meta, res, err)
+    -- pcall — handle_response может бросить из cat.apply/cat.sweep
+    -- (например, через ngx.log при экзотическом аргументе). В этом случае
+    -- in_flight остался бы взведённым навсегда и каталог тихо застрял.
+    local ok, perr = pcall(_M.handle_response, cat, dict, meta, res, err)
+    in_flight[catalog_name] = nil
+    if not ok then
+        ngx.log(ngx.ERR, "catalog_pull ", catalog_name,
+            ": handle_response raised: ", perr)
+    end
 end
 
 -- start — call from init_worker_by_lua_block. Wires one ngx.timer.every per
