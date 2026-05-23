@@ -115,3 +115,22 @@ ngx.say(table.concat(rule_lines, "\n"))
 ngx.say(table.concat(flag_lines, "\n"))
 ngx.say(table.concat(tag_lines, "\n"))
 ngx.say(table.concat(stg_lines, "\n"))
+
+-- Channel C catalog staleness (B5, RFC §В1 "edge_catalog_staleness_seconds").
+-- catalog_pull.handle_response stamps `catalog_last_pull_ts:<name>` on each
+-- successful 200; this gauge is now - that timestamp. A catalog that was
+-- never pulled (no backend configured, or all ticks have failed) has no
+-- timestamp — emit it as -1 so dashboards can distinguish "never pulled"
+-- from "freshly pulled (0)".
+local stale_lines = { "# HELP antibot_edge_catalog_staleness_seconds Seconds since the last successful Channel C pull; -1 if a pull has never succeeded since worker start.",
+                      "# TYPE antibot_edge_catalog_staleness_seconds gauge" }
+for _, key in ipairs(m:get_keys(0)) do
+    local catalog = key:match("^catalog_last_pull_ts:(.+)$")
+    if catalog then
+        local ts = m:get(key)
+        local age = ts and (now - ts) or -1
+        stale_lines[#stale_lines + 1] = string.format(
+            'antibot_edge_catalog_staleness_seconds{catalog="%s"} %d', catalog, age)
+    end
+end
+ngx.say(table.concat(stale_lines, "\n"))
