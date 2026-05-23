@@ -1,0 +1,47 @@
+# Пример YAML для CATALOG_YAML (v1, B3).
+#
+# Запуск: CATALOG_YAML=./catalogs.example.yaml ./antibot-backend
+# Backend упадёт на старте, если version отсутствует или regex не компилируется.
+# B4 заменит этот источник на pgx; контракт Store.Replace останется.
+
+version: "1.0.0"
+
+fp_blocklist:
+  # TLS-fingerprint в формате L<ver><sni><cipher_cnt><alpn>_<hash_b>_<hash_c>.
+  # "L13i17h2_abc_def": "block"
+
+ua_blacklist:
+  # Combined regex собирается на стороне backend'а из этих паттернов (плюс
+  # policy[host].ua_blacklist при ?site=). Каждая строка валидируется через
+  # regexp.Compile при старте — опечатка валит сервис, а не молча проседает
+  # UA-стадию на эджах.
+  # - "curl/.*"
+  # - "python-requests/.*"
+
+ip_blocklist:
+  # "203.0.113.0/24": "block"
+
+ip_whitelist:
+  # - "198.51.100.5/32"   # системный мониторинг
+
+asn_datacenters:
+  # - 14061  # DigitalOcean
+  # - 16509  # AWS
+
+verified_bot_ips:
+  # "66.249.66.1": "google"
+  # "157.55.39.1": "bing"
+
+policy:
+  # shop.example.com:
+  #   mode: active
+  #   strictness: standard
+  #   ua_blacklist:
+  #     - "evil-scraper/.*"
+  #   ip_whitelist:
+  #     - "198.51.100.99/32"
+  #   ip_blocklist:
+  #     - "192.0.2.10/32"
+  #   asn_block: []
+  #   geo_whitelist: []
+  #   attack_mode: false
