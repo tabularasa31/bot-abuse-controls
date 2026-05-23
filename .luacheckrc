@@ -35,12 +35,6 @@ files["tests/"] = {
     ignore = {"211"},  -- unused local in test scaffolding is fine
 }
 
--- Spike copies are intentional duplicates; suppress their warnings to
--- avoid noise — they're build-time artifacts not production code.
-files["infra/nginx-lua-poc/spikes/"] = {
-    ignore = {"211", "212", "311"},
-}
-
 -- Max line length — soft limit, the 631 ignore above handles overruns
 -- in long doc comments. Useful when we DO want to fix a real overrun.
 max_line_length = 120

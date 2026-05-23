@@ -1,6 +1,6 @@
 # infra/ — what each directory is
 
-Two directories, two distinct roles. They are **not** competing "stands".
+Two directories, two distinct roles.
 
 ## `demo-stand/` — the live demo
 
@@ -9,28 +9,28 @@ runs the full verdict cascade and proxies to an origin (`ORIGIN_URL`). Runs
 in **shadow** (empty blocklist — computes and logs verdicts, blocks nothing).
 This is the one thing we actually deploy and keep alive. Has its own
 observability (`/__admin`, `/metrics`), structured `BAC_LOG`, analytics
-(`scripts/analyze.py`), and a cron auto-update loop. See
+(`scripts/analyze.py`), and a cron auto-update loop. См.
 [`demo-stand/README.md`](demo-stand/README.md).
 
-It does **not** vendor the fingerprint code — it bind-mounts
-`nginx-lua-poc/lua` (see below) so the demo runs the exact production
-compute, not a drifting copy.
+Источник правды fp-кода ([`lua/ja4_compute.lua`](demo-stand/lua/ja4_compute.lua),
+[`lua/ja4_helpers.lua`](demo-stand/lua/ja4_helpers.lua)) лежит здесь же —
+рядом с остальным каскадом.
 
-## `nginx-lua-poc/` — canonical fp library + PoC benchmark
+## `demo-backend/` — antibot-backend HA-стек
 
-Home of the production fingerprint code: [`lua/ja4_compute.lua`](nginx-lua-poc/lua/ja4_compute.lua)
-and [`lua/ja4_helpers.lua`](nginx-lua-poc/lua/ja4_helpers.lua). Also the
-isolated rig that measured the cost of running the verdict path in
-`access_by_lua` (PoC #2, task [86exmhy8j](https://app.clickup.com/t/86exmhy8j);
-`../docker-compose.lua-poc.yml`). Treat it as a **shared library + benchmark**,
-not a deployable stand — `demo-stand` depends on its `lua/`.
+Docker compose substrate (Postgres + HA-пара antibot-backend за TLS-LB) для
+централизованного Go-сервиса из [`antibot-backend/`](../antibot-backend/) по
+ADR-005 / config-distribution. См. [`demo-backend/README.md`](demo-backend/README.md).
 
 ## Not here anymore
 
+- **`nginx-lua-poc/`** — спайк PoC #2 (`access_by_lua` verdict path benchmark).
+  Бенчмарк-стенд больше не нужен; `ja4_compute.lua` / `ja4_helpers.lua`
+  переехали в `demo-stand/lua/`. Сопутствующее — `docker-compose.lua-poc.yml`,
+  `scripts/lua-poc-probe.sh`, `docs/lua-poc-results.md`,
+  `docs/phase2-fp-catalog.md` — тоже удалено.
 - **`nginx-shadow/`** — removed. It was a separate "shadow proxy in front of
-  a real backend" package; that role is now exactly `demo-stand` (shadow +
-  proxy to `ORIGIN_URL`), and keeping it meant a third drifting copy of the
-  pipeline.
+  a real backend" package; that role is now exactly `demo-stand`.
 
 ## Related (other repo)
 
