@@ -1,18 +1,19 @@
-# infra/demo-backend — [B1] antibot-backend substrate (provisioning)
+# infra/demo-backend — antibot-backend demo stack
 
-Reproducible provisioning for the **antibot-backend** demo VM: PostgreSQL plus a
+Reproducible deploy of the **antibot-backend** demo VM: PostgreSQL plus a
 ≥2-instance backend pair behind a TLS-terminating LB, with the edge → backend
-HTTPS path opened. This is the *substrate* task ([B1]) — it stands up and proves
-the topology from [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md)
-and [config-distribution §HA](../../docs/architecture/config-distribution.md),
-nothing more.
+HTTPS path opened. Topology from
+[ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md)
+and [config-distribution §HA](../../docs/architecture/config-distribution.md).
 
-> **Reality level: backlog / provisioning only.** The `backend-*` containers are
-> placeholders (nginx returning a health JSON), **not** the real Go service. The
-> antibot-backend app is [B2] (catalog/log/rDNS) and its app-level deploy +
-> migrations are [B15]. They drop into this exact topology: swap the placeholder
-> image, point it at `postgres`, keep the LB + certs + firewall.
->
+The substrate (compose, LB, certs, firewall, provision scripts) is [B1]. The
+`backend-*` containers run the real Go service from
+[`../../antibot-backend/`](../../antibot-backend/) — task [B2], skeleton of the
+three backend functions: catalog server, log receiver, rDNS worker. Full
+contracts for those functions land in B3 (catalog HTTP/ETag), B6/B9 (log sink),
+B7 (rDNS state machine). App-level production deploy with DB migrations is
+[B15].
+
 > This is our own demo infra, **not** the prod-edge prod edge pool — see
 > [PROGRESS.md](../../PROGRESS.md) "НЕ НАШЕ".
 
@@ -50,16 +51,18 @@ docker compose -f docker-compose.backend.yml up -d
 Tear down: `docker compose -f docker-compose.backend.yml down`
 (add `-v` to drop the Postgres volume).
 
-## Acceptance ([B1])
+## Acceptance
 
 `scripts/verify.sh` checks each criterion:
 
-| Criterion | Check |
-|---|---|
-| VM(s) up, PostgreSQL accessible | `pg_isready` inside the `postgres` container |
-| Edge → backend reachable over HTTPS | `GET https://<host>/health` → `200` on `:443` |
-| Deploy reproducible | compose file + scripts; `provision.sh` re-runnable |
-| HA (≥2 instances) | `/health` round-robins ≥2 distinct `instance` tags |
+| Criterion | Check | Task |
+|---|---|---|
+| VM(s) up, PostgreSQL accessible | `pg_isready` inside the `postgres` container | B1 |
+| Edge → backend reachable over HTTPS | `GET https://<host>/health` → `200` on `:443` | B1 |
+| Deploy reproducible | compose file + scripts; `provision.sh` re-runnable | B1 |
+| HA (≥2 instances) | `/health` round-robins ≥2 distinct `instance` tags | B1 |
+| Backend serves the three function surfaces | `/catalog/<name>` (501 until B3), `POST /v1/logs` (202), `antibot_backend_rdns_ticks_total` in `/metrics` | B2 |
+| Backend not on hot path | edge fail-stale if backend down — see [demo-stand](../demo-stand/) Channel C client | B5/B6 |
 
 From the edge VM, verify reach with the real hostname:
 

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# [B1] Acceptance checks for the antibot-backend substrate:
+# Acceptance checks for the antibot-backend demo stack.
+#
+# [B1] substrate:
 #   1. PostgreSQL is up and accepting connections.
 #   2. The edge -> backend HTTPS path answers on :443.
 #   3. The LB round-robins across the >=2 backend instances (HA).
+#
+# [B2] real Go service surfaces (skeleton — bodies/contracts land in B3/B6/B7):
+#   4. /catalog/<name> mounted (known catalog returns 501 until B3).
+#   5. POST /v1/logs accepts a payload (202).
+#   6. rDNS worker is alive (counter present in /metrics).
 #
 # Usage:
 #   ./scripts/verify.sh            # checks https://localhost
@@ -60,6 +67,38 @@ if [ "${seen}" -ge 2 ]; then
     pass "saw ${seen} distinct backend instances"
 else
     bad "saw ${seen} distinct backend instance(s); expected >=2 for HA"
+fi
+
+echo "4. /catalog/* mounted (B2 skeleton; B3 fills bodies + ETag)"
+code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/catalog/fp_blocklist")" || code=000
+if [ "${code}" = "501" ]; then
+    pass "GET /catalog/fp_blocklist -> 501 (skeleton)"
+else
+    bad "GET /catalog/fp_blocklist -> ${code} (expected 501 from B2 skeleton)"
+fi
+code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/catalog/bogus")" || code=000
+if [ "${code}" = "404" ]; then
+    pass "GET /catalog/bogus -> 404 (unknown catalog)"
+else
+    bad "GET /catalog/bogus -> ${code} (expected 404)"
+fi
+
+echo "5. POST /v1/logs accepts payload (B2 skeleton; sink wiring is B6/B9)"
+code="$(printf 'line1\nline2\n' \
+    | "${CURL[@]}" -X POST --data-binary @- -o /dev/null -w '%{http_code}' \
+        "https://${HOST}/v1/logs")" || code=000
+if [ "${code}" = "202" ]; then
+    pass "POST /v1/logs -> 202"
+else
+    bad "POST /v1/logs -> ${code} (expected 202)"
+fi
+
+echo "6. rDNS worker alive (counter present in /metrics)"
+if "${CURL[@]}" "https://${HOST}/metrics" 2>/dev/null \
+        | grep -q '^antibot_backend_rdns_ticks_total '; then
+    pass "antibot_backend_rdns_ticks_total present"
+else
+    bad "antibot_backend_rdns_ticks_total missing from /metrics"
 fi
 
 echo
