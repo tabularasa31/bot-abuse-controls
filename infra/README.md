@@ -1,6 +1,6 @@
 # infra/ — what each directory is
 
-Two directories, two distinct roles.
+Three directories — два живых стенда и one historical marker. They are **not** competing "stands".
 
 ## `demo-stand/` — the live demo
 
@@ -22,15 +22,20 @@ Docker compose substrate (Postgres + HA-пара antibot-backend за TLS-LB) д
 централизованного Go-сервиса из [`antibot-backend/`](../antibot-backend/) по
 ADR-005 / config-distribution. См. [`demo-backend/README.md`](demo-backend/README.md).
 
+## `nginx-lua-poc/` — removed
+
+Был отдельный спайк PoC #2 (`access_by_lua` verdict path benchmark). После
+переезда `ja4_compute.lua` / `ja4_helpers.lua` в `demo-stand/lua/` папка
+полностью удалена; сопутствующее (`docker-compose.lua-poc.yml`,
+`scripts/lua-poc-probe.sh`, `docs/lua-poc-results.md`,
+`docs/phase2-fp-catalog.md`) — тоже.
+
 ## Not here anymore
 
-- **`nginx-lua-poc/`** — спайк PoC #2 (`access_by_lua` verdict path benchmark).
-  Бенчмарк-стенд больше не нужен; `ja4_compute.lua` / `ja4_helpers.lua`
-  переехали в `demo-stand/lua/`. Сопутствующее — `docker-compose.lua-poc.yml`,
-  `scripts/lua-poc-probe.sh`, `docs/lua-poc-results.md`,
-  `docs/phase2-fp-catalog.md` — тоже удалено.
 - **`nginx-shadow/`** — removed. It was a separate "shadow proxy in front of
-  a real backend" package; that role is now exactly `demo-stand`.
+  a real backend" package; that role is now exactly `demo-stand` (shadow +
+  proxy to `ORIGIN_URL`), and keeping it meant a third drifting copy of the
+  pipeline.
 
 ## Related (other repo)
 

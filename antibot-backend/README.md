@@ -30,7 +30,7 @@ fail-stale (см. config-distribution §"Channel C / Failure mode").
 go run ./cmd/antibot-backend
 # затем:
 curl http://localhost:8080/health
-curl -i http://localhost:8080/catalog/fp_blocklist        # 501
+curl -i http://localhost:8080/catalog/fp_blocklist        # 503 catalog_not_loaded без CATALOG_YAML / POSTGRES_DSN; 200 если источник задан
 curl -i -X POST --data 'line1\nline2\n' http://localhost:8080/v1/logs  # 202
 curl http://localhost:8080/metrics | grep antibot_backend_
 ```
