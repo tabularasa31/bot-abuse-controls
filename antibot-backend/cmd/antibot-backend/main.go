@@ -82,8 +82,10 @@ func run(logger *slog.Logger) error {
 	)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", health.Handler(cfg.Instance))
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	// Метод фиксируем на уровне ServeMux (Go 1.22+): POST /health → 405,
+	// дёргать /metrics чем-то кроме GET — тоже не повод трогать registry.
+	mux.HandleFunc("GET /health", health.Handler(cfg.Instance, healthPinger(pool)))
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	catalog.New().Register(mux)
 	logs.New(reg).Register(mux)
 
@@ -134,6 +136,16 @@ func run(logger *slog.Logger) error {
 	return runErr
 }
 
+// healthPinger превращает nil-pool в nil-Pinger (skeleton без БД) и наоборот
+// пробрасывает *pgxpool.Pool как health.Pinger. Без этого пришлось бы тащить
+// pgx-зависимость в пакет health.
+func healthPinger(pool *pgxpool.Pool) health.Pinger {
+	if pool == nil {
+		return nil
+	}
+	return pool
+}
+
 // shutdown — упорядоченное завершение под общим бюджетом cfg.ShutdownTimeout.
 // Шаги идут последовательно и каждый знает про общий deadline:
 //  1. HTTP: srv.Shutdown дренирует in-flight; если не уложился — srv.Close()
@@ -166,28 +178,34 @@ func shutdown(
 
 	logger.Info("shutdown: stopping background workers")
 	cancelCtx()
-	waitDone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(waitDone)
-	}()
-	select {
-	case <-waitDone:
-	case <-shutdownCtx.Done():
-		logger.Error("shutdown: workers did not exit within deadline")
+	if !waitBounded(shutdownCtx, wg.Wait) {
+		// Горутина продолжит крутиться до os.Exit — это осознанный abandonment,
+		// а не leak: процесс уходит следом, рантайм её собирёт. Логируем явно,
+		// чтобы оператор не гадал, почему процесс выходит дольше ShutdownTimeout.
+		logger.Error("shutdown: workers did not exit within deadline — abandoning")
 	}
 
 	if pool != nil {
 		logger.Info("shutdown: closing postgres pool")
-		closedDone := make(chan struct{})
-		go func() {
-			pool.Close()
-			close(closedDone)
-		}()
-		select {
-		case <-closedDone:
-		case <-shutdownCtx.Done():
-			logger.Error("shutdown: postgres pool did not close within deadline")
+		if !waitBounded(shutdownCtx, pool.Close) {
+			logger.Error("shutdown: postgres pool did not close within deadline — abandoning")
 		}
+	}
+}
+
+// waitBounded зовёт блокирующую fn в горутине и ждёт её либо до завершения,
+// либо до ctx.Done(). true — fn успела, false — abandoned (горутина может
+// продолжить жить до os.Exit).
+func waitBounded(ctx context.Context, fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -22,6 +23,19 @@ import (
 // твёрдый предохранитель от случайного/злонамеренного огромного POST'а.
 // B6 уточнит, когда будет известен реальный размер батча.
 const maxBodyBytes = 10 * 1024 * 1024
+
+// readBufSize — размер чанка чтения тела. 32 KiB — стандартный io.Copy'шный
+// компромисс между числом syscall'ов и пайплайнингом TCP.
+const readBufSize = 32 * 1024
+
+// bufPool переиспользует 32-KiB буферы между запросами — иначе под нагрузкой
+// от edge (десятки RPS батчей) каждый POST аллоцировал бы 32 KiB и грузил GC.
+var bufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, readBufSize)
+		return &b
+	},
+}
 
 type Receiver struct {
 	received prometheus.Counter
@@ -71,8 +85,9 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func countNewlines(r io.Reader) (int, error) {
-	const bufSize = 32 * 1024
-	buf := make([]byte, bufSize)
+	bufPtr, _ := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
 	count := 0
 	for {
 		nr, err := r.Read(buf)
@@ -81,7 +96,7 @@ func countNewlines(r io.Reader) (int, error) {
 				count++
 			}
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// Хвост без \n — тоже строка.
 			if nr > 0 && buf[nr-1] != '\n' {
 				count++

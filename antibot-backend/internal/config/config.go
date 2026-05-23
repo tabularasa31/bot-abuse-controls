@@ -50,6 +50,13 @@ func Load() (Config, error) {
 		}
 		cfg.ShutdownTimeout = d
 	}
+	// time.NewTicker паникует при <=0, не даём пользователю прострелить ногу.
+	if cfg.RDNSInterval <= 0 {
+		return cfg, fmt.Errorf("RDNS_INTERVAL must be > 0, got %s", cfg.RDNSInterval)
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		return cfg, fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0, got %s", cfg.ShutdownTimeout)
+	}
 	return cfg, nil
 }
 
