@@ -6,12 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+# Explicit token scope. `actions/checkout` needs only `contents: read`, but
+# declaring it at the workflow level removes ambiguity in the token
+# provisioning path — see the comment on each checkout step about the
+# intermittent "could not read Username" flake. With this block, every job's
+# GITHUB_TOKEN is guaranteed to carry contents: read regardless of org-level
+# policy changes.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Unit tests (luajit in openresty container)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - name: Run unit tests
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
@@ -28,6 +47,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - name: Run luacheck
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
@@ -39,6 +68,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
@@ -53,6 +92,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
@@ -68,6 +117,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - name: Run shellcheck
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
@@ -83,6 +142,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - name: Generate self-signed TLS cert
         # nginx.demo.conf hard-requires fullchain.pem / privkey.pem in
         # infra/demo-stand/certs/. Gitignored on a real deploy, but on a fresh
@@ -132,6 +201,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pass GITHUB_TOKEN explicitly. The action does this implicitly when
+          # no token: is set, but in practice we've seen 6+ runs across PRs
+          # #45-#51 where a random job fails the post-extraheader `git fetch`
+          # with "could not read Username for github.com" — the symptom of an
+          # auto-discovered token not being present in the fetch context.
+          # Explicit passthrough sidesteps the discovery and is GitHub's
+          # documented stable form.
+          token: ${{ github.token }}
+          persist-credentials: true
       - name: Bootstrap certs + .env
         run: |
           cd infra/demo-backend
