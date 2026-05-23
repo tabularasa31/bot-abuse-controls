@@ -104,6 +104,16 @@ local function bump_metric(key)
     if m then m:incr(key, 1, 0) end
 end
 
+-- bump_last_pull_ts — stamp `catalog_last_pull_ts:<name>` with the current
+-- time. Called from both the 200 and 304 paths in handle_response (both are
+-- "successful contact with backend" — see the 304 branch comment for why
+-- this is a liveness rather than freshness signal). Missing metrics dict is
+-- silent for the same test-harness reason as bump_metric.
+local function bump_last_pull_ts(cat)
+    local m = ngx.shared.metrics
+    if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+end
+
 -- version_compatible — single-major check. Accepts "1", "1.x", "1.x.y". An
 -- empty / missing header is treated as compatible: older backend builds may
 -- not set the header, and a missing header is an operator concern (visible
@@ -150,8 +160,7 @@ function _M.handle_response(cat, dict, meta, res, err)
         -- alert is actually checking), not "seconds since the last data
         -- change" (a freshness signal that needs its own metric if we ever
         -- want it).
-        local m = ngx.shared.metrics
-        if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+        bump_last_pull_ts(cat)
         return "not_modified"
     end
 
@@ -228,8 +237,7 @@ function _M.handle_response(cat, dict, meta, res, err)
     -- (above) — both mean "backend answered". A long run of skips (transport
     -- errors / non-200/304 statuses / decode failures) makes the gauge grow,
     -- which is the alert condition.
-    local m = ngx.shared.metrics
-    if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+    bump_last_pull_ts(cat)
 
     return "ok"
 end
