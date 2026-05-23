@@ -129,18 +129,29 @@ through Channel A (Puppet). Rotation without an outage:
 ### Channel C staleness SLA
 
 The edge exposes `antibot_edge_catalog_staleness_seconds{catalog="..."}` on
-`/metrics` (B5 — `infra/demo-stand/lua/metrics.lua`). Contract per
-config-distribution §Channel C and the B6 task:
+`/metrics` (B5 — `infra/demo-stand/lua/metrics.lua`).
 
-- **≤ 30 s** for fast catalogs (the 30-s pull cadence; one missed tick is
-  normal, two consecutive misses warrant a page).
-- **≤ 15 min** for PR-merged catalogs (`fp_blocklist`, `ua_blacklist`, IP
-  lists) — Channel A → Puppet bandwidth, well above one pull cycle, but a
-  prolonged outage of the backend or LB is the alarm condition.
+**Semantics**: the gauge is "seconds since the last successful **contact**
+with antibot-backend" — both `200` (new data landed) and `304` (ETag
+matched, no new data, channel still healthy) reset it. Transport errors,
+non-200/304 statuses, and decode failures leave the gauge growing. **This
+is a liveness signal, not a data-freshness one** — the alert fires when
+backend stops answering, not when a PR-merged catalog has been the same
+payload for a week (which is the steady state for `fp_blocklist`,
+`ua_blacklist`, IP lists). Pinned by `tests/catalog_pull_test.lua` case 2.
+
+Contract per config-distribution §Channel C and the B6 task:
+
+- **≤ 30 s** — backend reachable on the 30-s pull cadence. One missed tick
+  is normal jitter, two consecutive misses warrant a page.
+- **≤ 15 min** — hard outage budget; beyond this the catalog payload on
+  edge starts being meaningfully out of date for live changes (dashboard
+  attack-mode toggle, urgent blocklist additions delivered via the
+  dashboard, not via PR).
 
 Whoever scrapes `/metrics` (Prometheus / external observability) writes the
 alertmanager rule against these thresholds; this repo only guarantees the
-metric is exported.
+metric is exported with the contract above.
 
 ### Fail-stale verification
 

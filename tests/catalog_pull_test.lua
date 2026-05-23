@@ -156,6 +156,8 @@ end
 -- ===========================================================================
 -- 2. 304 Not Modified
 -- Regression from round-3 review: 304 must NOT touch dict / gen / etag.
+-- Staleness gauge contract: 304 IS a successful contact, so last_pull_ts
+-- gets bumped (alert fires on dead channel, not on stale-but-correct data).
 -- ===========================================================================
 
 do
@@ -178,8 +180,8 @@ do
         "304: live entry b preserved (regression guard)")
     check(ngx.shared.meta:get("fp_blocklist_etag"), "\"live-etag\"",
         "304: etag unchanged")
-    check(ngx.shared.metrics:get("catalog_last_pull_ts:fp_blocklist"), nil,
-        "304: last_pull_ts NOT bumped (304 is not a successful refresh of data)")
+    check(ngx.shared.metrics:get("catalog_last_pull_ts:fp_blocklist"), 1234567,
+        "304: last_pull_ts bumped (304 = successful contact, staleness is a liveness signal)")
 end
 
 -- ===========================================================================

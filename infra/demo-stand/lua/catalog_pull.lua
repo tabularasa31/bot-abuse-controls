@@ -104,6 +104,16 @@ local function bump_metric(key)
     if m then m:incr(key, 1, 0) end
 end
 
+-- bump_last_pull_ts — stamp `catalog_last_pull_ts:<name>` with the current
+-- time. Called from both the 200 and 304 paths in handle_response (both are
+-- "successful contact with backend" — see the 304 branch comment for why
+-- this is a liveness rather than freshness signal). Missing metrics dict is
+-- silent for the same test-harness reason as bump_metric.
+local function bump_last_pull_ts(cat)
+    local m = ngx.shared.metrics
+    if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+end
+
 -- version_compatible — single-major check. Accepts "1", "1.x", "1.x.y". An
 -- empty / missing header is treated as compatible: older backend builds may
 -- not set the header, and a missing header is an operator concern (visible
@@ -136,6 +146,21 @@ function _M.handle_response(cat, dict, meta, res, err)
         -- Round-3 regression: do NOT touch dict, do NOT bump gen. The 304
         -- short-circuit is the steady state — without this guard a catalog
         -- that hasn't changed for an hour would silently empty out.
+        --
+        -- BUT do bump catalog_last_pull_ts. 304 means backend answered and
+        -- the ETag matched — Channel C is healthy, just no new data. The
+        -- staleness gauge is meant to drive alerting on a dead channel
+        -- (config-distribution §Channel C "edge_catalog_staleness_seconds
+        -- ... drives alerting" with the ≤30s / ≤15m SLA from the B6 spec),
+        -- not on stale-but-correct data. Skipping the bump here made the
+        -- gauge grow linearly between catalog updates — for a `fp_blocklist`
+        -- that changes weekly via PR, the alert would fire 24/7 even with
+        -- a perfectly healthy backend. Bump on 304 so the gauge means
+        -- "seconds since the last successful contact" (the contract the
+        -- alert is actually checking), not "seconds since the last data
+        -- change" (a freshness signal that needs its own metric if we ever
+        -- want it).
+        bump_last_pull_ts(cat)
         return "not_modified"
     end
 
@@ -207,11 +232,12 @@ function _M.handle_response(cat, dict, meta, res, err)
 
     cat.sweep(dict, old_gen)
 
-    -- Last-successful-pull timestamp drives edge_catalog_staleness_seconds
-    -- in metrics.lua (gauge = now - last). Recorded only on "ok", so a long
-    -- run of skips/304s makes the gauge grow.
-    local m = ngx.shared.metrics
-    if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+    -- Last-successful-contact timestamp drives edge_catalog_staleness_seconds
+    -- in metrics.lua (gauge = now - last). Bumped on 200 (here) and on 304
+    -- (above) — both mean "backend answered". A long run of skips (transport
+    -- errors / non-200/304 statuses / decode failures) makes the gauge grow,
+    -- which is the alert condition.
+    bump_last_pull_ts(cat)
 
     return "ok"
 end
