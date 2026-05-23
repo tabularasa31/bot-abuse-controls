@@ -136,6 +136,22 @@ function _M.handle_response(cat, dict, meta, res, err)
         -- Round-3 regression: do NOT touch dict, do NOT bump gen. The 304
         -- short-circuit is the steady state — without this guard a catalog
         -- that hasn't changed for an hour would silently empty out.
+        --
+        -- BUT do bump catalog_last_pull_ts. 304 means backend answered and
+        -- the ETag matched — Channel C is healthy, just no new data. The
+        -- staleness gauge is meant to drive alerting on a dead channel
+        -- (config-distribution §Channel C "edge_catalog_staleness_seconds
+        -- ... drives alerting" with the ≤30s / ≤15m SLA from the B6 spec),
+        -- not on stale-but-correct data. Skipping the bump here made the
+        -- gauge grow linearly between catalog updates — for a `fp_blocklist`
+        -- that changes weekly via PR, the alert would fire 24/7 even with
+        -- a perfectly healthy backend. Bump on 304 so the gauge means
+        -- "seconds since the last successful contact" (the contract the
+        -- alert is actually checking), not "seconds since the last data
+        -- change" (a freshness signal that needs its own metric if we ever
+        -- want it).
+        local m = ngx.shared.metrics
+        if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
         return "not_modified"
     end
 
@@ -207,9 +223,11 @@ function _M.handle_response(cat, dict, meta, res, err)
 
     cat.sweep(dict, old_gen)
 
-    -- Last-successful-pull timestamp drives edge_catalog_staleness_seconds
-    -- in metrics.lua (gauge = now - last). Recorded only on "ok", so a long
-    -- run of skips/304s makes the gauge grow.
+    -- Last-successful-contact timestamp drives edge_catalog_staleness_seconds
+    -- in metrics.lua (gauge = now - last). Bumped on 200 (here) and on 304
+    -- (above) — both mean "backend answered". A long run of skips (transport
+    -- errors / non-200/304 statuses / decode failures) makes the gauge grow,
+    -- which is the alert condition.
     local m = ngx.shared.metrics
     if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
 

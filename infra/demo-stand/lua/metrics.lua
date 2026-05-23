@@ -126,13 +126,22 @@ ngx.say(table.concat(tag_lines, "\n"))
 ngx.say(table.concat(stg_lines, "\n"))
 
 -- Channel C catalog staleness (B5, RFC §В1 "edge_catalog_staleness_seconds").
--- catalog_pull.handle_response stamps `catalog_last_pull_ts:<name>` on each
--- successful 200; this gauge is now - that timestamp. We iterate over the
--- KNOWN catalog list (catalog_pull.catalogs) rather than over keys that
--- exist in the dict, so a catalog that has never had a successful pull
--- still gets a -1 series — dashboards distinguish "never pulled" from
--- "metric missing" (codex review).
-local stale_lines = { "# HELP antibot_edge_catalog_staleness_seconds Seconds since the last successful Channel C pull; -1 if a pull has never succeeded since worker start.",
+-- catalog_pull.handle_response stamps `catalog_last_pull_ts:<name>` on every
+-- successful contact with antibot-backend — both 200 (new data) and 304
+-- (ETag matches, no new data, channel still healthy). This gauge is
+-- now - that timestamp. We iterate over the KNOWN catalog list
+-- (catalog_pull.catalogs) rather than over keys that exist in the dict, so a
+-- catalog that has never been pulled still gets a -1 series — dashboards
+-- distinguish "never pulled" from "metric missing" (codex review).
+--
+-- Semantics: this is a LIVENESS gauge ("seconds since last contact with
+-- backend"), not a freshness gauge ("seconds since data last changed").
+-- The alert condition from config-distribution §Channel C and B6 ("≤30s
+-- fast / ≤15m PR catalogs") fires only when backend stops answering — not
+-- when the catalog payload has been the same for a week (the steady state
+-- for PR-merged lists). If we ever need "data age" separately, that's a
+-- different metric (e.g. age of the ETag), not this one.
+local stale_lines = { "# HELP antibot_edge_catalog_staleness_seconds Seconds since the last successful contact with antibot-backend (200 or 304); grows only when ticks fail (transport / non-200/304 / decode). -1 if no contact has succeeded since worker start.",
                       "# TYPE antibot_edge_catalog_staleness_seconds gauge" }
 local vmis_lines  = { "# HELP antibot_edge_sidecar_version_mismatch_total Times a catalog response was rejected because X-Catalog-Version major disagreed with the edge's supported major.",
                       "# TYPE antibot_edge_sidecar_version_mismatch_total counter" }
