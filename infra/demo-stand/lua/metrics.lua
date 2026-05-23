@@ -7,7 +7,8 @@
 -- is intentionally simple — a few counters plus a derived gauge — so a
 -- reviewer can read it and understand what's being measured.
 
-local fp_state = require "fp_blocklist_state"
+local fp_state    = require "fp_blocklist_state"
+local catalog_pull = require "catalog_pull"
 
 local m = ngx.shared.metrics
 
@@ -74,7 +75,9 @@ antibot_fp_unique %d
 -- Per-rule / per-flag / per-tag counters live in the metrics dict under
 -- "rule:<stage>:<rule>", "flag:<flag>" and "tag:<tag>" keys (written by
 -- log_event.lua). Emit them as labelled counters. Cheap here because the
--- rule/flag/tag code-spaces are tiny. One get_keys pass classifies all three.
+-- rule/flag/tag code-spaces are tiny. One get_keys pass classifies all
+-- prefixes (rule/flag/tag/staging/catalog_last_pull_ts/
+-- edge_sidecar_version_mismatch_total) so we hit the dict lock once.
 local rule_lines = { "# HELP antibot_rule_total Times each rule fired, by stage.",
                      "# TYPE antibot_rule_total counter" }
 local flag_lines = { "# HELP antibot_flag_total Times each soft challenge flag accumulated.",
@@ -83,6 +86,8 @@ local tag_lines  = { "# HELP antibot_tag_total Times each informational tag was 
                      "# TYPE antibot_tag_total counter" }
 local stg_lines  = { "# HELP antibot_staging_match_total Times each staged pattern matched (observe-only, feeds the staging→active promotion workflow).",
                      "# TYPE antibot_staging_match_total counter" }
+local pulled_ts  = {}   -- catalog → last pull ts (or nil if never)
+local vmis       = {}   -- catalog → version-mismatch count
 for _, key in ipairs(m:get_keys(0)) do
     local stage, rule = key:match("^rule:([^:]+):(.+)$")
     if stage then
@@ -110,8 +115,35 @@ for _, key in ipairs(m:get_keys(0)) do
         stg_lines[#stg_lines + 1] = string.format(
             'antibot_staging_match_total{pattern="%s"} %d', label, get(key))
     end
+    local pulled = key:match("^catalog_last_pull_ts:(.+)$")
+    if pulled then pulled_ts[pulled] = m:get(key) end
+    local vcat = key:match("^edge_sidecar_version_mismatch_total:(.+)$")
+    if vcat then vmis[vcat] = get(key) end
 end
 ngx.say(table.concat(rule_lines, "\n"))
 ngx.say(table.concat(flag_lines, "\n"))
 ngx.say(table.concat(tag_lines, "\n"))
 ngx.say(table.concat(stg_lines, "\n"))
+
+-- Channel C catalog staleness (B5, RFC §В1 "edge_catalog_staleness_seconds").
+-- catalog_pull.handle_response stamps `catalog_last_pull_ts:<name>` on each
+-- successful 200; this gauge is now - that timestamp. We iterate over the
+-- KNOWN catalog list (catalog_pull.catalogs) rather than over keys that
+-- exist in the dict, so a catalog that has never had a successful pull
+-- still gets a -1 series — dashboards distinguish "never pulled" from
+-- "metric missing" (codex review).
+local stale_lines = { "# HELP antibot_edge_catalog_staleness_seconds Seconds since the last successful Channel C pull; -1 if a pull has never succeeded since worker start.",
+                      "# TYPE antibot_edge_catalog_staleness_seconds gauge" }
+local vmis_lines  = { "# HELP antibot_edge_sidecar_version_mismatch_total Times a catalog response was rejected because X-Catalog-Version major disagreed with the edge's supported major.",
+                      "# TYPE antibot_edge_sidecar_version_mismatch_total counter" }
+for name in pairs(catalog_pull.catalogs) do
+    local ts = pulled_ts[name]
+    local age = ts and (now - ts) or -1
+    stale_lines[#stale_lines + 1] = string.format(
+        'antibot_edge_catalog_staleness_seconds{catalog="%s"} %d', name, age)
+    vmis_lines[#vmis_lines + 1] = string.format(
+        'antibot_edge_sidecar_version_mismatch_total{catalog="%s"} %d',
+        name, vmis[name] or 0)
+end
+ngx.say(table.concat(stale_lines, "\n"))
+ngx.say(table.concat(vmis_lines, "\n"))
