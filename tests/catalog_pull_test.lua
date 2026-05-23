@@ -292,6 +292,83 @@ check_true(cp.version_compatible(nil),       "version_compatible: nil is compati
 check_true(cp.version_compatible(""),        "version_compatible: empty is compatible")
 
 -- ===========================================================================
+-- apply() failure mid-batch (no memory / oversized key) → no gen flip,
+-- partially-written new gen is rolled back, old gen stays intact.
+-- Regression guard for the gemini/codex review: violation of fail-stale
+-- when dict:set returns nil, "no memory".
+-- ===========================================================================
+
+do
+    reset_state()
+    -- Make the fp_blocklist dict refuse the SECOND set with a fake "no memory".
+    local fp_dict = ngx.shared.fp_blocklist
+    local calls = 0
+    local real_set = fp_dict.set
+    fp_dict.set = function(self, k, v)
+        calls = calls + 1
+        if calls == 2 then return nil, "no memory" end
+        return real_set(self, k, v)
+    end
+
+    local body = '{"fp_a":"block","fp_b":"block","fp_c":"block"}'
+    decode_table[body] = { fp_a = "block", fp_b = "block", fp_c = "block" }
+    local res = {
+        status  = 200,
+        body    = body,
+        headers = { ETag = "\"x\"", ["X-Catalog-Version"] = "1.0" },
+    }
+    local outcome = cp.handle_response(cat, fp_dict, ngx.shared.meta, res, nil)
+    check(outcome, "skip", "apply failure: returns skip")
+    check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
+        "apply failure: gen NOT flipped (still 0)")
+    check(fp_dict:get(fp_state.key("seed_fp", 0)), "block",
+        "apply failure: old-gen seed entry preserved")
+    -- The first set went through (calls==1) — verify the partial new-gen
+    -- write was swept on rollback so the dict isn't carrying dead entries
+    -- until the next pull.
+    local any_new_gen = false
+    for _, k in ipairs(fp_dict:get_keys(0)) do
+        if k:sub(-2) == ":1" then any_new_gen = true end
+    end
+    check_false(any_new_gen, "apply failure: partial new-gen entries swept on rollback")
+    check_true(log_contains("apply failed"), "apply failure: log mentions apply failure")
+    fp_dict.set = real_set
+end
+
+-- ===========================================================================
+-- meta:set(gen_key) failure → roll back, old gen kept (defense-in-depth;
+-- a 1m meta dict with a single int practically can't fail, but if it did
+-- we'd activate a catalog readers can't see).
+-- ===========================================================================
+
+do
+    reset_state()
+    local meta = ngx.shared.meta
+    local real_meta_set = meta.set
+    meta.set = function(self, k, v)
+        if k == fp_state.META_GEN_KEY and v == 1 then
+            return nil, "no memory"
+        end
+        return real_meta_set(self, k, v)
+    end
+
+    local body = '{"fp_x":"block"}'
+    decode_table[body] = { fp_x = "block" }
+    local res = { status = 200, body = body, headers = { ["X-Catalog-Version"] = "1.0" } }
+    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, meta, res, nil)
+    check(outcome, "skip", "meta:set failure: returns skip")
+    check(meta:get(fp_state.META_GEN_KEY), 0,
+        "meta:set failure: gen unchanged")
+    check(ngx.shared.fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
+        "meta:set failure: seed preserved")
+    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_x", 1)), nil,
+        "meta:set failure: failed new-gen entry swept on rollback")
+    check_true(log_contains("gen flip failed"),
+        "meta:set failure: log mentions gen flip failure")
+    meta.set = real_meta_set
+end
+
+-- ===========================================================================
 -- Non-200 / non-304 status (e.g. 500) → skip, no mutation.
 -- ===========================================================================
 

@@ -47,18 +47,30 @@ _M.catalogs = {
         gen_key     = fp_state.META_GEN_KEY,   -- "fp_blocklist_gen"
         etag_key    = "fp_blocklist_etag",
         version_key = "fp_blocklist_version",
+        -- Возвращает (ok, count). `ok=false` если хоть один dict:set провалился
+        -- (типично "no memory" при фрагментации shared_dict, либо ключ длиннее
+        -- 255 байт). handle_response в этом случае откатится до flip'a и
+        -- НЕ перейдёт на битое поколение — иначе sweep удалил бы старый gen,
+        -- и в worst case эдж остался бы с частично записанным/пустым каталогом
+        -- (gemini/codex review: violation of fail-stale).
         apply = function(dict, entries, new_gen)
             local n = 0
             for fp, verdict in pairs(entries) do
                 local ok, err = dict:set(fp_state.key(fp, new_gen), verdict)
-                if ok then
-                    n = n + 1
-                else
-                    ngx.log(ngx.ERR, "fp_blocklist:set failed: ", err)
+                if not ok then
+                    ngx.log(ngx.ERR, "fp_blocklist:set failed: ", err,
+                        " (fp=", fp, ", gen=", new_gen, ")")
+                    return false, n
                 end
+                n = n + 1
             end
-            return n
+            return true, n
         end,
+        -- get_keys(0) lock'ает весь shared_dict на время скана. Для текущего
+        -- размера каталога (десятки–сотни fp) это микросекунды; gemini-review
+        -- отметила, что на десятках тысяч ключей блокировка станет видна на
+        -- p99 — тогда поедем на side-index "keys-of-gen-N" в отдельном ключе
+        -- meta'и. Пока что 100% RFC §В1 алгоритм + комментарий.
         sweep = function(dict, old_gen)
             -- old_gen == 0 is the static seed from init.lua; sweeping it on
             -- the first pull is intentional — once the live catalog lands,
@@ -157,8 +169,30 @@ function _M.handle_response(cat, dict, meta, res, err)
     -- "Atomically flip readers" and verdict.lua's `fp:gen` lookup.
     local old_gen = meta:get(cat.gen_key) or 0
     local new_gen = old_gen + 1
-    cat.apply(dict, entries, new_gen)
-    meta:set(cat.gen_key, new_gen)
+
+    -- Apply: если хоть один dict:set провалился (no memory / key too long) —
+    -- НЕ flip'аем gen и НЕ sweep'аем старый. Параллельно подчищаем уже
+    -- записанные ключи нового gen, чтобы они не висели до следующего pull'a
+    -- (occupying shared_dict впустую). Edge остаётся на прежнем gen,
+    -- следующий тик попробует снова — fail-stale (gemini/codex review).
+    local apply_ok, written = cat.apply(dict, entries, new_gen)
+    if not apply_ok then
+        ngx.log(ngx.ERR, "catalog ", cat.endpoint,
+            ": apply failed after ", written, " writes — keeping gen=", old_gen)
+        cat.sweep(dict, new_gen)
+        return "skip"
+    end
+
+    -- Сам flip. meta:set на 1m shared_dict с одним int практически не падает,
+    -- но если упал — каталог нового gen уже в dict, а readers всё ещё резолвят
+    -- старый. Сводим к тому же fail-stale: подчистим новый gen и держим старый.
+    local ok_flip, flip_err = meta:set(cat.gen_key, new_gen)
+    if not ok_flip then
+        ngx.log(ngx.ERR, "catalog ", cat.endpoint, ": gen flip failed: ",
+            tostring(flip_err), " — rolling back, keeping gen=", old_gen)
+        cat.sweep(dict, new_gen)
+        return "skip"
+    end
 
     local etag = res.headers and res.headers["ETag"]
     if etag then meta:set(cat.etag_key, etag) end
