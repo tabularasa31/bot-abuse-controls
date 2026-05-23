@@ -10,11 +10,18 @@
 package logs
 
 import (
+	"errors"
 	"io"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// maxBodyBytes — потолок на одно тело запроса. Edge батчит BAC_LOG короткими
+// строками; 10 MiB — с запасом на батч из сотен тысяч записей и одновременно
+// твёрдый предохранитель от случайного/злонамеренного огромного POST'а.
+// B6 уточнит, когда будет известен реальный размер батча.
+const maxBodyBytes = 10 * 1024 * 1024
 
 type Receiver struct {
 	received prometheus.Counter
@@ -31,18 +38,32 @@ func New(reg prometheus.Registerer) *Receiver {
 	return r
 }
 
+// Register монтирует POST /v1/logs. Метод — на уровне ServeMux (Go 1.22+),
+// чужие методы сразу отбиваются 405.
 func (rcv *Receiver) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/v1/logs", rcv.handle)
+	mux.HandleFunc("POST /v1/logs", rcv.handle)
 }
 
 func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+	// MaxBytesReader — твёрдый потолок на тело: при переборе чтение вернёт
+	// ошибку *http.MaxBytesError, мы отвечаем 413 и НЕ инкрементим счётчик
+	// (иначе атакующий мог бы накачивать метрику дёшево).
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	defer func() { _ = r.Body.Close() }()
+
+	n, err := countNewlines(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, `{"error":"request_too_large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
+		// Обрыв соединения / прочее IO — счётчик не двигаем, отвечать в
+		// сломанный сокет смысла мало, но явный 400 пусть будет на случай,
+		// если связь успела восстановиться к моменту записи.
+		http.Error(w, `{"error":"read_failed"}`, http.StatusBadRequest)
 		return
 	}
-	// Считаем строки по «\n» — достаточно, чтобы метрика двигалась под нагрузкой
-	// от edge ([A2]). Парсинг JSON-схемы и батч-форвард в sink — B6.
-	n, _ := countNewlines(r.Body)
 	rcv.received.Add(float64(n))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)

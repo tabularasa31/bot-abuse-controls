@@ -12,7 +12,6 @@ package catalog
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 )
 
 // knownCatalogs — список из config-distribution.md §"The 'catalog' concept".
@@ -32,23 +31,16 @@ type Server struct{}
 
 func New() *Server { return &Server{} }
 
-// Register монтирует /catalog/{name}. Один обработчик на все каталоги —
-// разводить по отдельным путям в скелете нет смысла, B3 либо оставит так,
+// Register монтирует GET /catalog/{name}. Метод и парсинг сегмента — на
+// уровне ServeMux (Go 1.22+ routing); один обработчик на все каталоги — в
+// скелете разводить по отдельным путям нет смысла, B3 либо оставит так,
 // либо разнесёт.
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/catalog/", s.handle)
+	mux.HandleFunc("GET /catalog/{name}", s.handle)
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-	name := strings.TrimPrefix(r.URL.Path, "/catalog/")
-	if name == "" || strings.Contains(name, "/") {
-		writeJSON(w, http.StatusNotFound, errorBody{Error: "not_found"})
-		return
-	}
+	name := r.PathValue("name")
 	if _, ok := knownCatalogs[name]; !ok {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "unknown_catalog", Catalog: name})
 		return
