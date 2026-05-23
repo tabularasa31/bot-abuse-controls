@@ -34,6 +34,35 @@ jobs:
             pipelinecomponents/luacheck:latest \
             luacheck $(find infra -name '*.lua')
 
+  lint-go:
+    name: Lint Go (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: antibot-backend/go.sum
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.60.3
+          working-directory: antibot-backend
+
+  test-go:
+    name: Build Go (antibot-backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: antibot-backend/go.sum
+      - name: go vet + build
+        working-directory: antibot-backend
+        run: |
+          go vet ./...
+          go build ./...
+
   lint-shell:
     name: Lint shell (shellcheck)
     runs-on: ubuntu-latest

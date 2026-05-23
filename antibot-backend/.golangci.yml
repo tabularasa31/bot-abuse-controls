@@ -1,0 +1,18 @@
+# Базовый набор линтеров для antibot-backend. Зеркалит то, что уже стоит
+# в репо для Lua/shell (см. .github/workflows/ci.yml): только enabled-by-default
+# + несколько проверок корректности. Стилистика и эстетика — не сюда.
+run:
+  timeout: 3m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck     # необработанные ошибки
+    - govet        # go vet
+    - ineffassign  # неиспользованные присваивания
+    - staticcheck  # ловит SA1019 (deprecated) и пр.
+    - unused       # мёртвый код
+    - gosimple     # упрощения
+    - misspell     # опечатки в комментах
+    - bodyclose    # незакрытые HTTP body
+    - errorlint    # некорректная работа с errors.Is/As
