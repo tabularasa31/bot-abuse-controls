@@ -1,6 +1,6 @@
 # infra/ — what each directory is
 
-Two directories, two distinct roles. They are **not** competing "stands".
+Three directories, three distinct roles. They are **not** competing "stands".
 
 ## `demo-stand/` — the live demo
 
@@ -12,18 +12,23 @@ observability (`/__admin`, `/metrics`), structured `BAC_LOG`, analytics
 (`scripts/analyze.py`), and a cron auto-update loop. See
 [`demo-stand/README.md`](demo-stand/README.md).
 
-It does **not** vendor the fingerprint code — it bind-mounts
-`nginx-lua-poc/lua` (see below) so the demo runs the exact production
-compute, not a drifting copy.
+Источник правды fp-кода ([`lua/ja4_compute.lua`](demo-stand/lua/ja4_compute.lua),
+[`lua/ja4_helpers.lua`](demo-stand/lua/ja4_helpers.lua)) теперь лежит здесь
+же — рядом с остальным каскадом.
 
-## `nginx-lua-poc/` — canonical fp library + PoC benchmark
+## `demo-backend/` — antibot-backend HA-стек
 
-Home of the production fingerprint code: [`lua/ja4_compute.lua`](nginx-lua-poc/lua/ja4_compute.lua)
-and [`lua/ja4_helpers.lua`](nginx-lua-poc/lua/ja4_helpers.lua). Also the
-isolated rig that measured the cost of running the verdict path in
-`access_by_lua` (PoC #2, task [86exmhy8j](https://app.clickup.com/t/86exmhy8j);
-`../docker-compose.lua-poc.yml`). Treat it as a **shared library + benchmark**,
-not a deployable stand — `demo-stand` depends on its `lua/`.
+Docker compose substrate (Postgres + HA-пара antibot-backend за TLS-LB) для
+централизованного Go-сервиса из [`antibot-backend/`](../antibot-backend/) по
+ADR-005 / config-distribution. См. [`demo-backend/README.md`](demo-backend/README.md).
+
+## `nginx-lua-poc/` — removed
+
+Был отдельный спайк PoC #2 (`access_by_lua` verdict path benchmark). После
+переезда `ja4_compute.lua` / `ja4_helpers.lua` в `demo-stand/lua/` папка
+полностью удалена; компоуз `docker-compose.lua-poc.yml`, пробник
+`scripts/lua-poc-probe.sh` и результаты `docs/lua-poc-results.md` /
+`docs/phase2-fp-catalog.md` — тоже.
 
 ## Not here anymore
 

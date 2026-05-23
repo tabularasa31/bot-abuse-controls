@@ -54,14 +54,9 @@ services:
 
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
-      # Demo-specific Lua (verdict.lua, blocklist, init, metrics, admin,
-      # probe, log_event). Mounted at /etc/nginx/lua.
+      # Cascade Lua: stage modules + shared fp compute
+      # (ja4_compute + ja4_helpers, источник правды теперь здесь же).
       - ./lua:/etc/nginx/lua:ro
-      # Production fp compute (ja4_compute + ja4_helpers) bind-mounted
-      # from the canonical infra/nginx-lua-poc/lua/ tree so the demo
-      # uses the exact same code as production, not a copy that drifts.
-      # nginx.demo.conf's lua_package_path includes /etc/nginx/lua-common.
-      - ../nginx-lua-poc/lua:/etc/nginx/lua-common:ro
       # Cascade config files (defaults + IP/UA/ASN/fp catalogs), read once
       # at init_by_lua via the `config` Lua module. Editing a file here and
       # restarting the container re-applies it (hot-reload is a separate task).

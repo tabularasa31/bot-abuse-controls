@@ -1,4 +1,4 @@
--- Unit tests for infra/nginx-lua-poc/lua/ja4_helpers.lua. Pure Lua;
+-- Unit tests for infra/demo-stand/lua/ja4_helpers.lua. Pure Lua;
 -- runs under any luajit or lua 5.1+ with no openresty / resty deps.
 --
 -- Run with:
@@ -9,7 +9,7 @@
 -- output. Failures print expected vs actual and bump a counter; the
 -- process exits non-zero if any failed.
 
-package.path = "infra/nginx-lua-poc/lua/?.lua;./infra/nginx-lua-poc/lua/?.lua;" .. package.path
+package.path = "infra/demo-stand/lua/?.lua;./infra/demo-stand/lua/?.lua;" .. package.path
 local helpers = require "ja4_helpers"
 
 local failed, passed = 0, 0

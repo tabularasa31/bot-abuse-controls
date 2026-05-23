@@ -2,7 +2,7 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (CDN operator admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. The cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua`); the TLS-fingerprint compute (`ja4_compute.lua`, `ja4_helpers.lua`) is bind-mounted from `infra/nginx-lua-poc/lua/` and shared with the PoC. The multi-scenario endpoints below front this cascade. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
+The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. The cascade лежит целиком в `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`). The multi-scenario endpoints below front this cascade. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
 
 ## Scenarios a reviewer can probe
 
@@ -275,8 +275,8 @@ infra/demo-stand/
 │   ├── kill_switch.local.conf.example   operator kill-switch template (copy → .local.conf, gitignored)
 │   └── …                           IP/UA/ASN lists + tls_fp catalogs
 ├── lua/
-│   ├── verdict.lua                 verdict pipeline (production variant; symlink-equivalent of infra/nginx-lua-poc/lua/verdict.lua)
-│   ├── ja4_compute.lua             same compute as production
+│   ├── verdict.lua                 verdict pipeline (production variant)
+│   ├── ja4_compute.lua             fp compute (helpers in ja4_helpers.lua)
 │   ├── blocklist.lua               seed automation fps
 │   ├── init.lua                    load blocklist, init metrics counters
 │   ├── metrics.lua                 /metrics handler (Prometheus text format)
@@ -295,7 +295,7 @@ infra/demo-stand/
 |---|---|
 | "Is this AI-generated slop?" | `make ci` passes 61 unit tests + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
-| "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. Measured ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook — see [`docs/lua-poc-results.md`](../../docs/lua-poc-results.md). |
+| "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. PoC #2 mеасured ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен). |
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). The stand already runs shadow (empty blocklist) — observability on, enforcement off — so "shadow vs active" is just whether the blocklist has entries. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
