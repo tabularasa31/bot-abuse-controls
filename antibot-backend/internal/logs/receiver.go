@@ -8,10 +8,9 @@
 // перебора). Receiver парсит каждую строку как JSON, и если видит IP +
 // бот-UA — дёргает Enqueuer (rdns.Worker).
 //
-// Реальные части — валидация схемы под аналитику, батч в sink, disk-queue
-// на случай недоступности sink (логи не теряются) — задача [B6] поверх [B9]
-// (sink: PostgreSQL → DuckDB/ClickHouse). Edge-сторона (отправка лога) —
-// часть [A2]/[B5].
+// Sink-сторона (валидация под аналитику, батч, disk-queue) живёт в пакете
+// internal/logsink ([B9]); receiver просто дёргает LogSink.Submit на каждую
+// строку. Edge-сторона (отправка лога) — часть [A2]/[B6].
 package logs
 
 import (
@@ -50,6 +49,14 @@ type Enqueuer interface {
 	Enqueue(ip, claimedFamily string)
 }
 
+// LogSink — приёмник BAC_LOG ([B9]). Receiver сабмитит каждую строку
+// сюда; пакет sink сам парсит, батчит и пишет в PostgreSQL c disk-queue
+// fallback'ом. Интерфейс — чтобы receiver не зависел от logsink (impl
+// — *logsink.Sink).
+type LogSink interface {
+	Submit(line []byte)
+}
+
 // FamilyClassifier — функция, превращающая UA-строку в каноничную семью
 // бота или "" если UA не похож на поискового. Реализация —
 // rdns.FamilyOfUA. Инжектится через конструктор по той же причине, что
@@ -72,19 +79,27 @@ type Receiver struct {
 
 	enqueue  Enqueuer
 	classify FamilyClassifier
+	sink     LogSink
 }
 
-// New возвращает receiver без rDNS-интеграции (skeleton-режим / тесты,
-// которым нужен только подсчёт строк).
+// New возвращает receiver без rDNS-интеграции и без sink'а (skeleton-режим /
+// тесты, которым нужен только подсчёт строк).
 func New(reg prometheus.Registerer) *Receiver {
-	return NewWithEnqueuer(reg, nil, nil)
+	return NewWithDeps(reg, nil, nil, nil)
 }
 
-// NewWithEnqueuer возвращает receiver, который дополнительно дёргает
-// enqueue.Enqueue для каждой строки с известным бот-UA. enqueue/classify
-// могут быть nil — тогда receiver работает как скелетный счётчик. Если
-// задана одна — должна быть задана и вторая.
+// NewWithEnqueuer — обратная совместимость с B7-стартом: receiver с rDNS,
+// но без sink'a. Эквивалент NewWithDeps(..., nil).
 func NewWithEnqueuer(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyClassifier) *Receiver {
+	return NewWithDeps(reg, enqueue, classify, nil)
+}
+
+// NewWithDeps — receiver с обеими опциональными зависимостями. Любая из
+// них может быть nil:
+//   - enqueue+classify оба заданы → dispatch в rDNS-воркер (B7-функция);
+//   - sink задан → каждая строка уходит в logsink (B9-функция);
+//   - всё nil → skeleton-режим, только received-счётчик.
+func NewWithDeps(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyClassifier, sink LogSink) *Receiver {
 	r := &Receiver{
 		received: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "antibot_backend_log_lines_received_total",
@@ -92,6 +107,7 @@ func NewWithEnqueuer(reg prometheus.Registerer, enqueue Enqueuer, classify Famil
 		}),
 		enqueue:  enqueue,
 		classify: classify,
+		sink:     sink,
 	}
 	reg.MustRegister(r.received)
 	// parsed/parseErr/botSpotted — это метрики dispatch-пути. В skeleton-
@@ -200,6 +216,11 @@ func (rcv *Receiver) consume(body io.Reader) (int, error) {
 		line := sc.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+		// Sink дёргаем безусловно — он сам парсит и батчит. Skeleton-
+		// режим (sink==nil) — пропускаем; rDNS-путь работает независимо.
+		if rcv.sink != nil {
+			rcv.sink.Submit(line)
 		}
 		rcv.dispatch(line)
 	}

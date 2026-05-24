@@ -27,6 +27,7 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/dbloader"
 	"github.com/tabularasa31/antibot-backend/internal/health"
 	"github.com/tabularasa31/antibot-backend/internal/logs"
+	"github.com/tabularasa31/antibot-backend/internal/logsink"
 	"github.com/tabularasa31/antibot-backend/internal/rdns"
 )
 
@@ -43,6 +44,7 @@ type App struct {
 	store    *catalog.Store     // ссылка нужна rDNS-воркеру (HasVerifiedBotIP)
 	reloader *dbloader.Reloader // nil если каталог из YAML или не загружен
 	rdns     *rdns.Worker       // nil в skeleton-режиме без БД
+	logSink  *logsink.Sink      // nil без БД (skeleton) или при ошибке инициализации спула
 }
 
 // New собирает граф зависимостей. Возвращает ошибку, если конфиг не читается,
@@ -140,11 +142,50 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		logger.Warn("rdns worker disabled — no DB / catalog store (skeleton mode)")
 	}
 
-	// Receiver регистрируется здесь, после rdns: если воркер есть — даём
-	// receiver'у Enqueuer + classifier; если нет (skeleton без БД) — пустой
-	// конструктор, receiver работает как счётчик строк.
+	// LogSink (B9) — батч-инсертер BAC_LOG в PostgreSQL с disk-queue.
+	// Поднимаем только при наличии пула: без БД sink'у некуда писать,
+	// receiver останется без него (логи будут просто 202-ить как в B2-скелете).
+	if a.pool != nil {
+		sink, err := logsink.New(logsink.Config{
+			BatchSize:     cfg.LogsSinkBatchSize,
+			FlushInterval: cfg.LogsSinkFlushInterval,
+			QueueSize:     cfg.LogsSinkQueueSize,
+			SpoolDir:      cfg.LogsSinkSpoolDir,
+			SpoolMaxBytes: cfg.LogsSinkSpoolMaxBytes,
+			DrainInterval: cfg.LogsSinkDrainInterval,
+		}, a.pool, logger, a.reg)
+		if err != nil {
+			// Спул-каталог не создаётся → инструментальная ошибка деплоя
+			// (volume не примонтирован / нет прав). Лучше упасть, чем
+			// тихо терять логи в spillover.
+			return nil, fmt.Errorf("logsink init: %w", err)
+		}
+		a.logSink = sink
+		if cfg.LogsSinkSpoolDir == "" {
+			logger.Warn("logsink wired without spool dir — DB outage will drop log lines; set LOGS_SINK_SPOOL_DIR in production",
+				"batch_size", cfg.LogsSinkBatchSize,
+				"flush_interval", cfg.LogsSinkFlushInterval,
+			)
+		} else {
+			logger.Info("logsink wired",
+				"spool_dir", cfg.LogsSinkSpoolDir,
+				"batch_size", cfg.LogsSinkBatchSize,
+				"flush_interval", cfg.LogsSinkFlushInterval,
+			)
+		}
+	}
+
+	// Receiver регистрируется здесь, после rdns + sink: если воркер есть —
+	// даём receiver'у Enqueuer + classifier; sink подключаем независимо.
+	// Без пула обе ветки = nil, receiver работает как счётчик строк (B2).
+	var sinkArg logs.LogSink
+	if a.logSink != nil {
+		sinkArg = a.logSink
+	}
 	if a.rdns != nil {
-		logs.NewWithEnqueuer(a.reg, a.rdns, rdns.FamilyOfUA).Register(mux)
+		logs.NewWithDeps(a.reg, a.rdns, rdns.FamilyOfUA, sinkArg).Register(mux)
+	} else if sinkArg != nil {
+		logs.NewWithDeps(a.reg, nil, nil, sinkArg).Register(mux)
 	} else {
 		logs.New(a.reg).Register(mux)
 	}
@@ -241,6 +282,15 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			a.rdns.Run(workerCtx)
+		}()
+	}
+
+	// LogSink (B9): consumer + drainer.
+	if a.logSink != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.logSink.Run(workerCtx)
 		}()
 	}
 
