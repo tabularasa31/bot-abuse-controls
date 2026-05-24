@@ -31,13 +31,46 @@ package.loaded["bac_log"] = {
 
 local function new_dict()
     local d = { _store = {} }
-    function d:get(k) return self._store[k] end
+    -- get returns (value, err); err is set by tests that simulate a real
+    -- shared_dict failure (rare — covered by the "meta:get error" case).
+    function d:get(k) return self._store[k], self._err end
     function d:set(k, v) self._store[k] = v; return true end
+    -- add inserts only if the key is missing; returns true on insert, false
+    -- otherwise — mirrors ngx.shared.DICT:add's "first-wins" contract that
+    -- classify uses to dedupe its WARN/ERR logs.
+    function d:add(k, v)
+        if self._store[k] ~= nil then return false, "exists" end
+        self._store[k] = v
+        return true
+    end
+    function d:incr(k, delta, init)
+        self._store[k] = (self._store[k] or init or 0) + delta
+        return self._store[k]
+    end
     return d
 end
 
+local logged = {}
+local function reset_log() logged = {} end
+
 _G.ngx = _G.ngx or {}
-ngx.shared = { verified_bots = new_dict(), meta = new_dict() }
+ngx.WARN, ngx.ERR, ngx.NOTICE = "WARN", "ERR", "NOTICE"
+ngx.log = function(level, ...)
+    local parts = { ... }
+    for i, p in ipairs(parts) do parts[i] = tostring(p) end
+    logged[#logged + 1] = level .. " " .. table.concat(parts)
+end
+local function log_contains(needle)
+    for _, line in ipairs(logged) do
+        if line:find(needle, 1, true) then return true end
+    end
+    return false
+end
+ngx.shared = {
+    verified_bots = new_dict(),
+    meta          = new_dict(),
+    metrics       = new_dict(),
+}
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 local vb = require "verified_bots"
@@ -242,6 +275,74 @@ check(vb.run("198.51.100.1", "Googlebot/2.1"), nil,
     "run: provisional=false + absent -> nil")
 check(#set_calls, 0, "run: provisional=false writes NO verdict on absent")
 vb.provisional = true
+
+-- ===========================================================================
+-- classify() WARN on malformed catalog value (PR #55 review #2)
+-- ===========================================================================
+
+-- Fresh state: gen=0 seeded, insert a malformed entry, expect WARN once and
+-- "absent" return (SEO-safe demotion). Second classify on the same (ip,val)
+-- must NOT re-log — dedup via meta:add.
+ngx.shared.verified_bots = new_dict()
+ngx.shared.meta = new_dict()
+ngx.shared.metrics = new_dict()
+ngx.shared.meta:set("verified_bots_gen", 0)
+ngx.shared.verified_bots:set("203.0.113.99:0", "verified:")  -- empty family
+reset_log()
+
+do
+    local s = vb.classify("203.0.113.99")
+    check(s, "absent", "classify: malformed val demotes to absent")
+    check(log_contains("malformed entry for ip=203.0.113.99"), true,
+        "classify: WARN logged on first malformed encounter")
+    check(ngx.shared.metrics:get("verified_bots_malformed_total"), 1,
+        "classify: malformed counter incremented")
+end
+
+reset_log()
+do
+    local s = vb.classify("203.0.113.99")
+    check(s, "absent", "classify: malformed val still absent on second call")
+    check(log_contains("malformed entry"), false,
+        "classify: WARN deduped on second call (same ip+val)")
+end
+
+-- ===========================================================================
+-- classify() WARN on missing gen key (PR #55 review #4)
+-- ===========================================================================
+
+-- Wipe meta entirely — simulates an ordering bug where init.lua did not run
+-- (or a future hot-reload that cleared meta). classify must log WARN once
+-- and treat gen as 0 (fail-open into provisional).
+ngx.shared.meta = new_dict()
+ngx.shared.verified_bots = new_dict()
+reset_log()
+
+do
+    local s = vb.classify("66.249.66.1")
+    check(s, "absent", "classify: missing gen key → absent (fail-open)")
+    check(log_contains("verified_bots_gen missing"), true,
+        "classify: WARN on missing gen key")
+end
+
+reset_log()
+do
+    local s = vb.classify("66.249.66.1")
+    check(s, "absent", "classify: still absent on second call")
+    check(log_contains("verified_bots_gen missing"), false,
+        "classify: WARN deduped (per-worker)")
+end
+
+-- ===========================================================================
+-- SHORT_CIRCUIT set (PR #55 review #3) — reputation.lua single source of truth
+-- ===========================================================================
+
+check(vb.SHORT_CIRCUIT["verified"], true,  "SHORT_CIRCUIT contains verified")
+check(vb.SHORT_CIRCUIT["pending"],  true,  "SHORT_CIRCUIT contains pending")
+check(vb.SHORT_CIRCUIT["rejected"], nil,
+    "SHORT_CIRCUIT does NOT contain rejected (cascade must continue)")
+check(vb.SHORT_CIRCUIT[nil],        nil,
+    "SHORT_CIRCUIT[nil] is nil (non-bot UA falls through)")
 
 -- ===========================================================================
 -- Reporting

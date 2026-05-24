@@ -227,7 +227,14 @@ function _M.run()
     local verified_bots = package.loaded["verified_bots"]
                          or require "verified_bots"
     local vb_outcome = verified_bots.run(ip, ngx.var.http_user_agent)
-    if vb_outcome == "verified" or vb_outcome == "pending" then
+    -- Use the SHORT_CIRCUIT set rather than a literal `vb_outcome ==
+    -- "verified" or "pending"` chain so a future outcome added to
+    -- verified_bots cannot accidentally short-circuit by being copy-pasted
+    -- into this condition (review #3 on PR #55). "rejected" is deliberately
+    -- absent from SHORT_CIRCUIT: rejected IPs must continue through
+    -- ip_blocklist / tls_fp / rate_limits / L5 — that is the entire point
+    -- of the 3-state catalog.
+    if verified_bots.SHORT_CIRCUIT[vb_outcome] then
         return true
     end
 

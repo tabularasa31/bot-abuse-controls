@@ -145,6 +145,15 @@ _M.catalogs = {
         -- этот порог (на стенде без backend dict пустой, фактического
         -- риска нет).
         sweep = function(dict, old_gen)
+            -- The suffix-string match below is only safe for numeric, small,
+            -- monotonically-growing generation IDs (no `:` inside, no
+            -- string-typed gens). Lock that assumption load-bearing so a
+            -- future change to non-numeric gens (e.g. a content hash to
+            -- dedupe identical pulls) fails LOUD here instead of silently
+            -- shadowing IP-shaped keys (review #5 on PR #55).
+            assert(type(old_gen) == "number",
+                "verified_bot_ips.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
             if old_gen < 0 then return 0 end
             local suffix = ":" .. old_gen
             local n = 0

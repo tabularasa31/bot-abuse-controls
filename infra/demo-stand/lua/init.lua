@@ -117,6 +117,16 @@ ngx.log(ngx.NOTICE, "[demo] reputation matchers: ip_whitelist=", rep_wl,
 ngx.log(ngx.NOTICE, "[demo] verified-bot fastpath: ua_alts=", vb_alts_n,
     " (verified_bots dict empty until Channel C `verified_bot_ips`",
     " catalog pull lands — searchbot UAs get bot_verified_pending)")
+-- Loud signal when the rule is enabled but its UA list is empty: looks_like_bot
+-- would return false for every UA, so bot_verified / bot_verified_pending
+-- never emits and every searchbot IP silently falls through to ip_blocklist.
+-- A common cause is an accidental edit to [allow.bot_verified].ua_pattern in
+-- defaults.conf (review #6 on PR #55).
+if (require "verified_bots").enabled and vb_alts_n == 0 then
+    ngx.log(ngx.WARN, "[demo] verified-bot fastpath: rule is ENABLED but",
+        " ua_alts is EMPTY — check [allow.bot_verified].ua_pattern in",
+        " defaults.conf; the fastpath will NEVER fire")
+end
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
 ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,

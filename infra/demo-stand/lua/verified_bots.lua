@@ -50,6 +50,16 @@ local _M = {
 
 _M.GEN_KEY = "verified_bots_gen"
 
+-- Outcomes from run() that should short-circuit the L2 reputation stage
+-- (whitelist-fastpath semantics). Exposed as a set so the caller does not
+-- duplicate the literal list — a future addition like a "permissive" outcome
+-- only needs to flip a key here, and accidentally short-circuiting on a
+-- non-fastpath outcome (e.g. "rejected" — review #3 on PR #55) is no longer
+-- a one-line copy-paste away. Keep "rejected" and any future non-fastpath
+-- outcome OUT of this set: the 3-state catalog's whole point is that
+-- rejected IPs continue through ip_blocklist / tls_fp / rate_limits / L5.
+_M.SHORT_CIRCUIT = { verified = true, pending = true }
+
 -- pure: does `ua` contain ANY of the searchbot-family substrings? Empty UA
 -- or empty alternatives → false. plain=true on string.find so a future
 -- alternative with `.`/`?`/etc. matches literally (the regex `Googlebot`
@@ -117,11 +127,52 @@ function _M.classify(ip)
     local dict = ngx.shared.verified_bots
     local meta = ngx.shared.meta
     if not dict or not meta then return "absent", nil end
-    local gen = meta:get(_M.GEN_KEY) or 0
+    -- Distinguish "gen key missing" (ordering bug — init.lua should have
+    -- seeded verified_bots_gen=0 in init_by_lua before any request lands)
+    -- from "gen is legitimately 0" (the seeded initial state). Without this
+    -- the `or 0` would silently collapse a future regression — meta dict
+    -- cleared by an out-of-order hot-reload, worker fork race — into a
+    -- correct-looking gen=0 read against a dict whose live entries are at
+    -- gen=N, degrading SEO-safely (every searchbot IP gets pending) with
+    -- zero operator signal. Log ONCE per worker (meta:add fails on the
+    -- second attempt so the per-request hot-path stays quiet).
+    local gen, gen_err = meta:get(_M.GEN_KEY)
+    if gen == nil and gen_err == nil then
+        if meta:add("verified_bots_gen_missing_logged", 1) then
+            ngx.log(ngx.WARN, "verified_bots: ", _M.GEN_KEY,
+                " missing from `meta` dict — init_by_lua ordering bug or",
+                " meta was cleared post-init; classify will treat all IPs as absent")
+        end
+        gen = 0
+    elseif gen == nil then
+        -- Real shared_dict error (e.g. dict not declared). Same fail-open
+        -- shape, separate log so the operator can tell them apart.
+        if meta:add("verified_bots_gen_error_logged", 1) then
+            ngx.log(ngx.ERR, "verified_bots: meta:get(", _M.GEN_KEY,
+                ") failed: ", tostring(gen_err))
+        end
+        return "absent", nil
+    end
     local val = dict:get(ip .. ":" .. gen)
     if val == nil then return "absent", nil end
     local status, family = _M.parse_entry(val)
-    if not status then return "absent", nil end
+    if not status then
+        -- Catalog entry present but unparseable (e.g. "verified:" with empty
+        -- family, "verified" missing the colon, or an unknown status code).
+        -- Demoting silently to absent is SEO-safe-by-accident (the IP gets
+        -- bot_verified_pending indefinitely) but masks backend bugs from
+        -- monitoring; surface it once per (ip, value) so operators see it
+        -- without the per-request hot path spamming. add() returns true
+        -- only the first time the key lands in the dict.
+        if ngx.shared.metrics then
+            ngx.shared.metrics:incr("verified_bots_malformed_total", 1, 0)
+        end
+        if meta:add("verified_bots_malformed:" .. ip .. ":" .. tostring(val), 1) then
+            ngx.log(ngx.WARN, "verified_bots: malformed entry for ip=", ip,
+                " val=", tostring(val), " — treating as absent")
+        end
+        return "absent", nil
+    end
     return status, family
 end
 
