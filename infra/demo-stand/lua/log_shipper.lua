@@ -26,9 +26,6 @@
 --   _M.flush_now()      — синхронный flush для тестов / drain на shutdown
 --   _M.queue_size()     — текущая длина очереди (для метрики)
 
-local cjson = require "cjson.safe" -- noqa: unused-import guard; nothing decoded here, kept for parity with catalog_pull
-_ = cjson
-
 local _M = {}
 
 -- Дефолты — те же по духу, что в catalog_pull.start: nonempty(opts) →
