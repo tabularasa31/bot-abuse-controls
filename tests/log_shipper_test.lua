@@ -78,7 +78,9 @@ local function reset_for_test()
     last_request = nil
 end
 
--- 1. enqueue до start() — drop + метрика
+-- 1. enqueue до start() — drop + метрика (shipper выключен — это
+-- реальная потеря данных, дашборд должен отличать «нет трафика»
+-- от «трафик есть, но не уезжает»; PR #54 codex review).
 do
     reset_for_test()
     local s = load_shipper()
@@ -86,6 +88,7 @@ do
     expect(ok == false, "1: enqueue без start возвращает false")
     expect(s.queue_size() == 0, "1: очередь пустая")
     expect(metrics_store.bac_log_enqueued_total == nil, "1: enqueued не двинулся")
+    expect(metrics_store.bac_log_dropped_total == 1, "1: dropped инкрементирован")
 end
 
 -- 2. enqueue после start() — попадает в очередь

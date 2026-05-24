@@ -267,9 +267,14 @@ function _M.emit()
     -- если shipper не сконфигурирован (ANTIBOT_BACKEND_URL не задан) — это
     -- no-op. На стенде stdout-эмит остаётся как ground truth для analyze.py
     -- daily-report'a; shipper — отдельный канал для backend-receiver'а.
-    -- Тяжёлые require()'ы кэшируются — это просто доступ к package.loaded.
-    local ok, shipper = pcall(require, "log_shipper")
-    if ok and shipper and shipper.enqueue then
+    --
+    -- Прямой доступ через package.loaded, а не pcall(require, ...): require
+    -- кэширует, но pcall + table-lookup на каждый запрос — заметный шум
+    -- на хот-пасе log_by_lua. Модуль точно загружен в init_worker (см.
+    -- nginx.demo.conf), если он там не зарегистрировался — это deploy-bug,
+    -- а не runtime-fallback. PR #54 gemini review.
+    local shipper = package.loaded["log_shipper"]
+    if shipper and shipper.enqueue then
         shipper.enqueue(line)
     end
 end

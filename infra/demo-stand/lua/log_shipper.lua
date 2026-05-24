@@ -81,12 +81,15 @@ end
 -- строка попала в очередь, false если дропнули (overflow / shipper
 -- не инициализирован). Никогда не блокирует, не аллоцирует heavy.
 function _M.enqueue(line)
+    if not line or line == "" then return false end
     if not _M.backend_url then
         -- start() не позвали или backend_url пустой — шиппер выключен.
-        -- Считаем как drop, чтобы метрика отражала реальные потери.
+        -- Инкрементим dropped, чтобы дашборд отличал «трафика нет»
+        -- (enqueued=dropped=0) от «трафик есть, но shipper выключен»
+        -- (dropped растёт). PR #54 codex review.
+        metric_incr(M_DROPPED)
         return false
     end
-    if not line or line == "" then return false end
     if #queue >= _M.queue_max then
         -- Drop-newest: проще и честнее, чем drop-oldest (старые логи
         -- уже могли быть полезны rDNS-воркеру, более новые — нет ещё).
@@ -147,7 +150,11 @@ local function ship(batch)
         req_opts.ssl_client_priv_key = _M.parsed_key
     end
 
-    local res, err = httpc:request_uri(_M.backend_url .. _M.path, req_opts)
+    -- Нормализуем хвостовой `/` в backend_url: иначе при URL'е "https://h/"
+    -- + path "/v1/logs" получим "https://h//v1/logs", который nginx иногда
+    -- роутит в другой location. PR #54 gemini review.
+    local base = _M.backend_url:gsub("/+$", "")
+    local res, err = httpc:request_uri(base .. _M.path, req_opts)
     if not res then return false, "transport: " .. tostring(err) end
     -- backend 202 — единственный успешный код. 413/400 значат «батч
     -- частично битый» — на v1 теряем целиком (backend инкрементит свои
