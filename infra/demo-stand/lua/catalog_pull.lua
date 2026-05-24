@@ -44,8 +44,18 @@ _M.SUPPORTED_VERSION_MAJOR = "1"
 -- after the gen flip (RFC §В1 explicit cleanup — per-entry TTL is wrong here
 -- because the 304 short-circuit means entries never get re-written and would
 -- silently age out, see §В1 "Why explicit cleanup instead of per-entry TTL").
+-- Each descriptor carries `name` = the catalog-identifier (key in this
+-- table) duplicated as a field, so handle_response can stamp metrics under
+-- the CATALOG name rather than the dict name. metrics.lua iterates the
+-- known catalogs by name and reads `catalog_last_pull_ts:<name>` /
+-- `edge_sidecar_version_mismatch_total:<name>` — for fp_blocklist the two
+-- are the same string and the bug was invisible; verified_bot_ips
+-- (dict_name=verified_bots) is the case that surfaced it (PR #55 review P1).
+-- Keeping `name` and `dict_name` distinct also leaves room for two catalogs
+-- to share a dict in the future (none today).
 _M.catalogs = {
     fp_blocklist = {
+        name        = "fp_blocklist",
         endpoint    = "/catalog/fp_blocklist",
         dict_name   = "fp_blocklist",
         gen_key     = fp_state.META_GEN_KEY,   -- "fp_blocklist_gen"
@@ -108,6 +118,7 @@ _M.catalogs = {
     -- in provisional fastpath (bot_verified_pending), which is the
     -- SEO-safe default for a stand without backend (vision §Шаг 2.2).
     verified_bot_ips = {
+        name        = "verified_bot_ips",
         endpoint    = "/catalog/verified_bot_ips",
         dict_name   = "verified_bots",
         gen_key     = "verified_bots_gen",
@@ -177,13 +188,19 @@ local function bump_metric(key)
 end
 
 -- bump_last_pull_ts — stamp `catalog_last_pull_ts:<name>` with the current
--- time. Called from both the 200 and 304 paths in handle_response (both are
--- "successful contact with backend" — see the 304 branch comment for why
--- this is a liveness rather than freshness signal). Missing metrics dict is
--- silent for the same test-harness reason as bump_metric.
+-- time, where `name` is the catalog identifier (descriptor key) — NOT the
+-- dict_name. metrics.lua iterates `catalog_pull.catalogs` by key and reads
+-- this metric under the same key; using `dict_name` makes the staleness
+-- gauge stuck at -1 for any catalog whose dict has a different name (this
+-- was invisible for fp_blocklist where name==dict_name; PR #55 review P1
+-- surfaced it via verified_bot_ips → dict verified_bots). Called from both
+-- the 200 and 304 paths in handle_response (both are "successful contact
+-- with backend" — see the 304 branch comment for why this is a liveness
+-- rather than freshness signal). Missing metrics dict is silent for the
+-- same test-harness reason as bump_metric.
 local function bump_last_pull_ts(cat)
     local m = ngx.shared.metrics
-    if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+    if m then m:set("catalog_last_pull_ts:" .. cat.name, ngx.time()) end
 end
 
 -- version_compatible — single-major check. Accepts "1", "1.x", "1.x.y". An
@@ -245,7 +262,9 @@ function _M.handle_response(cat, dict, meta, res, err)
     if not _M.version_compatible(version) then
         ngx.log(ngx.ERR, "catalog ", cat.endpoint, ": version mismatch ",
             tostring(version), " vs major=", _M.SUPPORTED_VERSION_MAJOR)
-        bump_metric("edge_sidecar_version_mismatch_total:" .. cat.dict_name)
+        -- Same naming contract as bump_last_pull_ts: keyed by the catalog
+        -- NAME (descriptor key), which is what metrics.lua reads back.
+        bump_metric("edge_sidecar_version_mismatch_total:" .. cat.name)
         return "skip"
     end
 
