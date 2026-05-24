@@ -186,7 +186,7 @@ func Load() (Config, error) {
 	if v := os.Getenv("LOGS_SINK_FLUSH_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
-			return cfg, fmt.Errorf("LOGS_SINK_FLUSH_INTERVAL: %v", err)
+			return cfg, fmt.Errorf("LOGS_SINK_FLUSH_INTERVAL: %w", err)
 		}
 		cfg.LogsSinkFlushInterval = d
 	}
@@ -207,7 +207,7 @@ func Load() (Config, error) {
 	if v := os.Getenv("LOGS_SINK_DRAIN_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
-			return cfg, fmt.Errorf("LOGS_SINK_DRAIN_INTERVAL: %v", err)
+			return cfg, fmt.Errorf("LOGS_SINK_DRAIN_INTERVAL: %w", err)
 		}
 		cfg.LogsSinkDrainInterval = d
 	}

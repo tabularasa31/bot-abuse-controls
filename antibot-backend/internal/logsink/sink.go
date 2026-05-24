@@ -14,11 +14,11 @@
 //     edge продолжит работать, NDJSON осядет в следующий батч.
 //
 //   - Run(ctx) — крутит две горутины:
-//       (a) consumer: батчит из канала, флашит по size/timer через CopyFrom.
-//           На ошибку записи → spill всего батча на диск (одна спул-файла
-//           NDJSON = один батч), консумер продолжает принимать новые строки.
-//       (b) drainer: периодически выгребает старейший спул-файл и пробует
-//           вставить заново; на ошибку — backoff (ничего не удаляет).
+//     (a) consumer: батчит из канала, флашит по size/timer через CopyFrom.
+//     На ошибку записи → spill всего батча на диск (одна спул-файла
+//     NDJSON = один батч), консумер продолжает принимать новые строки.
+//     (b) drainer: периодически выгребает старейший спул-файл и пробует
+//     вставить заново; на ошибку — backoff (ничего не удаляет).
 //
 //   - Disk-queue: гарантия «sink-простой не теряет логи» (acceptance B9).
 //     Bound: SpoolMaxBytes; при превышении — удаляем старейшие спул-файлы
@@ -109,17 +109,17 @@ type Sink struct {
 	stopped atomic.Bool
 
 	// метрики
-	submitted     prometheus.Counter
-	dropped       prometheus.Counter
-	parseErr      prometheus.Counter
-	inserted      prometheus.Counter
-	insertErr     prometheus.Counter
-	spooledFiles  prometheus.Counter
-	spooledLines  prometheus.Counter
-	drained       prometheus.Counter
-	spoolDropped  prometheus.Counter
-	spoolBytes    prometheus.Gauge
-	queueDepth    prometheus.GaugeFunc
+	submitted    prometheus.Counter
+	dropped      prometheus.Counter
+	parseErr     prometheus.Counter
+	inserted     prometheus.Counter
+	insertErr    prometheus.Counter
+	spooledFiles prometheus.Counter
+	spooledLines prometheus.Counter
+	drained      prometheus.Counter
+	spoolDropped prometheus.Counter
+	spoolBytes   prometheus.Gauge
+	queueDepth   prometheus.GaugeFunc
 }
 
 // New создаёт sink. Если cfg.SpoolDir задан и существует — создаст подкаталог
@@ -278,7 +278,12 @@ func (s *Sink) consume(ctx context.Context) {
 					}
 				default:
 					if len(batch) > 0 {
-						s.flush(context.Background(), batch)
+						// ctx уже отменён shutdown'ом, но финальный
+						// флаш должен пройти — WithoutCancel сохраняет
+						// values (tracing/log), но рвёт cancellation,
+						// иначе writer.Insert упадёт на canceled ctx
+						// и батч уйдёт в spill вместо DB.
+						s.flush(context.WithoutCancel(ctx), batch)
 					}
 					return
 				}
@@ -695,4 +700,3 @@ func listSpoolFiles(dir string) ([]os.DirEntry, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out, nil
 }
-

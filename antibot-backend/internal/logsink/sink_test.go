@@ -97,7 +97,10 @@ func goodLine(t *testing.T, reqID string) []byte {
 		"flags":         []string{},
 		"staging_match": []string{},
 	}
-	b, _ := json.Marshal(rec)
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 
