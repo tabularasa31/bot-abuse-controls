@@ -319,6 +319,133 @@ func TestGetPolicy_AfterPatch(t *testing.T) {
 	}
 }
 
+func TestASNBlock_MissingAsnField_400(t *testing.T) {
+	// PR-58 review #4: пустой body `{}` → asn=0 без явного required-check
+	// молча мутировал ASN 0. Теперь *int64-указатель + nil-check.
+	ts, pool, tok := newTestServer(t)
+	cases := []struct{ name, body string }{
+		{"empty object", `{}`},
+		{"asn null", `{"asn":null}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"_append", func(t *testing.T) {
+			status, body := do(t, ts, http.MethodPost,
+				"/antibot/v1/policy/foo.example/asn_block", tok, tc.body)
+			if status != http.StatusBadRequest {
+				t.Errorf("status=%d body=%s, want 400 missing_asn", status, body)
+			}
+		})
+		t.Run(tc.name+"_delete", func(t *testing.T) {
+			status, body := do(t, ts, http.MethodDelete,
+				"/antibot/v1/policy/foo.example/asn_block", tok, tc.body)
+			if status != http.StatusBadRequest {
+				t.Errorf("status=%d body=%s, want 400 missing_asn", status, body)
+			}
+		})
+	}
+	// Ни одного row после серии bad-request'ов — site нетронут.
+	var count int
+	_ = pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM policy WHERE host='foo.example'`,
+	).Scan(&count)
+	if count != 0 {
+		t.Errorf("row created on missing-asn requests: count=%d", count)
+	}
+}
+
+// TestPatchScalars_ConcurrentDifferentFields покрывает PR-58 review #1:
+// два concurrent PATCH на РАЗНЫЕ скаляры не должны затирать друг друга.
+// До фикса `UPDATE ... SET mode=$2, strictness=$3, attack_mode=$4` молча
+// откатывал чужое поле; теперь UPSERT-with-lock сериализует PATCHes,
+// loser видит обновлённое состояние и сохраняет уже-применённое.
+func TestPatchScalars_ConcurrentDifferentFields(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	const site = "concurrent.example"
+
+	const N = 8
+	done := make(chan struct{}, N*2)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_, _ = do(t, ts, http.MethodPatch,
+				"/antibot/v1/policy/"+site, tok, `{"mode":"active"}`)
+		}()
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_, _ = do(t, ts, http.MethodPatch,
+				"/antibot/v1/policy/"+site, tok, `{"strictness":"permissive"}`)
+		}()
+	}
+	for i := 0; i < N*2; i++ {
+		<-done
+	}
+	var mode, strictness string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT mode, strictness FROM policy WHERE host=$1`, site,
+	).Scan(&mode, &strictness); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	// Финальное состояние: ОБЕ мутации должны быть применены (any winner
+	// между mode=active и strictness=permissive).
+	if mode != "active" {
+		t.Errorf("mode=%q, want active (concurrent strictness PATCH overwrote it — lost-update regression)", mode)
+	}
+	if strictness != "permissive" {
+		t.Errorf("strictness=%q, want permissive (concurrent mode PATCH overwrote it — lost-update regression)", strictness)
+	}
+}
+
+// TestRemoveASN_ConcurrentAppendNotLost покрывает PR-58 review #2:
+// concurrent AppendASN, успевший закоммитить между CTE snapshot и UPDATE
+// в старой реализации, молча терялся. После фикса (new_arr подзапросом
+// в SET) операция атомарна.
+func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	const site = "remove-race.example"
+
+	// Засеваем начальное состояние.
+	if status, _ := do(t, ts, http.MethodPost,
+		"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":100}`); status != http.StatusOK {
+		t.Fatalf("seed 100: %d", status)
+	}
+	if status, _ := do(t, ts, http.MethodPost,
+		"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":200}`); status != http.StatusOK {
+		t.Fatalf("seed 200: %d", status)
+	}
+
+	// Параллельно: DELETE 100 и POST 300. Если RemoveASN использует
+	// stale snapshot, 300 потеряется (asn_block станет [200] вместо [200,300]).
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		do(t, ts, http.MethodDelete,
+			"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":100}`)
+	}()
+	go func() {
+		defer func() { done <- struct{}{} }()
+		do(t, ts, http.MethodPost,
+			"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":300}`)
+	}()
+	<-done
+	<-done
+
+	var raw []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT asn_block::text FROM policy WHERE host=$1`, site,
+	).Scan(&raw); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	got := string(raw)
+	// Финал должен содержать 200 и 300; 100 — может ИЛИ нет, в зависимости
+	// от commit-порядка DELETE vs POST 300, но 300 должен ТОЧНО быть.
+	if !strings.Contains(got, "200") {
+		t.Errorf("asn_block=%s, lost 200", got)
+	}
+	if !strings.Contains(got, "300") {
+		t.Errorf("asn_block=%s, lost concurrent append of 300 (lost-update regression)", got)
+	}
+}
+
 func TestASNBlock_AppendDeleteRoundtrip(t *testing.T) {
 	ts, _, tok := newTestServer(t)
 	status, _ := do(t, ts, http.MethodPost, "/antibot/v1/policy/foo.example/asn_block", tok,

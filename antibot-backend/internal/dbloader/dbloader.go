@@ -260,7 +260,15 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, d *catalog.Data) error {
 		if err := unmarshalIfNonEmpty(ipBLJSON, &p.IPBlocklist); err != nil {
 			return fmt.Errorf("policy[%s].ip_blocklist: %w", host, err)
 		}
-		if err := unmarshalIfNonEmpty(asnJSON, &p.ASNBlock); err != nil {
+		// asn_block: defensive decode через []int64 + per-element bounds-check
+		// (PR-58 review #6). Прямой Unmarshal в []uint32 валится на любом
+		// значении -1 / >2^32 одной строки и роняет весь catalog tick →
+		// Store.Replace не вызывается → edge fail-stale для ВСЕХ клиентов.
+		// Запись через admin API уже ловится `antibotapi.ValidateASN`, но
+		// legacy/manual SQL/импорт могут оставить out-of-range значения —
+		// здесь они скипаются с warn'ом (через rows.Err()-агрегацию мы не
+		// можем — это per-row, не fatal для loader'a).
+		if err := decodeASNBlock(asnJSON, &p.ASNBlock); err != nil {
 			return fmt.Errorf("policy[%s].asn_block: %w", host, err)
 		}
 		if err := unmarshalIfNonEmpty(geoJSON, &p.GeoWhitelist); err != nil {
@@ -279,4 +287,30 @@ func unmarshalIfNonEmpty(b []byte, dst any) error {
 		return nil
 	}
 	return json.Unmarshal(b, dst)
+}
+
+// decodeASNBlock декодирует JSONB-массив ASN в []uint32 с per-element
+// bounds-check. Out-of-range элементы (отрицательные, >2^32-1) скипаются —
+// loader не валит весь tick из-за одной битой строки. Возвращает ошибку
+// только если сам JSON битый (не массив, не числа).
+func decodeASNBlock(b []byte, dst *[]uint32) error {
+	if len(b) == 0 {
+		return nil
+	}
+	var raw []int64
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	out := make([]uint32, 0, len(raw))
+	for _, n := range raw {
+		if n < 0 || n > 0xFFFFFFFF {
+			// Битый элемент: skip. Loader должен продолжить, чтобы остальные
+			// row'ы политики применились; иначе один невалидный ASN кладёт
+			// edge для всего пула.
+			continue
+		}
+		out = append(out, uint32(n)) //nolint:gosec // G115: range checked above
+	}
+	*dst = out
+	return nil
 }

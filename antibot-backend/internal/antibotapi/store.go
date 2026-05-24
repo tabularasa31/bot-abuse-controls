@@ -80,42 +80,56 @@ func (p PolicyPatch) IsEmpty() bool {
 // PatchScalars применяет patch. Возвращает (changed, changedFields, err).
 //
 // Сценарии:
-//   - row не существует → ensureRow (атомарный ON CONFLICT DO NOTHING) создаёт
-//     его с PoolDefault; затем conditional UPDATE применяет переданные поля.
+//   - row не существует → атомарный UPSERT (ON CONFLICT DO UPDATE
+//     SET host=EXCLUDED.host) создаёт его с PoolDefault И берёт row lock
+//     одной statement; RETURNING (xmax=0) отдаёт inserted-флаг.
 //   - row существует и все переданные поля совпадают → no-op (changed=false,
 //     updated_at НЕ дёргается).
-//   - row существует и хоть одно поле отличается → UPDATE, changed=true.
+//   - row существует и хоть одно поле отличается → UPDATE под тем же lock'ом,
+//     changed=true.
 //
-// Concurrency: НЕТ tx с RepeatableRead/FOR UPDATE (PR-58 review codex P1) —
-// раньше под нагрузкой давали `40001 serialization_failure` без retry.
-// ensureRow идемпотентный, UPDATE по host PK атомарен; параллельные PATCH —
-// «last writer wins» по полю (естественная PATCH-семантика, лучше чем 500
-// одному из request'ов). Для отчёта diff под гонкой мы можем «промахнуться»
-// (другой PATCH успел между SELECT и UPDATE), но это benign: оба запроса
-// получают changed=true с актуальным для своего тика diff'ом.
+// Concurrency: ВСЁ внутри одной транзакции (Read Committed по умолчанию).
+// UPSERT с `DO UPDATE SET host=EXCLUDED.host` — это no-op assignment, но
+// он триггерит UPDATE-ветку, которая берёт ROW SHARE+EXCLUSIVE lock на
+// конфликтующую строку. Параллельные PATCH на тот же host теперь блокируют
+// друг друга на этом lock'е (без 40001 — это RepeatableRead-only артефакт);
+// loser ждёт, потом читает уже-обновлённое состояние и считает diff против
+// него. Lost-update между независимыми полями исключён (PR-58 review,
+// finding #1: до этого `mode=$2, strictness=$3, attack_mode=$4` молча
+// перетирало concurrent PATCH на соседнее поле).
+//
+// `xmax = 0` — Postgres-трюк: только что вставленные строки имеют xmax=0,
+// строки, попавшие в DO UPDATE ветку, имеют xmax = current xid. Так одна
+// statement отдаёт и current values, и «был ли реальный insert».
 func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (bool, []string, error) {
 	if p.IsEmpty() {
 		return false, nil, fmt.Errorf("empty patch")
 	}
 
-	// Шаг 1: гарантируем, что row есть. Идемпотентно: ON CONFLICT DO NOTHING.
-	// inserted=true ⇒ row только что создан, значит даже PATCH со значениями,
-	// эквивалентными PoolDefault, представляет собой «появление настроек у
-	// site'a» — это семантическое изменение, отражаем changed=true.
-	inserted, err := s.ensureRow(ctx, site)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, nil, err
+		return false, nil, fmt.Errorf("begin tx: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Шаг 2: читаем текущее состояние и считаем target/diff против PATCH.
-	var curMode, curStr string
-	var curAttack bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT mode, strictness, attack_mode FROM policy WHERE host = $1`,
-		site,
-	).Scan(&curMode, &curStr, &curAttack); err != nil {
-		// pgx.ErrNoRows здесь невозможен — ensureRow только что положил row.
-		return false, nil, fmt.Errorf("select current: %w", err)
+	def := catalog.PoolDefault()
+	var (
+		inserted        bool
+		curMode, curStr string
+		curAttack       bool
+	)
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO policy (host, mode, strictness, attack_mode,
+			ua_blacklist, ip_whitelist, ip_blocklist,
+			asn_block, geo_whitelist, rate_rules)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
+		ON CONFLICT (host) DO UPDATE SET host = EXCLUDED.host
+		RETURNING (xmax = 0) AS inserted, mode, strictness, attack_mode`,
+		site, def.Mode, def.Strictness, def.AttackMode,
+		poolDefaultUAJSON, poolDefaultIPWLJSON, poolDefaultIPBLJSON,
+		poolDefaultASNJSON, poolDefaultGeoJSON, poolDefaultRateJSON,
+	).Scan(&inserted, &curMode, &curStr, &curAttack); err != nil {
+		return false, nil, fmt.Errorf("upsert-lock: %w", err)
 	}
 
 	targetMode, targetStr, targetAttack := curMode, curStr, curAttack
@@ -133,9 +147,11 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 		targetAttack = *p.AttackMode
 	}
 
-	// Если поля совпадают с current — UPDATE пропускаем (updated_at сохраняется).
+	// UPDATE только если хоть одно поле отличается. Под row lock'ом из UPSERT
+	// выше — concurrent PATCH ждёт на нашем lock'е, потом видит уже-новое
+	// состояние и считает свой diff корректно.
 	if len(changed) > 0 {
-		if _, err := s.pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE policy
 			SET mode = $2, strictness = $3, attack_mode = $4, updated_at = NOW()
 			WHERE host = $1`,
@@ -145,17 +161,21 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 		}
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return false, nil, fmt.Errorf("commit: %w", err)
+	}
+
 	switch {
 	case inserted:
-		// Новый row: changed=true. diff — все ЯВНО переданные поля
-		// (independent of совпадения с PoolDefault), так дашборд видит,
-		// что именно пришло из его PATCH.
-		fresh := patchFields(p)
-		return true, fresh, nil
+		// Новый row: changed=true (site впервые получил настройки). diff —
+		// все ЯВНО переданные поля, чтобы dashboard видел, что именно из
+		// его PATCH'а доехало. updated_at — schema default NOW() на INSERT.
+		return true, patchFields(p), nil
 	case len(changed) > 0:
 		return true, changed, nil
 	default:
-		// Существующий row, все переданные поля совпали → no-op.
+		// Существующий row, все переданные поля совпали → no-op,
+		// updated_at сохраняется.
 		return false, nil, nil
 	}
 }
@@ -178,19 +198,22 @@ func patchFields(p PolicyPatch) []string {
 
 // AppendStringArray делает идемпотентный append в JSONB-string-массив.
 // Создаёт row с PoolDefault, если site нет. changed=false → значение уже было.
+//
+// COALESCE(field, '[]'::jsonb) — defence-in-depth против row'ов с JSONB-null
+// (legacy/manual SQL/test-фикстуры). Без него `null || x = null` → WHERE NOT
+// (null @> ...) даёт null → false → silent no-op (PR-58 review #5).
 func (s *Store) AppendStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
 	}
-	if _, err := s.ensureRow(ctx, site); err != nil {
+	if err := s.ensureRow(ctx, site); err != nil {
 		return false, err
 	}
-	// jsonb-containment: уже есть → no-op. fmt.Sprintf для имени колонки безопасен
-	// после white-list проверки выше.
+	// fmt.Sprintf для имени колонки безопасен после white-list проверки выше.
 	q := fmt.Sprintf(
 		`UPDATE policy
-		 SET %[1]s = %[1]s || to_jsonb($2::text), updated_at = NOW()
-		 WHERE host = $1 AND NOT (%[1]s @> to_jsonb($2::text))`, field)
+		 SET %[1]s = COALESCE(%[1]s, '[]'::jsonb) || to_jsonb($2::text), updated_at = NOW()
+		 WHERE host = $1 AND NOT (COALESCE(%[1]s, '[]'::jsonb) @> to_jsonb($2::text))`, field)
 	tag, err := s.pool.Exec(ctx, q, site, value)
 	if err != nil {
 		return false, fmt.Errorf("append %s: %w", field, err)
@@ -200,14 +223,15 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 
 // RemoveStringArray удаляет элемент. existed=false → элемента не было,
 // handler возвращает 404 (отделяем «не было» от «было и удалили»).
+// COALESCE против jsonb-null row'ов — см. AppendStringArray (PR-58 review #5).
 func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
 	}
 	q := fmt.Sprintf(
 		`UPDATE policy
-		 SET %[1]s = %[1]s - $2, updated_at = NOW()
-		 WHERE host = $1 AND (%[1]s @> to_jsonb($2::text))`, field)
+		 SET %[1]s = COALESCE(%[1]s, '[]'::jsonb) - $2, updated_at = NOW()
+		 WHERE host = $1 AND COALESCE(%[1]s, '[]'::jsonb) @> to_jsonb($2::text)`, field)
 	tag, err := s.pool.Exec(ctx, q, site, value)
 	if err != nil {
 		return false, fmt.Errorf("remove %s: %w", field, err)
@@ -218,12 +242,12 @@ func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string
 // AppendASN — симметрично AppendStringArray, но для числового asn_block.
 // JSONB-containment работает на скалярных значениях, поэтому семантика та же.
 func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, error) {
-	if _, err := s.ensureRow(ctx, site); err != nil {
+	if err := s.ensureRow(ctx, site); err != nil {
 		return false, err
 	}
 	q := `UPDATE policy
-		  SET asn_block = asn_block || to_jsonb($2::bigint), updated_at = NOW()
-		  WHERE host = $1 AND NOT (asn_block @> to_jsonb($2::bigint))`
+		  SET asn_block = COALESCE(asn_block, '[]'::jsonb) || to_jsonb($2::bigint), updated_at = NOW()
+		  WHERE host = $1 AND NOT (COALESCE(asn_block, '[]'::jsonb) @> to_jsonb($2::bigint))`
 	tag, err := s.pool.Exec(ctx, q, site, int64(asn))
 	if err != nil {
 		return false, fmt.Errorf("append asn_block: %w", err)
@@ -231,29 +255,25 @@ func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, e
 	return tag.RowsAffected() == 1, nil
 }
 
+// RemoveASN удаляет ASN из массива.
+//
+// PR-58 review #2: предыдущая реализация считала new_arr в CTE до lock'а
+// UPDATE-ом, поэтому concurrent AppendASN, успевший закоммитить между CTE
+// и UPDATE, молча затирался — Read Committed re-locks row но НЕ переоценивает
+// CTE. Новая версия вычисляет new_arr подзапросом В SET — этот подзапрос
+// исполняется ПОСЛЕ row lock'а под актуальным состоянием.
+//
+// jsonb-null защита через COALESCE (PR-58 review #5): без неё
+// jsonb_array_elements(null) бросает 'cannot extract elements from a scalar'.
 func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, error) {
-	// Минус-оператор по числу из jsonb-массива: WHERE-фильтр + перестройка
-	// массива через jsonb_array_elements. Простой `arr - 'val'` работает только
-	// на text-членах; для чисел нужно вытащить и пересобрать.
-	q := `WITH cur AS (
-		SELECT host, asn_block FROM policy WHERE host = $1
-	  ), rebuilt AS (
-		SELECT host, COALESCE(jsonb_agg(elem), '[]'::jsonb) AS new_arr
-		FROM cur, LATERAL jsonb_array_elements(asn_block) AS elem
-		WHERE (elem)::bigint <> $2
-		GROUP BY host
-	  ), empty_case AS (
-		SELECT host, '[]'::jsonb AS new_arr FROM cur
-		WHERE NOT EXISTS (SELECT 1 FROM rebuilt WHERE rebuilt.host = cur.host)
-	  ), final AS (
-		SELECT host, new_arr FROM rebuilt
-		UNION ALL
-		SELECT host, new_arr FROM empty_case
-	  )
-	  UPDATE policy
-	  SET asn_block = final.new_arr, updated_at = NOW()
-	  FROM final
-	  WHERE policy.host = final.host AND policy.asn_block @> to_jsonb($2::bigint)`
+	q := `UPDATE policy
+		  SET asn_block = COALESCE(
+		      (SELECT jsonb_agg(elem)
+		       FROM jsonb_array_elements(COALESCE(asn_block, '[]'::jsonb)) AS elem
+		       WHERE (elem)::bigint <> $2),
+		      '[]'::jsonb),
+		      updated_at = NOW()
+		  WHERE host = $1 AND COALESCE(asn_block, '[]'::jsonb) @> to_jsonb($2::bigint)`
 	tag, err := s.pool.Exec(ctx, q, site, int64(asn))
 	if err != nil {
 		return false, fmt.Errorf("remove asn_block: %w", err)
@@ -263,13 +283,13 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 
 // ensureRow создаёт row с PoolDefault если site нет. Идемпотентно через
 // ON CONFLICT DO NOTHING — не перетирает существующие значения.
-// Возвращает inserted=true когда row был только что создан (RowsAffected==1),
-// иначе false (row уже был). Caller'у это нужно для разделения «новый
-// site» vs «существующий» без дополнительного SELECT (PR-58 review,
-// gemini medium).
-func (s *Store) ensureRow(ctx context.Context, site string) (bool, error) {
+//
+// PatchScalars свою UPSERT-with-lock делает сам (xmax=0 трюк), поэтому
+// ensureRow используется только array-операциями (Append*), которым не
+// нужен inserted-флаг.
+func (s *Store) ensureRow(ctx context.Context, site string) error {
 	def := catalog.PoolDefault()
-	tag, err := s.pool.Exec(ctx, `
+	_, err := s.pool.Exec(ctx, `
 		INSERT INTO policy (host, mode, strictness, attack_mode,
 			ua_blacklist, ip_whitelist, ip_blocklist,
 			asn_block, geo_whitelist, rate_rules)
@@ -280,9 +300,9 @@ func (s *Store) ensureRow(ctx context.Context, site string) (bool, error) {
 		poolDefaultASNJSON, poolDefaultGeoJSON, poolDefaultRateJSON,
 	)
 	if err != nil {
-		return false, fmt.Errorf("ensure row: %w", err)
+		return fmt.Errorf("ensure row: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	return nil
 }
 
 // GetPolicy возвращает полную Policy для site. ErrNotFound если row нет —

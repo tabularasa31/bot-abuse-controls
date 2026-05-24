@@ -282,8 +282,25 @@ func (s *Server) handleGetASN(action, site string, w http.ResponseWriter, r *htt
 	s.mutations.WithLabelValues(action, "ok").Inc()
 }
 
+// asnBody — ASN как *int64 чтобы отличить «не задано» от «0». ValidateASN(0)
+// принимает (RFC 6793 — 0 reserved, но не блокируем как явный выбор оператора),
+// поэтому без *-указателя пустой body `{}` молча мутировал бы ASN 0
+// (PR-58 review #4).
 type asnBody struct {
-	ASN int64 `json:"asn"`
+	ASN *int64 `json:"asn"`
+}
+
+// requireASN — общая проверка required + range для POST/DELETE asn_block.
+func (s *Server) requireASN(w http.ResponseWriter, action string, b asnBody) (uint32, bool) {
+	if b.ASN == nil {
+		s.bad(w, action, "missing_asn", "field 'asn' is required")
+		return 0, false
+	}
+	if err := ValidateASN(*b.ASN); err != nil {
+		s.bad(w, action, "bad_asn", err.Error())
+		return 0, false
+	}
+	return uint32(*b.ASN), true //nolint:gosec // G115: bounds checked by ValidateASN above
 }
 
 func (s *Server) handleAppendASN(action, site string, w http.ResponseWriter, r *http.Request) {
@@ -292,11 +309,11 @@ func (s *Server) handleAppendASN(action, site string, w http.ResponseWriter, r *
 		s.bad(w, action, "bad_body", err.Error())
 		return
 	}
-	if err := ValidateASN(b.ASN); err != nil {
-		s.bad(w, action, "bad_asn", err.Error())
+	asn, ok := s.requireASN(w, action, b)
+	if !ok {
 		return
 	}
-	changed, err := s.store.AppendASN(r.Context(), site, uint32(b.ASN)) //nolint:gosec // G115: bounds checked by ValidateASN above
+	changed, err := s.store.AppendASN(r.Context(), site, asn)
 	if err != nil {
 		s.dbErr(w, action, err)
 		return
@@ -317,11 +334,11 @@ func (s *Server) handleDeleteASN(action, site string, w http.ResponseWriter, r *
 		s.bad(w, action, "bad_body", err.Error())
 		return
 	}
-	if err := ValidateASN(b.ASN); err != nil {
-		s.bad(w, action, "bad_asn", err.Error())
+	asn, ok := s.requireASN(w, action, b)
+	if !ok {
 		return
 	}
-	existed, err := s.store.RemoveASN(r.Context(), site, uint32(b.ASN)) //nolint:gosec // G115: bounds checked by ValidateASN above
+	existed, err := s.store.RemoveASN(r.Context(), site, asn)
 	if err != nil {
 		s.dbErr(w, action, err)
 		return
