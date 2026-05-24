@@ -105,6 +105,21 @@ func (s *Server) timed(action string, h func(action, site string, w http.Respons
 	}
 }
 
+// requestAttrs собирает forensic-поля для slog'а на каждую mutation
+// (PR-58 security audit #3): при leak'е токена audit-log без source IP /
+// request_id не позволял отличить легитимные мутации от атакующих.
+// Источник IP — X-Forwarded-For (наш LB — nginx — его выставляет; см.
+// infra/demo-backend/nginx/lb.conf), fallback на r.RemoteAddr. Request-id —
+// заголовок X-Request-Id (если dashboard-backend его проставляет), пустая
+// строка иначе.
+func requestAttrs(r *http.Request) []any {
+	src := r.Header.Get("X-Forwarded-For")
+	if src == "" {
+		src = r.RemoteAddr
+	}
+	return []any{"src", src, "request_id", r.Header.Get("X-Request-Id")}
+}
+
 // --- GET / PATCH policy ----------------------------------------------------
 
 func (s *Server) handleGetPolicy(action, site string, w http.ResponseWriter, r *http.Request) {
@@ -134,7 +149,7 @@ type patchBody struct {
 func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r *http.Request) {
 	var pb patchBody
 	if err := decodeJSON(r, &pb); err != nil {
-		s.bad(w, action, "bad_body", err.Error())
+		s.handleDecodeErr(w, action, err)
 		return
 	}
 	patch := PolicyPatch{Mode: pb.Mode, Strictness: pb.Strictness, AttackMode: pb.AttackMode}
@@ -160,7 +175,8 @@ func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r
 		return
 	}
 	s.log.Info("policy mutation",
-		"actor", "dashboard", "action", action, "site", site, "was_noop", !changed, "fields", fields)
+		append([]any{"actor", "dashboard", "action", action, "site", site, "was_noop", !changed, "fields", fields},
+			requestAttrs(r)...)...)
 	if changed {
 		s.mutations.WithLabelValues(action, "ok").Inc()
 	} else {
@@ -217,7 +233,7 @@ func (s *Server) makeStringAppend(field string) func(action, site string, w http
 	return func(action, site string, w http.ResponseWriter, r *http.Request) {
 		var b stringArrayBody
 		if err := decodeJSON(r, &b); err != nil {
-			s.bad(w, action, "bad_body", err.Error())
+			s.handleDecodeErr(w, action, err)
 			return
 		}
 		val, errCode, errMsg := valueForField(field, b)
@@ -231,7 +247,8 @@ func (s *Server) makeStringAppend(field string) func(action, site string, w http
 			return
 		}
 		s.log.Info("policy mutation",
-			"actor", "dashboard", "action", action, "site", site, "was_noop", !changed)
+			append([]any{"actor", "dashboard", "action", action, "site", site, "was_noop", !changed},
+				requestAttrs(r)...)...)
 		if changed {
 			s.mutations.WithLabelValues(action, "ok").Inc()
 		} else {
@@ -245,7 +262,7 @@ func (s *Server) makeStringDelete(field string) func(action, site string, w http
 	return func(action, site string, w http.ResponseWriter, r *http.Request) {
 		var b stringArrayBody
 		if err := decodeJSON(r, &b); err != nil {
-			s.bad(w, action, "bad_body", err.Error())
+			s.handleDecodeErr(w, action, err)
 			return
 		}
 		val, errCode, errMsg := valueForField(field, b)
@@ -306,7 +323,7 @@ func (s *Server) requireASN(w http.ResponseWriter, action string, b asnBody) (ui
 func (s *Server) handleAppendASN(action, site string, w http.ResponseWriter, r *http.Request) {
 	var b asnBody
 	if err := decodeJSON(r, &b); err != nil {
-		s.bad(w, action, "bad_body", err.Error())
+		s.handleDecodeErr(w, action, err)
 		return
 	}
 	asn, ok := s.requireASN(w, action, b)
@@ -331,7 +348,7 @@ func (s *Server) handleAppendASN(action, site string, w http.ResponseWriter, r *
 func (s *Server) handleDeleteASN(action, site string, w http.ResponseWriter, r *http.Request) {
 	var b asnBody
 	if err := decodeJSON(r, &b); err != nil {
-		s.bad(w, action, "bad_body", err.Error())
+		s.handleDecodeErr(w, action, err)
 		return
 	}
 	asn, ok := s.requireASN(w, action, b)
@@ -349,32 +366,63 @@ func (s *Server) handleDeleteASN(action, site string, w http.ResponseWriter, r *
 		return
 	}
 	s.log.Info("policy mutation",
-		"actor", "dashboard", "action", action, "site", site, "was_noop", false)
+		append([]any{"actor", "dashboard", "action", action, "site", site, "was_noop", false},
+			requestAttrs(r)...)...)
 	s.mutations.WithLabelValues(action, "ok").Inc()
 	s.writeJSON(w, map[string]any{"changed": true})
 }
 
 // --- helpers ---------------------------------------------------------------
 
-// decodeJSON читает bounded body и парсит strict-декодером.
+// Sentinel-ошибки decodeJSON — handler.bad() мапит их на санитарные коды
+// без leak'a внутренних деталей (имена unknown полей, JSON-decoder сообщения,
+// размер MaxBytes — PR-58 security audit #5/#7).
+var (
+	errBodyEmpty    = errors.New("empty body")
+	errBodyTooLarge = errors.New("body too large")
+	errBodyBadJSON  = errors.New("invalid json")
+)
+
+// decodeJSON читает bounded body и парсит strict-декодером. Возвращает
+// одну из sentinel-ошибок выше (или nil). Сами json.Decoder-сообщения и
+// `read body: http: request body too large` НЕ выходят за пределы пакета.
 func decodeJSON(r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
 	buf, err := io.ReadAll(r.Body)
 	if err != nil {
-		return fmt.Errorf("read body: %w", err)
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return errBodyTooLarge
+		}
+		return errBodyBadJSON
 	}
 	if len(buf) == 0 {
-		return fmt.Errorf("empty body")
+		return errBodyEmpty
 	}
 	dec := json.NewDecoder(bytes.NewReader(buf))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
-		return fmt.Errorf("decode: %w", err)
+		return errBodyBadJSON
 	}
 	if dec.More() {
-		return fmt.Errorf("trailing junk after json object")
+		return errBodyBadJSON
 	}
 	return nil
+}
+
+// handleDecodeErr мапит sentinel-ошибки decodeJSON на корректный HTTP-статус
+// + статичный JSON-код без раскрытия деталей. 413 для oversize — стандарт
+// (RFC 7231 §6.5.11), не лепим всё в 400.
+func (s *Server) handleDecodeErr(w http.ResponseWriter, action string, err error) {
+	switch {
+	case errors.Is(err, errBodyTooLarge):
+		s.writeErr(w, http.StatusRequestEntityTooLarge, "body_too_large", "")
+		s.mutations.WithLabelValues(action, "bad_request").Inc()
+	case errors.Is(err, errBodyEmpty):
+		s.bad(w, action, "empty_body", "")
+	default:
+		s.bad(w, action, "invalid_json", "")
+	}
 }
 
 // itemsKey возвращает имя ключа в JSON-ответе для GET array-endpoint'а.

@@ -214,11 +214,23 @@ func patchFields(p PolicyPatch) []string {
 // COALESCE(field, '[]'::jsonb) — defence-in-depth против row'ов с JSONB-null
 // (legacy/manual SQL/test-фикстуры). Без него `null || x = null` → WHERE NOT
 // (null @> ...) даёт null → false → silent no-op (PR-58 review #5).
+//
+// Tx: ensureRow + UPDATE в одной транзакции (PR-58 security audit #6).
+// Раньше две отдельные pool.Exec — если бы появился DELETE site endpoint,
+// concurrent site-DELETE между ensureRow и UPDATE дал бы silent no-op
+// (RowsAffected=0 → changed=false без error). Сейчас такого endpoint'a нет,
+// но фикс закрывает латентную дыру.
 func (s *Store) AppendStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
 	}
-	if err := s.ensureRow(ctx, site); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.ensureRowTx(ctx, tx, site); err != nil {
 		return false, err
 	}
 	// fmt.Sprintf для имени колонки безопасен после white-list проверки выше.
@@ -226,9 +238,12 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 		`UPDATE policy
 		 SET %[1]s = COALESCE(%[1]s, '[]'::jsonb) || to_jsonb($2::text), updated_at = NOW()
 		 WHERE host = $1 AND NOT (COALESCE(%[1]s, '[]'::jsonb) @> to_jsonb($2::text))`, field)
-	tag, err := s.pool.Exec(ctx, q, site, value)
+	tag, err := tx.Exec(ctx, q, site, value)
 	if err != nil {
 		return false, fmt.Errorf("append %s: %w", field, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
@@ -236,6 +251,9 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 // RemoveStringArray удаляет элемент. existed=false → элемента не было,
 // handler возвращает 404 (отделяем «не было» от «было и удалили»).
 // COALESCE против jsonb-null row'ов — см. AppendStringArray (PR-58 review #5).
+// Без tx — single-statement UPDATE атомарен сам по себе; ensureRow тут не
+// нужен (delete на несуществующем site → RowsAffected=0 → 404, что
+// семантически верно).
 func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -253,16 +271,26 @@ func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string
 
 // AppendASN — симметрично AppendStringArray, но для числового asn_block.
 // JSONB-containment работает на скалярных значениях, поэтому семантика та же.
+// Tx-обвязка идентична AppendStringArray (см. там про PR-58 audit #6).
 func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, error) {
-	if err := s.ensureRow(ctx, site); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.ensureRowTx(ctx, tx, site); err != nil {
 		return false, err
 	}
 	q := `UPDATE policy
 		  SET asn_block = COALESCE(asn_block, '[]'::jsonb) || to_jsonb($2::bigint), updated_at = NOW()
 		  WHERE host = $1 AND NOT (COALESCE(asn_block, '[]'::jsonb) @> to_jsonb($2::bigint))`
-	tag, err := s.pool.Exec(ctx, q, site, int64(asn))
+	tag, err := tx.Exec(ctx, q, site, int64(asn))
 	if err != nil {
 		return false, fmt.Errorf("append asn_block: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
@@ -301,15 +329,18 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 	return tag.RowsAffected() == 1, nil
 }
 
-// ensureRow создаёт row с PoolDefault если site нет. Идемпотентно через
-// ON CONFLICT DO NOTHING — не перетирает существующие значения.
+// ensureRowTx создаёт row с PoolDefault если site нет, под переданной tx.
+// Идемпотентно через ON CONFLICT DO NOTHING — не перетирает существующие
+// значения. Tx-аргумент обязателен: AppendStringArray/AppendASN обвязывают
+// ensureRow + UPDATE одной транзакцией (PR-58 audit #6), чтобы concurrent
+// site-DELETE (если когда-нибудь появится endpoint) не дал silent no-op
+// между двумя отдельными Exec'ами.
 //
 // PatchScalars свою UPSERT-with-lock делает сам (xmax=0 трюк), поэтому
-// ensureRow используется только array-операциями (Append*), которым не
-// нужен inserted-флаг.
-func (s *Store) ensureRow(ctx context.Context, site string) error {
+// ensureRowTx сюда не подключается.
+func (s *Store) ensureRowTx(ctx context.Context, tx pgx.Tx, site string) error {
 	def := catalog.PoolDefault()
-	_, err := s.pool.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		INSERT INTO policy (host, mode, strictness, attack_mode,
 			ua_blacklist, ip_whitelist, ip_blocklist,
 			asn_block, geo_whitelist, rate_rules)

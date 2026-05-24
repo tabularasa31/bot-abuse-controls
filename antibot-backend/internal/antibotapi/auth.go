@@ -8,6 +8,7 @@
 package antibotapi
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
 	"strings"
@@ -17,8 +18,14 @@ import (
 
 // Authenticator проверяет bearer-token. Сконфигурирован одним allowed-токеном;
 // больше нужно — заводим slice (per-tenant — v2).
+//
+// Compare-стратегия: sha256(token) → 32 байта → ConstantTimeCompare фиксированной
+// длины. Прямой ConstantTimeCompare([]byte(got), token) short-circuit'ит когда
+// len(got) != len(token), что технически leak'ает длину сконфигурированного
+// токена через timing (PR-58 security audit #8). Хеширование выравнивает
+// длину compare-операндов независимо от длины входа.
 type Authenticator struct {
-	token         []byte
+	tokenHash     [32]byte               // sha256 of configured token
 	authFailures  *prometheus.CounterVec // {reason}: missing | malformed | bad_token
 	authSucceeded prometheus.Counter
 }
@@ -31,7 +38,7 @@ func NewAuthenticator(token string, reg prometheus.Registerer) *Authenticator {
 		return nil
 	}
 	a := &Authenticator{
-		token: []byte(token),
+		tokenHash: sha256.Sum256([]byte(token)),
 		authFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "antibot_backend_api_auth_failures_total",
 			Help: "policy API: bearer-token auth failures, by reason.",
@@ -60,8 +67,9 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			a.fail(w, "malformed")
 			return
 		}
-		got := []byte(strings.TrimSpace(h[len(prefix):]))
-		if subtle.ConstantTimeCompare(got, a.token) != 1 {
+		got := strings.TrimSpace(h[len(prefix):])
+		gotHash := sha256.Sum256([]byte(got))
+		if subtle.ConstantTimeCompare(gotHash[:], a.tokenHash[:]) != 1 {
 			a.fail(w, "bad_token")
 			return
 		}

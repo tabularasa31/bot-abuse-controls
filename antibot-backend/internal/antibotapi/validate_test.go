@@ -14,8 +14,25 @@ func TestValidateSite(t *testing.T) {
 	}{
 		{"", true},
 		{"foo.example", false},
-		{strings.Repeat("a", 253), false},
-		{strings.Repeat("a", 254), true},
+		{"a.b.c.example.com", false},
+		{"single", false},                // single-label internal hostname разрешён
+		{"foo-bar.example.com", false},   // дефис внутри label
+		{strings.Repeat("a", 63), false}, // max label len
+		{strings.Repeat("a", 64), true},  // > 63 в label
+		{strings.Repeat("a.", 100) + "z", false},
+		{strings.Repeat("a", 254), true}, // > 253 total
+		// Mусор, который раньше проходил по len-only:
+		{"../etc/passwd", true},
+		{"foo/bar", true},
+		{"foo bar", true},
+		{"-foo.example", true}, // label leading hyphen
+		{"foo-.example", true}, // label trailing hyphen
+		{".foo.example", true}, // leading dot
+		{"foo.example.", true}, // trailing dot
+		{"foo..bar", true},     // empty label
+		{"foo.例え.jp", true},    // non-ASCII (IDN не поддерживаем)
+		{"foo\x00bar", true},   // NUL
+		{"foo\nbar", true},     // newline (header injection guard)
 	}
 	for _, tc := range cases {
 		err := antibotapi.ValidateSite(tc.in)

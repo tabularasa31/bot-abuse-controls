@@ -14,16 +14,30 @@ import (
 // maxSiteLen — RFC 1035 §2.3.4 (максимум 253 октета для domain name).
 const maxSiteLen = 253
 
-// ValidateSite — синтаксическая проверка host'a из URL-path. Жёсткий regex
-// для DNS-валидности нам не нужен: реальный host клиент уже зарегистрировал
-// у себя, мы только защищаемся от мусора в path (длинные строки в БД,
-// неконтролируемое логирование).
+// siteRE — допустимое hostname по RFC 1123 §2.1: LDH-label'ы (буквы, цифры,
+// дефис), разделённые точкой, label ≤63 байт, не начинается/заканчивается
+// дефисом. Регистр сохраняем как есть (Postgres host PK is case-sensitive),
+// но фактически hostname'ы lowercase у дашборда.
+//
+// PR-58 security audit #2: до этого проверка была только len ≤253, что
+// пропускало `..`, NUL, control-chars, percent-encoded slash (после
+// ServeMux URL-decode становится '/'), unicode. Не SQLi (parameterized),
+// но мусор в `host` PK + сломанная корреляция по `site` в SIEM-логах.
+var siteRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+
+// ValidateSite — синтаксическая проверка hostname'a из URL-path.
+// LDH + dots + length ≤253. Single-label hosts разрешены (например, internal
+// `staging`). IDN не поддерживаем — дашборд обязан подавать ASCII (Punycode
+// при необходимости).
 func ValidateSite(s string) error {
 	if s == "" {
 		return fmt.Errorf("site: empty")
 	}
 	if len(s) > maxSiteLen {
 		return fmt.Errorf("site: longer than %d bytes (RFC 1035)", maxSiteLen)
+	}
+	if !siteRE.MatchString(s) {
+		return fmt.Errorf("site: must be a valid LDH hostname (RFC 1123)")
 	}
 	return nil
 }

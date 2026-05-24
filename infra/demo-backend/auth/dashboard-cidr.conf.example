@@ -1,0 +1,17 @@
+# Dashboard-backend egress CIDR allowlist for /antibot/v1/* (PR-58 audit #1).
+# Copy to dashboard-cidr.conf and fill with the real CIDR(s) of
+# client dashboard's backend service before deploy. nginx fails
+# `nginx -t` if the included file is missing — explicit signal that the
+# operator must configure this before the policy API is reachable.
+#
+# Example for a single host:
+#   allow 203.0.113.42/32;
+#   deny all;
+#
+# Example for a small private subnet:
+#   allow 10.0.5.0/24;
+#   deny all;
+
+allow 127.0.0.1/32;        # local dev / curl-from-backend
+allow ::1/128;
+deny all;

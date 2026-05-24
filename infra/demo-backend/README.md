@@ -285,16 +285,31 @@ from the the platform dashboard-backend. Server-to-server only: the dashboard
 authenticates its end users on its side, then forwards the change to
 antibot-backend with a shared bearer token in `Authorization: Bearer …`.
 
-**Setup.** Generate a token (`openssl rand -hex 32`), put it into `.env` on
-both sides:
-
-```
-DASHBOARD_API_TOKEN=<hex string>
-```
+**Setup.** `provision.sh` generates a random `DASHBOARD_API_TOKEN` on first
+run (32 random bytes → 64 hex chars) and writes it into `.env`. Sync it to
+dashboard-backend's own env; never commit.
 
 If `DASHBOARD_API_TOKEN` is unset, `/antibot/v1/*` is NOT registered on
 backend startup (fail-closed; dashboard would get 404). A warn line lands in
 the backend log on every restart in that state.
+
+**Defence-in-depth at the LB** (`nginx/lb.conf`):
+1. `/antibot/v1/` has a **dedicated `location`** block, separate from
+   `/catalog/` and `/health`. The block `include`s
+   `auth/dashboard-cidr.conf` — a CIDR-allowlist of the dashboard-backend
+   egress IPs. `provision.sh` seeds it with loopback-only from
+   `dashboard-cidr.conf.example`; operator MUST edit before prod. If the
+   file is missing nginx fails `nginx -t` — an explicit signal vs. silently
+   public policy API.
+2. Per-IP rate limit `limit_req zone=antibot_api burst=10 nodelay` at
+   `rate=20r/s`. Bounds blast radius if `DASHBOARD_API_TOKEN` leaks: a
+   scripted PATCH flood from one source can't saturate the backend pgxpool
+   and starve `/catalog/*` reads (edge would otherwise fall into fail-stale
+   for all clients).
+
+These layers are independent of `AUTH_MODE`. Even with `AUTH_MODE=off`
+(debug, never for prod) the CIDR-allowlist + rate-limit still gate
+`/antibot/v1/*`.
 
 **Rotation.** Pick a new token; update env on both services simultaneously;
 `docker compose restart backend-1 backend-2` (rolling restart, no downtime

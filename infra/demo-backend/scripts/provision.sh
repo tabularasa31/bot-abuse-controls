@@ -66,10 +66,32 @@ else
     fi
 fi
 
+# ---- DASHBOARD_API_TOKEN seed (B10) ----
+# Без значения backend warn'ит «policy API disabled» и /antibot/v1/* возвращает
+# 404. Дашборду нужен этот же секрет в его конфиге. Генерим раз, оператор
+# синхронизирует на стороне дашборда.
+if [ ! -f "${ROOT}/.env" ] || ! grep -q '^DASHBOARD_API_TOKEN=' "${ROOT}/.env"; then
+    DASH_TOKEN="$(openssl rand -hex 32)"
+    if [ -n "$(tail -c1 "${ROOT}/.env" 2>/dev/null)" ]; then
+        echo >> "${ROOT}/.env"
+    fi
+    echo "DASHBOARD_API_TOKEN=${DASH_TOKEN}" >> "${ROOT}/.env"
+    log "generated DASHBOARD_API_TOKEN — sync it to dashboard-backend's env"
+fi
+
 # ---- TLS cert for the LB (+ edge-CA + sample client cert from B6) ----
 "${HERE}/gen-certs.sh"
 
 # auth/allow.list ships committed (see auth/allow.list) — no seed step needed.
+
+# ---- dashboard-cidr.conf seed (B10) ----
+# Без файла nginx -t падает (lb.conf делает include). На первом запуске
+# копируем example (loopback + ::1 — достаточно для local dev / verify.sh).
+# Operator правит реальные CIDR'ы дашборд-backend'а перед deploy в прод.
+if [ ! -f "${ROOT}/auth/dashboard-cidr.conf" ]; then
+    cp "${ROOT}/auth/dashboard-cidr.conf.example" "${ROOT}/auth/dashboard-cidr.conf"
+    log "seeded auth/dashboard-cidr.conf from example (loopback only) — edit before prod"
+fi
 
 # ---- bring up the stack ----
 log "starting Postgres + HA backend pair + TLS LB"

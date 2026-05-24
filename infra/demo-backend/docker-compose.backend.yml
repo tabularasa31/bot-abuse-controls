@@ -103,6 +103,11 @@ services:
       # file as its source (Docker would otherwise create the path as an empty
       # directory and nginx `include` would fail on it).
       - ./auth/allow.list:/etc/nginx/conf.d/allow.list:ro
+      # [B10] dashboard-cidr.conf — CIDR-allowlist for /antibot/v1/* (PR-58
+      # audit #1). Operator copies dashboard-cidr.conf.example, fills with
+      # the dashboard-backend egress CIDR. If missing, `nginx -t` fails →
+      # explicit signal vs. silently-public policy API.
+      - ./auth/dashboard-cidr.conf:/etc/nginx/conf.d/dashboard-cidr.conf:ro
     restart: unless-stopped
 
 volumes:
