@@ -18,12 +18,16 @@
 --                     init_worker_by_lua_block. Guarded to worker 0 so a
 --                     pool with N workers does N× fewer pulls, not N×.
 --
--- Today the only catalog wired in is fp_blocklist — verdict.lua is the only
--- request-path reader that consumes a Channel C catalog through the §A1
--- gen-keyed lookup (`fp:gen`). The other seven catalogs from
--- docs/architecture/config-distribution.md §"The 'catalog' concept" migrate
--- to Channel C in [B12] (hot-reload of static configs) — adding them here
--- without a consumer would write to a dict nobody reads.
+-- Two catalogs are wired today:
+--   * fp_blocklist     — consumed by verdict.lua (§A1 `fp:gen` lookup).
+--   * verified_bot_ips — consumed by verified_bots.lua (B8) for the L2.2
+--                        bot_verified / bot_verified_pending fastpath
+--                        (same `<key>:<gen>` shape as fp_blocklist so the
+--                        atomic-swap pattern is symmetric).
+-- The remaining catalogs from docs/architecture/config-distribution.md
+-- §"The 'catalog' concept" migrate to Channel C in [B12] (hot-reload of
+-- static configs) — adding them here without a consumer would write to a
+-- dict nobody reads.
 
 local cjson        = require "cjson.safe"
 local fp_state     = require "fp_blocklist_state"
@@ -87,6 +91,53 @@ _M.catalogs = {
             local n = 0
             for _, k in ipairs(dict:get_keys(0)) do
                 if fp_state.match(k, old_gen) then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
+
+    -- verified_bot_ips (B8) — map(ip → "<status>:<family>") with status
+    -- in {verified, rejected} (config-distribution.md §catalogs). Stored
+    -- key is `<ip>:<gen>`, mirroring fp_blocklist's §В1 atomic-swap shape
+    -- so two generations coexist during the write→flip→sweep window.
+    -- Reader: verified_bots.classify(ip) composes the key from
+    -- meta:get("verified_bots_gen"). Empty dict ⇒ all searchbot UAs land
+    -- in provisional fastpath (bot_verified_pending), which is the
+    -- SEO-safe default for a stand without backend (vision §Шаг 2.2).
+    verified_bot_ips = {
+        endpoint    = "/catalog/verified_bot_ips",
+        dict_name   = "verified_bots",
+        gen_key     = "verified_bots_gen",
+        etag_key    = "verified_bots_etag",
+        version_key = "verified_bots_version",
+        apply = function(dict, entries, new_gen)
+            local n = 0
+            for ip, val in pairs(entries) do
+                local ok, err = dict:set(ip .. ":" .. new_gen, val)
+                if not ok then
+                    ngx.log(ngx.ERR, "verified_bots:set failed: ", err,
+                        " (ip=", ip, ", gen=", new_gen, ")")
+                    return false, n
+                end
+                n = n + 1
+            end
+            return true, n
+        end,
+        -- Suffix-match `:<old_gen>` to find this generation's keys. The
+        -- dict is written exclusively by this catalog (no admin.lua / no
+        -- co-tenant), so the IP-shaped prefix has no collisions to worry
+        -- about; if a future writer joins, switch to a typed match the
+        -- way fp_state.match() guards fp_blocklist (see fp_blocklist's
+        -- sweep comment for the worked example).
+        sweep = function(dict, old_gen)
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
                     dict:delete(k)
                     n = n + 1
                 end

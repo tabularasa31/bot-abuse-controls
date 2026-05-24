@@ -23,6 +23,15 @@ require("hygiene").build(config)
 -- startup log below.
 local reputation, rep_wl, rep_bl = require("reputation").build(config)
 
+-- Compile the L2.2 verified-bot fastpath (B8: bot_verified /
+-- bot_verified_pending). build() reads the searchbot UA alternation from
+-- defaults.conf [allow.bot_verified].ua_pattern and stashes the split list;
+-- the verified_bots shared_dict is filled by catalog_pull (Channel C
+-- `verified_bot_ips`) and is empty on a stand without backend, so all
+-- searchbot-UA requests resolve to provisional fastpath until the rDNS
+-- worker (B7) publishes a status. Returns the active UA-alt count.
+local _, vb_alts_n = require("verified_bots").build(config)
+
 -- Compile the L4 rate_limits stage (GCRA profiles from defaults.conf
 -- [blocking.rate_*] thresholds) — also in the master so workers inherit the
 -- profile list on fork (see rate_limit.lua; the shared dict holds only per-key
@@ -80,6 +89,12 @@ end
 -- write-then-flip order so a reader never resolves to a gen with no keys.
 ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 
+-- verified_bots has no static seed (the catalog is rDNS-worker output, not
+-- a checked-in file). Seed gen=0 so verified_bots.classify() reads cleanly
+-- on an empty dict and lookups consistently return nil → "absent" →
+-- bot_verified_pending until catalog_pull lands the first generation.
+ngx.shared.meta:set("verified_bots_gen", 0)
+
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").
 ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
@@ -99,6 +114,9 @@ for _ in pairs(reputation.asn_dc_set) do asn_dc_n = asn_dc_n + 1 end
 ngx.log(ngx.NOTICE, "[demo] reputation matchers: ip_whitelist=", rep_wl,
     " active, ip_blocklist=", rep_bl, " active, asn_dc=", asn_dc_n,
     " (geo_blocklist dormant — per-resource policy source is Phase 3)")
+ngx.log(ngx.NOTICE, "[demo] verified-bot fastpath: ua_alts=", vb_alts_n,
+    " (verified_bots dict empty until Channel C `verified_bot_ips`",
+    " catalog pull lands — searchbot UAs get bot_verified_pending)")
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
 ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,
