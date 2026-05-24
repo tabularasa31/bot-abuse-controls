@@ -43,7 +43,8 @@ jobs:
                    luajit tests/fp_blocklist_state_test.lua && \
                    luajit tests/tls_fp_test.lua && \
                    luajit tests/catalog_pull_test.lua && \
-                   luajit tests/log_shipper_test.lua'
+                   luajit tests/log_shipper_test.lua && \
+                   luajit tests/verified_bots_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)

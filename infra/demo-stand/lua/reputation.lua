@@ -49,8 +49,9 @@
 --     here is unchanged. (Same "rule wired, data empty" shape as ua_blacklist
 --     / ip_blocklist.)
 --
--- Per-resource policy ip_whitelist and verified-bot fastpath are separate
--- tasks (B8) and are intentionally not handled here.
+-- Per-resource policy ip_whitelist is a future task (Phase 3). The
+-- verified-bot fastpath (B8) lives in verified_bots.lua and is invoked
+-- inline below between the ip_whitelist and ip_blocklist checks.
 
 local _M = {
     enabled        = true,
@@ -211,6 +212,29 @@ function _M.run()
     -- doesn't overwrite it under bac_log's last-writer-wins.
     if _M.whitelist and _M.whitelist:match(ip) then
         bac_log.set_verdict("reputation", "allow", "ip_whitelist")
+        return true
+    end
+
+    -- B8 verified-bot fastpath (rules-reference rules 4 + 5). Runs AFTER
+    -- ip_whitelist (rule 2) per the rules-reference order, BEFORE
+    -- ip_blocklist (rule 6) so a "verified" / "pending" allow always wins
+    -- over a block on the same stage. "rejected" emits no verdict and we
+    -- fall through to ip_blocklist (and the rest of the cascade) — that
+    -- 3-state behaviour is the whole point of the catalog. Like
+    -- ip_whitelist above, the stand stays observe-only: production would
+    -- short-circuit L3-L5 here, but on the stand we keep going so a later
+    -- tls_fp block can still demonstrate (last-writer-wins on the log).
+    local verified_bots = package.loaded["verified_bots"]
+                         or require "verified_bots"
+    local vb_outcome = verified_bots.run(ip, ngx.var.http_user_agent)
+    -- Use the SHORT_CIRCUIT set rather than a literal `vb_outcome ==
+    -- "verified" or "pending"` chain so a future outcome added to
+    -- verified_bots cannot accidentally short-circuit by being copy-pasted
+    -- into this condition (review #3 on PR #55). "rejected" is deliberately
+    -- absent from SHORT_CIRCUIT: rejected IPs must continue through
+    -- ip_blocklist / tls_fp / rate_limits / L5 — that is the entire point
+    -- of the 3-state catalog.
+    if verified_bots.SHORT_CIRCUIT[vb_outcome] then
         return true
     end
 

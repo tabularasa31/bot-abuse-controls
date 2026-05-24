@@ -281,6 +281,46 @@ do
 end
 
 -- ===========================================================================
+-- Metrics key naming contract (PR #55 review P1). bump_last_pull_ts and
+-- the version-mismatch bump must key by CATALOG NAME (descriptor key —
+-- what metrics.lua iterates), NOT by dict_name. The bug was invisible for
+-- fp_blocklist (name == dict_name) and surfaced only on verified_bot_ips
+-- (dict_name=verified_bots) where /metrics returned -1 staleness forever.
+-- Use a synthetic descriptor here so the assertion holds even if both
+-- shipped descriptors are renamed in lockstep.
+-- ===========================================================================
+
+do
+    reset_state()
+    local synth = {
+        name        = "synth_cat",
+        endpoint    = "/catalog/synth_cat",
+        dict_name   = "fp_blocklist",  -- reuse fp_blocklist dict for the harness
+        gen_key     = fp_state.META_GEN_KEY,
+        etag_key    = "synth_etag",
+        version_key = "synth_version",
+        apply = function() return true, 0 end,
+        sweep = function() return 0 end,
+    }
+    -- 304 path → bumps last_pull_ts only
+    local res304 = { status = 304, headers = {} }
+    local outcome = cp.handle_response(synth, ngx.shared.fp_blocklist, ngx.shared.meta, res304, nil)
+    check(outcome, "not_modified", "metrics key: 304 returns not_modified")
+    check(ngx.shared.metrics:get("catalog_last_pull_ts:synth_cat"), 1234567,
+        "metrics key: catalog_last_pull_ts keyed by NAME, not dict_name")
+    check(ngx.shared.metrics:get("catalog_last_pull_ts:fp_blocklist"), nil,
+        "metrics key: NOT keyed by dict_name (regression guard PR #55 P1)")
+
+    -- version mismatch → bumps the mismatch counter
+    local res_vmis = { status = 200, body = "{}", headers = { ["X-Catalog-Version"] = "2.0.0" } }
+    cp.handle_response(synth, ngx.shared.fp_blocklist, ngx.shared.meta, res_vmis, nil)
+    check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:synth_cat"), 1,
+        "metrics key: version mismatch keyed by NAME, not dict_name")
+    check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:fp_blocklist"), nil,
+        "metrics key: vmis NOT keyed by dict_name (regression guard PR #55 P1)")
+end
+
+-- ===========================================================================
 -- version_compatible — the pure helper used by the gate above.
 -- ===========================================================================
 

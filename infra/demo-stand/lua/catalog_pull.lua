@@ -18,12 +18,16 @@
 --                     init_worker_by_lua_block. Guarded to worker 0 so a
 --                     pool with N workers does N× fewer pulls, not N×.
 --
--- Today the only catalog wired in is fp_blocklist — verdict.lua is the only
--- request-path reader that consumes a Channel C catalog through the §A1
--- gen-keyed lookup (`fp:gen`). The other seven catalogs from
--- docs/architecture/config-distribution.md §"The 'catalog' concept" migrate
--- to Channel C in [B12] (hot-reload of static configs) — adding them here
--- without a consumer would write to a dict nobody reads.
+-- Two catalogs are wired today:
+--   * fp_blocklist     — consumed by verdict.lua (§A1 `fp:gen` lookup).
+--   * verified_bot_ips — consumed by verified_bots.lua (B8) for the L2.2
+--                        bot_verified / bot_verified_pending fastpath
+--                        (same `<key>:<gen>` shape as fp_blocklist so the
+--                        atomic-swap pattern is symmetric).
+-- The remaining catalogs from docs/architecture/config-distribution.md
+-- §"The 'catalog' concept" migrate to Channel C in [B12] (hot-reload of
+-- static configs) — adding them here without a consumer would write to a
+-- dict nobody reads.
 
 local cjson        = require "cjson.safe"
 local fp_state     = require "fp_blocklist_state"
@@ -40,8 +44,18 @@ _M.SUPPORTED_VERSION_MAJOR = "1"
 -- after the gen flip (RFC §В1 explicit cleanup — per-entry TTL is wrong here
 -- because the 304 short-circuit means entries never get re-written and would
 -- silently age out, see §В1 "Why explicit cleanup instead of per-entry TTL").
+-- Each descriptor carries `name` = the catalog-identifier (key in this
+-- table) duplicated as a field, so handle_response can stamp metrics under
+-- the CATALOG name rather than the dict name. metrics.lua iterates the
+-- known catalogs by name and reads `catalog_last_pull_ts:<name>` /
+-- `edge_sidecar_version_mismatch_total:<name>` — for fp_blocklist the two
+-- are the same string and the bug was invisible; verified_bot_ips
+-- (dict_name=verified_bots) is the case that surfaced it (PR #55 review P1).
+-- Keeping `name` and `dict_name` distinct also leaves room for two catalogs
+-- to share a dict in the future (none today).
 _M.catalogs = {
     fp_blocklist = {
+        name        = "fp_blocklist",
         endpoint    = "/catalog/fp_blocklist",
         dict_name   = "fp_blocklist",
         gen_key     = fp_state.META_GEN_KEY,   -- "fp_blocklist_gen"
@@ -94,6 +108,75 @@ _M.catalogs = {
             return n
         end,
     },
+
+    -- verified_bot_ips (B8) — map(ip → "<status>:<family>") with status
+    -- in {verified, rejected} (config-distribution.md §catalogs). Stored
+    -- key is `<ip>:<gen>`, mirroring fp_blocklist's §В1 atomic-swap shape
+    -- so two generations coexist during the write→flip→sweep window.
+    -- Reader: verified_bots.classify(ip) composes the key from
+    -- meta:get("verified_bots_gen"). Empty dict ⇒ all searchbot UAs land
+    -- in provisional fastpath (bot_verified_pending), which is the
+    -- SEO-safe default for a stand without backend (vision §Шаг 2.2).
+    verified_bot_ips = {
+        name        = "verified_bot_ips",
+        endpoint    = "/catalog/verified_bot_ips",
+        dict_name   = "verified_bots",
+        gen_key     = "verified_bots_gen",
+        etag_key    = "verified_bots_etag",
+        version_key = "verified_bots_version",
+        apply = function(dict, entries, new_gen)
+            local n = 0
+            for ip, val in pairs(entries) do
+                local ok, err = dict:set(ip .. ":" .. new_gen, val)
+                if not ok then
+                    ngx.log(ngx.ERR, "verified_bots:set failed: ", err,
+                        " (ip=", ip, ", gen=", new_gen, ")")
+                    return false, n
+                end
+                n = n + 1
+            end
+            return true, n
+        end,
+        -- Suffix-match `:<old_gen>` to find this generation's keys. The
+        -- dict is written exclusively by this catalog (no admin.lua / no
+        -- co-tenant), so the IP-shaped prefix has no collisions to worry
+        -- about; if a future writer joins, switch to a typed match the
+        -- way fp_state.match() guards fp_blocklist (see fp_blocklist's
+        -- sweep comment for the worked example).
+        --
+        -- Перформанс — тот же trade-off, что в fp_blocklist sweep'e:
+        -- `dict:get_keys(0)` лочит весь shared_dict на время скана.
+        -- nginx.demo.conf размечает verified_bots под "tens of thousands
+        -- of IPs", где блокировка становится видна на p99 (gemini-review
+        -- B5 и снова на этом PR). План тот же: side-index «keys-of-gen-N»
+        -- в отдельном ключе `meta`, чтобы sweep шёл по узкому списку
+        -- вместо полного скана. Пока что осознанно держим симметрию с
+        -- fp_blocklist'ом (RFC §В1 алгоритм) — мигрируем оба каталога
+        -- одной задачей, когда реальный размер verified_bot_ips перейдёт
+        -- этот порог (на стенде без backend dict пустой, фактического
+        -- риска нет).
+        sweep = function(dict, old_gen)
+            -- The suffix-string match below is only safe for numeric, small,
+            -- monotonically-growing generation IDs (no `:` inside, no
+            -- string-typed gens). Lock that assumption load-bearing so a
+            -- future change to non-numeric gens (e.g. a content hash to
+            -- dedupe identical pulls) fails LOUD here instead of silently
+            -- shadowing IP-shaped keys (review #5 on PR #55).
+            assert(type(old_gen) == "number",
+                "verified_bot_ips.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
 }
 
 -- bump_metric — best-effort counter increment on the `metrics` shared_dict.
@@ -105,13 +188,19 @@ local function bump_metric(key)
 end
 
 -- bump_last_pull_ts — stamp `catalog_last_pull_ts:<name>` with the current
--- time. Called from both the 200 and 304 paths in handle_response (both are
--- "successful contact with backend" — see the 304 branch comment for why
--- this is a liveness rather than freshness signal). Missing metrics dict is
--- silent for the same test-harness reason as bump_metric.
+-- time, where `name` is the catalog identifier (descriptor key) — NOT the
+-- dict_name. metrics.lua iterates `catalog_pull.catalogs` by key and reads
+-- this metric under the same key; using `dict_name` makes the staleness
+-- gauge stuck at -1 for any catalog whose dict has a different name (this
+-- was invisible for fp_blocklist where name==dict_name; PR #55 review P1
+-- surfaced it via verified_bot_ips → dict verified_bots). Called from both
+-- the 200 and 304 paths in handle_response (both are "successful contact
+-- with backend" — see the 304 branch comment for why this is a liveness
+-- rather than freshness signal). Missing metrics dict is silent for the
+-- same test-harness reason as bump_metric.
 local function bump_last_pull_ts(cat)
     local m = ngx.shared.metrics
-    if m then m:set("catalog_last_pull_ts:" .. cat.dict_name, ngx.time()) end
+    if m then m:set("catalog_last_pull_ts:" .. cat.name, ngx.time()) end
 end
 
 -- version_compatible — single-major check. Accepts "1", "1.x", "1.x.y". An
@@ -173,7 +262,9 @@ function _M.handle_response(cat, dict, meta, res, err)
     if not _M.version_compatible(version) then
         ngx.log(ngx.ERR, "catalog ", cat.endpoint, ": version mismatch ",
             tostring(version), " vs major=", _M.SUPPORTED_VERSION_MAJOR)
-        bump_metric("edge_sidecar_version_mismatch_total:" .. cat.dict_name)
+        -- Same naming contract as bump_last_pull_ts: keyed by the catalog
+        -- NAME (descriptor key), which is what metrics.lua reads back.
+        bump_metric("edge_sidecar_version_mismatch_total:" .. cat.name)
         return "skip"
     end
 
