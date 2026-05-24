@@ -39,7 +39,7 @@ type Data struct {
 	IPBlocklist    map[string]string `yaml:"ip_blocklist"`     // CIDR → "block"
 	IPWhitelist    []string          `yaml:"ip_whitelist"`     // CIDR (системный)
 	ASNDatacenters []uint32          `yaml:"asn_datacenters"`  // ASN-номера
-	VerifiedBotIPs map[string]string `yaml:"verified_bot_ips"` // IP → "google|bing|yandex|ddg"
+	VerifiedBotIPs map[string]string `yaml:"verified_bot_ips"` // IP → "<status>:<family>" where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}. Отсутствие ключа = provisional (см. vision §Шаг 2.2).
 	Policy         map[string]Policy `yaml:"policy"`           // host → policy (включая attack_mode)
 }
 

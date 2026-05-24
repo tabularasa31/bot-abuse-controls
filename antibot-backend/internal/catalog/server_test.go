@@ -49,7 +49,7 @@ func sampleData() *Data {
 	d.IPBlocklist = map[string]string{"203.0.113.0/24": "block"}
 	d.IPWhitelist = []string{"198.51.100.5/32"}
 	d.ASNDatacenters = []uint32{14061, 16509, 14061} // дубликат — проверяем dedup
-	d.VerifiedBotIPs = map[string]string{"66.249.66.1": "google", "157.55.39.1": "bing"}
+	d.VerifiedBotIPs = map[string]string{"66.249.66.1": "verified:google", "157.55.39.1": "rejected:bing"}
 	d.Policy = map[string]Policy{
 		"shop.example.com": {
 			Mode:        "active",
@@ -452,7 +452,7 @@ ip_whitelist:
 asn_datacenters:
   - 14061
 verified_bot_ips:
-  "66.249.66.1": "google"
+  "66.249.66.1": "verified:google"
 policy:
   shop.example.com:
     mode: active

@@ -97,7 +97,7 @@ Each thing pulled in Channel C is a **catalog**: a named, fully-versioned snapsh
 | `ip_blocklist` | CIDR list → "block" | `antibot_ip_blocklist` | PR + dashboard custom-add |
 | `ip_whitelist` | CIDR list | `antibot_ip_whitelist` | PR (monitoring, check services) |
 | `asn_datacenters` | set(asn → 1) | `antibot_asn_dc` | PR |
-| `verified_bot_ips` | set(ip → "google\|bing\|yandex\|ddg") | `antibot_verified_bots` | backend background rDNS |
+| `verified_bot_ips` | map(ip → "&lt;status&gt;:&lt;family&gt;"), status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}; отсутствие ключа = provisional | `antibot_verified_bots` | backend background rDNS (B7) |
 | `policy` | map(host → policy json) | `antibot_policy` | client dashboard |
 | `attack_mode` | one flag, optionally per host | `antibot_attack_mode` | dashboard toggle |
 
