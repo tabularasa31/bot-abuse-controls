@@ -40,8 +40,9 @@ type App struct {
 	pool     *pgxpool.Pool // nil в skeleton-режиме без БД
 	srv      *http.Server
 	reg      *prometheus.Registry
+	store    *catalog.Store     // ссылка нужна rDNS-воркеру (HasVerifiedBotIP)
 	reloader *dbloader.Reloader // nil если каталог из YAML или не загружен
-	rdns     *rdns.Worker
+	rdns     *rdns.Worker       // nil в skeleton-режиме без БД
 }
 
 // New собирает граф зависимостей. Возвращает ошибку, если конфиг не читается,
@@ -113,7 +114,40 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		return nil, err
 	}
 
-	a.rdns = rdns.New(a.reg, logger, cfg.RDNSInterval)
+	// rDNS-воркер ([B7]) живёт только когда есть БД и каталог — пишет
+	// verified_bot_ips, читает «уже есть в каталоге» из catalog.Store.
+	// Без pool'a (skeleton без БД) воркер остаётся nil; receiver тогда
+	// тоже без enqueue и работает как счётчик.
+	if a.pool != nil && a.store != nil {
+		a.rdns = rdns.New(
+			a.reg, logger,
+			rdns.Config{
+				QueueSize:  cfg.RDNSQueueSize,
+				Workers:    cfg.RDNSWorkers,
+				DNSTimeout: cfg.RDNSDNSTimeout,
+				GCInterval: cfg.RDNSGCInterval,
+				// PostWriteHold перекрывает окно между «воркер записал»
+				// и «reloader положил свежий Data в Store». Без буфера
+				// hot IP внутри этого окна снова прошёл бы Enqueue и
+				// сделал повторный DNS. +2с с запасом на pgx latency.
+				PostWriteHold: cfg.CatalogReloadInterval + 2*time.Second,
+			},
+			rdns.NetResolver{},
+			a.store,
+			rdns.NewPgxWriter(a.pool),
+		)
+	} else {
+		logger.Warn("rdns worker disabled — no DB / catalog store (skeleton mode)")
+	}
+
+	// Receiver регистрируется здесь, после rdns: если воркер есть — даём
+	// receiver'у Enqueuer + classifier; если нет (skeleton без БД) — пустой
+	// конструктор, receiver работает как счётчик строк.
+	if a.rdns != nil {
+		logs.NewWithEnqueuer(a.reg, a.rdns, rdns.FamilyOfUA).Register(mux)
+	} else {
+		logs.New(a.reg).Register(mux)
+	}
 
 	a.srv = &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -139,6 +173,7 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 // эджу).
 func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	catalogSrv := catalog.New()
+	a.store = catalogSrv.Store()
 
 	switch {
 	case a.pool != nil:
@@ -178,7 +213,8 @@ func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	}
 
 	catalogSrv.Register(mux)
-	logs.New(a.reg).Register(mux)
+	// logs.Receiver регистрируется ПОСЛЕ rdns.Worker (см. App.New), чтобы
+	// мог получить Enqueuer. Здесь только catalog + /metrics уже на mux.
 	return nil
 }
 
@@ -198,11 +234,15 @@ func (a *App) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	// rDNS-воркер — фоновая горутина, единственный активный compute сейчас.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		a.rdns.Run(workerCtx)
-	}()
+	// В skeleton-режиме без БД воркер не сконструирован — тогда просто
+	// нечего запускать.
+	if a.rdns != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.rdns.Run(workerCtx)
+		}()
+	}
 
 	// Catalog-reloader (B4): тикает Load → Store.Replace.
 	if a.reloader != nil {

@@ -29,8 +29,12 @@ asn_datacenters:
   # - 16509  # AWS
 
 verified_bot_ips:
-  # "66.249.66.1": "google"
-  # "157.55.39.1": "bing"
+  # Значение — "<status>:<family>", status ∈ {verified, rejected}, family
+  # ∈ {google, bing, yandex, ddg}. Отсутствие ключа = provisional (см.
+  # vision §Шаг 2.2). На проде это наполняется rDNS-воркером (B7) в БД
+  # с TTL 1ч; YAML-источник нужен только для dev-смока со статикой.
+  # "66.249.66.1": "verified:google"
+  # "203.0.113.7": "rejected:google"
 
 policy:
   # shop.example.com:

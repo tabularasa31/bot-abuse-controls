@@ -14,10 +14,17 @@
 2. **log receiver** — `POST /v1/logs`, принимает поток BAC_LOG с эджей, отвечает
    `202`. Метрика `antibot_backend_log_lines_received_total` считает строки.
    Валидация схемы, батч в sink, disk-queue — задачи [B6]/[B9].
-3. **rDNS worker** — фоновый таймер (`RDNS_INTERVAL`, по умолчанию `30m`).
-   Метрика `antibot_backend_rdns_ticks_total` доказывает, что воркер живёт.
-   Реальный PTR+forward DNS и 3-state machine (verified/rejected/provisional)
-   — задача [B7].
+3. **rDNS worker** ([B7]) — reactive фоновая горутина. Receiver, парсящий
+   BAC_LOG, дёргает `Worker.Enqueue` для каждой строки с поисковым UA
+   (Googlebot/bingbot/YandexBot/DuckDuckBot) и непустым IP. Воркер делает
+   `PTR → forward DNS` (оба этапа должны сойтись на официальный домен
+   поисковика — `.googlebot.com`, `.search.msn.com` и т.д.) и пишет
+   verdict в каталог `verified_bot_ips` с TTL 1ч симметрично для обоих
+   исходов (`verified` / `rejected`). Edge на L2.2 различает их по
+   значению (`"verified:<family>"` / `"rejected:<family>"`); отсутствие
+   ключа = provisional fastpath. Метрики: `..._rdns_enqueued_total`,
+   `..._rdns_verified_total`, `..._rdns_rejected_total`,
+   `..._rdns_queue_length`.
 
 Сервис **stateless** поверх своей PostgreSQL. На hot-path edge не висит —
 fail-stale (см. config-distribution §"Channel C / Failure mode").
@@ -48,7 +55,11 @@ curl http://localhost:8080/metrics | grep antibot_backend_
 | `CATALOG_YAML` | пусто | путь до YAML с каталогами (dev-fallback B3). Игнорируется, если задан `POSTGRES_DSN`. |
 | `CATALOG_RELOAD_INTERVAL` | `5s` | как часто backend перечитывает каталоги из БД (B4). Короче 30 с edge-poll'a, чтобы изменения доезжали ≤30 c. |
 | `MIGRATE_ON_STARTUP` | `true` | прогон встроенных миграций до старта HTTP при `POSTGRES_DSN`. `false` для прод-сценариев с внешним мигратором (B15). |
-| `RDNS_INTERVAL` | `30m` | тик rDNS-воркера. |
+| `RDNS_INTERVAL` | `30m` | устаревший knob от B2-скелета. В B7 воркер reactive (триггер — поток логов), периодического тика нет; параметр игнорируется. |
+| `RDNS_QUEUE_SIZE` | `1024` | буфер reactive-очереди rDNS-воркера. Переполнение = receiver дропает задачу в метрику `..._rdns_dropped_total`, edge продолжит выдавать provisional. |
+| `RDNS_WORKERS` | `4` | параллельных DNS-резолверов на воркера. |
+| `RDNS_DNS_TIMEOUT` | `5s` | потолок на одну итерацию PTR+forward для IP. |
+| `RDNS_GC_INTERVAL` | `1h` | как часто `DELETE` протухшие строки `verified_bot_ips`. |
 | `SHUTDOWN_TIMEOUT` | `10s` | graceful-shutdown HTTP-сервера. |
 
 ## Схема PostgreSQL (B4)

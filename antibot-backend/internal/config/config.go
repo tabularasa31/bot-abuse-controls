@@ -23,9 +23,24 @@ type Config struct {
 	// (skeleton-режим: сервис поднимется и пройдёт acceptance B1, но любые
 	// будущие фичи B3/B6/B7, которым DB нужна, должны это явно проверять).
 	PostgresDSN string
-	// RDNSInterval — тик rDNS-воркера (наполнение verified_bot_ips, B7).
-	// Сам воркер — заглушка под B7; на скелете просто доказываем, что он живёт.
+	// RDNSInterval — устаревший knob от B2-скелета (фоновый тик воркера).
+	// В B7 воркер reactive — никаких периодических тиков по очереди нет,
+	// триггер — поток логов. Оставлен для обратной совместимости с
+	// compose-файлами; реальное значение игнорируется. Будет удалён в B15
+	// (миграция конфига).
 	RDNSInterval time.Duration
+	// RDNSQueueSize — буфер reactive-очереди (Enqueue → consumer).
+	// Переполнение = receiver получает дроп задачи в метрику, edge
+	// продолжит выдавать provisional. См. rdns.DefaultConfig().
+	RDNSQueueSize int
+	// RDNSWorkers — параллельных DNS-резолверов на воркера.
+	RDNSWorkers int
+	// RDNSDNSTimeout — потолок на одну итерацию проверки IP. Защищает
+	// consumer-слот от зависшего DNS-резолвера.
+	RDNSDNSTimeout time.Duration
+	// RDNSGCInterval — как часто DELETE'им протухшие verified_bot_ips.
+	// Час сильно реже TTL (1ч) — таблица не пухнет, нагрузки на DB нет.
+	RDNSGCInterval time.Duration
 	// ShutdownTimeout — таймаут graceful-shutdown HTTP-сервера.
 	ShutdownTimeout time.Duration
 	// CatalogYAMLPath — путь до YAML с восемью каталогами Channel C (B3).
@@ -52,6 +67,10 @@ func Load() (Config, error) {
 		HTTPAddr:              getenv("HTTP_ADDR", ":8080"),
 		PostgresDSN:           os.Getenv("POSTGRES_DSN"),
 		RDNSInterval:          30 * time.Minute,
+		RDNSQueueSize:         1024,
+		RDNSWorkers:           4,
+		RDNSDNSTimeout:        5 * time.Second,
+		RDNSGCInterval:        time.Hour,
 		ShutdownTimeout:       10 * time.Second,
 		CatalogYAMLPath:       os.Getenv("CATALOG_YAML"),
 		CatalogReloadInterval: 5 * time.Second,
@@ -77,12 +96,38 @@ func Load() (Config, error) {
 		}
 		cfg.MigrateOnStartup = b
 	}
-	if v := os.Getenv("RDNS_INTERVAL"); v != "" {
+	// RDNS_INTERVAL — deprecated после B7 (воркер reactive, периодики нет).
+	// Принимаем любое значение, включая невалидное / 0 / -1, чтобы старые
+	// compose'ы из B2 эры не ломали запуск. Реально нигде не читается.
+	// PR #53 review.
+	_ = os.Getenv("RDNS_INTERVAL")
+	if v := os.Getenv("RDNS_QUEUE_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return cfg, fmt.Errorf("RDNS_QUEUE_SIZE: must be positive int, got %q", v)
+		}
+		cfg.RDNSQueueSize = n
+	}
+	if v := os.Getenv("RDNS_WORKERS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return cfg, fmt.Errorf("RDNS_WORKERS: must be positive int, got %q", v)
+		}
+		cfg.RDNSWorkers = n
+	}
+	if v := os.Getenv("RDNS_DNS_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return cfg, fmt.Errorf("RDNS_INTERVAL: %w", err)
+			return cfg, fmt.Errorf("RDNS_DNS_TIMEOUT: %w", err)
 		}
-		cfg.RDNSInterval = d
+		cfg.RDNSDNSTimeout = d
+	}
+	if v := os.Getenv("RDNS_GC_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("RDNS_GC_INTERVAL: %w", err)
+		}
+		cfg.RDNSGCInterval = d
 	}
 	if v := os.Getenv("SHUTDOWN_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -92,14 +137,18 @@ func Load() (Config, error) {
 		cfg.ShutdownTimeout = d
 	}
 	// time.NewTicker паникует при <=0, не даём пользователю прострелить ногу.
-	if cfg.RDNSInterval <= 0 {
-		return cfg, fmt.Errorf("RDNS_INTERVAL must be > 0, got %s", cfg.RDNSInterval)
-	}
+	// RDNSInterval — deprecated, не валидируем (см. выше).
 	if cfg.ShutdownTimeout <= 0 {
 		return cfg, fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0, got %s", cfg.ShutdownTimeout)
 	}
 	if cfg.CatalogReloadInterval <= 0 {
 		return cfg, fmt.Errorf("CATALOG_RELOAD_INTERVAL must be > 0, got %s", cfg.CatalogReloadInterval)
+	}
+	if cfg.RDNSDNSTimeout <= 0 {
+		return cfg, fmt.Errorf("RDNS_DNS_TIMEOUT must be > 0, got %s", cfg.RDNSDNSTimeout)
+	}
+	if cfg.RDNSGCInterval <= 0 {
+		return cfg, fmt.Errorf("RDNS_GC_INTERVAL must be > 0, got %s", cfg.RDNSGCInterval)
 	}
 	return cfg, nil
 }

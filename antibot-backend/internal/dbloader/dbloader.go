@@ -146,8 +146,17 @@ func Load(ctx context.Context, pool *pgxpool.Pool) (*catalog.Data, error) {
 		`SELECT asn FROM asn_datacenters ORDER BY asn`); err != nil {
 		return nil, err
 	}
+	// verified_bot_ips: rDNS-воркер ([B7]) пишет ОБА исхода — verified и rejected
+	// (vision §Шаг 2.2 + entities-reference.md bot_verification_status). Edge
+	// различает их по значению — поэтому в payload идёт "<status>:<family>",
+	// не просто family. expires_at > NOW() отсекает протухшие записи на
+	// уровне БД: edge видит "ключа нет" и идёт по provisional fastpath, а
+	// не по устаревшему verdict'у. Сам DELETE протухших строк — на воркере
+	// (GC-тик); фильтр здесь — defence-in-depth, чтобы корректность не
+	// зависела от того, успел ли GC. Миграция 0002 завела status/expires_at.
 	if err := loadKVString(ctx, tx, &d.VerifiedBotIPs,
-		`SELECT ip, bot_name FROM verified_bot_ips ORDER BY ip`); err != nil {
+		`SELECT ip, status || ':' || bot_name FROM verified_bot_ips
+		 WHERE expires_at > NOW() ORDER BY ip`); err != nil {
 		return nil, err
 	}
 	if err := loadPolicy(ctx, tx, d); err != nil {

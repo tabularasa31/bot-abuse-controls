@@ -67,6 +67,23 @@ func (s *Store) Replace(d *Data) {
 	s.loaded.Store(true)
 }
 
+// HasVerifiedBotIP — есть ли запись (verified ИЛИ rejected) для IP в
+// каталоге verified_bot_ips. rDNS-воркер (B7) использует это, чтобы
+// не дёргать DNS повторно — отсутствие записи = ещё не проверяли
+// (provisional на edge); наличие любого статуса = уже знаем verdict
+// в пределах TTL, перепроверять нет смысла.
+//
+// Lock-free: data.Load() атомарный, map[string]string Replace'ом
+// меняется целиком, читать без локов безопасно.
+func (s *Store) HasVerifiedBotIP(ip string) bool {
+	d := s.data.Load()
+	if d == nil {
+		return false
+	}
+	_, ok := d.VerifiedBotIPs[ip]
+	return ok
+}
+
 // IsLoaded возвращает true, когда Replace вызывался хотя бы один раз.
 // Handler по нему решает 200 vs 503 — не по сравнению Version с защитной
 // сентинелью, чтобы не падать на легитимном version: "0.0.0".
