@@ -229,24 +229,41 @@ case "${AUTH_MODE}" in
         esac
         ;;
     mtls)
-        # Negative path: use a BARE curl (no --cert/--key) — even though CURL
-        # is mtls-augmented above for checks #2–#6, here we explicitly probe
-        # the "no client cert" case. nginx rejects with 400 No required SSL
-        # certificate; OpenSSL may also fail the handshake → curl exit non-zero.
+        # Negative path: BARE curl (no --cert/--key) на /health (Channel C
+        # location). После PR-58 fix `ssl_verify_client optional` пропускает
+        # TLS handshake без cert'a, но `if ($ssl_client_verify != SUCCESS)`
+        # в auth-channelc.conf отдаёт 495 (nginx SSL Certificate Error).
+        # Раньше нас отвергал ssl_verify_client=on на TLS-уровне → 400/000/496;
+        # оба варианта оставляем в списке валидных для backward-compat при
+        # apply'е этого fix'a поэтапно.
         code="$(curl -sk --connect-timeout 3 --max-time 5 \
             -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
-        if [ "${code}" = "400" ] || [ "${code}" = "000" ] || [ "${code}" = "496" ]; then
-            pass "no client cert rejected (code=${code})"
+        if [ "${code}" = "495" ] || [ "${code}" = "400" ] || [ "${code}" = "000" ] || [ "${code}" = "496" ]; then
+            pass "no client cert rejected on /health (code=${code})"
         else
-            bad "no client cert accepted with code=${code} (expected 400/000/496)"
+            bad "no client cert accepted on /health with code=${code} (expected 495/400/000/496)"
         fi
         # Happy path: the augmented ${CURL[@]} already carries --cert/--key
         # (set up at the top when AUTH_MODE=mtls), so reuse it.
         code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
         if [ "${code}" = "200" ]; then
-            pass "edge-client cert accepted (${code})"
+            pass "edge-client cert accepted on /health (${code})"
         else
-            bad "edge-client cert rejected (${code})"
+            bad "edge-client cert rejected on /health (${code})"
+        fi
+        # PR-58 review fix: /antibot/v1/* НЕ должно гейтиться mTLS —
+        # dashboard-backend ходит туда без edge client cert'a, только bearer
+        # + dashboard-cidr.conf. BARE curl на /antibot/v1/policy/...
+        # должен пройти TLS handshake (нет mtls-rejection), upstream
+        # ответит уже своей auth-логикой (401 без bearer = норма; главное
+        # что НЕ 495 от mtls-enforcement).
+        code="$(curl -sk --connect-timeout 3 --max-time 5 \
+            -o /dev/null -w '%{http_code}' \
+            "https://${HOST}/antibot/v1/policy/verify-mtls-isolation.example")" || code=000
+        if [ "${code}" = "401" ] || [ "${code}" = "404" ]; then
+            pass "/antibot/v1/* not gated by mtls (got ${code} — backend auth, not nginx)"
+        else
+            bad "/antibot/v1/* unexpectedly returned ${code} under AUTH_MODE=mtls (expected 401/404; 495 means mtls-enforcement still gating)"
         fi
         ;;
     off)

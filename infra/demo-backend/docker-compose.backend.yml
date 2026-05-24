@@ -97,6 +97,12 @@ services:
       # Default is ip-allowlist (config-distribution §Channel C fallback);
       # flip AUTH_MODE=mtls in .env once edge clients have edge-client.{crt,key}.
       - ./auth/${AUTH_MODE:-ip-allowlist}.conf:/etc/nginx/conf.d/auth.conf:ro
+      # [B10] Channel C enforcement — pair to auth.conf, applied только
+      # внутри `location /` (catalog/health), не на /antibot/v1/. Split
+      # нужен потому, что server-level auth.conf запускается ДО routing'а
+      # по location и иначе гейтил бы /antibot/v1/ тем же edge-cred'ом
+      # (PR-58 review fix).
+      - ./auth/${AUTH_MODE:-ip-allowlist}-channelc.conf:/etc/nginx/conf.d/auth-channelc.conf:ro
       # Only read for AUTH_MODE=ip-allowlist (mtls/off do not include it),
       # but the bind-mount is unconditional — auth/allow.list ships committed
       # with safe loopback + RFC1918 defaults so the bind always has a real
