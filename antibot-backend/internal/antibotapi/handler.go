@@ -281,7 +281,8 @@ func (s *Server) makeStringDelete(field string) func(action, site string, w http
 			return
 		}
 		s.log.Info("policy mutation",
-			"actor", "dashboard", "action", action, "site", site, "was_noop", false)
+			append([]any{"actor", "dashboard", "action", action, "site", site, "was_noop", false},
+				requestAttrs(r)...)...)
 		s.mutations.WithLabelValues(action, "ok").Inc()
 		s.writeJSON(w, map[string]any{"changed": true})
 	}
@@ -336,7 +337,8 @@ func (s *Server) handleAppendASN(action, site string, w http.ResponseWriter, r *
 		return
 	}
 	s.log.Info("policy mutation",
-		"actor", "dashboard", "action", action, "site", site, "was_noop", !changed)
+		append([]any{"actor", "dashboard", "action", action, "site", site, "was_noop", !changed},
+			requestAttrs(r)...)...)
 	if changed {
 		s.mutations.WithLabelValues(action, "ok").Inc()
 	} else {

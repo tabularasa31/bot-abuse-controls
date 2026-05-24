@@ -297,10 +297,10 @@ the backend log on every restart in that state.
 1. `/antibot/v1/` has a **dedicated `location`** block, separate from
    `/catalog/` and `/health`. The block `include`s
    `auth/dashboard-cidr.conf` — a CIDR-allowlist of the dashboard-backend
-   egress IPs. `provision.sh` seeds it with loopback-only from
-   `dashboard-cidr.conf.example`; operator MUST edit before prod. If the
-   file is missing nginx fails `nginx -t` — an explicit signal vs. silently
-   public policy API.
+   egress IPs. The file **ships committed** with loopback-only defaults so
+   CI / fresh checkout bring up the stack out of the box; operators MUST
+   edit it in-place on the VM (don't commit prod CIDRs back) with the real
+   dashboard-backend egress before exposing the policy API to prod.
 2. Per-IP rate limit `limit_req zone=antibot_api burst=10 nodelay` at
    `rate=20r/s`. Bounds blast radius if `DASHBOARD_API_TOKEN` leaks: a
    scripted PATCH flood from one source can't saturate the backend pgxpool

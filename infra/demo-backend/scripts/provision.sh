@@ -82,16 +82,9 @@ fi
 # ---- TLS cert for the LB (+ edge-CA + sample client cert from B6) ----
 "${HERE}/gen-certs.sh"
 
-# auth/allow.list ships committed (see auth/allow.list) — no seed step needed.
-
-# ---- dashboard-cidr.conf seed (B10) ----
-# Без файла nginx -t падает (lb.conf делает include). На первом запуске
-# копируем example (loopback + ::1 — достаточно для local dev / verify.sh).
-# Operator правит реальные CIDR'ы дашборд-backend'а перед deploy в прод.
-if [ ! -f "${ROOT}/auth/dashboard-cidr.conf" ]; then
-    cp "${ROOT}/auth/dashboard-cidr.conf.example" "${ROOT}/auth/dashboard-cidr.conf"
-    log "seeded auth/dashboard-cidr.conf from example (loopback only) — edit before prod"
-fi
+# auth/allow.list AND auth/dashboard-cidr.conf both ship committed (см.
+# auth/allow.list, auth/dashboard-cidr.conf) с safe loopback baseline'ом —
+# no seed step needed. Оператор правит CIDR'ы in-place на VM перед prod.
 
 # ---- bring up the stack ----
 log "starting Postgres + HA backend pair + TLS LB"

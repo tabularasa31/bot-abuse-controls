@@ -32,10 +32,6 @@ infra/demo-stand/lua/.revision
 # dropped on the VM and flipped per incident, never committed.
 infra/demo-stand/config/kill_switch.local.conf
 
-# Dashboard egress CIDR allowlist (B10) — operational, real CIDRs not
-# committed. dashboard-cidr.conf.example ships as template.
-infra/demo-backend/auth/dashboard-cidr.conf
-
 # Python
 __pycache__/
 *.pyc
