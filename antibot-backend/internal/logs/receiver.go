@@ -110,9 +110,14 @@ func (rcv *Receiver) Register(mux *http.ServeMux) {
 
 // bufPool переиспользует scanner-буферы между запросами — иначе под
 // нагрузкой от edge каждый POST аллоцировал бы 32 KiB и грузил GC.
+//
+// make длиной maxLineBytes (не cap'ом нулевой длины): bufio.Scanner.Buffer
+// делает `buf[0:cap(buf)]`, так что cap уже достаточен; но `len=maxLineBytes`
+// делает контракт пула явным («полноразмерный готовый буфер»), не зависим
+// от внутренней реализации Scanner. PR #53 gemini review.
 var bufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0, maxLineBytes)
+		b := make([]byte, maxLineBytes)
 		return &b
 	},
 }
@@ -152,7 +157,7 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 func (rcv *Receiver) consume(body io.Reader) (int, error) {
 	bufPtr, _ := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
-	buf := (*bufPtr)[:0]
+	buf := *bufPtr
 
 	sc := bufio.NewScanner(body)
 	sc.Buffer(buf, maxLineBytes)

@@ -87,16 +87,20 @@ type Resolver interface {
 // NetResolver — production-резолвер на base net.Resolver. PreferGo=true,
 // чтобы pure-Go резолвер использовал контекст для отмены (cgo-резолвер
 // игнорирует ctx). Это критично: shutdown воркера должен быть быстрым.
+//
+// Один общий *net.Resolver на весь воркер: методы thread-safe, новый
+// инстанс на каждый запрос — пустая нагрузка на аллокатор. PR #53
+// gemini review.
 type NetResolver struct{}
 
+var sharedResolver = &net.Resolver{PreferGo: true}
+
 func (NetResolver) LookupAddr(ctx context.Context, addr string) ([]string, error) {
-	r := &net.Resolver{PreferGo: true}
-	return r.LookupAddr(ctx, addr)
+	return sharedResolver.LookupAddr(ctx, addr)
 }
 
 func (NetResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
-	r := &net.Resolver{PreferGo: true}
-	return r.LookupHost(ctx, host)
+	return sharedResolver.LookupHost(ctx, host)
 }
 
 // CatalogStore — read-side каталога: воркер по этому интерфейсу проверяет,
@@ -405,6 +409,11 @@ func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 		w.dnsErr.Inc()
 		return "rejected", t.claimedFamily
 	}
+	// net.IP.Equal сравнивает по байтам нормализованного IP — для IPv6
+	// это критично: "2001:db8::1" и "2001:0db8:0000:0000:0000:0000:0000:0001"
+	// один и тот же адрес, но разные строки. LookupHost может вернуть
+	// любую форму. Парсим target один раз вне цикла. PR #53 gemini review.
+	targetIP := net.ParseIP(t.ip)
 	for _, ptr := range ptrs {
 		name := normalizePTR(ptr)
 		if !matchesAnySuffix(name, suffixes) {
@@ -416,7 +425,7 @@ func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 			continue
 		}
 		for _, h := range hosts {
-			if h == t.ip {
+			if ip := net.ParseIP(h); ip != nil && targetIP != nil && ip.Equal(targetIP) {
 				return "verified", t.claimedFamily
 			}
 		}
