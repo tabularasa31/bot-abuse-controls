@@ -197,7 +197,7 @@ antibot_bac_log_ship_failed_total %d
 # TYPE antibot_bac_log_batches_ok_total counter
 antibot_bac_log_batches_ok_total %d
 
-# HELP antibot_bac_log_shipper_loaded 1 if log_shipper.start() completed (module + dependencies OK), 0 if it never ran (init_worker errored before start, or log_shipper.lua failed to load). Alert on == 0.
+# HELP antibot_bac_log_shipper_loaded 1 if log_shipper.start() finished setup successfully (timer + http module + mTLS snapshot ready) OR was intentionally disabled by empty ANTIBOT_BACKEND_URL. 0 if start() bailed on an error path (resty.http missing, ngx.timer.every failed, or module never required at all). Alert on == 0 — это silent shipper-down, не intentional disabled.
 # TYPE antibot_bac_log_shipper_loaded gauge
 antibot_bac_log_shipper_loaded %d
 ]],

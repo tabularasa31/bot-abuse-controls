@@ -244,19 +244,26 @@ end
 -- Не привязан к worker 0 (в отличие от catalog_pull): per-worker
 -- shipper это by design — у каждого воркера своя очередь. Дёргается
 -- одним и тем же путём из nginx.demo.conf, см. init_worker_by_lua_block.
+-- mark_loaded — выставляем gauge ТОЛЬКО на путях, где start() реально
+-- завершил setup'у успешно: либо «backend_url пуст и мы намеренно
+-- ничего не запускали» (intentional disabled — модуль работает,
+-- enqueue корректно считает dropped_disabled), либо «timer + http
+-- module + mTLS-snapshot готовы» (полный happy path). Error-пути
+-- (resty.http require fail, ngx.timer.every fail) НЕ выставляют
+-- gauge — оператор видит loaded=0 и алертится на silent-failure.
+-- PR #54 self-review (gauge set до setup'a был bug — contract в
+-- metrics.lua говорит «module + dependencies OK»).
+local function mark_loaded()
+    if ngx.shared.metrics then ngx.shared.metrics:set(M_SHIPPER_LOADED, 1) end
+end
+
 function _M.start(opts)
     opts = opts or {}
-    -- shipper_loaded=1 безусловно: gauge показывает, что модуль прошёл
-    -- require + start, даже если конфиг ниже выключит трафик. Это
-    -- ловит другую ошибку: «log_shipper.lua syntax broken / dep missing»
-    -- → init_worker логирует ERR один раз, gauge остаётся 0, метрика
-    -- видна оператору без хождения по worker-логам. PR #54 review.
-    if ngx.shared.metrics then ngx.shared.metrics:set(M_SHIPPER_LOADED, 1) end
-
     _M.backend_url = nonempty(opts.backend_url)
                      or nonempty(os.getenv("ANTIBOT_BACKEND_URL"))
     if not _M.backend_url then
         ngx.log(ngx.NOTICE, "log_shipper: ANTIBOT_BACKEND_URL not set — shipper disabled (dropped_disabled будет инкрементить per request)")
+        mark_loaded()
         return
     end
     _M.backend_host_header = nonempty(opts.backend_host_header)
@@ -321,6 +328,7 @@ function _M.start(opts)
         " flush=", _M.flush_interval, "s batch_max=", _M.batch_max,
         " queue_max=", _M.queue_max,
         _M.parsed_cert and " mTLS=on" or " mTLS=off")
+    mark_loaded()
 end
 
 return _M

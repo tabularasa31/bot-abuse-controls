@@ -175,14 +175,39 @@ do
     expect(metrics_store.bac_log_shipped_total == 2, "7: shipped == batch_max")
 end
 
--- 8a. shipper_loaded gauge ставится в 1 при start() (даже без backend_url —
---     модуль ЗАГРУЗИЛСЯ, это отдельный сигнал от «работает ли он»).
+-- 8a. shipper_loaded gauge ставится в 1 при start() только когда setup
+--     завершился — либо intentional-disabled (URL пуст), либо happy-path
+--     (timer + http_module готовы). Error-пути (resty.http missing, timer
+--     fail) оставляют gauge=0 — алерт ловит silent failure. PR #54 review.
 do
     reset_for_test()
     local s = load_shipper()
     expect(metrics_store.bac_log_shipper_loaded == nil, "8a: до start gauge не выставлен")
-    s.start({})  -- без backend_url — shipper disabled, но gauge всё равно 1
-    expect(metrics_store.bac_log_shipper_loaded == 1, "8a: после start gauge==1 даже без URL")
+    s.start({})  -- без backend_url — intentional disabled, setup завершён
+    expect(metrics_store.bac_log_shipper_loaded == 1, "8a: intentional disabled → gauge==1")
+end
+
+-- 8b. shipper_loaded НЕ ставится при error-пути: resty.http не доступен,
+--     start() возвращается до timer.every — gauge остаётся 0/nil.
+do
+    reset_for_test()
+    -- НЕ инжектим httpc_mock через s.http_module — log_shipper.start()
+    -- будет пробовать pcall(require, "resty.http"). Сделаем require
+    -- проваливающимся через stub package.loaded["resty.http"]=nil и
+    -- package.preload["resty.http"]=fail-loader.
+    package.loaded["resty.http"] = nil
+    package.preload["resty.http"] = function() error("simulated load failure") end
+    local s
+    do
+        package.loaded["log_shipper"] = nil
+        s = require "log_shipper"
+        -- НЕ присваиваем s.http_module — pусть start() пройдёт error-путь
+    end
+    s.start({ backend_url = "https://backend/test" })
+    expect(metrics_store.bac_log_shipper_loaded == nil
+           or metrics_store.bac_log_shipper_loaded == 0,
+           "8b: error-путь (resty.http missing) НЕ ставит gauge")
+    package.preload["resty.http"] = nil
 end
 
 -- 8. enqueue("") — drop без метрики (пустая входная)

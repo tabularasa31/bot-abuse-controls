@@ -35,12 +35,15 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/work" -w /work \
             openresty/openresty:alpine \
-            sh -c "luajit tests/ja4_helpers_test.lua && \
+            sh -c 'export LUA_PATH="infra/demo-stand/lua/?.lua;;"; \
+                   luajit tests/ja4_helpers_test.lua && \
                    luajit tests/hygiene_test.lua && \
                    luajit tests/reputation_test.lua && \
                    luajit tests/rate_limit_test.lua && \
                    luajit tests/fp_blocklist_state_test.lua && \
-                   luajit tests/tls_fp_test.lua"
+                   luajit tests/tls_fp_test.lua && \
+                   luajit tests/catalog_pull_test.lua && \
+                   luajit tests/log_shipper_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)
