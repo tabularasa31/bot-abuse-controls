@@ -32,6 +32,33 @@ var allowedStringArrayFields = map[string]struct{}{
 // allowedASNField — единственное JSONB-поле с числами.
 const allowedASNField = "asn_block"
 
+// PoolDefault'ы для INSERT нового row'a — JSONB-массивы маршалятся один раз
+// на старте, дальше идут как byte-slice'ы в Exec. Раньше делалось на каждый
+// PatchScalars/ensureRow вызов (PR-58 review, gemini medium).
+//
+// PoolDefault() гарантирует не-nil пустые срезы, json.Marshal на них даёт
+// "[]" — литералы (`[]`-jsonb-литерал в SQL) намеренно НЕ используем,
+// чтобы инициализация шла через ту же типизированную точку, что и логика
+// сравнения в дашборде / reloader'е.
+var (
+	poolDefaultUAJSON   = mustMarshalAtInit(catalog.PoolDefault().UABlacklist)
+	poolDefaultIPWLJSON = mustMarshalAtInit(catalog.PoolDefault().IPWhitelist)
+	poolDefaultIPBLJSON = mustMarshalAtInit(catalog.PoolDefault().IPBlocklist)
+	poolDefaultASNJSON  = mustMarshalAtInit(catalog.PoolDefault().ASNBlock)
+	poolDefaultGeoJSON  = mustMarshalAtInit(catalog.PoolDefault().GeoWhitelist)
+	poolDefaultRateJSON = mustMarshalAtInit(catalog.PoolDefault().RateRules)
+)
+
+func mustMarshalAtInit(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		// json.Marshal на наших фикс-типах не падает; если когда-нибудь
+		// упадёт — поймаем на process start, не в request-handler.
+		panic(fmt.Sprintf("antibotapi: marshal PoolDefault: %v", err))
+	}
+	return b
+}
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -51,135 +78,102 @@ func (p PolicyPatch) IsEmpty() bool {
 }
 
 // PatchScalars применяет patch. Возвращает (changed, changedFields, err).
-// Новый host → INSERT с PoolDefault() + patch. Существующий с теми же
-// значениями → changed=false, БЕЗ UPDATE (updated_at не дёргается).
+//
+// Сценарии:
+//   - row не существует → ensureRow (атомарный ON CONFLICT DO NOTHING) создаёт
+//     его с PoolDefault; затем conditional UPDATE применяет переданные поля.
+//   - row существует и все переданные поля совпадают → no-op (changed=false,
+//     updated_at НЕ дёргается).
+//   - row существует и хоть одно поле отличается → UPDATE, changed=true.
+//
+// Concurrency: НЕТ tx с RepeatableRead/FOR UPDATE (PR-58 review codex P1) —
+// раньше под нагрузкой давали `40001 serialization_failure` без retry.
+// ensureRow идемпотентный, UPDATE по host PK атомарен; параллельные PATCH —
+// «last writer wins» по полю (естественная PATCH-семантика, лучше чем 500
+// одному из request'ов). Для отчёта diff под гонкой мы можем «промахнуться»
+// (другой PATCH успел между SELECT и UPDATE), но это benign: оба запроса
+// получают changed=true с актуальным для своего тика diff'ом.
 func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (bool, []string, error) {
 	if p.IsEmpty() {
 		return false, nil, fmt.Errorf("empty patch")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		return false, nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
-	var (
-		curMode, curStr string
-		curAttack       bool
-		exists          = true
-	)
-	err = tx.QueryRow(ctx,
-		`SELECT mode, strictness, attack_mode FROM policy WHERE host = $1 FOR UPDATE`,
+	// Шаг 1: гарантируем, что row есть. Идемпотентно: ON CONFLICT DO NOTHING.
+	// inserted=true ⇒ row только что создан, значит даже PATCH со значениями,
+	// эквивалентными PoolDefault, представляет собой «появление настроек у
+	// site'a» — это семантическое изменение, отражаем changed=true.
+	inserted, err := s.ensureRow(ctx, site)
+	if err != nil {
+		return false, nil, err
+	}
+
+	// Шаг 2: читаем текущее состояние и считаем target/diff против PATCH.
+	var curMode, curStr string
+	var curAttack bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT mode, strictness, attack_mode FROM policy WHERE host = $1`,
 		site,
-	).Scan(&curMode, &curStr, &curAttack)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		exists = false
-	case err != nil:
+	).Scan(&curMode, &curStr, &curAttack); err != nil {
+		// pgx.ErrNoRows здесь невозможен — ensureRow только что положил row.
 		return false, nil, fmt.Errorf("select current: %w", err)
 	}
 
-	// Сначала собираем target-значения, потом считаем diff. Если row нет —
-	// базой служит PoolDefault.
-	target := catalog.PoolDefault()
-	if exists {
-		target.Mode = curMode
-		target.Strictness = curStr
-		target.AttackMode = curAttack
-	}
+	targetMode, targetStr, targetAttack := curMode, curStr, curAttack
 	var changed []string
-	if p.Mode != nil && *p.Mode != target.Mode {
+	if p.Mode != nil && *p.Mode != targetMode {
 		changed = append(changed, "mode")
-		target.Mode = *p.Mode
+		targetMode = *p.Mode
 	}
-	if p.Strictness != nil && *p.Strictness != target.Strictness {
+	if p.Strictness != nil && *p.Strictness != targetStr {
 		changed = append(changed, "strictness")
-		target.Strictness = *p.Strictness
+		targetStr = *p.Strictness
 	}
-	if p.AttackMode != nil && *p.AttackMode != target.AttackMode {
+	if p.AttackMode != nil && *p.AttackMode != targetAttack {
 		changed = append(changed, "attack_mode")
-		target.AttackMode = *p.AttackMode
+		targetAttack = *p.AttackMode
 	}
 
-	if exists && len(changed) == 0 {
-		// Полный no-op: row есть, все переданные поля совпадают. updated_at
-		// не трогаем — reloader не таскает пустой diff, дашборд видит
-		// `changed:false`.
-		if err := tx.Commit(ctx); err != nil {
-			return false, nil, fmt.Errorf("commit: %w", err)
-		}
-		return false, nil, nil
-	}
-
-	if !exists {
-		// Новый row: используем PoolDefault'ы для всех нестроковых полей + patch.
-		// JSONB-массивы инициализируем эквивалентом '[]'::jsonb через
-		// маршалинг пустых slice'ов (PoolDefault уже даёт []T{}).
-		uaJSON, err := mustMarshal(target.UABlacklist)
-		if err != nil {
-			return false, nil, err
-		}
-		ipWLJSON, err := mustMarshal(target.IPWhitelist)
-		if err != nil {
-			return false, nil, err
-		}
-		ipBLJSON, err := mustMarshal(target.IPBlocklist)
-		if err != nil {
-			return false, nil, err
-		}
-		asnJSON, err := mustMarshal(target.ASNBlock)
-		if err != nil {
-			return false, nil, err
-		}
-		geoJSON, err := mustMarshal(target.GeoWhitelist)
-		if err != nil {
-			return false, nil, err
-		}
-		rateJSON, err := mustMarshal(target.RateRules)
-		if err != nil {
-			return false, nil, err
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO policy (host, mode, strictness, attack_mode,
-				ua_blacklist, ip_whitelist, ip_blocklist,
-				asn_block, geo_whitelist, rate_rules, updated_at)
-			VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, NOW())`,
-			site, target.Mode, target.Strictness, target.AttackMode,
-			uaJSON, ipWLJSON, ipBLJSON, asnJSON, geoJSON, rateJSON,
-		); err != nil {
-			return false, nil, fmt.Errorf("insert: %w", err)
-		}
-		// Для нового row "changed" — это весь patch (все переданные поля,
-		// независимо от того, отличались ли от default'а).
-		if len(changed) == 0 {
-			for _, f := range []struct {
-				name string
-				set  bool
-			}{
-				{"mode", p.Mode != nil},
-				{"strictness", p.Strictness != nil},
-				{"attack_mode", p.AttackMode != nil},
-			} {
-				if f.set {
-					changed = append(changed, f.name)
-				}
-			}
-		}
-	} else {
-		if _, err := tx.Exec(ctx, `
+	// Если поля совпадают с current — UPDATE пропускаем (updated_at сохраняется).
+	if len(changed) > 0 {
+		if _, err := s.pool.Exec(ctx, `
 			UPDATE policy
 			SET mode = $2, strictness = $3, attack_mode = $4, updated_at = NOW()
 			WHERE host = $1`,
-			site, target.Mode, target.Strictness, target.AttackMode,
+			site, targetMode, targetStr, targetAttack,
 		); err != nil {
 			return false, nil, fmt.Errorf("update: %w", err)
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return false, nil, fmt.Errorf("commit: %w", err)
+	switch {
+	case inserted:
+		// Новый row: changed=true. diff — все ЯВНО переданные поля
+		// (independent of совпадения с PoolDefault), так дашборд видит,
+		// что именно пришло из его PATCH.
+		fresh := patchFields(p)
+		return true, fresh, nil
+	case len(changed) > 0:
+		return true, changed, nil
+	default:
+		// Существующий row, все переданные поля совпали → no-op.
+		return false, nil, nil
 	}
-	return true, changed, nil
+}
+
+// patchFields — список имён полей, явно переданных в patch (для diff
+// нового row'a, где сравнение с current бессмысленно).
+func patchFields(p PolicyPatch) []string {
+	var out []string
+	if p.Mode != nil {
+		out = append(out, "mode")
+	}
+	if p.Strictness != nil {
+		out = append(out, "strictness")
+	}
+	if p.AttackMode != nil {
+		out = append(out, "attack_mode")
+	}
+	return out
 }
 
 // AppendStringArray делает идемпотентный append в JSONB-string-массив.
@@ -188,7 +182,7 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
 	}
-	if err := s.ensureRow(ctx, site); err != nil {
+	if _, err := s.ensureRow(ctx, site); err != nil {
 		return false, err
 	}
 	// jsonb-containment: уже есть → no-op. fmt.Sprintf для имени колонки безопасен
@@ -224,7 +218,7 @@ func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string
 // AppendASN — симметрично AppendStringArray, но для числового asn_block.
 // JSONB-containment работает на скалярных значениях, поэтому семантика та же.
 func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, error) {
-	if err := s.ensureRow(ctx, site); err != nil {
+	if _, err := s.ensureRow(ctx, site); err != nil {
 		return false, err
 	}
 	q := `UPDATE policy
@@ -269,45 +263,26 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 
 // ensureRow создаёт row с PoolDefault если site нет. Идемпотентно через
 // ON CONFLICT DO NOTHING — не перетирает существующие значения.
-func (s *Store) ensureRow(ctx context.Context, site string) error {
+// Возвращает inserted=true когда row был только что создан (RowsAffected==1),
+// иначе false (row уже был). Caller'у это нужно для разделения «новый
+// site» vs «существующий» без дополнительного SELECT (PR-58 review,
+// gemini medium).
+func (s *Store) ensureRow(ctx context.Context, site string) (bool, error) {
 	def := catalog.PoolDefault()
-	uaJSON, err := mustMarshal(def.UABlacklist)
-	if err != nil {
-		return err
-	}
-	ipWLJSON, err := mustMarshal(def.IPWhitelist)
-	if err != nil {
-		return err
-	}
-	ipBLJSON, err := mustMarshal(def.IPBlocklist)
-	if err != nil {
-		return err
-	}
-	asnJSON, err := mustMarshal(def.ASNBlock)
-	if err != nil {
-		return err
-	}
-	geoJSON, err := mustMarshal(def.GeoWhitelist)
-	if err != nil {
-		return err
-	}
-	rateJSON, err := mustMarshal(def.RateRules)
-	if err != nil {
-		return err
-	}
-	_, err = s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO policy (host, mode, strictness, attack_mode,
 			ua_blacklist, ip_whitelist, ip_blocklist,
 			asn_block, geo_whitelist, rate_rules)
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
 		ON CONFLICT (host) DO NOTHING`,
 		site, def.Mode, def.Strictness, def.AttackMode,
-		uaJSON, ipWLJSON, ipBLJSON, asnJSON, geoJSON, rateJSON,
+		poolDefaultUAJSON, poolDefaultIPWLJSON, poolDefaultIPBLJSON,
+		poolDefaultASNJSON, poolDefaultGeoJSON, poolDefaultRateJSON,
 	)
 	if err != nil {
-		return fmt.Errorf("ensure row: %w", err)
+		return false, fmt.Errorf("ensure row: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
 // GetPolicy возвращает полную Policy для site. ErrNotFound если row нет —
@@ -420,16 +395,4 @@ func unmarshalNonNil(b []byte, dst any) error {
 		return nil
 	}
 	return json.Unmarshal(b, dst)
-}
-
-// mustMarshal — обёртка над json.Marshal для типов, которые точно
-// сериализуются (slice/map простых типов из catalog.PoolDefault). Возвращает
-// ошибку наверх (а не паникует), чтобы errchkjson не ругался и чтобы
-// hypothetic future-тип, который ломает Marshal, валил handler корректно.
-func mustMarshal(v any) ([]byte, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("json.Marshal: %w", err)
-	}
-	return b, nil
 }
