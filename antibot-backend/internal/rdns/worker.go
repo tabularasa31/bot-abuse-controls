@@ -48,6 +48,12 @@ import (
 // для verified и rejected. См. vision.md §Шаг 2.2 (v0.6).
 const VerificationTTL = time.Hour
 
+// dbWriteTimeout — budget на UpsertVerifiedBot после того как parent ctx
+// уже мог быть cancel'нут (graceful shutdown). UPSERT по PK + индекс
+// миллисекунды; 5с с запасом, чтобы выдержать busy postgres под нагрузкой
+// и не задушить shutdown в случае если pgxpool занят.
+const dbWriteTimeout = 5 * time.Second
+
 // Канонические семейства поисковых ботов. Edge различает их по значению
 // в каталоге ("<status>:<family>"); ключевые слова — те же четыре,
 // что в config-distribution.md §"The 'catalog' concept".
@@ -355,6 +361,19 @@ func (w *Worker) processSafely(ctx context.Context, t task) {
 }
 
 func (w *Worker) process(ctx context.Context, t task) {
+	// Sanitize: net.Resolver.LookupAddr ждёт чистый IP-литерал. Если
+	// в логе пришло "1.2.3.4:54321", "[::1]:443" или что-то ещё с
+	// артефактами эмиттера — lookup провалится, и легитимный бот-IP
+	// получил бы rejected:family на час (HasVerifiedBotIP заблокировал
+	// бы re-check). Лучше тихо дропнуть задачу с метрикой —
+	// следующий лог-event с этого IP попробует снова. PR #53 review.
+	if net.ParseIP(t.ip) == nil {
+		w.skipped.Inc()
+		w.logger.Debug("rdns: skip task with unparseable ip",
+			"ip", t.ip, "family", t.claimedFamily)
+		return
+	}
+
 	// Per-task deadline. На зависшем DNS воркер бы съел consumer-слот
 	// до родительского shutdown'a — это убивало бы throughput для
 	// нормальных задач после первого зависшего IP.
@@ -364,10 +383,16 @@ func (w *Worker) process(ctx context.Context, t task) {
 	status, family := w.classify(taskCtx, t)
 	expiresAt := w.now().Add(VerificationTTL)
 
-	// Используем родительский ctx для DB-write: задаче DNS-таймаут
-	// мог истечь, но писать результат всё равно надо (writes быстрые,
-	// держим запас на shutdown).
-	if err := w.db.UpsertVerifiedBot(ctx, t.ip, family, status, expiresAt); err != nil {
+	// DB-write: родительский ctx уже cancel'нут при graceful shutdown
+	// (app.shutdown зовёт cancelWorkers() ДО wg.Wait). Если использовать
+	// этот ctx — UpsertVerifiedBot вернёт context.Canceled для каждого
+	// task'a, успевшего пройти classify до cancel, dbErr спайкает на
+	// каждом деплое. Отрываем cancellation через context.WithoutCancel,
+	// ставим короткий собственный deadline — тот же приём, что в
+	// dbloader.Migrate для pg_advisory_unlock. PR #53 review.
+	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), dbWriteTimeout)
+	defer writeCancel()
+	if err := w.db.UpsertVerifiedBot(writeCtx, t.ip, family, status, expiresAt); err != nil {
 		w.dbErr.Inc()
 		w.logger.Error("rdns: db upsert failed",
 			"ip", t.ip, "family", family, "status", status, "err", err)
@@ -404,6 +429,11 @@ func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 		// Незнакомая family — receiver не должен такое пропускать; защита.
 		return "rejected", t.claimedFamily
 	}
+	// dnsErr — per-task флаг, инкрементим максимум один раз. До PR #53
+	// review мы инкрементили на каждую неудачную LookupAddr/LookupHost,
+	// и task с 3 PTR + 3 неудачами LookupHost давал dnsErr=4 — ломая
+	// rate-метрики (dnsErr/enqueued > 100%).
+	dnsTrouble := false
 	ptrs, err := w.resolver.LookupAddr(ctx, t.ip)
 	if err != nil || len(ptrs) == 0 {
 		w.dnsErr.Inc()
@@ -421,7 +451,7 @@ func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 		}
 		hosts, err := w.resolver.LookupHost(ctx, name)
 		if err != nil {
-			w.dnsErr.Inc()
+			dnsTrouble = true
 			continue
 		}
 		for _, h := range hosts {
@@ -429,6 +459,9 @@ func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 				return "verified", t.claimedFamily
 			}
 		}
+	}
+	if dnsTrouble {
+		w.dnsErr.Inc()
 	}
 	return "rejected", t.claimedFamily
 }

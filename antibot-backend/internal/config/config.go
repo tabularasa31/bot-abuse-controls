@@ -96,13 +96,11 @@ func Load() (Config, error) {
 		}
 		cfg.MigrateOnStartup = b
 	}
-	if v := os.Getenv("RDNS_INTERVAL"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return cfg, fmt.Errorf("RDNS_INTERVAL: %w", err)
-		}
-		cfg.RDNSInterval = d
-	}
+	// RDNS_INTERVAL — deprecated после B7 (воркер reactive, периодики нет).
+	// Принимаем любое значение, включая невалидное / 0 / -1, чтобы старые
+	// compose'ы из B2 эры не ломали запуск. Реально нигде не читается.
+	// PR #53 review.
+	_ = os.Getenv("RDNS_INTERVAL")
 	if v := os.Getenv("RDNS_QUEUE_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -139,9 +137,7 @@ func Load() (Config, error) {
 		cfg.ShutdownTimeout = d
 	}
 	// time.NewTicker паникует при <=0, не даём пользователю прострелить ногу.
-	if cfg.RDNSInterval <= 0 {
-		return cfg, fmt.Errorf("RDNS_INTERVAL must be > 0, got %s", cfg.RDNSInterval)
-	}
+	// RDNSInterval — deprecated, не валидируем (см. выше).
 	if cfg.ShutdownTimeout <= 0 {
 		return cfg, fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0, got %s", cfg.ShutdownTimeout)
 	}

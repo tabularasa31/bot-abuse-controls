@@ -22,9 +22,23 @@ ALTER TABLE verified_bot_ips
     ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'verified'
         CHECK (status IN ('verified', 'rejected'));
 
+-- expires_at: добавляем без DEFAULT, отдельным UPDATE'ом раскидываем
+-- по verified_at прошлых записей, и только потом ставим DEFAULT +
+-- NOT NULL. Прямой `ADD COLUMN NOT NULL DEFAULT (NOW() + INTERVAL '1
+-- hour')` забэкфилил бы ВСЕ строки одним и тем же T+1h — через час
+-- dbloader.Load (`WHERE expires_at > NOW()`) выбросил бы их одним
+-- разом, и edge потерял бы весь verified-набор разом → cold-start
+-- storm на rDNS-резолвере. PR #53 review.
 ALTER TABLE verified_bot_ips
-    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL
-        DEFAULT (NOW() + INTERVAL '1 hour');
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+UPDATE verified_bot_ips
+    SET expires_at = verified_at + INTERVAL '1 hour'
+    WHERE expires_at IS NULL;
+
+ALTER TABLE verified_bot_ips
+    ALTER COLUMN expires_at SET DEFAULT (NOW() + INTERVAL '1 hour'),
+    ALTER COLUMN expires_at SET NOT NULL;
 
 -- Worker дёргает DELETE WHERE expires_at <= NOW() периодически, чтобы
 -- таблица не росла бесконечно (запросы с фильтром expires_at > NOW()

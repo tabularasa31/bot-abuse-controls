@@ -25,6 +25,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// errOversizedLine — одна строка батча длиннее maxLineBytes. bufio.Scanner
+// поднимает bufio.ErrTooLong; для receiver это "одна битая строка", а не
+// "битый батч" — отвечаем 202 и инкрементим parseErr, чтобы edge не
+// ретраил весь батч (что задублировало бы Enqueue для всех нормальных
+// строк до плохой). См. PR #53 review.
+var errOversizedLine = errors.New("logs: oversized line in batch")
+
 // maxBodyBytes — потолок на одно тело запроса. Edge батчит BAC_LOG короткими
 // строками; 10 MiB — с запасом на батч из сотен тысяч записей и одновременно
 // твёрдый предохранитель от случайного/злонамеренного огромного POST'а.
@@ -81,24 +88,32 @@ func NewWithEnqueuer(reg prometheus.Registerer, enqueue Enqueuer, classify Famil
 	r := &Receiver{
 		received: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "antibot_backend_log_lines_received_total",
-			Help: "BAC_LOG lines accepted by the receiver. Increments before parsing — counts what arrived, not what was understood.",
-		}),
-		parsed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "antibot_backend_log_lines_parsed_total",
-			Help: "BAC_LOG lines successfully parsed as JSON.",
-		}),
-		parseErr: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "antibot_backend_log_lines_parse_errors_total",
-			Help: "BAC_LOG lines rejected as invalid JSON. Receiver still 202s — one bad line per batch must not poison the rest of the batch.",
-		}),
-		botSpotted: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "antibot_backend_log_bot_ua_spotted_total",
-			Help: "Lines with a known search-bot UA (Googlebot/bingbot/YandexBot/DuckDuckBot) — upper bound on rDNS enqueue attempts.",
+			Help: "BAC_LOG lines accepted by the receiver. Counts every line read from the body, regardless of parse outcome.",
 		}),
 		enqueue:  enqueue,
 		classify: classify,
 	}
-	reg.MustRegister(r.received, r.parsed, r.parseErr, r.botSpotted)
+	reg.MustRegister(r.received)
+	// parsed/parseErr/botSpotted — это метрики dispatch-пути. В skeleton-
+	// режиме (enqueue==nil) dispatch уходит в ранний return и эти счётчики
+	// никогда не двигались бы, но висели в /metrics на нуле — оператор
+	// видел бы flatline и думал, что receiver сломан. Регистрируем их
+	// только когда dispatch реально работает. PR #53 review.
+	if enqueue != nil && classify != nil {
+		r.parsed = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "antibot_backend_log_lines_parsed_total",
+			Help: "BAC_LOG lines successfully parsed as JSON.",
+		})
+		r.parseErr = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "antibot_backend_log_lines_parse_errors_total",
+			Help: "BAC_LOG lines rejected as invalid JSON / oversized. Receiver still 202s — one bad line per batch must not poison the rest of the batch.",
+		})
+		r.botSpotted = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "antibot_backend_log_bot_ua_spotted_total",
+			Help: "Lines with a known search-bot UA (Googlebot/bingbot/YandexBot/DuckDuckBot) — upper bound on rDNS enqueue attempts.",
+		})
+		reg.MustRegister(r.parsed, r.parseErr, r.botSpotted)
+	}
 	return r
 }
 
@@ -130,19 +145,36 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = r.Body.Close() }()
 
 	n, err := rcv.consume(r.Body)
+	// received инкрементим всегда по числу обработанных строк, даже если
+	// дальше вернём 4xx: dispatch уже мог дёрнуть Enqueue/parseErr/botSpotted
+	// для строк ДО ошибки, и без received_total получились бы метрики
+	// botSpotted > received (инверсия, ломающая capacity-планирование).
+	// PR #53 review.
+	if n > 0 {
+		rcv.received.Add(float64(n))
+	}
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			http.Error(w, `{"error":"request_too_large"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
-		// Обрыв соединения / прочее IO — счётчик не двигаем, отвечать в
-		// сломанный сокет смысла мало, но явный 400 пусть будет на случай,
-		// если связь успела восстановиться к моменту записи.
+		if errors.Is(err, errOversizedLine) {
+			// Одна строка батча длиннее maxLineBytes. Отвечаем 202 —
+			// edge не должен ретраить из-за одной плохой строки
+			// (иначе Enqueue для всех нормальных строк до неё
+			// задвоится). parseErr уже инкрементирован в consume().
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"status":"accepted","note":"oversized line skipped"}`))
+			return
+		}
+		// Обрыв соединения / прочее IO — отвечать в сломанный сокет
+		// смысла мало, но явный 400 пусть будет на случай, если связь
+		// успела восстановиться к моменту записи.
 		http.Error(w, `{"error":"read_failed"}`, http.StatusBadRequest)
 		return
 	}
-	rcv.received.Add(float64(n))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte(`{"status":"accepted","note":"sink/batching wiring lands in B6/B9"}`))
@@ -172,6 +204,18 @@ func (rcv *Receiver) consume(body io.Reader) (int, error) {
 		rcv.dispatch(line)
 	}
 	if err := sc.Err(); err != nil {
+		// bufio.ErrTooLong — одна строка длиннее maxLineBytes. Это
+		// "битая строка", а не "битый батч": считаем как parseErr и
+		// возвращаем sentinel'ную ошибку, которую handle() мапит в
+		// 202 вместо 400/ErrServerClosed. См. errOversizedLine.
+		if errors.Is(err, bufio.ErrTooLong) {
+			// parseErr регистрируется только когда есть enqueue (skeleton-
+			// режим без него — без счётчика). Защищаем nil-deref.
+			if rcv.parseErr != nil {
+				rcv.parseErr.Inc()
+			}
+			return count, errOversizedLine
+		}
 		return count, err
 	}
 	return count, nil
