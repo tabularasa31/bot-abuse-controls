@@ -132,6 +132,18 @@ _M.catalogs = {
         -- about; if a future writer joins, switch to a typed match the
         -- way fp_state.match() guards fp_blocklist (see fp_blocklist's
         -- sweep comment for the worked example).
+        --
+        -- Перформанс — тот же trade-off, что в fp_blocklist sweep'e:
+        -- `dict:get_keys(0)` лочит весь shared_dict на время скана.
+        -- nginx.demo.conf размечает verified_bots под "tens of thousands
+        -- of IPs", где блокировка становится видна на p99 (gemini-review
+        -- B5 и снова на этом PR). План тот же: side-index «keys-of-gen-N»
+        -- в отдельном ключе `meta`, чтобы sweep шёл по узкому списку
+        -- вместо полного скана. Пока что осознанно держим симметрию с
+        -- fp_blocklist'ом (RFC §В1 алгоритм) — мигрируем оба каталога
+        -- одной задачей, когда реальный размер verified_bot_ips перейдёт
+        -- этот порог (на стенде без backend dict пустой, фактического
+        -- риска нет).
         sweep = function(dict, old_gen)
             if old_gen < 0 then return 0 end
             local suffix = ":" .. old_gen
