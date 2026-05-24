@@ -229,24 +229,41 @@ case "${AUTH_MODE}" in
         esac
         ;;
     mtls)
-        # Negative path: use a BARE curl (no --cert/--key) — even though CURL
-        # is mtls-augmented above for checks #2–#6, here we explicitly probe
-        # the "no client cert" case. nginx rejects with 400 No required SSL
-        # certificate; OpenSSL may also fail the handshake → curl exit non-zero.
+        # Negative path: BARE curl (no --cert/--key) на /health (Channel C
+        # location). После PR-58 fix `ssl_verify_client optional` пропускает
+        # TLS handshake без cert'a, но `if ($ssl_client_verify != SUCCESS)`
+        # в auth-channelc.conf отдаёт 495 (nginx SSL Certificate Error).
+        # Раньше нас отвергал ssl_verify_client=on на TLS-уровне → 400/000/496;
+        # оба варианта оставляем в списке валидных для backward-compat при
+        # apply'е этого fix'a поэтапно.
         code="$(curl -sk --connect-timeout 3 --max-time 5 \
             -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
-        if [ "${code}" = "400" ] || [ "${code}" = "000" ] || [ "${code}" = "496" ]; then
-            pass "no client cert rejected (code=${code})"
+        if [ "${code}" = "495" ] || [ "${code}" = "400" ] || [ "${code}" = "000" ] || [ "${code}" = "496" ]; then
+            pass "no client cert rejected on /health (code=${code})"
         else
-            bad "no client cert accepted with code=${code} (expected 400/000/496)"
+            bad "no client cert accepted on /health with code=${code} (expected 495/400/000/496)"
         fi
         # Happy path: the augmented ${CURL[@]} already carries --cert/--key
         # (set up at the top when AUTH_MODE=mtls), so reuse it.
         code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
         if [ "${code}" = "200" ]; then
-            pass "edge-client cert accepted (${code})"
+            pass "edge-client cert accepted on /health (${code})"
         else
-            bad "edge-client cert rejected (${code})"
+            bad "edge-client cert rejected on /health (${code})"
+        fi
+        # PR-58 review fix: /antibot/v1/* НЕ должно гейтиться mTLS —
+        # dashboard-backend ходит туда без edge client cert'a, только bearer
+        # + dashboard-cidr.conf. BARE curl на /antibot/v1/policy/...
+        # должен пройти TLS handshake (нет mtls-rejection), upstream
+        # ответит уже своей auth-логикой (401 без bearer = норма; главное
+        # что НЕ 495 от mtls-enforcement).
+        code="$(curl -sk --connect-timeout 3 --max-time 5 \
+            -o /dev/null -w '%{http_code}' \
+            "https://${HOST}/antibot/v1/policy/verify-mtls-isolation.example")" || code=000
+        if [ "${code}" = "401" ] || [ "${code}" = "404" ]; then
+            pass "/antibot/v1/* not gated by mtls (got ${code} — backend auth, not nginx)"
+        else
+            bad "/antibot/v1/* unexpectedly returned ${code} under AUTH_MODE=mtls (expected 401/404; 495 means mtls-enforcement still gating)"
         fi
         ;;
     off)
@@ -257,7 +274,89 @@ case "${AUTH_MODE}" in
         ;;
 esac
 
-echo "8. Fail-stale on edge (cross-stack, opt-in via STAND_HOST)"
+echo "8. Policy API (B10): PATCH attack_mode -> backend reload -> /catalog/attack_mode"
+# Probes the dashboard-backend → antibot-backend → edge path on the
+# backend-side only (catalog ETag change). Edge swap happens once B12
+# registers the catalog in catalog_pull.lua._M.catalogs.
+#
+# Auth shape: bearer with DASHBOARD_API_TOKEN. We read the token from .env
+# (same source the compose passes to the container). Skip the check if the
+# token isn't configured — fail-closed: /antibot/v1/* won't be mounted, so
+# probing makes no sense.
+DASHBOARD_TOKEN="${DASHBOARD_API_TOKEN:-}"
+if [ -z "${DASHBOARD_TOKEN}" ] && [ -f "${ROOT}/.env" ]; then
+    DASHBOARD_TOKEN="$(grep -E '^DASHBOARD_API_TOKEN=' "${ROOT}/.env" \
+        | tail -1 \
+        | sed -E 's/^DASHBOARD_API_TOKEN=//; s/[[:space:]]*#.*$//; s/^["'"'"']//; s/["'"'"']$//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+        | tr -d '\r' || true)"
+fi
+case "${host_only}" in
+    localhost | 127.0.0.1 | ::1)
+        if [ -z "${DASHBOARD_TOKEN}" ]; then
+            skip "DASHBOARD_API_TOKEN not set — policy API disabled (set in .env)"
+        else
+            site="verify-policy-$(date +%s).example"
+            patch_url="https://${HOST}/antibot/v1/policy/${site}"
+            cat_url="https://${HOST}/catalog/attack_mode?site=${site}"
+
+            # Negative: bad token → 401. Run before the real PATCH so a
+            # mis-typed token can't accidentally write state.
+            code="$("${CURL[@]}" -X PATCH -H 'Authorization: Bearer wrong' \
+                -H 'Content-Type: application/json' \
+                -o /dev/null -w '%{http_code}' \
+                -d '{"attack_mode":true}' "${patch_url}")" || code=000
+            if [ "${code}" = "401" ]; then
+                pass "bad token rejected (${code})"
+            else
+                bad "bad token accepted with ${code} (expected 401)"
+            fi
+
+            # First PATCH — expect changed:true.
+            body="$("${CURL[@]}" -X PATCH \
+                -H "Authorization: Bearer ${DASHBOARD_TOKEN}" \
+                -H 'Content-Type: application/json' \
+                -d '{"attack_mode":true}' "${patch_url}")" || body=""
+            if printf '%s' "${body}" | grep -q '"changed":true'; then
+                pass "PATCH attack_mode -> changed:true"
+            else
+                bad "PATCH attack_mode body=${body} (expected changed:true)"
+            fi
+
+            # Idempotent repeat — expect changed:false.
+            body="$("${CURL[@]}" -X PATCH \
+                -H "Authorization: Bearer ${DASHBOARD_TOKEN}" \
+                -H 'Content-Type: application/json' \
+                -d '{"attack_mode":true}' "${patch_url}")" || body=""
+            if printf '%s' "${body}" | grep -q '"changed":false'; then
+                pass "repeat PATCH -> changed:false (idempotent)"
+            else
+                bad "repeat PATCH body=${body} (expected changed:false)"
+            fi
+
+            # Wait for reloader tick (5s default) + small buffer, then check
+            # /catalog/attack_mode reflects the change.
+            echo "   waiting up to 8s for reloader tick..."
+            ok=0
+            for _ in 1 2 3 4 5 6 7 8; do
+                cat_body="$("${CURL[@]}" "${cat_url}" 2>/dev/null || true)"
+                if printf '%s' "${cat_body}" | grep -q '"on":true'; then
+                    ok=1; break
+                fi
+                sleep 1
+            done
+            if [ "${ok}" = "1" ]; then
+                pass "/catalog/attack_mode?site=${site} -> on:true within 8s"
+            else
+                bad "/catalog/attack_mode?site=${site} body=${cat_body} (expected on:true)"
+            fi
+        fi
+        ;;
+    *)
+        skip "remote host ${host_only} — policy API check needs local .env"
+        ;;
+esac
+
+echo "9. Fail-stale on edge (cross-stack, opt-in via STAND_HOST)"
 if [ -n "${STAND_HOST:-}" ]; then
     # Capture the staleness gauge before and after a backend stop. We don't
     # actually stop containers here — operator does it manually so the test

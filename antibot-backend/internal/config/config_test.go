@@ -51,3 +51,28 @@ func TestLoad_MigrateOnStartup_RejectsGarbage(t *testing.T) {
 		t.Fatal("Load: ожидалась ошибка для невалидного MIGRATE_ON_STARTUP")
 	}
 }
+
+// TestLoad_DashboardAPIToken — пустой по умолчанию (fail-closed: handler
+// не регистрируется), читается из ENV.
+func TestLoad_DashboardAPIToken(t *testing.T) {
+	t.Run("default empty", func(t *testing.T) {
+		t.Setenv("DASHBOARD_API_TOKEN", "")
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DashboardAPIToken != "" {
+			t.Errorf("DashboardAPIToken default = %q, want empty", cfg.DashboardAPIToken)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		t.Setenv("DASHBOARD_API_TOKEN", "s3cret-xyz")
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DashboardAPIToken != "s3cret-xyz" {
+			t.Errorf("DashboardAPIToken = %q, want s3cret-xyz", cfg.DashboardAPIToken)
+		}
+	})
+}
