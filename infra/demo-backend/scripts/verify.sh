@@ -131,14 +131,38 @@ else
     bad "GET /catalog/bogus -> ${code} (expected 404)"
 fi
 
-echo "5. POST /v1/logs accepts payload (B2 skeleton; sink wiring is B6/B9)"
-code="$(printf 'line1\nline2\n' \
+echo "5. POST /v1/logs accepts payload + sink ingests into PostgreSQL (B9)"
+# Тело — валидный BAC_LOG-record (миним. required: request_id/timestamp/edge_id).
+# Без него sink инкрементирует parse_errors_total и оставляет inserted=0,
+# acceptance B9 не пройдёт.
+ts="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+body="$(printf '{"request_id":"verify-%s","timestamp":"%s","edge_id":"verify","stage":"egress","verdict":"pass","action":"pass","mode":"shadow"}\n' \
+    "$(date +%s)" "${ts}")"
+code="$(printf '%s' "${body}" \
     | "${CURL[@]}" -X POST --data-binary @- -o /dev/null -w '%{http_code}' \
         "https://${HOST}/v1/logs")" || code=000
 if [ "${code}" = "202" ]; then
     pass "POST /v1/logs -> 202"
 else
     bad "POST /v1/logs -> ${code} (expected 202)"
+fi
+# inserted_total живёт в /metrics только при wired sink'е (POSTGRES_DSN +
+# LOGS_SINK_SPOOL_DIR); без них считаем шаг N/A — для smoke'а CI этого
+# достаточно, чтобы поймать «sink упал на init»: метрика отсутствует и
+# мы тегаем 'skipped', а не 'pass'. Sink батчит до FlushInterval=2s →
+# даём 5s окно.
+echo "   waiting up to 5s for sink to flush the verify payload..."
+sleep 5
+metrics="$("${CURL[@]}" "https://${HOST}/metrics" 2>/dev/null || true)"
+if printf '%s' "${metrics}" | grep -q '^antibot_backend_log_sink_inserted_total '; then
+    inserted="$(printf '%s' "${metrics}" | awk '/^antibot_backend_log_sink_inserted_total / {print $2; exit}')"
+    if awk -v v="${inserted}" 'BEGIN{exit !(v+0>0)}'; then
+        pass "antibot_backend_log_sink_inserted_total=${inserted} (>0)"
+    else
+        bad "antibot_backend_log_sink_inserted_total=${inserted} (expected >0 after POST)"
+    fi
+else
+    echo "   skip: sink metric absent (POSTGRES_DSN / LOGS_SINK_SPOOL_DIR not set?)"
 fi
 
 echo "6. rDNS worker alive (counter present in /metrics)"

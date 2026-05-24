@@ -222,6 +222,14 @@ func NewWithWriter(cfg Config, w Writer, logger *slog.Logger, reg prometheus.Reg
 // Submit — non-blocking, дёргается с hot-path receiver. Копия line — её
 // уже сделал bufio.Scanner владельцу, нам безопасно держать ссылку, но
 // scanner переиспользует свой буфер на следующей итерации → нужно скопировать.
+//
+// stopped-проверка best-effort: формально между Load и select-write есть
+// окно, в которое consume может уже выйти из drain-цикла и оставить
+// записанный line осиротевшим в буфере. В app.shutdown HTTP-сервер
+// дренируется ДО cancelWorkers (см. app/app.go shutdown), так что
+// receiver-горутины завершаются до того, как consume увидит ctx.Done —
+// окна в проде не наступает. Mutex здесь добавлял бы contention на
+// каждый log-line ради сценария, отсутствующего по порядку shutdown'a.
 func (s *Sink) Submit(line []byte) {
 	if s.stopped.Load() {
 		return
@@ -263,29 +271,44 @@ func (s *Sink) consume(ctx context.Context) {
 		batch = batch[:0]
 	}
 
+	// detachedFlush — общий хелпер для всех флашей в shutdown-фазе:
+	// ctx уже отменён, но writer.Insert должен иметь шанс отдать батч в
+	// DB (иначе батч уйдёт в spill, хотя DB здорова). WithoutCancel рвёт
+	// cancellation; WithTimeout даёт жёсткую границу — иначе зависший
+	// CopyFrom на мёртвой DB пережил бы ShutdownTimeout, wg.Wait
+	// abandon'нул бы воркера, pool.Close race'нулся бы с in-flight
+	// CopyFrom, и финальный батч пропал бы и из DB, и из спула
+	// (code-review #56). FlushInterval — приемлемый бюджет: он уже задаёт
+	// порядок «как быстро мы ждём ответа sink'а» в нормальной работе.
+	detachedFlush := func(b [][]byte) {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.FlushInterval)
+		defer cancel()
+		s.flush(fctx, b)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Дренируем оставшийся канал, чтобы submitted-counter сошёлся
-			// с inserted+spooled+parseErr на штатной остановке. Финальный
-			// флаш — после.
+			// stopped=true ДО drain'a: окно между ctx.Done и Store
+			// должно быть нулевым, иначе Submit, прошедший Load до
+			// Store, мог бы записать в канал после drain'а и осиротить
+			// строку. См. также комментарий в Submit.
 			s.stopped.Store(true)
 			for {
 				select {
 				case line := <-s.ch:
 					batch = append(batch, line)
 					if len(batch) >= s.cfg.BatchSize {
-						s.flush(ctx, batch)
+						// Все флаши на shutdown-фазе — через detachedFlush
+						// (не только финальный): mid-drain батч с
+						// canceled ctx сразу спилл'ился бы без попытки
+						// в DB (code-review #56).
+						detachedFlush(batch)
 						batch = batch[:0]
 					}
 				default:
 					if len(batch) > 0 {
-						// ctx уже отменён shutdown'ом, но финальный
-						// флаш должен пройти — WithoutCancel сохраняет
-						// values (tracing/log), но рвёт cancellation,
-						// иначе writer.Insert упадёт на canceled ctx
-						// и батч уйдёт в spill вместо DB.
-						s.flush(context.WithoutCancel(ctx), batch)
+						detachedFlush(batch)
 					}
 					return
 				}
@@ -438,10 +461,24 @@ func (s *Sink) drainOnce(ctx context.Context) {
 			return
 		}
 		if err := os.Remove(path); err != nil {
-			s.logger.Warn("logsink: drain remove failed", "err", err, "path", path)
-			// Файл уже в DB — повторное чтение даст дубликаты. Stop'аемся,
-			// чтобы оператор увидел в логах и руками удалил/переименовал.
-			return
+			// Файл уже в DB — без квaрантина следующий drain-тик
+			// перечитает и вставит дубликаты (logs не имеет natural-key
+			// на request_id, только BIGSERIAL id; code-review #56).
+			// Переименовываем в .quarantine — listSpoolFiles фильтрует
+			// по префиксу `batch-` и суффиксу `.ndjson`, так что
+			// quarantine-файлы больше не попадают в drain. Если и
+			// rename упал — отдаём операцию оператору.
+			quar := path + ".quarantine"
+			if rerr := os.Rename(path, quar); rerr != nil {
+				s.logger.Error("logsink: drain remove AND quarantine-rename failed — RISK OF DUPLICATES on next tick",
+					"err", err, "rename_err", rerr, "path", path)
+				return
+			}
+			s.logger.Warn("logsink: drain remove failed, file quarantined to avoid duplicate insert",
+				"err", err, "path", path, "quarantined_to", quar)
+			s.drained.Add(float64(len(lines)))
+			s.updateSpoolGauge()
+			continue
 		}
 		s.drained.Add(float64(len(lines)))
 		s.updateSpoolGauge()
@@ -467,7 +504,13 @@ func (s *Sink) enforceSpoolBudget() error {
 		}
 		total += info.Size()
 	}
-	for total > s.cfg.SpoolMaxBytes && len(files) > 0 {
+	// Никогда не evict'им последний оставшийся файл: если total>cap
+	// при len(files)==1, значит один батч сам по себе больше cap'a
+	// (misconfig: SpoolMaxBytes < ожидаемого размера батча). Удаление
+	// этого файла превратило бы «жёсткий bound» в «гарантированную
+	// потерю любого spill'a», даже когда диск пуст. Логируем как ошибку
+	// и оставляем как есть — оператор должен поднять SpoolMaxBytes.
+	for total > s.cfg.SpoolMaxBytes && len(files) > 1 {
 		victim := files[0]
 		path := filepath.Join(s.cfg.SpoolDir, victim.Name())
 		info, _ := victim.Info()
@@ -480,6 +523,10 @@ func (s *Sink) enforceSpoolBudget() error {
 		}
 		s.spoolDropped.Inc()
 		files = files[1:]
+	}
+	if total > s.cfg.SpoolMaxBytes && len(files) == 1 {
+		s.logger.Error("logsink: single spool file exceeds SpoolMaxBytes — bump cap or shrink batch size",
+			"bytes", total, "cap", s.cfg.SpoolMaxBytes, "file", files[0].Name())
 	}
 	s.updateSpoolGauge()
 	return nil

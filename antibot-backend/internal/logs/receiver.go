@@ -235,6 +235,10 @@ func (rcv *Receiver) consume(body io.Reader) (int, error) {
 			if rcv.parseErr != nil {
 				rcv.parseErr.Inc()
 			}
+			// Oversized-строка не доходит до sink.Submit ниже — её отбраковал
+			// scanner. В antibot_backend_log_sink_* движения не будет;
+			// дашборд аналитики должен учитывать parse_errors_total c
+			// receiver-уровня как полную картину потерь (code-review #56).
 			return count, errOversizedLine
 		}
 		return count, err
