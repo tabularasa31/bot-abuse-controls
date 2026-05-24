@@ -31,11 +31,11 @@ test:
 	else echo "luajit not on host; falling back to docker"; $(MAKE) test-docker; fi
 
 test-host:
-	luajit tests/ja4_helpers_test.lua && luajit tests/hygiene_test.lua && luajit tests/reputation_test.lua && luajit tests/rate_limit_test.lua && luajit tests/fp_blocklist_state_test.lua && luajit tests/tls_fp_test.lua && luajit tests/catalog_pull_test.lua
+	sh -c 'export LUA_PATH="infra/demo-stand/lua/?.lua;;"; luajit tests/ja4_helpers_test.lua && luajit tests/hygiene_test.lua && luajit tests/reputation_test.lua && luajit tests/rate_limit_test.lua && luajit tests/fp_blocklist_state_test.lua && luajit tests/tls_fp_test.lua && luajit tests/catalog_pull_test.lua && luajit tests/log_shipper_test.lua'
 
 test-docker:
 	docker run --rm -v $(PWD):/work -w /work $(OPENRESTY_IMAGE) \
-		sh -c "luajit tests/ja4_helpers_test.lua && luajit tests/hygiene_test.lua && luajit tests/reputation_test.lua && luajit tests/rate_limit_test.lua && luajit tests/fp_blocklist_state_test.lua && luajit tests/tls_fp_test.lua && luajit tests/catalog_pull_test.lua"
+		sh -c 'export LUA_PATH="infra/demo-stand/lua/?.lua;;"; luajit tests/ja4_helpers_test.lua && luajit tests/hygiene_test.lua && luajit tests/reputation_test.lua && luajit tests/rate_limit_test.lua && luajit tests/fp_blocklist_state_test.lua && luajit tests/tls_fp_test.lua && luajit tests/catalog_pull_test.lua && luajit tests/log_shipper_test.lua'
 
 # ---------- Linters ----------
 

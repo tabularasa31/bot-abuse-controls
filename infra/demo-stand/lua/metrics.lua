@@ -156,3 +156,55 @@ for name in pairs(catalog_pull.catalogs) do
 end
 ngx.say(table.concat(stale_lines, "\n"))
 ngx.say(table.concat(vmis_lines, "\n"))
+
+-- BAC_LOG shipper (B6 edge-side, log_shipper.lua). Per-worker очередь
+-- наполняется bac_log.emit'ом, фоновый таймер дренирует батчами на
+-- antibot-backend /v1/logs. Дашборды смотрят на:
+--   enqueued        — общий поток (≈ requests-через-каскад минус bypass);
+--   dropped{reason="overflow"} — очередь полная, бэкенд не успевает
+--                                (реальная нагрузка);
+--   dropped{reason="disabled"} — shipper выключен (ANTIBOT_BACKEND_URL
+--                                пустой) — config-issue, не нагрузка;
+--   shipped         — успешно доставленные строки на backend;
+--   ship_failed     — провальные POST'ы (батч теряется, потери ≈
+--                     shipped - enqueued + sum(dropped) только при != 0);
+--   batches_ok      — счётчик удачных батчей, для оценки пропускной
+--                     способности (shipped / batches_ok ≈ avg батч);
+--   shipper_loaded  — gauge 0/1: 0 если модуль не загрузился вовсе
+--                     (syntax-bug / missing dep) — алерт на shipper_loaded==0
+--                     ловит silent-failure, когда все остальные метрики
+--                     на нуле и непонятно «нет трафика» это или «модуль
+--                     никогда не стартовал».
+ngx.say(string.format([[
+# HELP antibot_bac_log_enqueued_total BAC_LOG lines added to the per-worker shipper queue.
+# TYPE antibot_bac_log_enqueued_total counter
+antibot_bac_log_enqueued_total %d
+
+# HELP antibot_bac_log_dropped_total BAC_LOG lines dropped, by reason. overflow = queue full (backend can't keep up); disabled = ANTIBOT_BACKEND_URL unset (config issue, edge sees traffic but cannot ship).
+# TYPE antibot_bac_log_dropped_total counter
+antibot_bac_log_dropped_total{reason="overflow"} %d
+antibot_bac_log_dropped_total{reason="disabled"} %d
+
+# HELP antibot_bac_log_shipped_total BAC_LOG lines successfully POSTed to antibot-backend /v1/logs (202).
+# TYPE antibot_bac_log_shipped_total counter
+antibot_bac_log_shipped_total %d
+
+# HELP antibot_bac_log_ship_failed_total Batches that failed to POST (transport error or non-202 response). Whole batch is lost (no retry; B9 disk-queue closes this gap).
+# TYPE antibot_bac_log_ship_failed_total counter
+antibot_bac_log_ship_failed_total %d
+
+# HELP antibot_bac_log_batches_ok_total Successful batch POSTs. shipped/batches_ok ≈ average batch size.
+# TYPE antibot_bac_log_batches_ok_total counter
+antibot_bac_log_batches_ok_total %d
+
+# HELP antibot_bac_log_shipper_loaded 1 if log_shipper.start() finished setup successfully (timer + http module + mTLS snapshot ready) OR was intentionally disabled by empty ANTIBOT_BACKEND_URL. 0 if start() bailed on an error path (resty.http missing, ngx.timer.every failed, or module never required at all). Alert on == 0 — это silent shipper-down, не intentional disabled.
+# TYPE antibot_bac_log_shipper_loaded gauge
+antibot_bac_log_shipper_loaded %d
+]],
+    get("bac_log_enqueued_total"),
+    get("bac_log_dropped_overflow_total"),
+    get("bac_log_dropped_disabled_total"),
+    get("bac_log_shipped_total"),
+    get("bac_log_ship_failed_total"),
+    get("bac_log_batches_ok_total"),
+    get("bac_log_shipper_loaded")))
