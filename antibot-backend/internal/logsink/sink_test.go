@@ -304,6 +304,37 @@ func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
 	t.Fatal("spool budget did not evict any file")
 }
 
+// listSpoolFiles должен пропускать .quarantine и .partial — иначе
+// drainOnce перечитает уже-в-DB файл и вставит дубликаты (PR-56 review).
+func TestListSpoolFiles_SkipsQuarantineAndPartial(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"batch-100-1.ndjson",
+		"batch-101-2.ndjson.quarantine",
+		"batch-102-3.ndjson.partial",
+		"batch-103-4.ndjson",
+		"unrelated.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := listSpoolFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		names := []string{}
+		for _, e := range got {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("got %d files %v, want exactly 2 active batch files", len(got), names)
+	}
+	if got[0].Name() != "batch-100-1.ndjson" || got[1].Name() != "batch-103-4.ndjson" {
+		t.Fatalf("unexpected order/contents: %s, %s", got[0].Name(), got[1].Name())
+	}
+}
+
 func TestSink_ParseErrorSkippedNotSpilled(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{

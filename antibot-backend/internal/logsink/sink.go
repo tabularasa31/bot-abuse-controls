@@ -744,7 +744,10 @@ func readNDJSON(path string) ([][]byte, error) {
 
 // listSpoolFiles возвращает спул-файлы, отсортированные по имени (имя
 // начинается с UnixNano → лексикографический порядок = хронологический).
-// Пропускаем `.partial` (незаконченные spill'ы).
+// Принимаем только `batch-*.ndjson` — БЕЗ суффикс-проверки `.quarantine`
+// (созданные drainOnce при недоступном Remove) и `.partial` (незаконченные
+// spill'ы) тоже имеют prefix `batch-` и без точной проверки суффикса .ndjson
+// drainer перечитал бы их и вставил повторно (PR-56 review, P1 blocker).
 func listSpoolFiles(dir string) ([]os.DirEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -756,10 +759,7 @@ func listSpoolFiles(dir string) ([]os.DirEntry, error) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasSuffix(name, ".partial") {
-			continue
-		}
-		if !strings.HasPrefix(name, "batch-") {
+		if !strings.HasPrefix(name, "batch-") || !strings.HasSuffix(name, ".ndjson") {
 			continue
 		}
 		out = append(out, e)
