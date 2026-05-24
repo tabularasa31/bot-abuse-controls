@@ -29,6 +29,7 @@ local shared_dict = {
         return metrics_store[k]
     end,
     get = function(_, k) return metrics_store[k] end,
+    set = function(_, k, v) metrics_store[k] = v end,
 }
 _G.ngx = {
     log = function(_, ...) ngx_logged[#ngx_logged + 1] = table.concat({ ... }, "") end,
@@ -88,7 +89,8 @@ do
     expect(ok == false, "1: enqueue без start возвращает false")
     expect(s.queue_size() == 0, "1: очередь пустая")
     expect(metrics_store.bac_log_enqueued_total == nil, "1: enqueued не двинулся")
-    expect(metrics_store.bac_log_dropped_total == 1, "1: dropped инкрементирован")
+    expect(metrics_store.bac_log_dropped_disabled_total == 1, "1: dropped_disabled инкрементирован")
+    expect(metrics_store.bac_log_dropped_overflow_total == nil, "1: overflow не двинулся (это не overflow-путь)")
 end
 
 -- 2. enqueue после start() — попадает в очередь
@@ -111,7 +113,7 @@ do
     expect(s.enqueue("b") == true, "3: вторая принята")
     expect(s.enqueue("c") == false, "3: третья дропнута")
     expect(s.queue_size() == 2, "3: queue не превышает 2")
-    expect(metrics_store.bac_log_dropped_total == 1, "3: dropped_total == 1")
+    expect(metrics_store.bac_log_dropped_overflow_total == 1, "3: dropped_total == 1")
 end
 
 -- 4. flush_now: успешный POST → shipped/batches_ok метрики, queue пустой
@@ -173,6 +175,16 @@ do
     expect(metrics_store.bac_log_shipped_total == 2, "7: shipped == batch_max")
 end
 
+-- 8a. shipper_loaded gauge ставится в 1 при start() (даже без backend_url —
+--     модуль ЗАГРУЗИЛСЯ, это отдельный сигнал от «работает ли он»).
+do
+    reset_for_test()
+    local s = load_shipper()
+    expect(metrics_store.bac_log_shipper_loaded == nil, "8a: до start gauge не выставлен")
+    s.start({})  -- без backend_url — shipper disabled, но gauge всё равно 1
+    expect(metrics_store.bac_log_shipper_loaded == 1, "8a: после start gauge==1 даже без URL")
+end
+
 -- 8. enqueue("") — drop без метрики (пустая входная)
 do
     reset_for_test()
@@ -181,7 +193,7 @@ do
     local ok = s.enqueue("")
     expect(ok == false, "8: enqueue('') вернул false")
     expect(s.queue_size() == 0, "8: очередь не растёт")
-    expect(metrics_store.bac_log_dropped_total == nil, "8: dropped не двинулся (пустая строка — не drop)")
+    expect(metrics_store.bac_log_dropped_overflow_total == nil, "8: dropped не двинулся (пустая строка — не drop)")
 end
 
 print(string.format("log_shipper: %d passed, %d failed", passed, failed))

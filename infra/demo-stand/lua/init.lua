@@ -141,10 +141,16 @@ for _, key in ipairs({
     -- POST'ов (помогает отличить «1 батч × 1000 строк» от «1000 батчей
     -- × 1 строка» при анализе пропускной способности).
     "bac_log_enqueued_total",
-    "bac_log_dropped_total",
+    "bac_log_dropped_overflow_total",
+    "bac_log_dropped_disabled_total",
     "bac_log_shipped_total",
     "bac_log_ship_failed_total",
     "bac_log_batches_ok_total",
+    -- Gauge 0/1: 0 если log_shipper.lua не загрузился (syntax broken,
+    -- missing dep, init_worker ERR'нул и не дошёл до start()); 1 после
+    -- успешного start(). Дашборд алертит на `bac_log_shipper_loaded == 0`
+    -- — иначе silent-failure при regression в log_shipper.lua.
+    "bac_log_shipper_loaded",
 }) do
     metrics:safe_add(key, 0)
 end

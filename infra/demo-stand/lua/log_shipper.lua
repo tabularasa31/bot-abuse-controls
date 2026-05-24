@@ -53,11 +53,21 @@ local in_flight = false  -- guard, чтобы tick'и не пересекали�
 -- видел их как обычные prometheus-counter'ы. metrics shared_dict уже
 -- объявлен в nginx.demo.conf (1m) и нагружен init.lua (см. ниже —
 -- prime через safe_add(0)).
-local M_ENQUEUED   = "bac_log_enqueued_total"
-local M_DROPPED    = "bac_log_dropped_total"
-local M_SHIPPED    = "bac_log_shipped_total"
-local M_FAILED     = "bac_log_ship_failed_total"
-local M_BATCHES_OK = "bac_log_batches_ok_total"
+-- Метрики. dropped разнесён на ДВА счётчика, чтобы дашборд различал:
+--   _overflow — очередь полная, бэкенд не успевает (реальная нагрузка)
+--   _disabled — shipper выключен (ANTIBOT_BACKEND_URL пустой);
+--               для оператора это сигнал «трафик идёт, но мы его не
+--               доставляем», что концептуально другая ошибка.
+-- shipper_loaded — gauge 0/1; init.lua прайнит нулём, start() ставит 1.
+-- Без него «module не загрузился из-за syntax-bug в log_shipper.lua»
+-- неотличимо от «модуль работает, просто счётчики на нуле».
+local M_ENQUEUED          = "bac_log_enqueued_total"
+local M_DROPPED_OVERFLOW  = "bac_log_dropped_overflow_total"
+local M_DROPPED_DISABLED  = "bac_log_dropped_disabled_total"
+local M_SHIPPED           = "bac_log_shipped_total"
+local M_FAILED            = "bac_log_ship_failed_total"
+local M_BATCHES_OK        = "bac_log_batches_ok_total"
+local M_SHIPPER_LOADED    = "bac_log_shipper_loaded"
 
 local function metric_incr(key, by)
     local m = ngx.shared.metrics
@@ -81,19 +91,28 @@ end
 -- строка попала в очередь, false если дропнули (overflow / shipper
 -- не инициализирован). Никогда не блокирует, не аллоцирует heavy.
 function _M.enqueue(line)
-    if not line or line == "" then return false end
+    if not line then return false end
+    if line == "" then
+        -- Пустая строка из bac_log.emit'a возможна только при
+        -- регрессии cjson.encode (она проверяется выше — emit делает
+        -- ранний return при encode-fail). Здесь == "" означает баг
+        -- в продюсере; WARN'аем, но не падаем — лучше пропустить
+        -- одну строку, чем уронить worker'a. PR #54 review.
+        ngx.log(ngx.WARN, "log_shipper: enqueue('') — empty line, upstream bug?")
+        return false
+    end
     if not _M.backend_url then
         -- start() не позвали или backend_url пустой — шиппер выключен.
-        -- Инкрементим dropped, чтобы дашборд отличал «трафика нет»
-        -- (enqueued=dropped=0) от «трафик есть, но shipper выключен»
-        -- (dropped растёт). PR #54 codex review.
-        metric_incr(M_DROPPED)
+        -- Инкрементим dropped_disabled (отдельно от dropped_overflow),
+        -- чтобы дашборд отличал «shipper выключен» от «очередь полная».
+        -- PR #54 codex+self review.
+        metric_incr(M_DROPPED_DISABLED)
         return false
     end
     if #queue >= _M.queue_max then
         -- Drop-newest: проще и честнее, чем drop-oldest (старые логи
         -- уже могли быть полезны rDNS-воркеру, более новые — нет ещё).
-        metric_incr(M_DROPPED)
+        metric_incr(M_DROPPED_OVERFLOW)
         return false
     end
     queue[#queue + 1] = line
@@ -197,13 +216,21 @@ end
 
 -- Синхронный flush для drain'а из тестов. На проде не вызываем —
 -- timer.every даёт асинхронный пайплайн.
+-- Использует pcall вокруг ship() симметрично tick'у — если ship raise'нет
+-- (resty.http throw на битом URL, table.concat на non-string и т.д.),
+-- in_flight всё равно сбросится, иначе следующий flush_now вернёт
+-- "in_flight" навсегда. PR #54 review.
 function _M.flush_now()
     if #queue == 0 then return true, nil end
     if in_flight then return false, "in_flight" end
     in_flight = true
     local batch = drain_batch(_M.batch_max)
-    local ok, err = ship(batch)
+    local pok, ok, err = pcall(ship, batch)
     in_flight = false
+    if not pok then
+        metric_incr(M_FAILED)
+        return false, "ship raised: " .. tostring(ok)
+    end
     if ok then
         metric_incr(M_SHIPPED, #batch)
         metric_incr(M_BATCHES_OK)
@@ -219,10 +246,17 @@ end
 -- одним и тем же путём из nginx.demo.conf, см. init_worker_by_lua_block.
 function _M.start(opts)
     opts = opts or {}
+    -- shipper_loaded=1 безусловно: gauge показывает, что модуль прошёл
+    -- require + start, даже если конфиг ниже выключит трафик. Это
+    -- ловит другую ошибку: «log_shipper.lua syntax broken / dep missing»
+    -- → init_worker логирует ERR один раз, gauge остаётся 0, метрика
+    -- видна оператору без хождения по worker-логам. PR #54 review.
+    if ngx.shared.metrics then ngx.shared.metrics:set(M_SHIPPER_LOADED, 1) end
+
     _M.backend_url = nonempty(opts.backend_url)
                      or nonempty(os.getenv("ANTIBOT_BACKEND_URL"))
     if not _M.backend_url then
-        ngx.log(ngx.NOTICE, "log_shipper: ANTIBOT_BACKEND_URL not set — shipper disabled")
+        ngx.log(ngx.NOTICE, "log_shipper: ANTIBOT_BACKEND_URL not set — shipper disabled (dropped_disabled будет инкрементить per request)")
         return
     end
     _M.backend_host_header = nonempty(opts.backend_host_header)
@@ -247,6 +281,19 @@ function _M.start(opts)
     local cp = require "catalog_pull"
     _M.parsed_cert = cp.parsed_cert
     _M.parsed_key  = cp.parsed_key
+
+    -- Loud signal при https://-url + отсутствующих cert/key: backend под
+    -- AUTH_MODE=mtls отвергнет handshake, каждый батч улетит в ship_failed,
+    -- и оператор будет искать причину в backend'е. Лучше один WARN на старте,
+    -- чем поиск по rate-логам. PR #54 review.
+    if _M.backend_url:sub(1, 8) == "https://"
+        and not (_M.parsed_cert and _M.parsed_key)
+    then
+        ngx.log(ngx.WARN,
+            "log_shipper: backend_url is https:// but mTLS material is absent — ",
+            "set ANTIBOT_BACKEND_CLIENT_CERT/KEY or expect handshake failures (",
+            "ship_failed_total will grow).")
+    end
 
     if not _M.http_module then
         local ok, mod = pcall(require, "resty.http")
