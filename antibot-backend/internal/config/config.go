@@ -79,6 +79,14 @@ type Config struct {
 	LogsSinkSpoolMaxBytes int64
 	// LogsSinkDrainInterval — как часто пробуем вернуть спул в DB.
 	LogsSinkDrainInterval time.Duration
+
+	// DashboardAPIToken — shared M2M secret для bearer-auth между
+	// dashboard-backend и antibot-backend ([B10] / internal/antibotapi).
+	// Пустая строка = /antibot/v1/* не регистрируется (fail-closed; warn
+	// в лог). Других потребителей policy-API нет и не планируется, поэтому
+	// per-tenant токенов не вводим — единственный subject всегда
+	// dashboard-backend.
+	DashboardAPIToken string
 }
 
 func Load() (Config, error) {
@@ -101,6 +109,7 @@ func Load() (Config, error) {
 		LogsSinkQueueSize:     8192,
 		LogsSinkSpoolMaxBytes: 256 << 20,
 		LogsSinkDrainInterval: 10 * time.Second,
+		DashboardAPIToken:     os.Getenv("DASHBOARD_API_TOKEN"),
 	}
 	if v := os.Getenv("CATALOG_RELOAD_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)

@@ -277,3 +277,40 @@ docker compose -f docker-compose.backend.yml start backend-1 backend-2
 `POSTGRES_PASSWORD` and a self-signed cert (`certs/{fullchain,privkey}.pem`, same
 naming as demo-stand so a certbot deploy-hook can refresh it) on first run; never
 commit either.
+
+## Policy API for the dashboard (B10)
+
+`antibot-backend` exposes `/antibot/v1/policy/{site}/*` for per-host mutations
+from the the platform dashboard-backend. Server-to-server only: the dashboard
+authenticates its end users on its side, then forwards the change to
+antibot-backend with a shared bearer token in `Authorization: Bearer …`.
+
+**Setup.** Generate a token (`openssl rand -hex 32`), put it into `.env` on
+both sides:
+
+```
+DASHBOARD_API_TOKEN=<hex string>
+```
+
+If `DASHBOARD_API_TOKEN` is unset, `/antibot/v1/*` is NOT registered on
+backend startup (fail-closed; dashboard would get 404). A warn line lands in
+the backend log on every restart in that state.
+
+**Rotation.** Pick a new token; update env on both services simultaneously;
+`docker compose restart backend-1 backend-2` (rolling restart, no downtime
+thanks to the HA pair). The old token stops working the moment its instance
+restarts; there is no overlap window — coordinate the dashboard env update
+with the restart.
+
+**Endpoints (short).** All under `/antibot/v1/policy/{site}/`:
+- `GET .` — full Policy (404 if site never touched).
+- `PATCH .` — merge-patch of `mode` / `strictness` / `attack_mode`. Strict
+  decode (unknown keys → 400). Idempotent: `{"changed":false}` and
+  `updated_at` is preserved on no-op.
+- `GET/POST/DELETE ./{ua_blacklist|ip_blocklist|ip_whitelist|geo_whitelist|asn_block}`
+  — list operations on per-host arrays. POST is dedup'd; DELETE returns 404
+  if the item wasn't there.
+
+Dashboard mutation → backend reload tick (5s, [B4]) → edge `/catalog/*` pull
+(30s, [B5]) → swap on edge. End-to-end ≤30s under the contract from
+[`config-distribution.md`](../../docs/architecture/config-distribution.md).

@@ -51,6 +51,10 @@ services:
       # с примонтированным volume'ом ниже; без него простой PostgreSQL терял
       # бы поток логов (acceptance B9 «приёмник не теряет логи»).
       LOGS_SINK_SPOOL_DIR: "/var/lib/antibot-backend/log-spool"
+      # [B10] shared M2M secret для bearer-auth между dashboard-backend и
+      # antibot-backend (/antibot/v1/*). Без него policy API не
+      # регистрируется (fail-closed, warn в лог).
+      DASHBOARD_API_TOKEN: "${DASHBOARD_API_TOKEN:-}"
     depends_on: &backend_depends
       postgres:
         condition: service_healthy

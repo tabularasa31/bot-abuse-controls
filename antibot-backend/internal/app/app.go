@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/tabularasa31/antibot-backend/internal/antibotapi"
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 	"github.com/tabularasa31/antibot-backend/internal/config"
 	"github.com/tabularasa31/antibot-backend/internal/db"
@@ -188,6 +189,22 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		logs.NewWithDeps(a.reg, nil, nil, sinkArg).Register(mux)
 	} else {
 		logs.New(a.reg).Register(mux)
+	}
+
+	// Policy API ([B10]) — write-side для dashboard-backend. Поднимаем только
+	// если DB есть И токен задан: без токена /antibot/v1/* не регистрируется
+	// (fail-closed; dashboard получит 404, и сразу видно что secret не
+	// прокинут в env).
+	if a.pool != nil {
+		auth := antibotapi.NewAuthenticator(a.cfg.DashboardAPIToken, a.reg)
+		if auth != nil {
+			if srv := antibotapi.New(a.pool, auth, logger, a.reg); srv != nil {
+				srv.Register(mux)
+				logger.Info("policy API wired", "prefix", "/antibot/v1/")
+			}
+		} else {
+			logger.Warn("policy API disabled — DASHBOARD_API_TOKEN not set; /antibot/v1/* will 404")
+		}
 	}
 
 	a.srv = &http.Server{

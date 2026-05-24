@@ -1,0 +1,91 @@
+// Валидация payload'ов admin API ДО открытия транзакции. Любая запись,
+// прошедшая эти проверки, обязана пройти catalog.Validate на следующем тике
+// dbloader.Reloader — иначе reloader станет fail-stale и edge зависнет на
+// старом каталоге.
+package antibotapi
+
+import (
+	"fmt"
+	"regexp"
+
+	"github.com/tabularasa31/antibot-backend/internal/catalog"
+)
+
+// maxSiteLen — RFC 1035 §2.3.4 (максимум 253 октета для domain name).
+const maxSiteLen = 253
+
+// ValidateSite — синтаксическая проверка host'a из URL-path. Жёсткий regex
+// для DNS-валидности нам не нужен: реальный host клиент уже зарегистрировал
+// у себя, мы только защищаемся от мусора в path (длинные строки в БД,
+// неконтролируемое логирование).
+func ValidateSite(s string) error {
+	if s == "" {
+		return fmt.Errorf("site: empty")
+	}
+	if len(s) > maxSiteLen {
+		return fmt.Errorf("site: longer than %d bytes (RFC 1035)", maxSiteLen)
+	}
+	return nil
+}
+
+var (
+	validModes        = map[string]struct{}{"shadow": {}, "active": {}}
+	validStrictnesses = map[string]struct{}{"standard": {}, "permissive": {}}
+)
+
+func ValidateMode(s string) error {
+	if _, ok := validModes[s]; !ok {
+		return fmt.Errorf("mode: must be 'shadow' or 'active', got %q", s)
+	}
+	return nil
+}
+
+func ValidateStrictness(s string) error {
+	if _, ok := validStrictnesses[s]; !ok {
+		return fmt.Errorf("strictness: must be 'standard' or 'permissive', got %q", s)
+	}
+	return nil
+}
+
+// ValidateUARegex — RE2-валидация. Та же грамматика, что и catalog.Validate
+// на стороне reloader'a: если здесь пропустили, там тоже пропустит.
+func ValidateUARegex(pattern string) error {
+	if pattern == "" {
+		return fmt.Errorf("pattern: empty")
+	}
+	if _, err := regexp.Compile(pattern); err != nil {
+		return fmt.Errorf("pattern: invalid regex: %w", err)
+	}
+	return nil
+}
+
+// ValidateCIDR делегирует catalog.ValidateCIDR — симметрично reloader'у и
+// lua-resty-ipmatcher на edge (принимает IP без /N как host-route).
+func ValidateCIDR(s string) error {
+	if s == "" {
+		return fmt.Errorf("cidr: empty")
+	}
+	return catalog.ValidateCIDR(s)
+}
+
+// ValidateASN — RFC 6793 32-bit ASN. Допускаем диапазон uint32 (≤4_294_967_295).
+// 0 — зарезервирован, но не блокируем (operator-discretion); ловим в БД при
+// необходимости.
+func ValidateASN(n int64) error {
+	if n < 0 || n > 0xFFFFFFFF {
+		return fmt.Errorf("asn: out of uint32 range, got %d", n)
+	}
+	return nil
+}
+
+// geoCodeRE — две заглавные ASCII-буквы. ISO 3166-1 alpha-2 без проверки
+// against реального списка стран (это не наша забота, geoip-база может быть
+// обновлённее нашего hard-coded списка).
+var geoCodeRE = regexp.MustCompile(`^[A-Z]{2}$`)
+
+func ValidateGeoCode(s string) error {
+	if !geoCodeRE.MatchString(s) {
+		return fmt.Errorf("geo: must be ISO 3166-1 alpha-2 uppercase, got %q", s)
+	}
+	return nil
+}

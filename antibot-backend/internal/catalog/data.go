@@ -247,7 +247,7 @@ func dedupSortUint32(s []uint32) []uint32 {
 // Validate проверяет:
 //   - UA-regex (системные и per-host) через regexp.Compile;
 //   - CIDR-строки (системные ip_blocklist / ip_whitelist и per-host
-//     варианты) через `validateCIDR`, которая повторяет терпимость
+//     варианты) через `ValidateCIDR`, которая повторяет терпимость
 //     lua-resty-ipmatcher: голый IP без `/N` принимается как host-route
 //     (/32 для v4, /128 для v6), а CIDR с заданными host-битами
 //     (`10.0.0.5/8`) — тоже валиден, ipmatcher всё равно их маскирует.
@@ -273,12 +273,12 @@ func Validate(d *Data) error {
 		}
 	}
 	for cidr := range d.IPBlocklist {
-		if err := validateCIDR(cidr); err != nil {
+		if err := ValidateCIDR(cidr); err != nil {
 			return fmt.Errorf("ip_blocklist[%q]: %w", cidr, err)
 		}
 	}
 	for i, cidr := range d.IPWhitelist {
-		if err := validateCIDR(cidr); err != nil {
+		if err := ValidateCIDR(cidr); err != nil {
 			return fmt.Errorf("ip_whitelist[%d] %q: %w", i, cidr, err)
 		}
 	}
@@ -289,12 +289,12 @@ func Validate(d *Data) error {
 			}
 		}
 		for i, cidr := range pol.IPBlocklist {
-			if err := validateCIDR(cidr); err != nil {
+			if err := ValidateCIDR(cidr); err != nil {
 				return fmt.Errorf("policy[%s].ip_blocklist[%d] %q: %w", host, i, cidr, err)
 			}
 		}
 		for i, cidr := range pol.IPWhitelist {
-			if err := validateCIDR(cidr); err != nil {
+			if err := ValidateCIDR(cidr); err != nil {
 				return fmt.Errorf("policy[%s].ip_whitelist[%d] %q: %w", host, i, cidr, err)
 			}
 		}
@@ -302,12 +302,15 @@ func Validate(d *Data) error {
 	return nil
 }
 
-// validateCIDR принимает либо «сырой» IP («1.2.3.4», «2001:db8::1»),
+// ValidateCIDR принимает либо «сырой» IP («1.2.3.4», «2001:db8::1»),
 // либо префикс («10.0.0.0/8», «10.0.0.5/8» с заданными host-битами).
 // Это симметрично lua-resty-ipmatcher на edge: тот принимает то же
 // подмножество и сам маскирует host-биты. netip.ParsePrefix отдельно от
-// netip.ParseAddr строже, поэтому пробуем оба.
-func validateCIDR(s string) error {
+// netip.ParseAddr строже, поэтому пробуем оба. Экспортирована для
+// переиспользования в [internal/antibotapi] (B10): admin-мутация должна
+// валидировать вход тем же предикатом, что и reloader, иначе любая запись
+// от dashboard'а уронит следующий тик reloader'a через catalog.Validate.
+func ValidateCIDR(s string) error {
 	if _, err := netip.ParsePrefix(s); err == nil {
 		return nil
 	}
