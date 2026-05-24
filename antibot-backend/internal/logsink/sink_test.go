@@ -131,6 +131,15 @@ func TestParseRow_MissingRequired(t *testing.T) {
 	}
 }
 
+func TestParseRow_TrailingJunkRejected(t *testing.T) {
+	good := goodLine(t, "r")
+	body := append([]byte{}, good...)
+	body = append(body, []byte("garbage")...)
+	if _, err := parseRow(body); err == nil {
+		t.Fatal("want error on trailing data after JSON")
+	}
+}
+
 func TestParseRow_MalformedTimestamp(t *testing.T) {
 	body := `{"request_id":"r","edge_id":"e","timestamp":"not-a-time"}`
 	if _, err := parseRow([]byte(body)); err == nil {

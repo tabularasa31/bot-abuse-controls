@@ -28,10 +28,12 @@ package logsink
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -384,6 +386,14 @@ func (s *Sink) spill(lines [][]byte) {
 	}
 	s.spooledFiles.Inc()
 	s.spooledLines.Add(float64(len(lines)))
+	// Post-write повторно прогоняем budget: pre-write enforce оставлял
+	// только «место под следующий батч», но сам batch мог быть крупнее
+	// освобождённого окна и оставить каталог над cap'ом до следующего
+	// spill'a (codex review #56). Гарантия hard-bound'a достигается
+	// именно этим вторым прогоном.
+	if err := s.enforceSpoolBudget(); err != nil {
+		s.logger.Warn("logsink: post-write budget check failed", "err", err)
+	}
 	s.updateSpoolGauge()
 }
 
@@ -550,11 +560,21 @@ type rawRecord struct {
 }
 
 func parseRow(line []byte) ([]any, error) {
-	dec := json.NewDecoder(strings.NewReader(string(line)))
+	// json.Decoder.Decode принимает один JSON-объект и молча игнорирует
+	// trailing-байты — строка вида `{...}garbage` прошла бы парс, но та же
+	// строка как jsonb в PostgreSQL отвергается, и весь батч CopyFrom
+	// падает; sink уносит его в spool, drainer его же возвращает в DB,
+	// CopyFrom снова падает — sink-throughput умирает на одной кривой
+	// строке (codex review #56, P1). Поэтому после Decode проверяем,
+	// что в буфере осталась только whitespace до EOF.
+	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.UseNumber()
 	var r rawRecord
 	if err := dec.Decode(&r); err != nil {
 		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing data after JSON object")
 	}
 	if r.RequestID == "" || r.EdgeID == "" || r.Timestamp == "" {
 		return nil, errors.New("missing required fields (request_id/edge_id/timestamp)")
