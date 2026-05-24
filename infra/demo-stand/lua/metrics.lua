@@ -156,3 +156,41 @@ for name in pairs(catalog_pull.catalogs) do
 end
 ngx.say(table.concat(stale_lines, "\n"))
 ngx.say(table.concat(vmis_lines, "\n"))
+
+-- BAC_LOG shipper (B6 edge-side, log_shipper.lua). Per-worker очередь
+-- наполняется bac_log.emit'ом, фоновый таймер дренирует батчами на
+-- antibot-backend /v1/logs. Дашборды смотрят на:
+--   enqueued — общий поток (равен числу обработанных запросов через
+--              каскад, минус requests, которые bypass'нули bac_log);
+--   dropped  — overflow (queue_max превышен) или shipper выключен;
+--   shipped  — успешно доставленные строки на backend;
+--   ship_failed — провальные POST'ы (батч теряется, потери ≈
+--                 shipped - enqueued + dropped только если != 0);
+--   batches_ok — счётчик удачных батчей, для оценки пропускной способности
+--                (shipped / batches_ok ≈ средний размер батча).
+ngx.say(string.format([[
+# HELP antibot_bac_log_enqueued_total BAC_LOG lines added to the per-worker shipper queue.
+# TYPE antibot_bac_log_enqueued_total counter
+antibot_bac_log_enqueued_total %d
+
+# HELP antibot_bac_log_dropped_total BAC_LOG lines dropped because the queue was full or the shipper is disabled.
+# TYPE antibot_bac_log_dropped_total counter
+antibot_bac_log_dropped_total %d
+
+# HELP antibot_bac_log_shipped_total BAC_LOG lines successfully POSTed to antibot-backend /v1/logs (202).
+# TYPE antibot_bac_log_shipped_total counter
+antibot_bac_log_shipped_total %d
+
+# HELP antibot_bac_log_ship_failed_total Batches that failed to POST (transport error or non-202 response). Whole batch is lost (no retry; B9 disk-queue closes this gap).
+# TYPE antibot_bac_log_ship_failed_total counter
+antibot_bac_log_ship_failed_total %d
+
+# HELP antibot_bac_log_batches_ok_total Successful batch POSTs. shipped/batches_ok ≈ average batch size.
+# TYPE antibot_bac_log_batches_ok_total counter
+antibot_bac_log_batches_ok_total %d
+]],
+    get("bac_log_enqueued_total"),
+    get("bac_log_dropped_total"),
+    get("bac_log_shipped_total"),
+    get("bac_log_ship_failed_total"),
+    get("bac_log_batches_ok_total")))

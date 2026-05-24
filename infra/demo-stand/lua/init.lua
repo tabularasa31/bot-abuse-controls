@@ -132,6 +132,19 @@ for _, key in ipairs({
     "tag:tls_fp:dc_browser",
     "tag:reputation:asn_dc",
     "tag:hygiene:header_anomaly",
+    -- BAC_LOG shipper (log_shipper.lua, B6 edge-side): счётчики живут
+    -- здесь, чтобы /metrics показывал их at-zero с первого scrape'a,
+    -- а не лениво после первой строки. enqueued — сколько прилетело в
+    -- очередь от bac_log.emit; dropped — overflow / shipper выключен;
+    -- shipped — сколько успешных строк уехало на backend; failed —
+    -- провальные POST'ы (батч теряется); batches_ok — счётчик удачных
+    -- POST'ов (помогает отличить «1 батч × 1000 строк» от «1000 батчей
+    -- × 1 строка» при анализе пропускной способности).
+    "bac_log_enqueued_total",
+    "bac_log_dropped_total",
+    "bac_log_shipped_total",
+    "bac_log_ship_failed_total",
+    "bac_log_batches_ok_total",
 }) do
     metrics:safe_add(key, 0)
 end

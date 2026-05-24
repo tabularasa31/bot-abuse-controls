@@ -261,6 +261,17 @@ function _M.emit()
     -- async shipper.
     io.stdout:write("BAC_LOG ", line, "\n")
     io.stdout:flush()
+
+    -- Ship to antibot-backend /v1/logs via per-worker async queue. enqueue
+    -- никогда не блокирует и не аллоцирует heavy (см. log_shipper.lua);
+    -- если shipper не сконфигурирован (ANTIBOT_BACKEND_URL не задан) — это
+    -- no-op. На стенде stdout-эмит остаётся как ground truth для analyze.py
+    -- daily-report'a; shipper — отдельный канал для backend-receiver'а.
+    -- Тяжёлые require()'ы кэшируются — это просто доступ к package.loaded.
+    local ok, shipper = pcall(require, "log_shipper")
+    if ok and shipper and shipper.enqueue then
+        shipper.enqueue(line)
+    end
 end
 
 return _M
