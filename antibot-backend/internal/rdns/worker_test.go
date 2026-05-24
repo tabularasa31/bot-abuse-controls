@@ -232,6 +232,90 @@ func TestProcess_UpsertsAndIncrementsMetric(t *testing.T) {
 	}
 }
 
+func TestProcess_SkipsPersistOnShutdownInducedReject(t *testing.T) {
+	// P1: classify не различает authoritative-NXDOMAIN от ctx.Canceled —
+	// оба превращаются в "rejected". При parent ctx canceled во время
+	// shutdown воркер раньше писал бы rejected:family с TTL 1ч,
+	// блокируя legit Googlebot на час. Проверяем: с canceled ctx
+	// upsert НЕ должен происходить.
+	r := &fakeResolver{} // empty maps → LookupAddr returns error
+	db := &fakeDB{}
+	w := newTestWorker(t, r, &fakeCatalog{}, db)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // сразу cancel — имитируем shutdown
+	w.process(ctx, task{ip: "66.249.66.1", claimedFamily: FamilyGoogle})
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.upserts) != 0 {
+		t.Errorf("shutdown-induced rejected was persisted: %+v", db.upserts)
+	}
+	if counterValue(t, w.skipped) != 1 {
+		t.Errorf("skipped counter = %v, want 1", counterValue(t, w.skipped))
+	}
+}
+
+func TestEnqueue_HoldsInFlightPastWrite(t *testing.T) {
+	// P2: после успешного upsert'а inFlight должен оставаться занятым
+	// на PostWriteHold, чтобы перекрыть окно до reloader-тика.
+	r := &fakeResolver{
+		addr: map[string][]string{"66.249.66.1": {"crawl.googlebot.com."}},
+		host: map[string][]string{"crawl.googlebot.com": {"66.249.66.1"}},
+	}
+	db := &fakeDB{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg := prometheus.NewRegistry()
+	w := New(reg, logger,
+		Config{
+			QueueSize: 16, Workers: 1,
+			DNSTimeout: time.Second, GCInterval: time.Hour,
+			PostWriteHold: time.Hour, // долгий hold — гарантированно не истечёт за тест
+		},
+		r, &fakeCatalog{}, db)
+
+	// Идём через полный путь Enqueue → consume(ctx) с одним consumer'ом,
+	// чтобы inFlight реально был заселён до process().
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); w.Run(ctx) }()
+
+	w.Enqueue("66.249.66.1", FamilyGoogle)
+
+	// Ждём пока consumer запишет upsert.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		db.mu.Lock()
+		n := len(db.upserts)
+		db.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	db.mu.Lock()
+	gotUpserts := len(db.upserts)
+	db.mu.Unlock()
+	if gotUpserts != 1 {
+		cancel()
+		<-done
+		t.Fatalf("expected 1 upsert, got %d", gotUpserts)
+	}
+	// inFlight должен ещё содержать ip — releaseInFlight отложен на 1ч.
+	if _, ok := w.inFlight.Load("66.249.66.1"); !ok {
+		cancel()
+		<-done
+		t.Error("inFlight для записанного IP снят сразу — hold не работает")
+	}
+	// Второй Enqueue для того же IP должен быть skipped (inFlight держит).
+	w.Enqueue("66.249.66.1", FamilyGoogle)
+	if counterValue(t, w.skipped) < 1 {
+		t.Errorf("second Enqueue not skipped: skipped=%v", counterValue(t, w.skipped))
+	}
+	cancel()
+	<-done
+}
+
 func TestRun_ConsumesQueueAndShutsDown(t *testing.T) {
 	// End-to-end через Run: enqueue → consume → upsert → ctx.Done() → stop.
 	r := &fakeResolver{

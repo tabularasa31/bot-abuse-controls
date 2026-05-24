@@ -126,6 +126,11 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 				Workers:    cfg.RDNSWorkers,
 				DNSTimeout: cfg.RDNSDNSTimeout,
 				GCInterval: cfg.RDNSGCInterval,
+				// PostWriteHold перекрывает окно между «воркер записал»
+				// и «reloader положил свежий Data в Store». Без буфера
+				// hot IP внутри этого окна снова прошёл бы Enqueue и
+				// сделал повторный DNS. +2с с запасом на pgx latency.
+				PostWriteHold: cfg.CatalogReloadInterval + 2*time.Second,
 			},
 			rdns.NetResolver{},
 			a.store,

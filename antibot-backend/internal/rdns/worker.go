@@ -143,6 +143,14 @@ type Config struct {
 	// dbloader.Load уже фильтрует протухшие на чтении, GC только
 	// чтобы таблица не пухла; час — сильно реже чем TTL, нагрузки нет.
 	GCInterval time.Duration
+	// PostWriteHold — сколько держим IP в inFlight ПОСЛЕ успешного
+	// upsert'a. Между моментом «воркер записал» и моментом «reloader
+	// положил свежий каталог в Store» проходит CatalogReloadInterval
+	// (5с по дефолту); без hold'а в это окно каждый новый лог с тем же
+	// hot IP проходил бы HasVerifiedBotIP=false и плодил повторные
+	// DNS/UPSERT. Дефолт 0 = моментальное снятие (старое поведение);
+	// app.New передаёт CatalogReloadInterval + 2с. PR #53 follow-up.
+	PostWriteHold time.Duration
 }
 
 func DefaultConfig() Config {
@@ -345,7 +353,9 @@ func (w *Worker) consume(ctx context.Context) {
 }
 
 func (w *Worker) processSafely(ctx context.Context, t task) {
-	defer w.inFlight.Delete(t.ip)
+	// Снятие inFlight откладываем до process(): успешный upsert ставит
+	// AfterFunc(PostWriteHold), все остальные пути (skipped, dbErr, panic)
+	// снимают сразу — иначе IP залип бы до GC.
 	defer func() {
 		if rec := recover(); rec != nil {
 			w.panics.Inc()
@@ -355,9 +365,26 @@ func (w *Worker) processSafely(ctx context.Context, t task) {
 				"panic", rec,
 				"stack", string(debug.Stack()),
 			)
+			w.inFlight.Delete(t.ip)
 		}
 	}()
 	w.process(ctx, t)
+}
+
+// releaseInFlight снимает t.ip из inFlight: сразу, если hold==0
+// (deprecated/тестовый путь), либо через PostWriteHold time.AfterFunc —
+// нужно перекрыть окно «воркер записал, но reloader ещё не положил
+// свежий Data в Store», иначе следующий лог с тем же hot IP опять
+// проходит HasVerifiedBotIP=false и плодит повторный DNS/UPSERT.
+// PR #53 follow-up.
+func (w *Worker) releaseInFlight(ip string) {
+	if w.cfg.PostWriteHold <= 0 {
+		w.inFlight.Delete(ip)
+		return
+	}
+	time.AfterFunc(w.cfg.PostWriteHold, func() {
+		w.inFlight.Delete(ip)
+	})
 }
 
 func (w *Worker) process(ctx context.Context, t task) {
@@ -371,6 +398,7 @@ func (w *Worker) process(ctx context.Context, t task) {
 		w.skipped.Inc()
 		w.logger.Debug("rdns: skip task with unparseable ip",
 			"ip", t.ip, "family", t.claimedFamily)
+		w.inFlight.Delete(t.ip)
 		return
 	}
 
@@ -381,6 +409,21 @@ func (w *Worker) process(ctx context.Context, t task) {
 	defer cancel()
 
 	status, family := w.classify(taskCtx, t)
+
+	// Shutdown-induced rejected — НЕ персистим. classify не различает
+	// authoritative-NXDOMAIN от ctx.Canceled, оба превращаются в rejected.
+	// Без этой проверки in-flight Googlebot/Bingbot, для которого parent
+	// ctx отменился во время DNS, записался бы как rejected:google с TTL
+	// 1ч; HasVerifiedBotIP блокировал бы re-check; легитимный бот терял
+	// бы fastpath на час после каждого деплоя. Verified-вердикт не
+	// затрагиваем — он получен ДО ctx.Err() и валиден. PR #53 follow-up.
+	if status == "rejected" && ctx.Err() != nil {
+		w.skipped.Inc()
+		w.logger.Debug("rdns: skip persist of shutdown-induced rejected",
+			"ip", t.ip, "family", t.claimedFamily, "ctx_err", ctx.Err())
+		w.inFlight.Delete(t.ip)
+		return
+	}
 	expiresAt := w.now().Add(VerificationTTL)
 
 	// DB-write: родительский ctx уже cancel'нут при graceful shutdown
@@ -396,6 +439,9 @@ func (w *Worker) process(ctx context.Context, t task) {
 		w.dbErr.Inc()
 		w.logger.Error("rdns: db upsert failed",
 			"ip", t.ip, "family", family, "status", status, "err", err)
+		// Снимаем inFlight сразу — без записи в БД следующий лог должен
+		// иметь возможность ретраить.
+		w.inFlight.Delete(t.ip)
 		return
 	}
 	switch status {
@@ -404,6 +450,10 @@ func (w *Worker) process(ctx context.Context, t task) {
 	case "rejected":
 		w.rejected.Inc()
 	}
+	// Hold inFlight на PostWriteHold (≈ CatalogReloadInterval + buffer):
+	// до того как reloader положит свежий Data в Store, hot IP получал
+	// бы HasVerifiedBotIP=false и плодил повторные DNS/UPSERT.
+	w.releaseInFlight(t.ip)
 	w.logger.Debug("rdns verdict",
 		"ip", t.ip, "claim", t.claimedFamily,
 		"family", family, "status", status,
