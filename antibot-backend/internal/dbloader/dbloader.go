@@ -260,14 +260,13 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, d *catalog.Data) error {
 		if err := unmarshalIfNonEmpty(ipBLJSON, &p.IPBlocklist); err != nil {
 			return fmt.Errorf("policy[%s].ip_blocklist: %w", host, err)
 		}
-		// asn_block: defensive decode через []int64 + per-element bounds-check
-		// (PR-58 review #6). Прямой Unmarshal в []uint32 валится на любом
-		// значении -1 / >2^32 одной строки и роняет весь catalog tick →
-		// Store.Replace не вызывается → edge fail-stale для ВСЕХ клиентов.
+		// asn_block: defensive decode через []*int64 + per-element фильтрацию
+		// (PR-58 review #6). Прямой Unmarshal в []uint32 валился на любом
+		// значении -1 / >2^32 одной строки и ронял весь catalog tick →
+		// Store.Replace не вызывался → edge fail-stale для ВСЕХ клиентов.
 		// Запись через admin API уже ловится `antibotapi.ValidateASN`, но
-		// legacy/manual SQL/импорт могут оставить out-of-range значения —
-		// здесь они скипаются с warn'ом (через rows.Err()-агрегацию мы не
-		// можем — это per-row, не fatal для loader'a).
+		// legacy/manual SQL/импорт могут оставить out-of-range или null —
+		// они тихо скипаются (см. doc-комментарий decodeASNBlock).
 		if err := decodeASNBlock(asnJSON, &p.ASNBlock); err != nil {
 			return fmt.Errorf("policy[%s].asn_block: %w", host, err)
 		}
@@ -290,23 +289,42 @@ func unmarshalIfNonEmpty(b []byte, dst any) error {
 }
 
 // decodeASNBlock декодирует JSONB-массив ASN в []uint32 с per-element
-// bounds-check. Out-of-range элементы (отрицательные, >2^32-1) скипаются —
-// loader не валит весь tick из-за одной битой строки. Возвращает ошибку
-// только если сам JSON битый (не массив, не числа).
+// фильтрацией. Возвращает ошибку только если сам JSON битый (не массив,
+// не числа).
+//
+// Скипаются БЕЗ ошибки (loader не валит весь tick из-за одной битой
+// строки — иначе один out-of-range ASN кладёт edge для всего пула):
+//   - элементы с n < 0 или n > 2^32-1 (out of uint32 range)
+//   - JSON null (json.Unmarshal маппит null → zero-int64=0, что после
+//     попадания в out выглядит как валидный ASN-0; легитимный admin-API
+//     путь 0 принимает, но фантомные 0 из null-элементов — точно артефакт
+//     legacy/manual SQL, симметрично 0-фильтру не делаем — пусть operator
+//     явно вставит [0] если ему нужен ASN-0).
+//
+// Скип молчаливый — оператор увидит расхождение через дашборд/аналитику,
+// не через логи backend'а. Сохранить host+raw-value для warn'а
+// потребовало бы пробросить host вглубь, плюс slog spam'ил бы на каждом
+// 5-секундном reloader-тике одно и то же — лучше fix-on-source.
 func decodeASNBlock(b []byte, dst *[]uint32) error {
 	if len(b) == 0 {
+		// Empty bytes = «поле не пришло» (NULL column из БД). Контракт:
+		// dst остаётся nil. Явно зануляем на случай, если caller
+		// переиспользует slice (decode_asn_test проверяет).
+		*dst = nil
 		return nil
 	}
-	var raw []int64
+	var raw []*int64
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
 	out := make([]uint32, 0, len(raw))
-	for _, n := range raw {
+	for _, p := range raw {
+		if p == nil {
+			// JSON null — отбрасываем (не дефолтим в 0).
+			continue
+		}
+		n := *p
 		if n < 0 || n > 0xFFFFFFFF {
-			// Битый элемент: skip. Loader должен продолжить, чтобы остальные
-			// row'ы политики применились; иначе один невалидный ASN кладёт
-			// edge для всего пула.
 			continue
 		}
 		out = append(out, uint32(n)) //nolint:gosec // G115: range checked above

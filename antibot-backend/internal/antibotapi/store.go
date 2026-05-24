@@ -101,6 +101,18 @@ func (p PolicyPatch) IsEmpty() bool {
 // `xmax = 0` — Postgres-трюк: только что вставленные строки имеют xmax=0,
 // строки, попавшие в DO UPDATE ветку, имеют xmax = current xid. Так одна
 // statement отдаёт и current values, и «был ли реальный insert».
+//
+// Trade-off (PR-58 round 2 review #5): `DO UPDATE SET host=EXCLUDED.host`
+// — намеренно self-assignment, чтобы взять row lock на конфликте. Postgres
+// в DO UPDATE ветке ВСЕГДА пишет новую heap-tuple, даже если SET присваивает
+// то же значение (нет SET-to-same-value short-circuit). Это значит каждый
+// PATCH (включая no-op) генерирует одну dead tuple → autovacuum bytes
+// при высокой частоте идемпотентных PATCH'ей. Альтернатива (`DO NOTHING` +
+// fallback `SELECT FOR UPDATE`) сложнее и теряет атомарность UPSERT'a;
+// сознательно выбран churn вместо retry-loop'а. Если dashboard начнёт
+// долбить одним и тем же payload (что в текущем дизайне не предусмотрено),
+// придётся пересмотреть. updated_at сохраняется (см. ниже) — heap churn
+// не виден через X-Catalog-Version.
 func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (bool, []string, error) {
 	if p.IsEmpty() {
 		return false, nil, fmt.Errorf("empty patch")
@@ -265,12 +277,20 @@ func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, e
 //
 // jsonb-null защита через COALESCE (PR-58 review #5): без неё
 // jsonb_array_elements(null) бросает 'cannot extract elements from a scalar'.
+//
+// jsonb_typeof = 'number' (PR-58 round 2 review #3): схема не констрейнит
+// типы элементов JSONB-массива; legacy/manual SQL может оставить строку
+// (`'[15169, "13335"]'::jsonb`). Прямой cast `(elem)::bigint` тогда бросает
+// «invalid input syntax for type bigint», DELETE для всего site'a возвращает
+// 500 до ручной правки БД. Фильтр jsonb_typeof оставляет только числа;
+// строки/null/массивы дропаются (defensive — но это та самая legacy-зона,
+// которую decodeASNBlock на loader-стороне тоже защищает).
 func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, error) {
 	q := `UPDATE policy
 		  SET asn_block = COALESCE(
 		      (SELECT jsonb_agg(elem)
 		       FROM jsonb_array_elements(COALESCE(asn_block, '[]'::jsonb)) AS elem
-		       WHERE (elem)::bigint <> $2),
+		       WHERE jsonb_typeof(elem) = 'number' AND (elem)::bigint <> $2),
 		      '[]'::jsonb),
 		      updated_at = NOW()
 		  WHERE host = $1 AND COALESCE(asn_block, '[]'::jsonb) @> to_jsonb($2::bigint)`

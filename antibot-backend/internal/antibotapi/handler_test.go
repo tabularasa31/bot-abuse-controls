@@ -353,6 +353,34 @@ func TestASNBlock_MissingAsnField_400(t *testing.T) {
 	}
 }
 
+// doNoFatal — concurrency-safe HTTP-хелпер: НЕ вызывает t.Fatalf
+// (testing.T.FailNow семейство — UB вне test goroutine, см. Go testing docs).
+// Возвращает только err; status в concurrency-тестах нас не интересует —
+// конечное состояние ассертится через SELECT из БД после Wait'а.
+func doNoFatal(ts *httptest.Server, method, path, token, body string) error {
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), method, ts.URL+path, rdr)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 // TestPatchScalars_ConcurrentDifferentFields покрывает PR-58 review #1:
 // два concurrent PATCH на РАЗНЫЕ скаляры не должны затирать друг друга.
 // До фикса `UPDATE ... SET mode=$2, strictness=$3, attack_mode=$4` молча
@@ -363,22 +391,32 @@ func TestPatchScalars_ConcurrentDifferentFields(t *testing.T) {
 	const site = "concurrent.example"
 
 	const N = 8
+	errCh := make(chan error, N*2)
 	done := make(chan struct{}, N*2)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			_, _ = do(t, ts, http.MethodPatch,
-				"/antibot/v1/policy/"+site, tok, `{"mode":"active"}`)
+			if err := doNoFatal(ts, http.MethodPatch,
+				"/antibot/v1/policy/"+site, tok, `{"mode":"active"}`); err != nil {
+				errCh <- err
+			}
 		}()
 		go func() {
 			defer func() { done <- struct{}{} }()
-			_, _ = do(t, ts, http.MethodPatch,
-				"/antibot/v1/policy/"+site, tok, `{"strictness":"permissive"}`)
+			if err := doNoFatal(ts, http.MethodPatch,
+				"/antibot/v1/policy/"+site, tok, `{"strictness":"permissive"}`); err != nil {
+				errCh <- err
+			}
 		}()
 	}
 	for i := 0; i < N*2; i++ {
 		<-done
 	}
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent PATCH transport error: %v", err)
+	}
+
 	var mode, strictness string
 	if err := pool.QueryRow(context.Background(),
 		`SELECT mode, strictness FROM policy WHERE host=$1`, site,
@@ -415,19 +453,28 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 
 	// Параллельно: DELETE 100 и POST 300. Если RemoveASN использует
 	// stale snapshot, 300 потеряется (asn_block станет [200] вместо [200,300]).
+	errCh := make(chan error, 2)
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		do(t, ts, http.MethodDelete,
-			"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":100}`)
+		if err := doNoFatal(ts, http.MethodDelete,
+			"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":100}`); err != nil {
+			errCh <- err
+		}
 	}()
 	go func() {
 		defer func() { done <- struct{}{} }()
-		do(t, ts, http.MethodPost,
-			"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":300}`)
+		if err := doNoFatal(ts, http.MethodPost,
+			"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":300}`); err != nil {
+			errCh <- err
+		}
 	}()
 	<-done
 	<-done
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent request transport error: %v", err)
+	}
 
 	var raw []byte
 	if err := pool.QueryRow(context.Background(),

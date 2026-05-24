@@ -27,6 +27,9 @@ func TestDecodeASNBlock(t *testing.T) {
 		{"negative skipped", "[-1, 100, -5, 200]", []uint32{100, 200}, false},
 		{"too big skipped", "[5000000000, 100]", []uint32{100}, false},
 		{"all out of range", "[-1, 5000000000]", []uint32{}, false},
+		// JSON null: НЕ маппим в 0 (default-zero ловушка). PR-58 review #2.
+		{"single null skipped", "[null]", []uint32{}, false},
+		{"null mixed with valid", "[null, 100, null, 200]", []uint32{100, 200}, false},
 		// Битый JSON → ошибка (это уже не «один битый элемент», это поломанное
 		// поле — loader должен fail-stale, а не серебряно скипнуть).
 		{"bad json", "not-json", nil, true},
@@ -46,5 +49,19 @@ func TestDecodeASNBlock(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDecodeASNBlock_EmptyResetsDst — PR-58 review #6: contract «empty
+// input → nil output» должен держаться даже при reuse'aющем caller'е.
+// Раньше функция оставляла dst untouched на empty input → future-refactor
+// с переиспользованием Policy struct silently leak'ал stale ASN.
+func TestDecodeASNBlock_EmptyResetsDst(t *testing.T) {
+	dst := []uint32{1, 2, 3}
+	if err := decodeASNBlock(nil, &dst); err != nil {
+		t.Fatalf("decode empty: %v", err)
+	}
+	if dst != nil {
+		t.Errorf("empty input did not reset dst: got %v, want nil", dst)
 	}
 }
