@@ -35,3 +35,4 @@ infra/demo-stand/config/kill_switch.local.conf
 # Python
 __pycache__/
 *.pyc
+.claude/scheduled_tasks.lock

@@ -131,14 +131,47 @@ else
     bad "GET /catalog/bogus -> ${code} (expected 404)"
 fi
 
-echo "5. POST /v1/logs accepts payload (B2 skeleton; sink wiring is B6/B9)"
-code="$(printf 'line1\nline2\n' \
+echo "5. POST /v1/logs accepts payload + sink ingests into PostgreSQL (B9)"
+# Тело — валидный BAC_LOG-record (миним. required: request_id/timestamp/edge_id).
+# Без него sink инкрементирует parse_errors_total и оставляет inserted=0,
+# acceptance B9 не пройдёт.
+
+# scrape_inserted читает antibot_backend_log_sink_inserted_total из /metrics
+# и печатает число; пустая строка = метрика отсутствует (sink не wired).
+scrape_inserted() {
+    "${CURL[@]}" "https://${HOST}/metrics" 2>/dev/null \
+        | awk '/^antibot_backend_log_sink_inserted_total / {print $2; exit}'
+}
+
+# Снимаем baseline ДО POST'a, чтобы проверять РОСТ, а не абсолют:
+# на уже живом стенде inserted_total > 0 от прошлого трафика; без delta
+# свежий неудавшийся POST давал бы false-pass (PR-56 review P2).
+before="$(scrape_inserted)"
+
+ts="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+body="$(printf '{"request_id":"verify-%s","timestamp":"%s","edge_id":"verify","stage":"egress","verdict":"pass","action":"pass","mode":"shadow"}\n' \
+    "$(date +%s)" "${ts}")"
+code="$(printf '%s' "${body}" \
     | "${CURL[@]}" -X POST --data-binary @- -o /dev/null -w '%{http_code}' \
         "https://${HOST}/v1/logs")" || code=000
 if [ "${code}" = "202" ]; then
     pass "POST /v1/logs -> 202"
 else
     bad "POST /v1/logs -> ${code} (expected 202)"
+fi
+
+if [ -z "${before}" ]; then
+    echo "   skip: sink metric absent (POSTGRES_DSN / LOGS_SINK_SPOOL_DIR not set?)"
+else
+    # Sink батчит до FlushInterval=2s → даём 5s окно на flush.
+    echo "   waiting up to 5s for sink to flush the verify payload..."
+    sleep 5
+    after="$(scrape_inserted)"
+    if awk -v b="${before}" -v a="${after}" 'BEGIN{exit !(a+0>b+0)}'; then
+        pass "antibot_backend_log_sink_inserted_total ${before} -> ${after} (delta >0)"
+    else
+        bad "antibot_backend_log_sink_inserted_total ${before} -> ${after} (expected growth after POST)"
+    fi
 fi
 
 echo "6. rDNS worker alive (counter present in /metrics)"
