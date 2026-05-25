@@ -177,6 +177,93 @@ _M.catalogs = {
             return n
         end,
     },
+
+    -- tls_fp_catalog (PR2, ADR-006) — каталог сигнатур автоматизации для
+    -- tls_fp_impersonator (Phase 2+). Wire-payload: map(hash_b →
+    -- "<status>:<family>"), симметрично verified_bot_ips. status ∈
+    -- {active, staging}; staging читается, но эмитится только staging_match,
+    -- не verdict (A11 staged rollout). Reader — tls_fp.read_entry().
+    tls_fp_catalog = {
+        name        = "tls_fp_catalog",
+        endpoint    = "/catalog/tls_fp_catalog",
+        dict_name   = "tls_fp_catalog",
+        gen_key     = "tls_fp_catalog_gen",
+        etag_key    = "tls_fp_catalog_etag",
+        version_key = "tls_fp_catalog_version",
+        apply = function(dict, entries, new_gen)
+            local n = 0
+            for hb, val in pairs(entries) do
+                local ok, err = dict:set(hb .. ":" .. new_gen, val)
+                if not ok then
+                    ngx.log(ngx.ERR, "tls_fp_catalog:set failed: ", err,
+                        " (hash_b=", hb, ", gen=", new_gen, ")")
+                    return false, n
+                end
+                n = n + 1
+            end
+            return true, n
+        end,
+        -- Тот же suffix-match подход, что и verified_bot_ips: gen — numeric,
+        -- hash_b — hex без `:`. Контракт оставляем явным assert'ом на случай,
+        -- если в будущем кто-то решит сделать gen строковым (content-hash).
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "tls_fp_catalog.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
+
+    -- tls_fp_browser_profiles (PR2, ADR-006) — каталог ожидаемых cipher_cnt
+    -- для семейств браузеров (tls_fp_suspicious_ciphers, Phase 2+).
+    -- Wire-payload: map(family → "<status>:<expected_cipher_cnt>"). Малый
+    -- размер (единицы записей), но единая модель atomic-swap для
+    -- консистентности с остальными Channel C каталогами.
+    tls_fp_browser_profiles = {
+        name        = "tls_fp_browser_profiles",
+        endpoint    = "/catalog/tls_fp_browser_profiles",
+        dict_name   = "tls_fp_browser_profiles",
+        gen_key     = "tls_fp_browser_profiles_gen",
+        etag_key    = "tls_fp_browser_profiles_etag",
+        version_key = "tls_fp_browser_profiles_version",
+        apply = function(dict, entries, new_gen)
+            local n = 0
+            for family, val in pairs(entries) do
+                local ok, err = dict:set(family .. ":" .. new_gen, val)
+                if not ok then
+                    ngx.log(ngx.ERR, "tls_fp_browser_profiles:set failed: ", err,
+                        " (family=", family, ", gen=", new_gen, ")")
+                    return false, n
+                end
+                n = n + 1
+            end
+            return true, n
+        end,
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "tls_fp_browser_profiles.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
 }
 
 -- bump_metric — best-effort counter increment on the `metrics` shared_dict.

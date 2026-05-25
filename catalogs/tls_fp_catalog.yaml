@@ -1,0 +1,26 @@
+# tls_fp_catalog.yaml — каталог сигнатур автоматизации по TLS-fp (Phase 2+).
+#
+# Используется правилом tls_fp_impersonator (категория soft): если UA
+# заявляет браузер, но hash_b TLS-fp совпадает с известной сигнатурой
+# автоматизации — challenge. См. docs/product/phase2-spec.md §"tls_fp_*".
+#
+# Формат: map hash_b -> { family, status }.
+#   - hash_b — 12-символьный hex-фрагмент TLS-fp (см. ja4_compute.lua).
+#   - family — короткое имя автоматизации (`python-requests`, `curl`,
+#     `go-http-client`, `okhttp`, etc.). По нему ищется ua_family и эмитится
+#     verdict.
+#   - status — active | staging.
+#     active  → правило tls_fp_impersonator может выписать challenge.
+#     staging → эдж матчит, пишет staging_match в bac_log, не блокирует.
+#
+# Пустой файл = ничего не матчим. Наполняется через PR по результатам
+# анализа логов: продакт сопоставляет наблюдаемый hash_b с эталонным
+# трафиком (curl/python/go) и фиксирует соответствие.
+
+# Примеры (раскомментируйте при добавлении):
+#   "1ed0482b9b4c":
+#     family: python-requests
+#     status: active
+#   "a1b2c3d4e5f6":
+#     family: curl
+#     status: staging

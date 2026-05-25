@@ -42,7 +42,7 @@ import (
 )
 
 // Список файлов, которые мы трекаем для mtime-cache. Если добавляется новый
-// каталог (например, tls_fp_catalog в PR2) — добавь сюда и в Load().
+// каталог — добавь сюда и в Load().
 var trackedFiles = []string{
 	"version",
 	"fp_blocklist.yaml",
@@ -50,6 +50,8 @@ var trackedFiles = []string{
 	"ip_blocklist.yaml",
 	"ip_whitelist.yaml",
 	"asn_datacenters.yaml",
+	"tls_fp_catalog.yaml",
+	"tls_fp_browser_profiles.yaml",
 }
 
 // statusActive — единственное значение status, которое попадает в активный
@@ -127,12 +129,14 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	mtimes["version"] = vmtime
 
 	slow := &catalog.SlowData{
-		Version:        version,
-		FPBlocklist:    map[string]string{},
-		IPBlocklist:    map[string]string{},
-		UABlacklist:    []string{},
-		IPWhitelist:    []string{},
-		ASNDatacenters: []uint32{},
+		Version:              version,
+		FPBlocklist:          map[string]string{},
+		IPBlocklist:          map[string]string{},
+		UABlacklist:          []string{},
+		IPWhitelist:          []string{},
+		ASNDatacenters:       []uint32{},
+		TLSFPCatalog:         map[string]catalog.TLSFPCatalog{},
+		TLSFPBrowserProfiles: map[string]catalog.BrowserProfile{},
 	}
 
 	// fp_blocklist: map(fp → status). Активные → fp: "block" в SlowData.
@@ -184,6 +188,24 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	}
 	slow.ASNDatacenters = asns
 	mtimes["asn_datacenters.yaml"] = mt
+
+	// tls_fp_catalog: top-level map(hash_b → {family, status}). Validate
+	// делает структурные проверки (непустой family, валидный status); сюда
+	// просто кладём результат decodeYAML.
+	tlsCat, mt, err := loadTLSFPCatalog(l.dir, "tls_fp_catalog.yaml")
+	if err != nil {
+		return nil, err
+	}
+	slow.TLSFPCatalog = tlsCat
+	mtimes["tls_fp_catalog.yaml"] = mt
+
+	// tls_fp_browser_profiles: top-level map(family → {expected_cipher_cnt, status}).
+	tlsProf, mt, err := loadBrowserProfiles(l.dir, "tls_fp_browser_profiles.yaml")
+	if err != nil {
+		return nil, err
+	}
+	slow.TLSFPBrowserProfiles = tlsProf
+	mtimes["tls_fp_browser_profiles.yaml"] = mt
 
 	// Финальная валидация через catalog.Validate: regex компилируется,
 	// CIDR парсятся как симметрично-к-ipmatcher'у. Та же модель, что в
@@ -263,6 +285,41 @@ func loadStringSlice(dir, name string) ([]string, time.Time, error) {
 		s = []string{}
 	}
 	return s, mt, nil
+}
+
+// loadTLSFPCatalog читает YAML-map(hash_b → {family, status}). Пустой файл /
+// только комментарии = пустой каталог. Структурные проверки (непустой family,
+// валидный status) делает catalog.Validate на следующем шаге Load.
+func loadTLSFPCatalog(dir, name string) (map[string]catalog.TLSFPCatalog, time.Time, error) {
+	data, mt, err := readFile(dir, name)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	m := map[string]catalog.TLSFPCatalog{}
+	if err := decodeYAML(data, &m, name); err != nil {
+		return nil, time.Time{}, err
+	}
+	if m == nil {
+		m = map[string]catalog.TLSFPCatalog{}
+	}
+	return m, mt, nil
+}
+
+// loadBrowserProfiles читает YAML-map(family → {expected_cipher_cnt, status}).
+// Симметрично loadTLSFPCatalog: проверки в catalog.Validate.
+func loadBrowserProfiles(dir, name string) (map[string]catalog.BrowserProfile, time.Time, error) {
+	data, mt, err := readFile(dir, name)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	m := map[string]catalog.BrowserProfile{}
+	if err := decodeYAML(data, &m, name); err != nil {
+		return nil, time.Time{}, err
+	}
+	if m == nil {
+		m = map[string]catalog.BrowserProfile{}
+	}
+	return m, mt, nil
 }
 
 // loadASNs читает YAML-файл с последовательностью чисел и приводит к

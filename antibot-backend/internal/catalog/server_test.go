@@ -47,6 +47,14 @@ func sampleData() *Data {
 	d.IPBlocklist = map[string]string{"203.0.113.0/24": "block"}
 	d.IPWhitelist = []string{"198.51.100.5/32"}
 	d.ASNDatacenters = []uint32{14061, 16509, 14061} // дубликат — проверяем dedup
+	d.TLSFPCatalog = map[string]TLSFPCatalog{
+		"1ed0482b9b4c": {Family: "python-requests", Status: "active"},
+		"a1b2c3d4e5f6": {Family: "curl", Status: "staging"},
+	}
+	d.TLSFPBrowserProfiles = map[string]BrowserProfile{
+		"chrome":  {ExpectedCipherCnt: 15, Status: "active"},
+		"firefox": {ExpectedCipherCnt: 16, Status: "active"},
+	}
 	d.VerifiedBotIPs = map[string]string{"66.249.66.1": "verified:google", "157.55.39.1": "rejected:bing"}
 	d.Policy = map[string]Policy{
 		"shop.example.com": {
@@ -334,6 +342,43 @@ func TestPerTenantIPLists(t *testing.T) {
 	r.Body.Close()
 	if len(wl) != 2 {
 		t.Errorf("ip_whitelist?site=shop: len=%d want 2, got %v", len(wl), wl)
+	}
+}
+
+// TestTLSFPCatalogPayload: composite "<status>:<family>" payload — wire
+// формат, который edge tls_fp.lua разбирает split-по-`:` (mirrors verified_bot_ips
+// и не требует cjson.encode per-entry).
+func TestTLSFPCatalogPayload(t *testing.T) {
+	ts := newTestServer(t, sampleData())
+	r := httpGet(t, ts.URL+"/catalog/tls_fp_catalog")
+	var cat map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&cat); err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if cat["1ed0482b9b4c"] != "active:python-requests" {
+		t.Errorf("tls_fp_catalog[python-requests] payload = %q, want %q",
+			cat["1ed0482b9b4c"], "active:python-requests")
+	}
+	if cat["a1b2c3d4e5f6"] != "staging:curl" {
+		t.Errorf("tls_fp_catalog[curl] payload = %q, want %q (staging должен оставаться в payload, эдж сам фильтрует)",
+			cat["a1b2c3d4e5f6"], "staging:curl")
+	}
+}
+
+func TestTLSFPBrowserProfilesPayload(t *testing.T) {
+	ts := newTestServer(t, sampleData())
+	r := httpGet(t, ts.URL+"/catalog/tls_fp_browser_profiles")
+	var prof map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&prof); err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if prof["chrome"] != "active:15" {
+		t.Errorf("chrome payload = %q want active:15", prof["chrome"])
+	}
+	if prof["firefox"] != "active:16" {
+		t.Errorf("firefox payload = %q want active:16", prof["firefox"])
 	}
 }
 

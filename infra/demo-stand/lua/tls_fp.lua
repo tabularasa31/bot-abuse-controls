@@ -143,60 +143,50 @@ function _M.cipher_count(fp)
     return cc and tonumber(cc) or nil
 end
 
--- pure: build the active hash_b → family map from parsed tls_fp_catalog.conf
--- (config_loader.parse_ini output: { [hash_b] = { family=, status=, … } }).
--- Excludes status=staging; an entry with no family is skipped.
-function _M.build_catalog(catalog_cfg)
-    local out = {}
-    for hb, attrs in pairs(catalog_cfg or {}) do
-        if type(attrs) == "table" and attrs.family and attrs.status ~= "staging" then
-            out[hb] = attrs.family
+-- pure: parse wire-format map { [hash_b] = "<status>:<family>" } (composite
+-- string per Channel C contract — symmetric to verified_bot_ips) into two
+-- tables: active hash_b → family, staging hash_b → family. Empty family or
+-- unknown status is skipped (defense-in-depth — backend validates these,
+-- but a partial Channel C payload should never blow up the request path).
+-- Used by refresh() to rebuild the per-process lookup tables after a
+-- Channel C gen flip; also tested standalone (pure, no ngx deps).
+function _M.build_catalog(wire)
+    local active, staging = {}, {}
+    for hb, raw in pairs(wire or {}) do
+        if type(raw) == "string" then
+            local status, family = raw:match("^([^:]+):(.+)$")
+            if family and family ~= "" then
+                if status == "active" then
+                    active[hb] = family
+                elseif status == "staging" then
+                    staging[hb] = family
+                end
+            end
         end
     end
-    return out
+    return active, staging
 end
 
--- pure: build the active family → expected_cipher_cnt map from parsed
--- tls_fp_browser_profiles.conf. Excludes status=staging; an entry whose
--- expected_cipher_cnt is missing/non-numeric is skipped.
-function _M.build_profiles(profiles_cfg)
-    local out = {}
-    for family, attrs in pairs(profiles_cfg or {}) do
-        if type(attrs) == "table" and attrs.status ~= "staging" then
-            local n = tonumber(attrs.expected_cipher_cnt)
-            if n then out[family] = n end
+-- pure: parse wire-format map { [family] = "<status>:<expected_cipher_cnt>" }
+-- into two tables: active family → cipher_cnt, staging family → cipher_cnt.
+-- A non-numeric or non-positive cipher_cnt is skipped (backend Validate
+-- enforces > 0, but parser stays robust to corrupted wire payloads).
+function _M.build_profiles(wire)
+    local active, staging = {}, {}
+    for family, raw in pairs(wire or {}) do
+        if type(raw) == "string" then
+            local status, cnt = raw:match("^([^:]+):(.+)$")
+            local n = tonumber(cnt)
+            if n and n > 0 then
+                if status == "active" then
+                    active[family] = n
+                elseif status == "staging" then
+                    staging[family] = n
+                end
+            end
         end
     end
-    return out
-end
-
--- pure: build the staging hash_b → family map (status=staging only) — the
--- mirror of build_catalog. Same shape as the active table so the staging match
--- can reuse is_impersonator; entries with no family are skipped.
-function _M.build_catalog_staging(catalog_cfg)
-    local out = {}
-    for hb, attrs in pairs(catalog_cfg or {}) do
-        if type(attrs) == "table" and attrs.family and attrs.status == "staging" then
-            out[hb] = attrs.family
-        end
-    end
-    return out
-end
-
--- pure: build the staging family → expected_cipher_cnt map (status=staging
--- only) — the mirror of build_profiles. A non-numeric expected_cipher_cnt is
--- skipped. NB the INI section key is the family, so a family can be either
--- active or staging in a given file, not both; that is the config-format
--- limit, not enforced here.
-function _M.build_profiles_staging(profiles_cfg)
-    local out = {}
-    for family, attrs in pairs(profiles_cfg or {}) do
-        if type(attrs) == "table" and attrs.status == "staging" then
-            local n = tonumber(attrs.expected_cipher_cnt)
-            if n then out[family] = n end
-        end
-    end
-    return out
+    return active, staging
 end
 
 -- pure: build the staging fp set (status=staging only) from the parsed
@@ -254,16 +244,20 @@ function _M.has_tag(tags, want)
     return false
 end
 
--- Called once in init_by_lua, after config.load(). Compiles the on-disk
--- catalogs into the per-process lookup tables run() reads.
+-- Called once in init_by_lua, after config.load(). После PR2 (ADR-006)
+-- tls_fp_catalog / tls_fp_browser_profiles больше не INI-файлы на эдже —
+-- их Channel C тащит из git-репо catalogs/ через backend (см.
+-- catalog_pull.lua descriptors). Здесь только cold-start: ставим пустые
+-- lookup-таблицы; первая успешная pull в catalog_pull.fetch заполнит
+-- shared_dict, а refresh() в run() построит per-worker Lua-таблицы по
+-- этому snapshot'у. blocklist_staging остаётся file-based — это другой
+-- источник (tls_fp_blocklist.conf, ещё не мигрирован на Channel C).
 function _M.build(config)
-    _M.catalog  = _M.build_catalog(config.tls_fp_catalog)
-    _M.profiles = _M.build_profiles(config.tls_fp_browser_profiles)
+    _M.catalog          = {}
+    _M.profiles         = {}
+    _M.catalog_staging  = {}
+    _M.profiles_staging = {}
 
-    -- Staged counterparts (status=staging) — matched for staging_match, never
-    -- a verdict (A11).
-    _M.catalog_staging   = _M.build_catalog_staging(config.tls_fp_catalog)
-    _M.profiles_staging  = _M.build_profiles_staging(config.tls_fp_browser_profiles)
     _M.blocklist_staging = _M.build_blocklist_staging(config.tls_fp_blocklist)
 
     -- Stage off via the shared kill-switch helper (config-templates.md
@@ -272,15 +266,70 @@ function _M.build(config)
     -- gates only the soft rules + tags this module owns.
     _M.enabled = require("config").stage_enabled(config.defaults or {}, "tls_fp")
 
-    -- Active + staging entry counts for the startup log.
-    local cat_n, prof_n = 0, 0
-    for _ in pairs(_M.catalog)  do cat_n  = cat_n  + 1 end
-    for _ in pairs(_M.profiles) do prof_n = prof_n + 1 end
-    local stg_cat_n, stg_prof_n, stg_bl_n = 0, 0, 0
-    for _ in pairs(_M.catalog_staging)   do stg_cat_n  = stg_cat_n  + 1 end
-    for _ in pairs(_M.profiles_staging)  do stg_prof_n = stg_prof_n + 1 end
-    for _ in pairs(_M.blocklist_staging) do stg_bl_n   = stg_bl_n   + 1 end
-    return _M, cat_n, prof_n, stg_cat_n, stg_prof_n, stg_bl_n
+    -- Per-worker gen-cache reset (init_by_lua runs before fork, but a worker
+    -- restart re-runs this code on the new master too). nil means "first
+    -- refresh in this worker will rebuild from current dict gen".
+    _M._cached_gen_catalog  = nil
+    _M._cached_gen_profiles = nil
+
+    -- На init возвращаем нули — pull ещё не запускался. Точные счётчики
+    -- видны в /metrics и в bac_log staging_match после первого тика
+    -- catalog_pull (≤ 30 сек после старта).
+    local stg_bl_n = 0
+    for _ in pairs(_M.blocklist_staging) do stg_bl_n = stg_bl_n + 1 end
+    return _M, 0, 0, 0, 0, stg_bl_n
+end
+
+-- refresh — читает текущий gen из meta:get(gen_key) и, если он
+-- отличается от закешированного для этого worker'а, пересобирает Lua-
+-- таблицы _M.catalog / _M.catalog_staging (и аналогично profiles) из
+-- shared_dict. Дешево в steady state (один meta:get + сравнение чисел);
+-- rebuild — только когда Channel C доставил новый snapshot (~раз в 30с).
+-- Вызывается в начале run(), чтобы каскад работал на актуальном
+-- catalog'е без явного pub/sub между catalog_pull и tls_fp.
+--
+-- Вариант с per-request dict:get_keys(0) был отвергнут: для tls_fp_catalog
+-- размер маленький (десятки), но dict:get_keys лочит shared_dict на время
+-- скана, что добавляет latency-вариативности per-request. Per-gen rebuild
+-- амортизирует это до одного lock'а на pull.
+local function rebuild_from_dict(dict_name, gen_key, builder)
+    local meta = ngx.shared.meta
+    local dict = ngx.shared[dict_name]
+    if not meta or not dict then return {}, {}, nil end
+    local cur_gen = meta:get(gen_key) or 0
+    local suffix  = ":" .. cur_gen
+    local wire    = {}
+    for _, k in ipairs(dict:get_keys(0)) do
+        if k:sub(-#suffix) == suffix then
+            local base = k:sub(1, -#suffix - 1)
+            local val  = dict:get(k)
+            if val then wire[base] = val end
+        end
+    end
+    local active, staging = builder(wire)
+    return active, staging, cur_gen
+end
+
+function _M.refresh()
+    if not ngx or not ngx.shared then return end
+
+    local cat_gen = (ngx.shared.meta and ngx.shared.meta:get("tls_fp_catalog_gen")) or 0
+    if cat_gen ~= _M._cached_gen_catalog then
+        local active, staging = rebuild_from_dict(
+            "tls_fp_catalog", "tls_fp_catalog_gen", _M.build_catalog)
+        _M.catalog          = active
+        _M.catalog_staging  = staging
+        _M._cached_gen_catalog = cat_gen
+    end
+
+    local prof_gen = (ngx.shared.meta and ngx.shared.meta:get("tls_fp_browser_profiles_gen")) or 0
+    if prof_gen ~= _M._cached_gen_profiles then
+        local active, staging = rebuild_from_dict(
+            "tls_fp_browser_profiles", "tls_fp_browser_profiles_gen", _M.build_profiles)
+        _M.profiles          = active
+        _M.profiles_staging  = staging
+        _M._cached_gen_profiles = prof_gen
+    end
 end
 
 -- Record a soft challenge flag. The flag is always accumulated (vision.md:
@@ -300,6 +349,12 @@ end
 -- short-circuits.
 function _M.run(fp)
     if not _M.enabled then return end
+
+    -- Pull-in latest Channel C snapshot for tls_fp_catalog / tls_fp_browser_profiles.
+    -- Cheap in steady state (one meta:get per gen-key, compare to cached
+    -- worker-local int); rebuilds Lua tables only when gen flips (≈ pull
+    -- interval, 30s по умолчанию).
+    _M.refresh()
 
     local bac_log = package.loaded["bac_log"] or require "bac_log"
     local ctx = ngx.ctx.bac

@@ -72,33 +72,50 @@ check(tls_fp.cipher_count("L13d11h2_x_y"), 11, "cipher_count 11")
 check(tls_fp.cipher_count("nope"), nil,        "cipher_count malformed → nil")
 
 -- ===========================================================================
--- build_catalog / build_profiles — active-only compilation
+-- build_catalog / build_profiles — parse Channel C wire format
+-- "<status>:<value>" into (active, staging) tables. After PR2 (ADR-006)
+-- this is the only build path; on-disk INI source removed.
 -- ===========================================================================
 
-local cat = tls_fp.build_catalog({
-    ["1ed0482b9b4c"] = { family = "python-requests", status = "active" },
-    ["a1b2c3d4e5f6"] = { family = "curl",            status = "staging" },
-    ["dead00000000"] = { status = "active" },  -- no family → skipped
+local cat_active, cat_staging = tls_fp.build_catalog({
+    ["1ed0482b9b4c"] = "active:python-requests",
+    ["a1b2c3d4e5f6"] = "staging:curl",
+    ["dead00000000"] = "active:",            -- empty family → skipped
+    ["bad-status"]   = "unknown:something",  -- неизвестный status → skip
+    ["malformed"]    = "no-colon-here",      -- битый wire → skip
 })
-check(cat["1ed0482b9b4c"], "python-requests", "build_catalog keeps active")
-check(cat["a1b2c3d4e5f6"], nil,               "build_catalog drops staging")
-check(cat["dead00000000"], nil,               "build_catalog drops family-less")
-check(next(tls_fp.build_catalog(nil)), nil,   "build_catalog nil → empty")
+check(cat_active["1ed0482b9b4c"],  "python-requests", "build_catalog active")
+check(cat_active["a1b2c3d4e5f6"],  nil,               "build_catalog active drops staging")
+check(cat_staging["a1b2c3d4e5f6"], "curl",            "build_catalog staging")
+check(cat_active["dead00000000"],  nil,               "build_catalog drops empty family")
+check(cat_active["bad-status"],    nil,               "build_catalog drops unknown status")
+check(cat_active["malformed"],     nil,               "build_catalog drops malformed wire")
+local empty_a, empty_s = tls_fp.build_catalog(nil)
+check(next(empty_a), nil, "build_catalog nil active → empty")
+check(next(empty_s), nil, "build_catalog nil staging → empty")
 
-local prof = tls_fp.build_profiles({
-    chrome  = { expected_cipher_cnt = 15, status = "active" },
-    firefox = { expected_cipher_cnt = 16, status = "active" },
-    safari  = { expected_cipher_cnt = 20, status = "active" },
-    edge    = { expected_cipher_cnt = 15, status = "active" },
-    beta    = { expected_cipher_cnt = 18, status = "staging" },  -- excluded
-    bad     = { status = "active" },                              -- no cnt → skip
+local prof_active, prof_staging = tls_fp.build_profiles({
+    chrome  = "active:15",
+    firefox = "active:16",
+    safari  = "active:20",
+    edge    = "active:15",
+    beta    = "staging:18",
+    bad     = "active:notanumber",  -- non-numeric → skipped
+    zero    = "active:0",            -- non-positive → skipped (defense; backend Validate тоже ловит)
 })
-check(prof.chrome,  15,  "build_profiles chrome=15")
-check(prof.firefox, 16,  "build_profiles firefox=16")
-check(prof.safari,  20,  "build_profiles safari=20")
-check(prof.edge,    15,  "build_profiles edge=15")
-check(prof.beta,    nil, "build_profiles drops staging")
-check(prof.bad,     nil, "build_profiles drops cnt-less")
+check(prof_active.chrome,  15,  "build_profiles chrome=15")
+check(prof_active.firefox, 16,  "build_profiles firefox=16")
+check(prof_active.safari,  20,  "build_profiles safari=20")
+check(prof_active.edge,    15,  "build_profiles edge=15")
+check(prof_active.beta,    nil, "build_profiles active drops staging")
+check(prof_staging.beta,   18,  "build_profiles staging beta=18")
+check(prof_active.bad,     nil, "build_profiles drops non-numeric")
+check(prof_active.zero,    nil, "build_profiles drops zero cipher_cnt")
+
+-- Локальные алиасы для остальных тестов файла — they expected single-table
+-- shape, теперь build_* возвращает (active, staging).
+local cat  = cat_active
+local prof = prof_active
 
 -- ===========================================================================
 -- is_impersonator — UA browser + fp hash_b is a known automation signature

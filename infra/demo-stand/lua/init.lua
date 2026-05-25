@@ -129,11 +129,15 @@ if (require "verified_bots").enabled and vb_alts_n == 0 then
 end
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
+-- PR2 (ADR-006): tls_fp_catalog / tls_fp_browser_profiles теперь приезжают
+-- через Channel C, не из локального config.tls_fp_*. На init их ещё нет
+-- (pull выполняется после init_worker_by_lua); счётчики ниже всегда нули,
+-- актуальные значения видны в /metrics после первого тика catalog_pull
+-- (≤ 30 сек после старта). Оставлены as-is, чтобы формат лога не сломал
+-- скрипты, которые grep'ают по нему.
 ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,
     " active, browser_profiles=", tls_prof_n,
-    " active (impersonator/suspicious_ciphers → verdict=challenge, observe-only)")
--- Staged (status=staging) patterns: matched into staging_match, never a verdict
--- (A11). Counts let a reviewer confirm a staging PR landed on the stand.
+    " active at init (Channel C will populate; check /metrics after first pull)")
 ngx.log(ngx.NOTICE, "[demo] tls_fp staged: tls_fp_catalog=", tls_stg_cat_n,
     " browser_profiles=", tls_stg_prof_n, " tls_fp_blocklist=", tls_stg_bl_n,
     " (observe-only into staging_match, no verdict)")

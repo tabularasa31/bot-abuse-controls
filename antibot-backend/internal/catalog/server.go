@@ -28,14 +28,16 @@ import (
 // concept". Держим в одном месте, чтобы регистрация роутов и handle.handle
 // смотрели на тот же список.
 var knownCatalogs = map[string]struct{}{
-	"fp_blocklist":     {},
-	"ua_blacklist":     {},
-	"ip_blocklist":     {},
-	"ip_whitelist":     {},
-	"asn_datacenters":  {},
-	"verified_bot_ips": {},
-	"policy":           {},
-	"attack_mode":      {},
+	"fp_blocklist":            {},
+	"ua_blacklist":            {},
+	"ip_blocklist":            {},
+	"ip_whitelist":            {},
+	"asn_datacenters":         {},
+	"tls_fp_catalog":          {},
+	"tls_fp_browser_profiles": {},
+	"verified_bot_ips":        {},
+	"policy":                  {},
+	"attack_mode":             {},
 }
 
 // Server — HTTP-обёртка над Store. Один Store на процесс; Server-объектов
