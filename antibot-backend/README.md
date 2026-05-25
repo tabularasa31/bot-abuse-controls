@@ -6,11 +6,17 @@
 функции, ничего сверх:
 
 1. **catalog server** — отдаёт каталоги на edge по Channel C
-   (`GET /catalog/<name>`, ETag/If-None-Match, `?site=<host>`). HTTP-контракт
-   реализован в [B3]; схема PostgreSQL + per-host policy и периодический
-   reload — в [B4]. Источник данных выбирается по `POSTGRES_DSN` (БД,
-   приоритетно) или `CATALOG_YAML` (fallback). Без обоих Store пуст и
-   `/catalog/*` отвечает `503`.
+   (`GET /catalog/<name>`, ETag/If-None-Match, `?site=<host>`). После
+   [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
+   источников два:
+   - **медленные каталоги** (`fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
+     `ip_whitelist`, `asn_datacenters` + `version`) живут в git-репо
+     `../catalogs/` и читаются `internal/filesource` с mtime-кешем;
+   - **runtime state** (`verified_bot_ips`, `policy`) — в PostgreSQL,
+     читается `dbloader.LoadRuntime`.
+   Reloader на каждом тике мерджит оба слоя через `catalog.Merge` и
+   атомарно публикует в Store.Replace. Без БД сервис идёт в skeleton-
+   режим, `/catalog/*` отвечает `503`.
 2. **log receiver** — `POST /v1/logs`, принимает поток BAC_LOG с эджей, отвечает
    `202`. Метрика `antibot_backend_log_lines_received_total` считает строки.
    Валидация схемы, батч в sink, disk-queue — задачи [B6]/[B9].
@@ -37,7 +43,7 @@ fail-stale (см. config-distribution §"Channel C / Failure mode").
 go run ./cmd/antibot-backend
 # затем:
 curl http://localhost:8080/health
-curl -i http://localhost:8080/catalog/fp_blocklist        # 503 catalog_not_loaded без CATALOG_YAML / POSTGRES_DSN; 200 если источник задан
+curl -i http://localhost:8080/catalog/fp_blocklist        # 503 catalog_not_loaded без POSTGRES_DSN; 200 если БД + ./catalogs/ заданы
 curl -i -X POST --data 'line1\nline2\n' http://localhost:8080/v1/logs  # 202
 curl http://localhost:8080/metrics | grep antibot_backend_
 ```
@@ -51,9 +57,9 @@ curl http://localhost:8080/metrics | grep antibot_backend_
 |---|---|---|
 | `HTTP_ADDR` | `:8080` | listen для HTTP. LB B1-substrate'а ходит сюда. |
 | `INSTANCE_NAME` | hostname | метка в `/health` и логах (для round-robin checks). |
-| `POSTGRES_DSN` | пусто | DSN для pgxpool. Пусто = skeleton-режим без DB. Если задан — становится источником каталогов (B4), CATALOG_YAML игнорируется. |
-| `CATALOG_YAML` | пусто | путь до YAML с каталогами (dev-fallback B3). Игнорируется, если задан `POSTGRES_DSN`. |
-| `CATALOG_RELOAD_INTERVAL` | `5s` | как часто backend перечитывает каталоги из БД (B4). Короче 30 с edge-poll'a, чтобы изменения доезжали ≤30 c. |
+| `POSTGRES_DSN` | пусто | DSN для pgxpool. Пусто = skeleton-режим без DB (Channel C отвечает 503). |
+| `CATALOGS_DIR` | `./catalogs` | папка с медленными каталогами от продакта (ADR-006). Без файлов в этой папке Bootstrap падает. |
+| `CATALOG_RELOAD_INTERVAL` | `5s` | как часто backend перечитывает каталоги (файлы + DB → Merge → Store). Короче 30 с edge-poll'a, чтобы изменения доезжали ≤30 c. |
 | `MIGRATE_ON_STARTUP` | `true` | прогон встроенных миграций до старта HTTP при `POSTGRES_DSN`. `false` для прод-сценариев с внешним мигратором (B15). |
 | `RDNS_INTERVAL` | `30m` | устаревший knob от B2-скелета. В B7 воркер reactive (триггер — поток логов), периодического тика нет; параметр игнорируется. |
 | `RDNS_QUEUE_SIZE` | `1024` | буфер reactive-очереди rDNS-воркера. Переполнение = receiver дропает задачу в метрику `..._rdns_dropped_total`, edge продолжит выдавать provisional. |
@@ -62,14 +68,25 @@ curl http://localhost:8080/metrics | grep antibot_backend_
 | `RDNS_GC_INTERVAL` | `1h` | как часто `DELETE` протухшие строки `verified_bot_ips`. |
 | `SHUTDOWN_TIMEOUT` | `10s` | graceful-shutdown HTTP-сервера. |
 
-## Схема PostgreSQL (B4)
+## Схема PostgreSQL
 
-Восемь таблиц для восьми каталогов Channel C + singleton `catalog_version`.
-SQL-файл — [`internal/dbloader/migrations/0001_init.sql`](internal/dbloader/migrations/0001_init.sql),
-встраивается через `//go:embed` и применяется на старте при
-`MIGRATE_ON_STARTUP=true`. Все `CREATE TABLE IF NOT EXISTS` — повторный
-запуск безопасен; полноценный мигратор (golang-migrate с tracking-table)
-принесёт [B15].
+После ADR-006 в БД остались только runtime-таблицы:
+- `policy` — per-host настройки, пишутся через antibotapi из дашборда;
+- `verified_bot_ips` — пишется rDNS-воркером (B7);
+- `logs` — приёмник BAC_LOG (B9).
+
+Slow-каталоги (`fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
+`ip_whitelist`, `asn_datacenters`) и singleton `catalog_version` дропнуты
+миграцией [`0004_drop_slow_catalogs.sql`](internal/dbloader/migrations/0004_drop_slow_catalogs.sql).
+Их данные теперь в `../catalogs/`; миграция содержимого со стенда —
+скриптом [`../scripts/seed-catalogs-from-db.sh`](../scripts/seed-catalogs-from-db.sh)
+до накатки 0004.
+
+SQL-файлы лежат в [`internal/dbloader/migrations/`](internal/dbloader/migrations/),
+встраиваются через `//go:embed` и применяются на старте при
+`MIGRATE_ON_STARTUP=true`. `CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS`
+— повторный запуск безопасен; полноценный мигратор (golang-migrate с
+tracking-table) принесёт [B15].
 
 Per-host `policy` — единственная таблица с JSONB-полями: `ua_blacklist`,
 `ip_whitelist`, `ip_blocklist`, `asn_block`, `geo_whitelist`, `rate_rules`.

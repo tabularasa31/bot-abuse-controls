@@ -26,6 +26,7 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/config"
 	"github.com/tabularasa31/antibot-backend/internal/db"
 	"github.com/tabularasa31/antibot-backend/internal/dbloader"
+	"github.com/tabularasa31/antibot-backend/internal/filesource"
 	"github.com/tabularasa31/antibot-backend/internal/health"
 	"github.com/tabularasa31/antibot-backend/internal/logs"
 	"github.com/tabularasa31/antibot-backend/internal/logsink"
@@ -43,7 +44,7 @@ type App struct {
 	srv      *http.Server
 	reg      *prometheus.Registry
 	store    *catalog.Store     // ссылка нужна rDNS-воркеру (HasVerifiedBotIP)
-	reloader *dbloader.Reloader // nil если каталог из YAML или не загружен
+	reloader *dbloader.Reloader // nil в skeleton-режиме без БД
 	rdns     *rdns.Worker       // nil в skeleton-режиме без БД
 	logSink  *logsink.Sink      // nil без БД (skeleton) или при ошибке инициализации спула
 }
@@ -219,56 +220,52 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	return a, nil
 }
 
-// buildCatalog выбирает источник каталогов и регистрирует HTTP-роуты Channel C
-// плюс приёмник логов. Источник определяется по приоритету:
+// buildCatalog собирает источники Channel C и регистрирует HTTP-роуты.
+// Источников теперь два, оба обязательны при наличии БД (по ADR-006):
 //
-//   - POSTGRES_DSN (B4): миграции + dbloader.Reloader (тикает Load → Store.Replace).
-//   - CATALOG_YAML (B3 dev-fallback): один синхронный Load из файла.
-//   - ничего: Store остаётся пустым, /catalog/* отвечает 503 (fail-closed).
+//   - filesource (catalogs/): медленные каталоги от продакта. Без файлов
+//     невозможно собрать осмысленный slow-слой — Store не поднимется.
+//   - dbloader.LoadRuntime: verified_bot_ips, policy. Без БД (skeleton-
+//     режим) — оба пустые, /catalog/* отвечает 503.
 //
-// Если задан и POSTGRES_DSN, и CATALOG_YAML — побеждает БД (single source of
-// truth, иначе оператор гадал бы по prometheus'у, какой именно payload отдан
-// эджу).
+// Reloader тикает оба источника на одном interval'е, мерджит в *catalog.Data,
+// публикует в Store через атомарный Replace.
 func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	catalogSrv := catalog.New()
 	a.store = catalogSrv.Store()
 
-	switch {
-	case a.pool != nil:
-		if a.cfg.MigrateOnStartup {
-			if err := dbloader.Migrate(ctx, a.pool); err != nil {
-				return fmt.Errorf("catalog migrate: %w", err)
-			}
-			a.logger.Info("catalog migrations applied")
-		}
-		reloader, err := dbloader.NewReloader(a.pool, catalogSrv.Store(), a.cfg.CatalogReloadInterval, a.logger, a.reg)
-		if err != nil {
-			return fmt.Errorf("catalog reloader: %w", err)
-		}
-		// Первый Bootstrap синхронно — если БД пустая или схема битая,
-		// backend не должен подниматься "успешно" с 503 на каждый
-		// /catalog/* до первого тика.
-		if err := reloader.Bootstrap(ctx); err != nil {
-			return fmt.Errorf("catalog bootstrap: %w", err)
-		}
-		a.reloader = reloader
-		a.logger.Info("catalog loaded from postgres",
-			"reload_interval", a.cfg.CatalogReloadInterval,
-		)
-	case a.cfg.CatalogYAMLPath != "":
-		d, err := catalog.LoadYAML(a.cfg.CatalogYAMLPath)
-		if err != nil {
-			return fmt.Errorf("catalog load: %w", err)
-		}
-		catalogSrv.Store().Replace(d)
-		a.logger.Info("catalog loaded from yaml",
-			"path", a.cfg.CatalogYAMLPath,
-			"version", d.Version,
-			"hosts_with_policy", len(d.Policy),
-		)
-	default:
-		a.logger.Warn("no catalog source — set POSTGRES_DSN (preferred) or CATALOG_YAML; Store stays empty and Channel C returns 503")
+	if a.pool == nil {
+		// Skeleton-режим без БД: Channel C остаётся в not-loaded состоянии
+		// (503 на любой /catalog/*). Это явный знак оператору — без БД
+		// rDNS-воркер не пишет verified_bot_ips, antibotapi не принимает
+		// policy, отдавать пустую runtime-часть было бы хуже, чем 503.
+		a.logger.Warn("no POSTGRES_DSN — Channel C stays not-loaded (returns 503); set POSTGRES_DSN + CATALOGS_DIR to enable")
+		catalogSrv.Register(mux)
+		return nil
 	}
+
+	if a.cfg.MigrateOnStartup {
+		if err := dbloader.Migrate(ctx, a.pool); err != nil {
+			return fmt.Errorf("catalog migrate: %w", err)
+		}
+		a.logger.Info("catalog migrations applied")
+	}
+
+	fileLoader := filesource.New(a.cfg.CatalogsDir)
+	reloader, err := dbloader.NewReloader(a.pool, catalogSrv.Store(), fileLoader, a.cfg.CatalogReloadInterval, a.logger, a.reg)
+	if err != nil {
+		return fmt.Errorf("catalog reloader: %w", err)
+	}
+	// Первый Bootstrap синхронно — если файлы / БД биты, backend не должен
+	// подниматься "успешно" с 503 на каждый /catalog/* до первого тика.
+	if err := reloader.Bootstrap(ctx); err != nil {
+		return fmt.Errorf("catalog bootstrap: %w", err)
+	}
+	a.reloader = reloader
+	a.logger.Info("catalog wired",
+		"catalogs_dir", a.cfg.CatalogsDir,
+		"reload_interval", a.cfg.CatalogReloadInterval,
+	)
 
 	catalogSrv.Register(mux)
 	// logs.Receiver регистрируется ПОСЛЕ rdns.Worker (см. App.New), чтобы

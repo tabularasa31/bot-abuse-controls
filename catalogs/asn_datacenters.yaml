@@ -1,0 +1,13 @@
+# asn_datacenters.yaml — ASN-номера датацентров. Каскад на L2.3 тегирует
+# запросы с ASN из этого списка как reputation:asn_dc; дальше per-resource
+# policy[host].asn_block решает, эмитить ли verdict=block.
+#
+# Формат: список uint32 (RFC 6793 32-bit ASN). Без status — это
+# справочная таблица "какие ASN считаются ДЦ", сам тег ничего не блокирует
+# (блокировка — в per-resource policy).
+
+# Примеры:
+#   - 14061   # DigitalOcean
+#   - 16509   # AWS
+#   - 14618   # AWS
+#   - 32934   # Facebook

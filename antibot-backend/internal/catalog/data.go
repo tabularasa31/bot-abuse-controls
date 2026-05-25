@@ -11,11 +11,8 @@ package catalog
 import (
 	"fmt"
 	"net/netip"
-	"os"
 	"regexp"
 	"sort"
-
-	"gopkg.in/yaml.v3"
 )
 
 // defaultVersion — semver, который Store отдаёт до первой загрузки. Он же
@@ -71,6 +68,73 @@ type RateRule struct {
 	Action  string   `yaml:"action" json:"action"` // block | challenge | log_only
 }
 
+// SlowData — слой каталогов, который ведёт продакт через PR в git-репо
+// catalogs/. По ADR-006 это единственный источник истины для медленных
+// каталогов; БД для них больше не используется. Парсится из YAML-файлов
+// пакетом filesource и мерджится в *Data на каждом тике reloader'a.
+//
+// Версия каталога (для X-Catalog-Version) приходит из файла catalogs/version
+// и кладётся сюда: это часть «конфига», а не runtime state.
+type SlowData struct {
+	Version        string
+	FPBlocklist    map[string]string
+	UABlacklist    []string
+	IPBlocklist    map[string]string
+	IPWhitelist    []string
+	ASNDatacenters []uint32
+}
+
+// RuntimeData — слой runtime state, который пишут другие подсистемы
+// backend'а: policy через antibotapi (дашборд), verified_bot_ips через
+// rDNS-воркер. Это НЕ конфиг — данные меняются автоматически, SLA ≤ 30 сек.
+// Остаётся в БД (см. ADR-005 §Variant 3 rejected — для них файлы не
+// подходят по каденции).
+type RuntimeData struct {
+	VerifiedBotIPs map[string]string
+	Policy         map[string]Policy
+}
+
+// Merge собирает *Data из двух частичных снимков. Принимает nil-указатели
+// (как заглушку «слой не успел подгрузиться»); вернёт корректный *Data
+// с пустыми коллекциями вместо panic'a — handler выше ответит 503 по
+// IsLoaded, если оба слоя пусты на старте.
+//
+// Версия каталога берётся из SlowData (там же лежит файл version). Если
+// SlowData == nil, ставим defaultVersion — это семантически «ещё не
+// читали», тот же сигнал, что в emptyData().
+func Merge(s *SlowData, r *RuntimeData) *Data {
+	d := &Data{
+		Version:        defaultVersion,
+		FPBlocklist:    map[string]string{},
+		IPBlocklist:    map[string]string{},
+		VerifiedBotIPs: map[string]string{},
+		Policy:         map[string]Policy{},
+	}
+	if s != nil {
+		if s.Version != "" {
+			d.Version = s.Version
+		}
+		if s.FPBlocklist != nil {
+			d.FPBlocklist = s.FPBlocklist
+		}
+		d.UABlacklist = s.UABlacklist
+		if s.IPBlocklist != nil {
+			d.IPBlocklist = s.IPBlocklist
+		}
+		d.IPWhitelist = s.IPWhitelist
+		d.ASNDatacenters = s.ASNDatacenters
+	}
+	if r != nil {
+		if r.VerifiedBotIPs != nil {
+			d.VerifiedBotIPs = r.VerifiedBotIPs
+		}
+		if r.Policy != nil {
+			d.Policy = r.Policy
+		}
+	}
+	return d
+}
+
 // PoolDefault — то, что отдаётся для незарегистрированного host'a:
 // "новый домен без записи → дефолт пула (mode=shadow, observe-only)"
 // (config-distribution §"Per-resource lookup", задача B4). Реализована
@@ -107,71 +171,13 @@ func emptyData() *Data {
 	}
 }
 
-// LoadYAML — загрузчик v1: один YAML-файл со всеми каталогами. Postgres-
-// бэкенд (B4) заменит это, контракт Store.Replace останется тем же.
-//
-// Strict: KnownFields => true, чтобы опечатки в ключе (`fp_block_list`)
-// валились на проде, а не молча превращались в пустой каталог.
-//
-// Regex-валидация: каждый паттерн ua_blacklist (системный + per-resource)
-// прогоняется через regexp.Compile перед публикацией. Одна сломанная
-// строка в YAML иначе доедет до edge внутри combined regex и положит
-// всю UA-стадию по всем pull'ам — лучше упасть на старте.
-func LoadYAML(path string) (*Data, error) {
-	f, err := os.Open(path) //nolint:gosec // путь приходит из конфига оператора, не из запроса
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Декодируем в "сырой" Data (не emptyData): дефолтный Version в YAML
-	// допустим не должен, операторская ошибка "забыл version:" обязана
-	// падать. defaultVersion применяется ТОЛЬКО к Store до первого Replace.
-	d := &Data{}
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-	if err := dec.Decode(d); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", path, err)
-	}
-	if d.Version == "" {
-		// Без semver edge не сможет защититься от breaking schema change.
-		// Лучше упасть на старте, чем тянуть пустой X-Catalog-Version.
-		return nil, fmt.Errorf("%s: required field 'version' missing", path)
-	}
-
-	// Нормализуем nil-maps, которые decoder оставит, если ключа нет в YAML —
-	// иначе build* словит nil-map в range/lookup.
-	if d.FPBlocklist == nil {
-		d.FPBlocklist = map[string]string{}
-	}
-	if d.IPBlocklist == nil {
-		d.IPBlocklist = map[string]string{}
-	}
-	if d.VerifiedBotIPs == nil {
-		d.VerifiedBotIPs = map[string]string{}
-	}
-	if d.Policy == nil {
-		d.Policy = map[string]Policy{}
-	}
-
-	if err := Validate(d); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	// Каноничный вид сразу на выходе из LoadYAML: тесты и тулинг, который
-	// читает результат напрямую (не через Store.Replace), получают тот же
-	// порядок и тот же дедуп, что увидит build*-слой.
-	normalize(d)
-	return d, nil
-}
-
 // normalize приводит Data к каноничному виду: сортирует все срезы и
 // дедуплицирует их (для детерминизма payload'а и стабильности ETag —
-// две одинаковые записи в YAML не должны раздувать combined regex и не
-// должны давать разный ETag по сравнению с одной записью).
+// две одинаковые записи не должны раздувать combined regex и не должны
+// давать разный ETag по сравнению с одной записью).
 //
-// Вызывается из LoadYAML (источник правды для in-memory v1) и из
-// Store.Replace (защитный slot — на случай, если данные пришли не из
-// LoadYAML, например из B4 pgx-loader'а). Идемпотентен.
+// Вызывается из Store.Replace на каждом merge (filesource + dbloader).
+// Идемпотентен.
 func normalize(d *Data) {
 	// Системные slice'ы: dedup+sort + nil-coerce. Без ensure* json.Marshal
 	// эмитил бы `null` на пустой БД (DB-loader не инициализирует пустые

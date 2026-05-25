@@ -1,4 +1,5 @@
-// Reloader тикает Load → Store.Replace на заданном интервале.
+// Reloader тикает (filesource.Load + dbloader.LoadRuntime → Merge →
+// Store.Replace) на заданном интервале.
 //
 // Контракт edge'а из config-distribution.md §"Channel C / Cadence":
 // edge поллит /catalog/* каждые 30 с. Backend, чтобы дашборд-edit
@@ -8,8 +9,15 @@
 // stale-payload, но в окне «edge увидит правки через ≤ edgeInterval
 // + backendInterval» — для дашборд-UX этого хватает.
 //
-// Ошибка Load НЕ зануляет Store: fail-stale. Edge продолжит видеть
-// последний хороший каталог, оператор видит метрику reload_failures.
+// Источники данных:
+//   - filesource (медленные каталоги из git-репо catalogs/, ADR-006).
+//     Mtime-кеш: re-парсим YAML только когда что-то изменилось, иначе
+//     повторно используем кешированный *catalog.SlowData.
+//   - dbloader.LoadRuntime (verified_bot_ips, policy из БД).
+//
+// Ошибка любого из источников НЕ зануляет Store: fail-stale. Edge
+// продолжит видеть последний хороший каталог, оператор видит метрику
+// `*_failures_total` (с лейблом source).
 package dbloader
 
 import (
@@ -22,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/antibot-backend/internal/filesource"
 )
 
 // bootstrapTimeout — отдельный (более щедрый) бюджет на первый
@@ -33,10 +42,18 @@ import (
 const bootstrapTimeout = 60 * time.Second
 
 type Reloader struct {
-	pool     *pgxpool.Pool
-	store    *catalog.Store
-	interval time.Duration
-	logger   *slog.Logger
+	pool       *pgxpool.Pool
+	store      *catalog.Store
+	interval   time.Duration
+	logger     *slog.Logger
+	fileLoader *filesource.Loader
+
+	// slowCache — последний успешно распарсенный snapshot медленных
+	// каталогов из filesource. Переиспользуется на тиках, где mtime
+	// файлов не менялся, чтобы не тратиться на YAML-парсинг впустую
+	// (типичный случай: per-tick LoadRuntime приносит новый verified_bot,
+	// файлы не двигались).
+	slowCache *catalog.SlowData
 
 	reloadOK   prometheus.Counter
 	reloadFail prometheus.Counter
@@ -50,6 +67,7 @@ type Reloader struct {
 func NewReloader(
 	pool *pgxpool.Pool,
 	store *catalog.Store,
+	fileLoader *filesource.Loader,
 	interval time.Duration,
 	logger *slog.Logger,
 	reg prometheus.Registerer,
@@ -61,14 +79,22 @@ func NewReloader(
 		// expired — обе ветки дают мусорные сообщения. Лучше явный refuse.
 		return nil, fmt.Errorf("dbloader: reload interval must be > 0, got %s", interval)
 	}
+	if fileLoader == nil {
+		// Source-of-truth для медленных каталогов теперь обязателен. Без
+		// него merge выдал бы пустые fp_blocklist / ua_blacklist / etc.,
+		// и эдж получил бы «успешный» payload, в котором уже-добавленные
+		// в catalogs/ записи отсутствуют — silent regression на проде.
+		return nil, fmt.Errorf("dbloader: fileLoader is required (catalogs dir source)")
+	}
 	r := &Reloader{
-		pool:     pool,
-		store:    store,
-		interval: interval,
-		logger:   logger,
+		pool:       pool,
+		store:      store,
+		fileLoader: fileLoader,
+		interval:   interval,
+		logger:     logger,
 		reloadOK: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "antibot_backend_catalog_reload_total",
-			Help: "Successful catalog reloads from PostgreSQL.",
+			Help: "Successful catalog reloads (slow files + runtime DB merged).",
 		}),
 		reloadFail: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "antibot_backend_catalog_reload_failures_total",
@@ -132,14 +158,30 @@ func (r *Reloader) tickWith(ctx context.Context, timeout time.Duration) error {
 	defer cancel()
 
 	start := time.Now()
-	d, err := Load(tickCtx, r.pool)
-	dur := time.Since(start).Seconds()
-	if err != nil {
-		r.reloadDur.WithLabelValues("failure").Observe(dur)
-		r.reloadFail.Inc()
-		return err
+
+	// Slow-каталоги: парсим YAML, только если mtime файла поменялся ИЛИ
+	// кеш пуст (первый Bootstrap). Без mtime-кеша мы бы re-парсили
+	// несколько YAML каждые 5 с впустую: типичная нагрузка — новые
+	// verified_bot строки из БД, файлы покоятся.
+	if r.slowCache == nil || r.fileLoader.Changed() {
+		slow, err := r.fileLoader.Load()
+		if err != nil {
+			r.reloadDur.WithLabelValues("failure").Observe(time.Since(start).Seconds())
+			r.reloadFail.Inc()
+			return fmt.Errorf("filesource: %w", err)
+		}
+		r.slowCache = slow
 	}
-	r.reloadDur.WithLabelValues("success").Observe(dur)
+
+	runtime, err := LoadRuntime(tickCtx, r.pool)
+	if err != nil {
+		r.reloadDur.WithLabelValues("failure").Observe(time.Since(start).Seconds())
+		r.reloadFail.Inc()
+		return fmt.Errorf("dbloader runtime: %w", err)
+	}
+
+	d := catalog.Merge(r.slowCache, runtime)
+	r.reloadDur.WithLabelValues("success").Observe(time.Since(start).Seconds())
 	r.store.Replace(d)
 	r.reloadOK.Inc()
 	r.lastReload.Set(float64(time.Now().Unix()))

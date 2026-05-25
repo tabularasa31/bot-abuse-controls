@@ -1,0 +1,21 @@
+# ua_blacklist.yaml — RE2-regex паттерны по User-Agent, которые каскад
+# трактует как ботов / автоматизацию.
+#
+# Формат: <pattern>: <status>.
+#   - pattern — строка regex (RE2, как в Go regexp.Compile). Каждая строка
+#     валидируется на старте backend'а; одна битая запись валит всю загрузку
+#     (fail-stale) — лучше упасть, чем уехать в combined regex и положить
+#     UA-стадию на эджах.
+#   - status — active | staging.
+#     active  → эдж добавляет в combined regex, эмитит verdict=block,
+#               rule=ua_blacklist при матче.
+#     staging → паттерн идёт отдельным combined regex, эдж пишет
+#               staging_match, не блокирует.
+#
+# Пустой файл = ничего не матчим. Наполняется через PR по результатам
+# анализа логов (см. docs/product/vision.md §"User-Agent — в UA-blacklist").
+
+# Примеры (раскомментируйте при добавлении):
+#   "curl/.*": active
+#   "python-requests/.*": active
+#   "scrapy/[0-9.]+": staging
