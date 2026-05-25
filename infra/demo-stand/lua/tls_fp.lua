@@ -394,20 +394,36 @@ local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging
     if not m then return end
     local prefix = "staging:" .. catalog_name .. ":"
 
-    -- Add zero counter для новых entries.
+    -- Add zero counter для новых entries. Под shm pressure safe_add может
+    -- вернуть (nil, "no memory") для каждого entry — агрегируем счётчик
+    -- ошибок в одну WARN-строку на refresh-цикл, чтобы 200 staging hashes
+    -- не превращались в 200 строк error.log (PR-62 round-7 fix).
+    local fail_count, last_err = 0, nil
     for pattern_id in pairs(new_staging) do
         local ok, err = m:safe_add(prefix .. pattern_id, 0)
         if not ok and err ~= "exists" then
-            ngx.log(ngx.WARN, "tls_fp: prime staging counter failed ",
-                "(catalog=", catalog_name, ", pattern=", pattern_id, "): ", err)
+            fail_count = fail_count + 1
+            last_err = err
         end
     end
+    if fail_count > 0 then
+        ngx.log(ngx.WARN, "tls_fp: ", catalog_name, " staging-counter priming: ",
+            fail_count, " failures (last err: ", tostring(last_err), ")")
+    end
 
-    -- Delete counter для entries, которых больше нет в new (promoted/removed).
+    -- Delete counter для entries, которых больше нет в new (promoted-to-active
+    -- или удалены). Но ТОЛЬКО если value == 0 — иначе мы стираем
+    -- accumulated match count (история staging→active промоута, нужна
+    -- promotion-дашборду). PR-62 round-7 trade-off: phantom entries (всегда 0)
+    -- чистим; entries с реальной историей оставляем «zombie» — operator
+    -- может вычистить вручную, но мы не теряем данные.
     if prev_staging then
         for pattern_id in pairs(prev_staging) do
             if not new_staging[pattern_id] then
-                m:delete(prefix .. pattern_id)
+                local key = prefix .. pattern_id
+                if (m:get(key) or 0) == 0 then
+                    m:delete(key)
+                end
             end
         end
     end

@@ -83,10 +83,22 @@ require("catalog_pull").preload_mtls(
 -- shared_dict тоже выжил, читатели verdict.lua найдут `:N` записи как раньше.
 local fp_state = require "tls_fp_blocklist_state"
 local fp_dict = ngx.shared.tls_fp_blocklist
-local already_initialised, _ = ngx.shared.meta:add(fp_state.META_GEN_KEY, 0)
+-- ngx.shared.DICT:add returns (success, err, forcible). success=true ⇒
+-- ключ только что создан (cold start); success=false + err="exists" ⇒
+-- ключ уже существовал (reload-survive); любая другая ошибка
+-- (err="no memory") — реальный fail, на котором мы НЕ должны идти в
+-- reload-branch, иначе re-seed скипнется и стенд тихо станет SHADOW.
+local was_added, add_err = ngx.shared.meta:add(fp_state.META_GEN_KEY, 0)
+local is_cold_start = was_added or add_err ~= "exists"
+if not was_added and add_err ~= "exists" then
+    ngx.log(ngx.ERR, "[demo] meta:add tls_fp_blocklist_gen failed (",
+        tostring(add_err), ") — forcing cold-start re-seed to avoid silent SHADOW")
+    -- Force-set gen=0 чтобы verdict.lua резолвил наш сейчас-pisemый seed.
+    ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
+end
 local n = 0
-if already_initialised then
-    -- Cold start: meta:add вернул success, gen-key создан со значением 0.
+if is_cold_start then
+    -- Cold start (или meta-add failed): gen-key создан/forсed в 0.
     -- Заводим entries под `:0` чтобы verdict.lua сразу видел seed до первого
     -- Channel C pull.
     for _, entry in ipairs(config.tls_fp_blocklist) do
@@ -100,19 +112,45 @@ if already_initialised then
         end
     end
 else
-    -- Reload: meta:add no-op (gen-key уже существует с реальным N от
-    -- предыдущей жизни). Не трогаем data shared_dict — Channel C `:N`
-    -- entries уже там, verdict.lua найдёт их по meta:get(gen)=N.
-    -- Подсчитываем выжившие entries под текущей gen для blocklist_entries
-    -- gauge + ACTIVE/SHADOW лог (analyze.py парсит «tls_fp_blocklist loaded: N»).
+    -- Reload-survive: meta:add no-op потому что key exists. Не трогаем data
+    -- shared_dict — Channel C `:N` entries уже там, verdict.lua найдёт их по
+    -- meta:get(gen)=N. Считаем выжившие entries под current gen для
+    -- blocklist_entries gauge + ACTIVE/SHADOW лог (analyze.py парсит
+    -- «tls_fp_blocklist loaded: N»). Используем typed fp_state.match() вместо
+    -- bare suffix-string — симметрично catalog_pull.sweep (PR-55 review #5
+    -- guard от sharing dict с другим writer'ом).
     local cur_gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
-    local suffix  = ":" .. cur_gen
     for _, k in ipairs(fp_dict:get_keys(0)) do
-        if k:sub(-#suffix) == suffix then
+        if fp_state.match(k, cur_gen) then
             n = n + 1
         end
     end
-    ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", n, ")")
+    -- Detect data-dict-resized-but-meta-survived divergence: если gen>0 говорит
+    -- «Channel C доставил state», но n=0 значит data zone был wiped (например
+    -- operator resize'нул tls_fp_blocklist zone в nginx.conf и сделал reload).
+    -- В этом случае catalog_pull получит 304 (etag survived в meta) → gen
+    -- остаётся N → каталог frozen forever. Lечим: force-reset gen=0 + drop
+    -- etag, чтобы следующий pull сделал полный 200 GET и re-доставил данные.
+    if cur_gen > 0 and n == 0 then
+        ngx.log(ngx.WARN, "[demo] tls_fp_blocklist: meta says gen=", cur_gen,
+            " but data dict is empty — assuming zone resize/wipe. ",
+            "Forcing gen=0 + dropping etag so next Channel C pull re-delivers.")
+        ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
+        ngx.shared.meta:delete("tls_fp_blocklist_etag")
+        -- Re-seed локальный fallback под `:0`.
+        for _, entry in ipairs(config.tls_fp_blocklist) do
+            if entry.attrs.status ~= "staging" then
+                local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
+                if ok then
+                    n = n + 1
+                else
+                    ngx.log(ngx.ERR, "tls_fp_blocklist:set failed: ", err)
+                end
+            end
+        end
+    else
+        ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", n, ")")
+    end
 end
 
 -- verified_bots / tls_fp_catalog / tls_fp_browser_profiles — no static
