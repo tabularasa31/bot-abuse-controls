@@ -111,7 +111,10 @@ services:
       # нужен потому, что server-level auth.conf запускается ДО routing'а
       # по location и иначе гейтил бы /antibot/v1/ тем же edge-cred'ом
       # (PR-58 review fix).
-      - ./auth/${AUTH_MODE:-ip-allowlist}-channelc.conf:/etc/nginx/conf.d/auth-channelc.conf:ro
+      # Mounted outside /etc/nginx/conf.d/ to avoid the base image's
+      # `include /etc/nginx/conf.d/*.conf` wildcard — the fragments are
+      # only valid inside `location /` (lb.conf:71), not on http-level.
+      - ./auth/${AUTH_MODE:-ip-allowlist}-channelc.conf:/etc/nginx/auth-channelc.conf:ro
       # Only read for AUTH_MODE=ip-allowlist (mtls/off do not include it),
       # but the bind-mount is unconditional — auth/allow.list ships committed
       # with safe loopback + RFC1918 defaults so the bind always has a real
@@ -122,7 +125,13 @@ services:
       # audit #1). Operator copies dashboard-cidr.conf.example, fills with
       # the dashboard-backend egress CIDR. If missing, `nginx -t` fails →
       # explicit signal vs. silently-public policy API.
-      - ./auth/dashboard-cidr.conf:/etc/nginx/conf.d/dashboard-cidr.conf:ro
+      #
+      # Mounted outside /etc/nginx/conf.d/ for the same reason as
+      # auth-channelc.conf above: contains `deny all;`, which is valid on
+      # http-level but would silently block ALL traffic except the allowed
+      # CIDRs across every location. Must load only inside its
+      # `location /antibot/v1/` (lb.conf:55).
+      - ./auth/dashboard-cidr.conf:/etc/nginx/dashboard-cidr.conf:ro
     restart: unless-stopped
 
 volumes:
