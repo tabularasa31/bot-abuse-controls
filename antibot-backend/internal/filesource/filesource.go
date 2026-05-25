@@ -27,7 +27,10 @@
 package filesource
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,36 +289,14 @@ func loadASNs(dir, name string) ([]uint32, time.Time, error) {
 }
 
 // decodeYAML — обёртка с strict mode (KnownFields(true)) и человекочитаемой
-// ошибкой, в которой видно имя файла. Пустой документ декодируется в
-// zero-value (nil-map, nil-slice — caller должен это поддержать).
+// ошибкой, в которой видно имя файла. Пустой документ (только комментарии /
+// пробелы) даёт yaml.NewDecoder io.EOF — трактуем как «ничего не положили
+// в dst», caller это поддерживает (nil-map / nil-slice).
 func decodeYAML(data []byte, dst any, name string) error {
-	if len(strings.TrimSpace(stripComments(string(data)))) == 0 {
-		// Только комментарии / пробелы — yaml.Unmarshal не упадёт, но
-		// и не положит ничего в dst. Это явный «пустой каталог», возвращаем
-		// nil без действий.
-		return nil
-	}
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(dst); err != nil {
+	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("%s: yaml decode: %w", name, err)
 	}
 	return nil
-}
-
-// stripComments удаляет '#'-комментарии и blank-строки для проверки «есть
-// ли в файле хоть что-то осмысленное». Не парсит YAML — нам важен только
-// факт пустоты. Грубая эвристика, но достаточная для отличия «пустой
-// файл с шапкой» от «файл с данными».
-func stripComments(s string) string {
-	var b strings.Builder
-	for _, line := range strings.Split(s, "\n") {
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	return b.String()
 }

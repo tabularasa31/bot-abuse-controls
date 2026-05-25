@@ -43,22 +43,38 @@ if [[ -n "$VERSION" ]]; then
   echo "wrote $OUT_DIR/version: $VERSION"
 fi
 
+# Квотируем ключи и значения как YAML single-quoted scalars: внутри
+# одинарных кавычек YAML экранирует только саму ' через ''. Awk %q
+# непортабелен (только gawk 4.2+) и экранирует под shell, не под YAML —
+# поэтому делаем bash-ом. PR-59 review (gemini high / codex P1).
+yaml_sq() {
+  # echo single-quoted YAML scalar для строки $1.
+  local s=${1//\'/\'\'}
+  printf "'%s'" "$s"
+}
+
 # fp_blocklist: map fp → status.
 {
   echo "# fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <fp>: <status>"
   psql_q "SELECT fp, status FROM fp_blocklist ORDER BY fp" \
-    | awk -F'\t' 'NF==2 {printf "%q: %s\n", $1, $2}'
+    | while IFS=$'\t' read -r key status; do
+        [[ -z "$key" ]] && continue
+        printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
+      done
 } > "$OUT_DIR/fp_blocklist.yaml"
 echo "wrote $OUT_DIR/fp_blocklist.yaml"
 
-# ua_blacklist: map pattern → status. Pattern может содержать спецсимволы YAML,
-# поэтому квотируем через %q.
+# ua_blacklist: map pattern → status. Pattern содержит спецсимволы regex —
+# YAML single-quoted скаляр доставляет их без интерпретации.
 {
   echo "# ua_blacklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <pattern>: <status>"
   psql_q "SELECT pattern, status FROM ua_blacklist ORDER BY pattern" \
-    | awk -F'\t' 'NF==2 {printf "%q: %s\n", $1, $2}'
+    | while IFS=$'\t' read -r key status; do
+        [[ -z "$key" ]] && continue
+        printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
+      done
 } > "$OUT_DIR/ua_blacklist.yaml"
 echo "wrote $OUT_DIR/ua_blacklist.yaml"
 
@@ -67,7 +83,10 @@ echo "wrote $OUT_DIR/ua_blacklist.yaml"
   echo "# ip_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <cidr>: <status>"
   psql_q "SELECT cidr, status FROM ip_blocklist ORDER BY cidr" \
-    | awk -F'\t' 'NF==2 {printf "%q: %s\n", $1, $2}'
+    | while IFS=$'\t' read -r key status; do
+        [[ -z "$key" ]] && continue
+        printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
+      done
 } > "$OUT_DIR/ip_blocklist.yaml"
 echo "wrote $OUT_DIR/ip_blocklist.yaml"
 
@@ -75,7 +94,10 @@ echo "wrote $OUT_DIR/ip_blocklist.yaml"
 {
   echo "# ip_whitelist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   psql_q "SELECT cidr FROM ip_whitelist ORDER BY cidr" \
-    | awk 'NF {printf "- %q\n", $0}'
+    | while IFS= read -r cidr; do
+        [[ -z "$cidr" ]] && continue
+        printf -- "- %s\n" "$(yaml_sq "$cidr")"
+      done
 } > "$OUT_DIR/ip_whitelist.yaml"
 echo "wrote $OUT_DIR/ip_whitelist.yaml"
 
