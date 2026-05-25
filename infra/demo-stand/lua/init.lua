@@ -81,22 +81,17 @@ require("catalog_pull").preload_mtls(
 -- (как cold-start fallback) делаем ТОЛЬКО когда gen-key отсутствует в meta
 -- (полностью fresh start). Если key уже есть — Channel C state выжил, data
 -- shared_dict тоже выжил, читатели verdict.lua найдут `:N` записи как раньше.
-local fp_state = require "tls_fp_blocklist_state"
+local fp_state    = require "tls_fp_blocklist_state"
+local catalog_pull = require "catalog_pull"
 local fp_dict = ngx.shared.tls_fp_blocklist
 local meta    = ngx.shared.meta
 
--- seed_blocklist_gen0 — записывает локальный fallback в shared_dict под `:0`.
--- Используется и cold-start, и (вынужденно) на meta:add ERR-пути. Очищает
--- ghost ключи перед re-seed: если data dict содержит остатки `:N` от
--- предыдущей жизни worker'а, они никем не reader'ятся (мы только что
--- force-reset'нули gen=0), но занимают slots — лучше освободить (PR-62
--- round-8 audit, ghost-leak fix).
-local function seed_blocklist_gen0(force_clear_ghost)
-    if force_clear_ghost then
-        for _, k in ipairs(fp_dict:get_keys(0)) do
-            fp_dict:delete(k)
-        end
-    end
+-- seed_blocklist_cold — пишет локальный fallback под `:0`. Используется
+-- на cold-start пути (key только что создан через meta:add). На этом
+-- пути data dict гарантированно пуст или содержит только ghost-keys от
+-- предыдущей worker-генерации, которые верно reader'ятся (gen=0); очищать
+-- ghosts не нужно — мы их сейчас перепишем под тем же `:0` suffix.
+local function seed_blocklist_cold()
     local seeded = 0
     for _, entry in ipairs(config.tls_fp_blocklist) do
         if entry.attrs.status ~= "staging" then
@@ -111,29 +106,52 @@ local function seed_blocklist_gen0(force_clear_ghost)
     return seeded
 end
 
--- ngx.shared.DICT:add returns (success, err, forcible). success=true ⇒
--- ключ только что создан (cold start); success=false + err="exists" ⇒
--- ключ уже существовал (reload-survive); любая другая ошибка
--- (err="no memory") — реальный fail, на котором мы НЕ должны идти в
--- reload-branch, иначе re-seed скипнется и стенд тихо станет SHADOW.
-local was_added, add_err = meta:add(fp_state.META_GEN_KEY, 0)
-local is_cold_start = was_added or add_err ~= "exists"
-if not was_added and add_err ~= "exists" then
-    ngx.log(ngx.ERR, "[demo] meta:add tls_fp_blocklist_gen failed (",
-        tostring(add_err), ") — forcing cold-start re-seed to avoid silent SHADOW")
-    -- Force-set gen=0 чтобы verdict.lua резолвил наш сейчас-pisemый seed.
-    -- verdict.lua защищается `meta:get(...) or 0`, так что даже если этот
-    -- set тоже fail'нет (та же OOM-причина), читатели увидят gen=0 через
-    -- nil-defaults и резолвят наш `:0` seed.
-    meta:set(fp_state.META_GEN_KEY, 0)
+-- seed_blocklist_after_meta_failure — пишет fallback под `:0` + очищает
+-- ghost-keys предыдущей генерации перед записью. Используется ТОЛЬКО на
+-- meta:add ERR-пути (no_memory), когда мы force-set'нули gen=0 поверх
+-- неизвестного предыдущего значения N. data dict может содержать `:N`
+-- ключи, которые никто больше не читает (мы только что сбросили gen),
+-- но занимают slots — clear освобождает. Безопасность: fp_dict —
+-- exclusive writer-zone для blocklist (init + catalog_pull, оба нашего
+-- авторства); если будущий PR добавит admin-override или co-tenant
+-- writer, эта функция wipe'нет их keys тоже — переключи на typed
+-- filter `fp_state.match(k, anything)` ИЛИ запрети сторонних writers
+-- комментом в tls_fp_blocklist_state.lua.
+local function seed_blocklist_after_meta_failure()
+    for _, k in ipairs(fp_dict:get_keys(0)) do
+        fp_dict:delete(k)
+    end
+    return seed_blocklist_cold()
 end
+
+-- meta_add_gen — общий helper: meta:add(gen_key, 0) + распознание err.
+-- Возвращает (status, cur_gen_for_logging) где status ∈ {"cold_start",
+-- "reload", "err"}. "err" — meta:add fail с не-"exists" (no_memory). На
+-- "err" вызывает meta:set(gen_key, 0) — best-effort. verdict.lua и
+-- friends везде защищены `meta:get(...) or 0`, так что даже если set
+-- тоже fail'нет — readers увидят gen=0 через nil-default.
+-- PR-62 round-9 audit: вынесено из tls_fp_blocklist в общий helper, чтобы
+-- три sibling catalogs (verified_bots / tls_fp_catalog / tls_fp_browser_profiles)
+-- получили те же diagnostics+force-set fallback вместо silent SHADOW.
+local function meta_add_gen(gen_key)
+    local was_added, add_err = meta:add(gen_key, 0)
+    if was_added then return "cold_start" end
+    if add_err == "exists" then return "reload" end
+    ngx.log(ngx.ERR, "[demo] meta:add ", gen_key, " failed (",
+        tostring(add_err), ") — forcing gen=0; readers fall back via `or 0`")
+    meta:set(gen_key, 0)
+    return "err"
+end
+
+local blocklist_status = meta_add_gen(fp_state.META_GEN_KEY)
 local n = 0
-if is_cold_start then
-    -- Cold start (или meta-add failed): gen-key создан/forсed в 0.
-    -- Заводим entries под `:0` чтобы verdict.lua сразу видел seed до первого
-    -- Channel C pull. force_clear_ghost=true на ERR-path: data dict может
-    -- содержать ghost `:N` от previous worker generation.
-    n = seed_blocklist_gen0(not was_added)
+if blocklist_status == "cold_start" then
+    -- Свежий старт: data dict не содержит ничего нашего, seed напрямую.
+    n = seed_blocklist_cold()
+elseif blocklist_status == "err" then
+    -- meta-add failed: force-set'нули gen=0 но не знаем предыдущего gen.
+    -- Чистим ghost'ы перед re-seed.
+    n = seed_blocklist_after_meta_failure()
 else
     -- Reload-survive: meta:add no-op потому что key exists. Не трогаем data
     -- shared_dict — Channel C `:N` entries уже там, verdict.lua найдёт их по
@@ -159,11 +177,11 @@ else
     -- когда backend ALSO down — operator увидит WARN и решит вручную.
     if cur_gen > 0 and n == 0 then
         ngx.log(ngx.WARN, "[demo] tls_fp_blocklist: meta says gen=", cur_gen,
-            " but data dict is empty — possibly zone wipe (operator resize) ",
-            "or intentionally-empty Channel C payload. Dropping etag to force ",
-            "next pull to verify; NOT re-seeding (would override product intent ",
-            "if empty was deliberate). Will recover via catalog_pull within ≤30s ",
-            "if backend reachable.")
+            " but data dict has no matching entries — possibly zone wipe or ",
+            "intentionally-empty Channel C payload. Dropping etag to force next ",
+            "pull to verify; NOT re-seeding (preserves product intent if empty ",
+            "was deliberate). Recover via catalog_pull within ≤30s if backend ",
+            "reachable; see infra/demo-stand/README.md «Divergence WARN triage».")
         meta:delete(fp_state.META_ETAG_KEY)
     else
         ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", n, ")")
@@ -182,35 +200,56 @@ end
 -- WARN. Без re-seed (для этих трёх каталогов нет файлового fallback'а —
 -- catalog'и приходят только через Channel C, и intentional-empty
 -- неразличим от divergence).
-local function check_data_dict_divergence(dict_name, gen_key, etag_key, has_typed_match)
-    local dict = ngx.shared[dict_name]
-    if not dict then return end
-    local cur_gen = meta:get(gen_key)
+--
+-- Принимает catalog-descriptor из catalog_pull.lua (single source of truth
+-- для dict_name/gen_key/etag_key — устраняет sync-drift trap, который
+-- round-8 fix #5 закрыл для blocklist; round-9 audit B-R8-2: тот же
+-- trap не должен reintroduce'иться для siblings). dict missing → ERR
+-- log + return (вместо silent — чтобы typo в catalog name ловилась).
+local function check_data_dict_divergence(cat)
+    local dict = ngx.shared[cat.dict_name]
+    if not dict then
+        ngx.log(ngx.ERR, "[demo] check_data_dict_divergence: shared_dict ",
+            cat.dict_name, " not declared (catalog ", cat.name,
+            ") — declare in nginx.conf or remove from divergence check list")
+        return
+    end
+    local cur_gen = meta:get(cat.gen_key)
     if not cur_gen or cur_gen <= 0 then return end
+    -- Bare suffix-match: writer везде кладёт `<key>:<gen>` с gen как
+    -- ПОСЛЕДНИЙ `:`-segment (catalog_pull.lua apply: `key .. ":" .. new_gen`).
+    -- Ghost от старой gen=M (M≠N) ends `:M` — НЕ match `:N`. IPv6 ключи
+    -- (verified_bots) проверены: gen всегда последний segment, false-positive
+    -- невозможен пока writer-side контракт держится. Если когда-то поменяется
+    -- на content-hash gen — добавить typed match per-catalog.
     local suffix = ":" .. cur_gen
     for _, k in ipairs(dict:get_keys(0)) do
-        if has_typed_match then
-            if has_typed_match(k, cur_gen) then return end
-        elseif k:sub(-#suffix) == suffix then
-            return
-        end
+        if k:sub(-#suffix) == suffix then return end
     end
     -- Reached: cur_gen > 0 + no matching entry → divergence.
-    ngx.log(ngx.WARN, "[demo] ", dict_name, ": meta says gen=", cur_gen,
-        " but data dict has no matching entries — possibly zone wipe or empty payload. ",
-        "Dropping etag to force next pull to verify.")
-    meta:delete(etag_key)
+    ngx.log(ngx.WARN, "[demo] ", cat.name, ": meta says gen=", cur_gen,
+        " but data dict has no matching entries — possibly zone wipe or ",
+        "intentionally-empty Channel C payload. Dropping etag to force next ",
+        "pull to verify (recover ≤30s if backend reachable); see ",
+        "infra/demo-stand/README.md «Divergence WARN triage».")
+    meta:delete(cat.etag_key)
 end
 
-ngx.shared.meta:add("verified_bots_gen", 0)
-ngx.shared.meta:add("tls_fp_catalog_gen", 0)
-ngx.shared.meta:add("tls_fp_browser_profiles_gen", 0)
--- Detection для трёх Channel-C-only каталогов — после meta:add, чтобы
--- cold-start case (gen только что seeded в 0) короткозамыкался первой
--- проверкой `cur_gen > 0`.
-check_data_dict_divergence("verified_bots", "verified_bots_gen", "verified_bots_etag")
-check_data_dict_divergence("tls_fp_catalog", "tls_fp_catalog_gen", "tls_fp_catalog_etag")
-check_data_dict_divergence("tls_fp_browser_profiles", "tls_fp_browser_profiles_gen", "tls_fp_browser_profiles_etag")
+-- gen=0 seeding + divergence detection для трёх Channel-C-only каталогов.
+-- meta_add_gen использует общий ERR-handling (fix B-R8-1: no_memory не
+-- маскируется под reload, force-set + log). catalog descriptors берутся
+-- из catalog_pull.catalogs — single source of truth для dict/gen/etag
+-- имён (fix B-R8-2: literals не дублируются между init.lua и descriptors).
+for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser_profiles"}) do
+    local cat = catalog_pull.catalogs[cat_name]
+    if not cat then
+        ngx.log(ngx.ERR, "[demo] catalog_pull.catalogs[", cat_name,
+            "] missing — divergence detection skipped")
+    else
+        meta_add_gen(cat.gen_key)
+        check_data_dict_divergence(cat)
+    end
+end
 
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").

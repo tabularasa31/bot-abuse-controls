@@ -316,3 +316,26 @@ infra/demo-stand/
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). The stand already runs shadow (empty blocklist) — observability on, enforcement off — so "shadow vs active" is just whether the blocklist has entries. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
+
+## Divergence WARN triage
+
+При reload edge'a (`nginx -s reload` или recreate-контейнера) можно увидеть в error.log одно из:
+
+```
+[demo] tls_fp_blocklist: meta says gen=N but data dict has no matching entries — possibly zone wipe or intentionally-empty Channel C payload. Dropping etag to force next pull to verify…
+[demo] verified_bot_ips: meta says gen=N but data dict has no matching entries — …
+[demo] tls_fp_catalog: meta says gen=N …
+[demo] tls_fp_browser_profiles: meta says gen=N …
+```
+
+Это значит: `meta` shared_dict пережил reload с gen=N (Channel C исторически доставлял payload), но соответствующий data dict пуст (нет ни одного `:N` ключа). Два возможных сценария:
+
+1. **Operator resized data dict zone в nginx.conf** (e.g. `lua_shared_dict tls_fp_catalog 1m → 4m`) — nginx пересоздаёт zone, ключи теряются. `meta` (unchanged) сохраняет stale gen+etag.
+2. **Backend опубликовал intentional empty payload** — продакт удалил все entries из `catalogs/<name>.yaml`, Channel C доставил пустой ответ. Edge state корректно отражает product intent.
+
+Edge не может различить эти два случая из init.lua, поэтому **не делает re-seed** (это override'нуло бы product intent во втором случае). Действия:
+
+- **Триаж**: `curl <antibot-backend>/catalog/<name>` чтобы увидеть текущий backend payload. Если пусто — сценарий (2), всё корректно. Если есть entries — сценарий (1), wait ≤30s.
+- **Auto-recovery**: edge сбрасывает etag → catalog_pull следующего тика (≤30s) делает полный 200 GET → backend re-доставит entries (если они есть) → стенд recovery'нется automatically.
+- **Manual override** (если backend ALSO unreachable и intentional-empty НЕ ваш случай): рестарт edge (`docker compose restart` или `nginx -s stop` + `start`) — на полном рестарте `meta` zone re-create'ится, gen-key отсутствует → init.lua идёт cold-start path → локальный seed из `config/tls_fp_blocklist.conf` (для tls_fp_blocklist) или пустое состояние (для других — у них нет file-fallback'а).
+- **Между WARN и recovery**: соответствующий rule молча наблюдает (no blocks/challenges). Для tls_fp_browser_profiles cold-start fallback (chrome=15, firefox=16, safari=20, edge=15) применяется только пока `_M._cached_gen_profiles > 0` НЕ выставлен — после первого refresh fallback OFF, observe-only без profiles.
