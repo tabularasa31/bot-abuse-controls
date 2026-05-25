@@ -165,16 +165,28 @@ check(tls_fp.has_tag({ "hygiene:header_anomaly" }, "reputation:asn_dc"),
 check(tls_fp.has_tag(nil, "reputation:asn_dc"), false, "has_tag nil tags → false")
 
 -- ===========================================================================
--- Cold-start fallback semantics (PR-62 re-review)
+-- Cold-start fallback semantics (PR-62 re-review + round-6 staging-gate)
 -- ===========================================================================
--- Cold start (no Channel C pull landed yet, _cached_gen_profiles == nil):
--- fallback active → unknown family lookups fall to COLD_START_PROFILES.
+-- Signature: is_suspicious_ciphers(ua_family, cc, profiles, allow_fallback)
+-- allow_fallback=true → active-call (cold-start coverage до первого pull).
+-- allow_fallback=false/nil → staging-call (никаких phantom matches).
 tls_fp._cached_gen_profiles = nil
 local empty = {}
-check(tls_fp.is_suspicious_ciphers("chrome", 11, empty), true,
-    "cold start: chrome UA + cipher=11 vs fallback chrome=15 → suspicious")
-check(tls_fp.is_suspicious_ciphers("chrome", 15, empty), false,
-    "cold start: chrome UA + cipher=15 matches fallback → ok")
+
+-- Active-call (allow_fallback=true): cold start → fallback chrome=15.
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, true), true,
+    "active cold start: chrome UA + cipher=11 vs fallback chrome=15 → suspicious")
+check(tls_fp.is_suspicious_ciphers("chrome", 15, empty, true), false,
+    "active cold start: chrome UA + cipher=15 matches fallback → ok")
+
+-- STAGING-call (allow_fallback=false): пустая таблица → НИКАКОГО fallback,
+-- никакого phantom staging_match. Это PR-62 round-6 fix.
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, false), false,
+    "staging cold start: empty profiles_staging → NO fallback → no phantom match")
+check(tls_fp.is_suspicious_ciphers("chrome", 15, empty, false), false,
+    "staging cold start: empty staging table → no match regardless of cipher")
+
+-- fp_looks_like_browser один call site (active), всегда применяет fallback на cold start.
 check(tls_fp.fp_looks_like_browser(15, empty), true,
     "cold start: cipher=15 matches fallback chrome/edge → browser-shaped")
 check(tls_fp.fp_looks_like_browser(99, empty), false,
@@ -185,16 +197,18 @@ check(tls_fp.fp_looks_like_browser(99, empty), false,
 -- moved cipher_cnt to 16, etc.). Empty dynamic table = «no profiles known»,
 -- the rule simply doesn't fire — fallback не подменяет это решение.
 tls_fp._cached_gen_profiles = 1
-check(tls_fp.is_suspicious_ciphers("chrome", 11, empty), false,
-    "post-pull: backend dropped chrome → no profile → no verdict (no fallback override)")
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, true), false,
+    "post-pull active: backend dropped chrome → no profile → no verdict (fallback off after landed)")
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, false), false,
+    "post-pull staging: empty table → no match (fallback never applies to staging anyway)")
 check(tls_fp.fp_looks_like_browser(15, empty), false,
     "post-pull: empty profiles, cipher=15 NOT browser-shaped (fallback off)")
 -- А если backend подвинул chrome на 16 — старый 15 больше не считается chrome:
 local moved = { chrome = 16 }
-check(tls_fp.is_suspicious_ciphers("chrome", 15, moved), true,
-    "post-pull: backend moved chrome to 16, observed cipher=15 → suspicious vs new value")
-check(tls_fp.is_suspicious_ciphers("chrome", 16, moved), false,
-    "post-pull: chrome matches updated profile → ok")
+check(tls_fp.is_suspicious_ciphers("chrome", 15, moved, true), true,
+    "post-pull active: backend moved chrome to 16, observed cipher=15 → suspicious vs new value")
+check(tls_fp.is_suspicious_ciphers("chrome", 16, moved, true), false,
+    "post-pull active: chrome matches updated profile → ok")
 -- Reset для последующих тестов (если будут добавлены ниже).
 tls_fp._cached_gen_profiles = nil
 

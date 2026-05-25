@@ -253,9 +253,18 @@ local function profiles_landed()
     return type(g) == "number" and g > 0
 end
 
-function _M.is_suspicious_ciphers(ua_family, cc, profiles)
+-- is_suspicious_ciphers: returns true if `cc` doesn't match the expected
+-- cipher count for `ua_family`. `profiles` — таблица для проверки (active
+-- ИЛИ staging). `allow_fallback` (default false) — разрешать ли cold-start
+-- fallback к COLD_START_PROFILES, когда дикт пуст и Channel C ещё не
+-- landed. PR-62 round-6: fallback применять ТОЛЬКО для active-call (где
+-- цель — детекция baseline до первого pull). Для staging-call —
+-- запрещено: иначе пустая staging-таблица + не-landed gen эмитят
+-- фантомные `staging_match` для каждого браузера с нестандартным
+-- cipher_count, отравляя promotion-метрики несуществующими signatures.
+function _M.is_suspicious_ciphers(ua_family, cc, profiles, allow_fallback)
     local expected = profiles[ua_family]
-    if not expected and not profiles_landed() then
+    if not expected and allow_fallback and not profiles_landed() then
         expected = COLD_START_PROFILES[ua_family]
     end
     if not expected then return false end
@@ -363,19 +372,44 @@ local function rebuild_from_dict(dict_name, cur_gen, builder)
     return builder(wire)
 end
 
--- prime_staging_metrics — на каждом gen flip Channel C-каталога заводит
--- counter `staging:<catalog>:<pattern_id>` со значением 0 в metrics
--- shared_dict. Это даёт promotion-дашбордам видеть «staged signature
--- объявлена, ноль матчей» вместо «metric absent» (отличает «PR landed,
--- traffic не было» от «PR не доехал»). Init.lua симметрично prim'ит
--- counter'ы для tls_fp_blocklist staging (file-based), PR-62 audit:
--- для двух Channel C каталогов до этого fix'а priming не было —
--- counter'ы появлялись лениво на первом матче.
-local function prime_staging_metrics(catalog_name, staging_table)
+-- reconcile_staging_metrics — на каждом gen flip Channel C-каталога:
+--   1) Сидирует counter `staging:<catalog>:<pattern_id>` со значением 0 в
+--      metrics shared_dict для всех entries новой staging-таблицы. Это
+--      даёт promotion-дашбордам видеть «staged signature объявлена, ноль
+--      матчей» вместо «metric absent» (отличает «PR landed, traffic не
+--      было» от «PR не доехал»).
+--   2) Удаляет counter ключи для entries, которые БЫЛИ в предыдущей
+--      staging-таблице, но исчезли из новой (promoted-to-active или
+--      удалены). Без этого stale counter живёт в metrics dict до LRU
+--      eviction, и дашборд показывает фантомную «staged, zero traffic»
+--      запись для signature, которую продакт уже promoted (PR-62 round 6).
+--
+-- При unsupported metrics dict (нет declaration в nginx.conf) — silent
+-- noop. При ошибке записи (no_memory под shm pressure) — лог WARN: фикс
+-- silent-failure от round-5 (safe_add возвращает nil без exception, не
+-- делает LRU evict — counter просто не появится, дашборд увидит «metric
+-- absent» вопреки контракту).
+local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging)
     local m = ngx.shared.metrics
     if not m then return end
-    for pattern_id in pairs(staging_table) do
-        m:safe_add("staging:" .. catalog_name .. ":" .. pattern_id, 0)
+    local prefix = "staging:" .. catalog_name .. ":"
+
+    -- Add zero counter для новых entries.
+    for pattern_id in pairs(new_staging) do
+        local ok, err = m:safe_add(prefix .. pattern_id, 0)
+        if not ok and err ~= "exists" then
+            ngx.log(ngx.WARN, "tls_fp: prime staging counter failed ",
+                "(catalog=", catalog_name, ", pattern=", pattern_id, "): ", err)
+        end
+    end
+
+    -- Delete counter для entries, которых больше нет в new (promoted/removed).
+    if prev_staging then
+        for pattern_id in pairs(prev_staging) do
+            if not new_staging[pattern_id] then
+                m:delete(prefix .. pattern_id)
+            end
+        end
     end
 end
 
@@ -388,20 +422,20 @@ function _M.refresh()
     if cat_gen ~= _M._cached_gen_catalog then
         local active, staging = rebuild_from_dict(
             "tls_fp_catalog", cat_gen, _M.build_catalog)
+        reconcile_staging_metrics("tls_fp_catalog", _M.catalog_staging, staging)
         _M.catalog          = active
         _M.catalog_staging  = staging
         _M._cached_gen_catalog = cat_gen
-        prime_staging_metrics("tls_fp_catalog", staging)
     end
 
     local prof_gen = meta:get("tls_fp_browser_profiles_gen") or 0
     if prof_gen ~= _M._cached_gen_profiles then
         local active, staging = rebuild_from_dict(
             "tls_fp_browser_profiles", prof_gen, _M.build_profiles)
+        reconcile_staging_metrics("tls_fp_browser_profiles", _M.profiles_staging, staging)
         _M.profiles          = active
         _M.profiles_staging  = staging
         _M._cached_gen_profiles = prof_gen
-        prime_staging_metrics("tls_fp_browser_profiles", staging)
     end
 end
 
@@ -466,7 +500,7 @@ function _M.run(fp)
     if _M.is_impersonator(ua_family, hb, _M.catalog) then
         fire_soft(bac_log, ctx, "tls_fp_impersonator")
     end
-    if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles) then
+    if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles, true) then
         fire_soft(bac_log, ctx, "tls_fp_suspicious_ciphers")
     end
 
@@ -478,7 +512,7 @@ function _M.run(fp)
     if _M.is_impersonator(ua_family, hb, _M.catalog_staging) then
         bac_log.add_staging_match("tls_fp_catalog:" .. hb)
     end
-    if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles_staging) then
+    if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles_staging, false) then
         bac_log.add_staging_match("tls_fp_browser_profiles:" .. ua_family)
     end
     if type(fp) == "string" and _M.blocklist_staging[fp] then

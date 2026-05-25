@@ -72,22 +72,48 @@ require("catalog_pull").preload_mtls(
 -- tls_fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
 -- The static seed IS generation 0; when the Channel C catalog pull lands
 -- (task 86exmk08u) it bumps to gen 1+ and atomically swaps the set.
+--
+-- PR-62 audit round-6: reload-survive. `meta` и `tls_fp_blocklist` shared_dict
+-- выживают `nginx -s reload`. Если в прошлой жизни Channel C доставил gen=N
+-- с расширенным набором fp (например 50 vs 10 в локальном .conf), force-reset
+-- gen=0 + re-seed под `:0` СКРЫВАЕТ те 40 extra fps до следующего payload
+-- change на backend (304 на первом pull → gen остаётся 0). Поэтому: seed
+-- (как cold-start fallback) делаем ТОЛЬКО когда gen-key отсутствует в meta
+-- (полностью fresh start). Если key уже есть — Channel C state выжил, data
+-- shared_dict тоже выжил, читатели verdict.lua найдут `:N` записи как раньше.
 local fp_state = require "tls_fp_blocklist_state"
 local fp_dict = ngx.shared.tls_fp_blocklist
+local already_initialised, _ = ngx.shared.meta:add(fp_state.META_GEN_KEY, 0)
 local n = 0
-for _, entry in ipairs(config.tls_fp_blocklist) do
-    if entry.attrs.status ~= "staging" then
-        local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
-        if ok then
-            n = n + 1
-        else
-            ngx.log(ngx.ERR, "tls_fp_blocklist:set failed: ", err)
+if already_initialised then
+    -- Cold start: meta:add вернул success, gen-key создан со значением 0.
+    -- Заводим entries под `:0` чтобы verdict.lua сразу видел seed до первого
+    -- Channel C pull.
+    for _, entry in ipairs(config.tls_fp_blocklist) do
+        if entry.attrs.status ~= "staging" then
+            local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
+            if ok then
+                n = n + 1
+            else
+                ngx.log(ngx.ERR, "tls_fp_blocklist:set failed: ", err)
+            end
         end
     end
+else
+    -- Reload: meta:add no-op (gen-key уже существует с реальным N от
+    -- предыдущей жизни). Не трогаем data shared_dict — Channel C `:N`
+    -- entries уже там, verdict.lua найдёт их по meta:get(gen)=N.
+    -- Подсчитываем выжившие entries под текущей gen для blocklist_entries
+    -- gauge + ACTIVE/SHADOW лог (analyze.py парсит «tls_fp_blocklist loaded: N»).
+    local cur_gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
+    local suffix  = ":" .. cur_gen
+    for _, k in ipairs(fp_dict:get_keys(0)) do
+        if k:sub(-#suffix) == suffix then
+            n = n + 1
+        end
+    end
+    ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", n, ")")
 end
--- Publish the generation last (after the keys exist), matching §В1's
--- write-then-flip order so a reader never resolves to a gen with no keys.
-ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 
 -- verified_bots / tls_fp_catalog / tls_fp_browser_profiles — no static
 -- seed (catalogs приезжают через Channel C). Изначально (cold start)
@@ -201,15 +227,19 @@ end
 -- increments, metrics.lua parses). Pattern_ids are dynamic (depend on which
 -- patterns are staged), so unlike the fixed flag/tag list above they are
 -- primed from the compiled staging tables rather than hard-coded.
-for hb in pairs(tls_fp.catalog_staging) do
-    metrics:safe_add("staging:tls_fp_catalog:" .. hb, 0)
-end
-for family in pairs(tls_fp.profiles_staging) do
-    metrics:safe_add("staging:tls_fp_browser_profiles:" .. family, 0)
-end
+--
+-- PR-62 round-6: для двух Channel C-каталогов (tls_fp_catalog,
+-- tls_fp_browser_profiles) на init соответствующие staging-таблицы пусты —
+-- данные приедут только после первого pull. Priming для них делает
+-- `reconcile_staging_metrics` в tls_fp.refresh() на каждом gen flip
+-- (одновременно с удалением stale counters). Здесь оставляем только
+-- file-based tls_fp_blocklist staging (его данные есть на init из
+-- локального conf-файла).
 for fp_tok in pairs(tls_fp.blocklist_staging) do
     metrics:safe_add("staging:tls_fp_blocklist:" .. fp_tok, 0)
 end
+-- Удалены no-op loops для tls_fp.catalog_staging / profiles_staging (после
+-- PR2 они всегда пустые на init; priming живёт в tls_fp.refresh()).
 
 metrics:set("start_time", ngx.time())
 metrics:set("blocklist_entries", n)
