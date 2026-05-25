@@ -1,0 +1,19 @@
+# fp_blocklist.yaml — TLS fingerprints, которые каскад трактует как ботов.
+#
+# Формат: <fp>: <status>, где
+#   - fp     — строка вида L<ver><sni><cipher_cnt><alpn>_<hash_b>_<hash_c>
+#              (см. infra/demo-stand/lua/ja4_compute.lua).
+#   - status — active | staging.
+#     active  → эдж эмитит verdict=block, rule=tls_fp_blocklist.
+#     staging → эдж матчит и пишет staging_match в bac_log, НЕ блокирует.
+#
+# Промоут staging → active — отдельный PR с изменением статуса. Так у нас
+# есть две точки ревью и явный момент enforcement'a (см. [A11], staged
+# rollout в docs/product/phase2-spec.md §6).
+#
+# Пустой файл = пустой каталог. Каскад не блокирует никого по этому слою
+# до тех пор, пока продакт не добавит первую запись через PR.
+
+# Примеры (раскомментируйте при добавлении):
+#   "L13i17h2_abc_def_111": active
+#   "L12i14h1_ghi_jkl_222": staging

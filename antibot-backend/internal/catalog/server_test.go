@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -437,101 +435,6 @@ func TestConcurrentPullsNoRace(t *testing.T) {
 		t.Errorf("worker %v failed: %v", k, v)
 		return true
 	})
-}
-
-func TestLoadYAML(t *testing.T) {
-	yaml := `version: "2.0.0"
-fp_blocklist:
-  "L13i17h2_aaa_bbb": "block"
-ua_blacklist:
-  - "curl/.*"
-ip_blocklist:
-  "203.0.113.0/24": "block"
-ip_whitelist:
-  - "10.0.0.0/8"
-asn_datacenters:
-  - 14061
-verified_bot_ips:
-  "66.249.66.1": "verified:google"
-policy:
-  shop.example.com:
-    mode: active
-    strictness: standard
-    ua_blacklist:
-      - "evil/.*"
-    attack_mode: true
-`
-	dir := t.TempDir()
-	p := filepath.Join(dir, "catalogs.yaml")
-	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	d, err := LoadYAML(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Version != "2.0.0" {
-		t.Errorf("Version=%q want 2.0.0", d.Version)
-	}
-	if d.FPBlocklist["L13i17h2_aaa_bbb"] != "block" {
-		t.Errorf("fp_blocklist не загружен")
-	}
-	if pol := d.Policy["shop.example.com"]; pol.Mode != "active" || !pol.AttackMode {
-		t.Errorf("policy[shop] = %+v", pol)
-	}
-}
-
-func TestLoadYAMLInvalidRegex(t *testing.T) {
-	// Сломанный regex на любой стороне (системный или per-resource) должен
-	// валить старт сервиса — иначе одна опечатка в YAML тихо роняет всю
-	// UA-стадию на эджах после следующего pull'а.
-	cases := []struct {
-		name string
-		yaml string
-	}{
-		{
-			"system unclosed bracket",
-			"version: \"1.0.0\"\nua_blacklist:\n  - \"bot[a-z\"\n",
-		},
-		{
-			"per-resource trailing backslash",
-			"version: \"1.0.0\"\npolicy:\n  shop.example.com:\n    ua_blacklist:\n      - \"evil\\\\\"\n",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			p := filepath.Join(dir, "c.yaml")
-			if err := os.WriteFile(p, []byte(tc.yaml), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := LoadYAML(p); err == nil {
-				t.Fatal("LoadYAML с битым regex должен возвращать ошибку")
-			}
-		})
-	}
-}
-
-func TestLoadYAMLMissingVersion(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "c.yaml")
-	if err := os.WriteFile(p, []byte("fp_blocklist: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadYAML(p); err == nil {
-		t.Fatal("LoadYAML без version должен возвращать ошибку")
-	}
-}
-
-func TestLoadYAMLUnknownField(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "c.yaml")
-	if err := os.WriteFile(p, []byte("version: \"1.0.0\"\nfp_block_list: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadYAML(p); err == nil {
-		t.Fatal("LoadYAML с опечаткой в ключе должен возвращать ошибку (strict mode)")
-	}
 }
 
 func TestETagMatcher(t *testing.T) {

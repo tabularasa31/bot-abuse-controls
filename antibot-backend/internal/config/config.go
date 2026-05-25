@@ -43,15 +43,19 @@ type Config struct {
 	RDNSGCInterval time.Duration
 	// ShutdownTimeout — таймаут graceful-shutdown HTTP-сервера.
 	ShutdownTimeout time.Duration
-	// CatalogYAMLPath — путь до YAML с восемью каталогами Channel C (B3).
-	// Пустая строка = не грузим из YAML. Если задан POSTGRES_DSN, источником
-	// каталогов становится БД (B4), CATALOG_YAML игнорируется (либо может быть
-	// прогнан до миграций как fallback на dev-стенде — об этом решает main).
-	CatalogYAMLPath string
+	// CatalogsDir — корневая папка медленных каталогов из git-репо (ADR-006).
+	// Backend читает оттуда fp_blocklist.yaml / ua_blacklist.yaml / etc. на
+	// каждом тике reloader'a; mtime-кеш в reloader защищает от лишних
+	// YAML-парсов, когда файлы не двигались. Источник обязательный — без
+	// файлов медленные каталоги пусты, эдж получит «успешный» payload без
+	// уже-добавленных продактом записей (silent regression).
+	CatalogsDir string
 
-	// CatalogReloadInterval — как часто backend перечитывает каталоги из
-	// PostgreSQL (B4). Дефолт 5 с короче, чем edge-poll (30 с), чтобы
-	// дашборд-edit гарантированно доезжал на edge ≤30 c (acceptance B4/B13).
+	// CatalogReloadInterval — как часто backend перечитывает каталоги
+	// (filesource + dbloader runtime → Merge → Store). Дефолт 5 с короче,
+	// чем edge-poll (30 с), чтобы дашборд-edit гарантированно доезжал на
+	// edge ≤30 c (acceptance B4/B13). Тот же интервал используется как
+	// per-tick deadline в Reloader.Run.
 	CatalogReloadInterval time.Duration
 
 	// MigrateOnStartup — если true и POSTGRES_DSN задан, backend применит
@@ -100,7 +104,7 @@ func Load() (Config, error) {
 		RDNSDNSTimeout:        5 * time.Second,
 		RDNSGCInterval:        time.Hour,
 		ShutdownTimeout:       10 * time.Second,
-		CatalogYAMLPath:       os.Getenv("CATALOG_YAML"),
+		CatalogsDir:           getenv("CATALOGS_DIR", "./catalogs"),
 		CatalogReloadInterval: 5 * time.Second,
 		MigrateOnStartup:      true,
 		LogsSinkSpoolDir:      os.Getenv("LOGS_SINK_SPOOL_DIR"),

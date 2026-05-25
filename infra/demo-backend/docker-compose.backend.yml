@@ -47,6 +47,11 @@ services:
       INSTANCE_NAME: backend-1
       HTTP_ADDR: ":8080"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-antibot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antibot}?sslmode=disable"
+      # Slow-каталоги (fp_blocklist / ua_blacklist / ...) — git-репо
+      # ../../catalogs/, монтируется ниже как read-only volume. Обе
+      # реплики читают тот же снапшот (mtime-кеш в reloader защищает от
+      # лишних YAML-парсов между тиками). См. ADR-006.
+      CATALOGS_DIR: "/catalogs"
       # [B9] disk-queue для BAC_LOG sink'a. Путь внутри контейнера совпадает
       # с примонтированным volume'ом ниже; без него простой PostgreSQL терял
       # бы поток логов (acceptance B9 «приёмник не теряет логи»).
@@ -63,6 +68,9 @@ services:
       # пересекался с другой (один и тот же файл, прочитанный обеими
       # репликами, дал бы дубликат в logs).
       - log-spool-1:/var/lib/antibot-backend/log-spool
+      # Slow-каталоги read-only: backend их только читает; правки идут
+      # через git PR (см. catalogs/README.md).
+      - ../../catalogs:/catalogs:ro
     restart: unless-stopped
 
   backend-2:
@@ -76,6 +84,7 @@ services:
     depends_on: *backend_depends
     volumes:
       - log-spool-2:/var/lib/antibot-backend/log-spool
+      - ../../catalogs:/catalogs:ro
     restart: unless-stopped
 
   # Small LB / TLS front, per config-distribution §HA ("DNS round-robin or a
