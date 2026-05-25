@@ -107,8 +107,8 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 		err  error
 	)
 	switch catalog {
-	case "fp_blocklist":
-		body, err = jsonBytes(d.FPBlocklist)
+	case "tls_fp_blocklist":
+		body, err = jsonBytes(d.TLSFPBlocklist)
 	case "ua_blacklist":
 		body, err = buildUABlacklist(d, site)
 	case "ip_blocklist":

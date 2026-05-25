@@ -28,7 +28,7 @@ How configuration and runtime data get from where they are authored to the edge 
                                                           │   └─► HTTPS pull (ETag)──────────┼──┐
 [Channel C — runtime data, fast] ◄────────────────────────┤                                  │  │
  antibot-backend (our infra, centralized)                 └────────────────────────────────┘  │
-   GET /catalog/fp_blocklist                                                                  │
+   GET /catalog/tls_fp_blocklist                                                                  │
    GET /catalog/ua_blacklist                              ◄──────────────────────────────────┘
    GET /catalog/ip_blocklist        ◄── all edges of edge-pool pull from one backend
    GET /catalog/asn_datacenters
@@ -92,7 +92,7 @@ Each thing pulled in Channel C is a **catalog**: a named, fully-versioned snapsh
 
 | Catalog | Shape | shared_dict | Updated by |
 |---|---|---|---|
-| `fp_blocklist` | set(fp_string → "block") | `antibot_fp_blocklist` | PR / future auto-pipeline |
+| `tls_fp_blocklist` | set(fp_string → "block") | `antibot_tls_fp_blocklist` | PR / future auto-pipeline |
 | `ua_blacklist` | combined regex string | `antibot_ua_blacklist` | PR |
 | `ip_blocklist` | CIDR list → "block" | `antibot_ip_blocklist` | PR + dashboard custom-add |
 | `ip_whitelist` | CIDR list | `antibot_ip_whitelist` | PR (monitoring, check services) |

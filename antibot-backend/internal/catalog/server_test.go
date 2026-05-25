@@ -42,7 +42,7 @@ func httpGetWith(t *testing.T, url string, headers map[string]string) *http.Resp
 func sampleData() *Data {
 	d := emptyData()
 	d.Version = "1.2.3"
-	d.FPBlocklist = map[string]string{"L13i17h2_abc_def": "block", "L12i14h1_ghi_jkl": "block"}
+	d.TLSFPBlocklist = map[string]string{"L13i17h2_abc_def": "block", "L12i14h1_ghi_jkl": "block"}
 	d.UABlacklist = []string{`curl/.*`, `python-requests/.*`}
 	d.IPBlocklist = map[string]string{"203.0.113.0/24": "block"}
 	d.IPWhitelist = []string{"198.51.100.5/32"}
@@ -99,7 +99,7 @@ func TestUnknownCatalog404(t *testing.T) {
 
 func TestVersionAndETagHeaders(t *testing.T) {
 	ts := newTestServer(t, sampleData())
-	resp := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	resp := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d want 200", resp.StatusCode)
@@ -145,7 +145,7 @@ func TestConditionalGet304(t *testing.T) {
 
 func TestIfNoneMatchStar(t *testing.T) {
 	ts := newTestServer(t, sampleData())
-	resp := httpGetWith(t, ts.URL+"/catalog/fp_blocklist", map[string]string{"If-None-Match": "*"})
+	resp := httpGetWith(t, ts.URL+"/catalog/tls_fp_blocklist", map[string]string{"If-None-Match": "*"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotModified {
 		t.Fatalf("status=%d want 304 (If-None-Match: *)", resp.StatusCode)
@@ -154,11 +154,11 @@ func TestIfNoneMatchStar(t *testing.T) {
 
 func TestIfNoneMatchList(t *testing.T) {
 	ts := newTestServer(t, sampleData())
-	r1 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	r1 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	r1.Body.Close()
 	etag := r1.Header.Get("ETag")
 
-	resp := httpGetWith(t, ts.URL+"/catalog/fp_blocklist", map[string]string{
+	resp := httpGetWith(t, ts.URL+"/catalog/tls_fp_blocklist", map[string]string{
 		"If-None-Match": `"deadbeef", ` + etag + `, "cafebabe"`,
 	})
 	defer resp.Body.Close()
@@ -190,15 +190,15 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r1 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	r1 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	r1.Body.Close()
 	etag1 := r1.Header.Get("ETag")
 
 	d2 := sampleData()
-	d2.FPBlocklist["L99i99h9_new_token"] = "block"
+	d2.TLSFPBlocklist["L99i99h9_new_token"] = "block"
 	srv.Store().Replace(d2)
 
-	r2 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	r2 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	r2.Body.Close()
 	etag2 := r2.Header.Get("ETag")
 
@@ -207,7 +207,7 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 	}
 
 	// If-None-Match со старым etag после Replace должен дать 200, не 304.
-	r3 := httpGetWith(t, ts.URL+"/catalog/fp_blocklist", map[string]string{"If-None-Match": etag1})
+	r3 := httpGetWith(t, ts.URL+"/catalog/tls_fp_blocklist", map[string]string{"If-None-Match": etag1})
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d after Replace want 200 (старый etag не должен матчиться)", r3.StatusCode)
@@ -436,7 +436,7 @@ func TestConcurrentPullsNoRace(t *testing.T) {
 				if lastETag != "" && i%2 == 0 {
 					headers["If-None-Match"] = lastETag
 				}
-				resp := httpGetWith(t, ts.URL+"/catalog/fp_blocklist?site=shop.example.com", headers)
+				resp := httpGetWith(t, ts.URL+"/catalog/tls_fp_blocklist?site=shop.example.com", headers)
 				if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotModified {
 					failures.Store(id, resp.Status)
 					resp.Body.Close()
@@ -469,7 +469,7 @@ func TestConcurrentPullsNoRace(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 5; i++ {
 			d := sampleData()
-			d.FPBlocklist[strings.Repeat("x", i+1)] = "block"
+			d.TLSFPBlocklist[strings.Repeat("x", i+1)] = "block"
 			srv.Store().Replace(d)
 		}
 	}()
@@ -519,7 +519,7 @@ func TestStoreLoadedFlagNotVersion(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	resp := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	resp := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d want 200 на Replace с version=%q (бывший сентинель)", resp.StatusCode, defaultVersion)
@@ -588,7 +588,7 @@ func TestStoreNotLoaded503(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	resp := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	resp := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d want 503 на эмпти-Store", resp.StatusCode)
@@ -602,7 +602,7 @@ func TestStoreNotLoaded503(t *testing.T) {
 
 	// После Replace тот же endpoint становится доступен.
 	srv.Store().Replace(sampleData())
-	r2 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	r2 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d want 200 после Replace", r2.StatusCode)
@@ -614,12 +614,12 @@ func TestStoreNotLoaded503(t *testing.T) {
 func TestIfNoneMatchMultipleHeaders(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	r1 := httpGet(t, ts.URL+"/catalog/fp_blocklist")
+	r1 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	r1.Body.Close()
 	etag := r1.Header.Get("ETag")
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		ts.URL+"/catalog/fp_blocklist", nil)
+		ts.URL+"/catalog/tls_fp_blocklist", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

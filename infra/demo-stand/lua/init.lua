@@ -1,9 +1,9 @@
 -- Demo-stand init (init_by_lua). Loads the cascade config files, seeds the
--- fp_blocklist shared_dict from tls_fp_blocklist.conf, primes the metrics
+-- tls_fp_blocklist shared_dict from tls_fp_blocklist.conf, primes the metrics
 -- shared_dict with zero-valued counter keys (so /metrics shows them from the
 -- very first scrape), and records the start time for /__version uptime.
 --
--- The fp_blocklist dict is the one config the request path consumes today
+-- The tls_fp_blocklist dict is the one config the request path consumes today
 -- (verdict.lua). The other catalogs (ip/ua/asn lists, tls_fp catalog/
 -- profiles, defaults) are parsed and held on the `config` module for the
 -- cascade-rule tasks that will read them — they are not wired into a
@@ -63,17 +63,17 @@ require("catalog_pull").preload_mtls(
     os.getenv("ANTIBOT_BACKEND_CLIENT_CERT"),
     os.getenv("ANTIBOT_BACKEND_CLIENT_KEY"))
 
--- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
+-- Seed the tls_fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging — staged fps match-but-don't-block
 -- and are held in tls_fp.blocklist_staging (recorded into staging_match by the
 -- tls_fp stage, A11), never seeded here. An empty file => SHADOW mode.
 --
 -- Keys are written under generation 0 (`fp .. ":" .. 0`, §В1 format) and
--- fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
+-- tls_fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
 -- The static seed IS generation 0; when the Channel C catalog pull lands
 -- (task 86exmk08u) it bumps to gen 1+ and atomically swaps the set.
-local fp_state = require "fp_blocklist_state"
-local fp_dict = ngx.shared.fp_blocklist
+local fp_state = require "tls_fp_blocklist_state"
+local fp_dict = ngx.shared.tls_fp_blocklist
 local n = 0
 for _, entry in ipairs(config.tls_fp_blocklist) do
     if entry.attrs.status ~= "staging" then
@@ -81,7 +81,7 @@ for _, entry in ipairs(config.tls_fp_blocklist) do
         if ok then
             n = n + 1
         else
-            ngx.log(ngx.ERR, "fp_blocklist:set failed: ", err)
+            ngx.log(ngx.ERR, "tls_fp_blocklist:set failed: ", err)
         end
     end
 end
@@ -104,9 +104,9 @@ ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
     " ua_blacklist=", #config.ua_blacklist,
     " asn_datacenters=", #config.asn_datacenters)
 -- Marker text is a contract: scripts/analyze.py INIT_RE parses the
--- blocklist size out of "[demo] fp_blocklist loaded: N". Do not reword
+-- blocklist size out of "[demo] tls_fp_blocklist loaded: N". Do not reword
 -- without updating that regex, or daily reports mislabel the stand SHADOW.
-ngx.log(ngx.NOTICE, "[demo] fp_blocklist loaded: ", n, " active entries")
+ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist loaded: ", n, " active entries")
 -- Reputation matchers: active (non-staging) entry counts compiled into the
 -- ipmatcher objects. Empty whitelist/blocklist => that check is a no-op.
 local asn_dc_n = 0

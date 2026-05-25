@@ -1,4 +1,4 @@
--- Unit tests for infra/demo-stand/lua/fp_blocklist_state.lua.
+-- Unit tests for infra/demo-stand/lua/tls_fp_blocklist_state.lua.
 -- Pure Lua; runs under any luajit / lua 5.1+ with no openresty deps — the
 -- module is just a per-worker generation cursor plus a pure key builder.
 --
@@ -7,7 +7,7 @@
 --   make test-docker     (inside openresty/openresty:alpine)
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
-local fp_state = require "fp_blocklist_state"
+local fp_state = require "tls_fp_blocklist_state"
 
 local failed, passed = 0, 0
 
@@ -52,7 +52,7 @@ check(fp_state.match("abc:10", 1), nil,
 -- META_GEN_KEY — the meta shared_dict key, shared by every reader/writer.
 -- ===========================================================================
 
-check(fp_state.META_GEN_KEY, "fp_blocklist_gen", "META_GEN_KEY is stable")
+check(fp_state.META_GEN_KEY, "tls_fp_blocklist_gen", "META_GEN_KEY is stable")
 
 -- ===========================================================================
 
@@ -60,4 +60,4 @@ if failed > 0 then
     io.stderr:write(string.format("\n%d passed, %d FAILED\n", passed, failed))
     os.exit(1)
 end
-print(string.format("fp_blocklist_state: %d passed", passed))
+print(string.format("tls_fp_blocklist_state: %d passed", passed))

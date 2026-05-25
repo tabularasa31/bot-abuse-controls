@@ -31,7 +31,7 @@ type Data struct {
 	// (parser нужно обновлять). За свежесть контента отвечает ETag, не Version.
 	Version string `yaml:"version"`
 
-	FPBlocklist          map[string]string         `yaml:"fp_blocklist"`            // fp → "block"
+	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → "block"
 	UABlacklist          []string                  `yaml:"ua_blacklist"`            // глобальные regex-паттерны
 	IPBlocklist          map[string]string         `yaml:"ip_blocklist"`            // CIDR → "block"
 	IPWhitelist          []string                  `yaml:"ip_whitelist"`            // CIDR (системный)
@@ -99,7 +99,7 @@ type RateRule struct {
 // и кладётся сюда: это часть «конфига», а не runtime state.
 type SlowData struct {
 	Version              string
-	FPBlocklist          map[string]string
+	TLSFPBlocklist       map[string]string
 	UABlacklist          []string
 	IPBlocklist          map[string]string
 	IPWhitelist          []string
@@ -129,7 +129,7 @@ type RuntimeData struct {
 func Merge(s *SlowData, r *RuntimeData) *Data {
 	d := &Data{
 		Version:              defaultVersion,
-		FPBlocklist:          map[string]string{},
+		TLSFPBlocklist:       map[string]string{},
 		IPBlocklist:          map[string]string{},
 		TLSFPCatalog:         map[string]TLSFPCatalog{},
 		TLSFPBrowserProfiles: map[string]BrowserProfile{},
@@ -140,8 +140,8 @@ func Merge(s *SlowData, r *RuntimeData) *Data {
 		if s.Version != "" {
 			d.Version = s.Version
 		}
-		if s.FPBlocklist != nil {
-			d.FPBlocklist = s.FPBlocklist
+		if s.TLSFPBlocklist != nil {
+			d.TLSFPBlocklist = s.TLSFPBlocklist
 		}
 		d.UABlacklist = s.UABlacklist
 		if s.IPBlocklist != nil {
@@ -193,7 +193,7 @@ func PoolDefault() Policy {
 func emptyData() *Data {
 	return &Data{
 		Version:              defaultVersion,
-		FPBlocklist:          map[string]string{},
+		TLSFPBlocklist:       map[string]string{},
 		UABlacklist:          nil,
 		IPBlocklist:          map[string]string{},
 		IPWhitelist:          nil,

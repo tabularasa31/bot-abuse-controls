@@ -28,7 +28,7 @@ import (
 // concept". Держим в одном месте, чтобы регистрация роутов и handle.handle
 // смотрели на тот же список.
 var knownCatalogs = map[string]struct{}{
-	"fp_blocklist":            {},
+	"tls_fp_blocklist":        {},
 	"ua_blacklist":            {},
 	"ip_blocklist":            {},
 	"ip_whitelist":            {},

@@ -9,7 +9,7 @@
    (`GET /catalog/<name>`, ETag/If-None-Match, `?site=<host>`). После
    [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
    источников два:
-   - **медленные каталоги** (`fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
+   - **медленные каталоги** (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
      `ip_whitelist`, `asn_datacenters` + `version`) живут в git-репо
      `../catalogs/` и читаются `internal/filesource` с mtime-кешем;
    - **runtime state** (`verified_bot_ips`, `policy`) — в PostgreSQL,
@@ -43,7 +43,7 @@ fail-stale (см. config-distribution §"Channel C / Failure mode").
 go run ./cmd/antibot-backend
 # затем:
 curl http://localhost:8080/health
-curl -i http://localhost:8080/catalog/fp_blocklist        # 503 catalog_not_loaded без POSTGRES_DSN; 200 если БД + ./catalogs/ заданы
+curl -i http://localhost:8080/catalog/tls_fp_blocklist        # 503 catalog_not_loaded без POSTGRES_DSN; 200 если БД + ./catalogs/ заданы
 curl -i -X POST --data 'line1\nline2\n' http://localhost:8080/v1/logs  # 202
 curl http://localhost:8080/metrics | grep antibot_backend_
 ```
@@ -75,7 +75,7 @@ curl http://localhost:8080/metrics | grep antibot_backend_
 - `verified_bot_ips` — пишется rDNS-воркером (B7);
 - `logs` — приёмник BAC_LOG (B9).
 
-Slow-каталоги (`fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
+Slow-каталоги (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
 `ip_whitelist`, `asn_datacenters`) и singleton `catalog_version` дропнуты
 миграцией [`0004_drop_slow_catalogs.sql`](internal/dbloader/migrations/0004_drop_slow_catalogs.sql).
 Их данные теперь в `../catalogs/`; миграция содержимого со стенда —

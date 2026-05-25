@@ -63,7 +63,7 @@
 -- observation for the promotion workflow (staging → active in a separate PR, or
 -- revert). pattern_id per catalog: tls_fp_blocklist = the fp token,
 -- tls_fp_catalog = hash_b, tls_fp_browser_profiles = browser_family. The
--- blocklist staging set lives here too (not in init.lua's active fp_blocklist
+-- blocklist staging set lives here too (not in init.lua's active tls_fp_blocklist
 -- seed) so the whole stage's staging detection is in one place; a staged fp is
 -- absent from the active dict, so verdict.lua never exits on it and the request
 -- always reaches run().
@@ -191,7 +191,7 @@ end
 
 -- pure: build the staging fp set (status=staging only) from the parsed
 -- tls_fp_blocklist (config_loader.parse_list output: array of { value=fp,
--- attrs={status=,…} }). Active fps are seeded into the fp_blocklist shared_dict
+-- attrs={status=,…} }). Active fps are seeded into the tls_fp_blocklist shared_dict
 -- by init.lua; the staged ones land here so run() can record them without ever
 -- blocking.
 function _M.build_blocklist_staging(blocklist_list)

@@ -55,7 +55,7 @@ func resetSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		// Текущие runtime-таблицы.
 		"verified_bot_ips", "policy", "logs",
 		// Дропнуты 0004, но возможны в старых БД — IF EXISTS защищает.
-		"catalog_version", "fp_blocklist", "ua_blacklist",
+		"catalog_version", "tls_fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
 	}
 	for _, tbl := range tables {
@@ -75,12 +75,12 @@ func seedCatalogs(t *testing.T) *filesource.Loader {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"version":              "1.0.0\n",
-		"tls_fp_blocklist.yaml":    "# empty\n",
-		"ua_blacklist.yaml":    "# empty\n",
-		"ip_blocklist.yaml":    "# empty\n",
-		"ip_whitelist.yaml":    "# empty\n",
-		"asn_datacenters.yaml": "# empty\n",
+		"version":               "1.0.0\n",
+		"tls_fp_blocklist.yaml": "# empty\n",
+		"ua_blacklist.yaml":     "# empty\n",
+		"ip_blocklist.yaml":     "# empty\n",
+		"ip_whitelist.yaml":     "# empty\n",
+		"asn_datacenters.yaml":  "# empty\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
@@ -113,7 +113,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 			t.Errorf("expected runtime table %q to exist after Migrate", expected)
 		}
 	}
-	for _, dropped := range []string{"catalog_version", "fp_blocklist", "ua_blacklist", "ip_blocklist", "ip_whitelist", "asn_datacenters"} {
+	for _, dropped := range []string{"catalog_version", "tls_fp_blocklist", "ua_blacklist", "ip_blocklist", "ip_whitelist", "asn_datacenters"} {
 		var exists bool
 		if err := pool.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables

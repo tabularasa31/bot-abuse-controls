@@ -15,7 +15,7 @@ func seed(t *testing.T) string {
 	dir := t.TempDir()
 	files := map[string]string{
 		"version":                      "1.0.0\n",
-		"tls_fp_blocklist.yaml":            "# empty seed\n",
+		"tls_fp_blocklist.yaml":        "# empty seed\n",
 		"ua_blacklist.yaml":            "# empty seed\n",
 		"ip_blocklist.yaml":            "# empty seed\n",
 		"ip_whitelist.yaml":            "# empty seed\n",
@@ -48,7 +48,7 @@ func TestLoad_EmptySeed(t *testing.T) {
 	if s.Version != "1.0.0" {
 		t.Errorf("Version=%q want 1.0.0", s.Version)
 	}
-	if len(s.FPBlocklist) != 0 || len(s.UABlacklist) != 0 ||
+	if len(s.TLSFPBlocklist) != 0 || len(s.UABlacklist) != 0 ||
 		len(s.IPBlocklist) != 0 || len(s.IPWhitelist) != 0 ||
 		len(s.ASNDatacenters) != 0 ||
 		len(s.TLSFPCatalog) != 0 || len(s.TLSFPBrowserProfiles) != 0 {
@@ -134,7 +134,7 @@ chrome:
 
 func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
 	dir := seed(t)
-	// fp_blocklist: один active, один staging.
+	// tls_fp_blocklist: один active, один staging.
 	write(t, dir, "tls_fp_blocklist.yaml", `
 "L13i17h2_aaa_bbb": active
 "L12i14h1_ccc_ddd": staging
@@ -165,11 +165,11 @@ func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got, want := len(s.FPBlocklist), 1; got != want {
-		t.Errorf("fp_blocklist len=%d want %d (staging должен быть отфильтрован)", got, want)
+	if got, want := len(s.TLSFPBlocklist), 1; got != want {
+		t.Errorf("tls_fp_blocklist len=%d want %d (staging должен быть отфильтрован)", got, want)
 	}
-	if s.FPBlocklist["L13i17h2_aaa_bbb"] != "block" {
-		t.Errorf("fp_blocklist active record missing: %+v", s.FPBlocklist)
+	if s.TLSFPBlocklist["L13i17h2_aaa_bbb"] != "block" {
+		t.Errorf("tls_fp_blocklist active record missing: %+v", s.TLSFPBlocklist)
 	}
 	if got, want := len(s.UABlacklist), 2; got != want {
 		t.Errorf("ua_blacklist len=%d want %d", got, want)

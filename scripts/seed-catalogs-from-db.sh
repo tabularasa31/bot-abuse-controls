@@ -53,13 +53,13 @@ yaml_sq() {
   printf "'%s'" "$s"
 }
 
-# tls_fp_blocklist: map fp → status. DB-таблица называется `fp_blocklist`
+# tls_fp_blocklist: map fp → status. DB-таблица называется `tls_fp_blocklist`
 # (historical, до миграции 0004), файл — `tls_fp_blocklist.yaml` (имя из
 # vision/entities-reference.md).
 {
   echo "# tls_fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <fp>: <status>"
-  psql_q "SELECT fp, status FROM fp_blocklist ORDER BY fp" \
+  psql_q "SELECT fp, status FROM tls_fp_blocklist ORDER BY fp" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"

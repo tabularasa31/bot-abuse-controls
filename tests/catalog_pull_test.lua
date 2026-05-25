@@ -74,17 +74,17 @@ ngx.log = function(_level, ...)
 end
 ngx.time = function() return 1234567 end
 ngx.shared = {
-    fp_blocklist = new_dict(),
+    tls_fp_blocklist = new_dict(),
     meta         = new_dict(),
     metrics      = new_dict(),
 }
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 local cp       = require "catalog_pull"
-local fp_state = require "fp_blocklist_state"
+local fp_state = require "tls_fp_blocklist_state"
 
-local cat = cp.catalogs.fp_blocklist
-assert(cat, "fp_blocklist descriptor must be registered")
+local cat = cp.catalogs.tls_fp_blocklist
+assert(cat, "tls_fp_blocklist descriptor must be registered")
 
 -- ===========================================================================
 -- Test harness
@@ -110,13 +110,13 @@ local function check_false(cond, label) check(cond and true or false, false, lab
 -- leaves behind. Every test starts from this state so coverage is
 -- independent.
 local function reset_state()
-    ngx.shared.fp_blocklist = new_dict()
+    ngx.shared.tls_fp_blocklist = new_dict()
     ngx.shared.meta         = new_dict()
     ngx.shared.metrics      = new_dict()
     -- static seed: one fp under gen 0, like init.lua's `fp_dict:set(key(fp, 0), "block")`.
-    ngx.shared.fp_blocklist:set(fp_state.key("seed_fp", 0), "block")
+    ngx.shared.tls_fp_blocklist:set(fp_state.key("seed_fp", 0), "block")
     ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
-    ngx.shared.meta:set("fp_blocklist_etag", "seed-etag")
+    ngx.shared.meta:set("tls_fp_blocklist_etag", "seed-etag")
     reset_log()
     decode_table = {}
     decode_err   = {}
@@ -135,21 +135,21 @@ do
         body    = body,
         headers = { ETag = "\"new-etag\"", ["X-Catalog-Version"] = "1.0.0" },
     }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "ok", "200: returns ok")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 1,
         "200: gen flipped from 0 to 1")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_a", 1)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_a", 1)), "block",
         "200: new entry written under new gen")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_b", 1)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_b", 1)), "block",
         "200: second entry written under new gen")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("seed_fp", 0)), nil,
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("seed_fp", 0)), nil,
         "200: old gen entry swept after flip")
-    check(ngx.shared.meta:get("fp_blocklist_etag"), "\"new-etag\"",
+    check(ngx.shared.meta:get("tls_fp_blocklist_etag"), "\"new-etag\"",
         "200: etag stored in meta")
-    check(ngx.shared.meta:get("fp_blocklist_version"), "1.0.0",
+    check(ngx.shared.meta:get("tls_fp_blocklist_version"), "1.0.0",
         "200: version stored in meta")
-    check(ngx.shared.metrics:get("catalog_last_pull_ts:fp_blocklist"), 1234567,
+    check(ngx.shared.metrics:get("catalog_last_pull_ts:tls_fp_blocklist"), 1234567,
         "200: last_pull_ts stamped for staleness gauge")
 end
 
@@ -165,22 +165,22 @@ do
     -- live state: gen=5 with two live entries (simulate a steady-state edge
     -- that has been pulling for a while). 304 must preserve all of it.
     ngx.shared.meta:set(fp_state.META_GEN_KEY, 5)
-    ngx.shared.fp_blocklist:set(fp_state.key("live_a", 5), "block")
-    ngx.shared.fp_blocklist:set(fp_state.key("live_b", 5), "block")
-    ngx.shared.meta:set("fp_blocklist_etag", "\"live-etag\"")
+    ngx.shared.tls_fp_blocklist:set(fp_state.key("live_a", 5), "block")
+    ngx.shared.tls_fp_blocklist:set(fp_state.key("live_b", 5), "block")
+    ngx.shared.meta:set("tls_fp_blocklist_etag", "\"live-etag\"")
 
     local res = { status = 304, body = "", headers = {} }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "not_modified", "304: returns not_modified")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 5,
         "304: generation unchanged")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("live_a", 5)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("live_a", 5)), "block",
         "304: live entry a preserved (regression guard)")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("live_b", 5)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("live_b", 5)), "block",
         "304: live entry b preserved (regression guard)")
-    check(ngx.shared.meta:get("fp_blocklist_etag"), "\"live-etag\"",
+    check(ngx.shared.meta:get("tls_fp_blocklist_etag"), "\"live-etag\"",
         "304: etag unchanged")
-    check(ngx.shared.metrics:get("catalog_last_pull_ts:fp_blocklist"), 1234567,
+    check(ngx.shared.metrics:get("catalog_last_pull_ts:tls_fp_blocklist"), 1234567,
         "304: last_pull_ts bumped (304 = successful contact, staleness is a liveness signal)")
 end
 
@@ -190,11 +190,11 @@ end
 
 do
     reset_state()
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, nil, "timeout")
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, nil, "timeout")
     check(outcome, "skip", "transport error: returns skip")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
         "transport error: gen unchanged")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
         "transport error: seed entry preserved")
     check_true(log_contains("fetch failed: timeout"),
         "transport error: ngx.log includes the err string")
@@ -213,11 +213,11 @@ do
         body    = body,
         headers = { ETag = "\"x\"", ["X-Catalog-Version"] = "1.0.0" },
     }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "skip", "malformed JSON: returns skip")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
         "malformed JSON: gen unchanged")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
         "malformed JSON: seed entry preserved")
     check_true(log_contains("decode failed"),
         "malformed JSON: ngx.log mentions decode failure")
@@ -237,7 +237,7 @@ do
         body    = body,
         headers = { ETag = "\"y\"", ["X-Catalog-Version"] = "1.0.0" },
     }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "skip", "wrong type (string): returns skip")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
         "wrong type (string): gen unchanged")
@@ -249,7 +249,7 @@ do
     body = "42"
     decode_table[body] = 42
     res = { status = 200, body = body, headers = { ["X-Catalog-Version"] = "1.0.0" } }
-    outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "skip", "wrong type (number): returns skip")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
         "wrong type (number): gen unchanged")
@@ -268,13 +268,13 @@ do
         body    = body,
         headers = { ETag = "\"z\"", ["X-Catalog-Version"] = "2.0.0" },  -- major 2
     }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "skip", "version mismatch: returns skip")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
         "version mismatch: gen unchanged")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
         "version mismatch: seed entry preserved")
-    check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:fp_blocklist"), 1,
+    check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:tls_fp_blocklist"), 1,
         "version mismatch: metric bumped")
     check_true(log_contains("version mismatch"),
         "version mismatch: ngx.log identifies the mismatch")
@@ -284,7 +284,7 @@ end
 -- Metrics key naming contract (PR #55 review P1). bump_last_pull_ts and
 -- the version-mismatch bump must key by CATALOG NAME (descriptor key —
 -- what metrics.lua iterates), NOT by dict_name. The bug was invisible for
--- fp_blocklist (name == dict_name) and surfaced only on verified_bot_ips
+-- tls_fp_blocklist (name == dict_name) and surfaced only on verified_bot_ips
 -- (dict_name=verified_bots) where /metrics returned -1 staleness forever.
 -- Use a synthetic descriptor here so the assertion holds even if both
 -- shipped descriptors are renamed in lockstep.
@@ -295,7 +295,7 @@ do
     local synth = {
         name        = "synth_cat",
         endpoint    = "/catalog/synth_cat",
-        dict_name   = "fp_blocklist",  -- reuse fp_blocklist dict for the harness
+        dict_name   = "tls_fp_blocklist",  -- reuse tls_fp_blocklist dict for the harness
         gen_key     = fp_state.META_GEN_KEY,
         etag_key    = "synth_etag",
         version_key = "synth_version",
@@ -304,19 +304,19 @@ do
     }
     -- 304 path → bumps last_pull_ts only
     local res304 = { status = 304, headers = {} }
-    local outcome = cp.handle_response(synth, ngx.shared.fp_blocklist, ngx.shared.meta, res304, nil)
+    local outcome = cp.handle_response(synth, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res304, nil)
     check(outcome, "not_modified", "metrics key: 304 returns not_modified")
     check(ngx.shared.metrics:get("catalog_last_pull_ts:synth_cat"), 1234567,
         "metrics key: catalog_last_pull_ts keyed by NAME, not dict_name")
-    check(ngx.shared.metrics:get("catalog_last_pull_ts:fp_blocklist"), nil,
+    check(ngx.shared.metrics:get("catalog_last_pull_ts:tls_fp_blocklist"), nil,
         "metrics key: NOT keyed by dict_name (regression guard PR #55 P1)")
 
     -- version mismatch → bumps the mismatch counter
     local res_vmis = { status = 200, body = "{}", headers = { ["X-Catalog-Version"] = "2.0.0" } }
-    cp.handle_response(synth, ngx.shared.fp_blocklist, ngx.shared.meta, res_vmis, nil)
+    cp.handle_response(synth, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res_vmis, nil)
     check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:synth_cat"), 1,
         "metrics key: version mismatch keyed by NAME, not dict_name")
-    check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:fp_blocklist"), nil,
+    check(ngx.shared.metrics:get("edge_sidecar_version_mismatch_total:tls_fp_blocklist"), nil,
         "metrics key: vmis NOT keyed by dict_name (regression guard PR #55 P1)")
 end
 
@@ -342,8 +342,8 @@ check_true(cp.version_compatible(""),        "version_compatible: empty is compa
 
 do
     reset_state()
-    -- Make the fp_blocklist dict refuse the SECOND set with a fake "no memory".
-    local fp_dict = ngx.shared.fp_blocklist
+    -- Make the tls_fp_blocklist dict refuse the SECOND set with a fake "no memory".
+    local fp_dict = ngx.shared.tls_fp_blocklist
     local calls = 0
     local real_set = fp_dict.set
     fp_dict.set = function(self, k, v)
@@ -397,13 +397,13 @@ do
     local body = '{"fp_x":"block"}'
     decode_table[body] = { fp_x = "block" }
     local res = { status = 200, body = body, headers = { ["X-Catalog-Version"] = "1.0" } }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, meta, res, nil)
     check(outcome, "skip", "meta:set failure: returns skip")
     check(meta:get(fp_state.META_GEN_KEY), 0,
         "meta:set failure: gen unchanged")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("seed_fp", 0)), "block",
         "meta:set failure: seed preserved")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_x", 1)), nil,
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_x", 1)), nil,
         "meta:set failure: failed new-gen entry swept on rollback")
     check_true(log_contains("gen flip failed"),
         "meta:set failure: log mentions gen flip failure")
@@ -417,7 +417,7 @@ end
 do
     reset_state()
     local res = { status = 500, body = "", headers = {} }
-    local outcome = cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta, res, nil)
+    local outcome = cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta, res, nil)
     check(outcome, "skip", "HTTP 500: returns skip")
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 0,
         "HTTP 500: gen unchanged")
@@ -434,37 +434,37 @@ do
     -- Tick 1: 200 lands fp_a, fp_b at gen=1; seed swept.
     local b1 = "tick1"
     decode_table[b1] = { fp_a = "block", fp_b = "block" }
-    cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta,
+    cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta,
         { status = 200, body = b1, headers = { ["X-Catalog-Version"] = "1.0" } }, nil)
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 1, "soak: gen=1 after first 200")
 
     -- Tick 2: 304 — entries and gen stable.
-    cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta,
+    cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta,
         { status = 304, body = "", headers = {} }, nil)
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 1, "soak: gen still 1 after 304")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_a", 1)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_a", 1)), "block",
         "soak: fp_a still present after 304")
 
     -- Tick 3: 304 again — still stable.
-    cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta,
+    cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta,
         { status = 304, body = "", headers = {} }, nil)
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 1, "soak: gen still 1 after second 304")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_a", 1)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_a", 1)), "block",
         "soak: fp_a still present after second 304")
 
     -- Tick 4: 200 with a new set (fp_a kept, fp_c added, fp_b dropped) → gen=2.
     local b4 = "tick4"
     decode_table[b4] = { fp_a = "block", fp_c = "block" }
-    cp.handle_response(cat, ngx.shared.fp_blocklist, ngx.shared.meta,
+    cp.handle_response(cat, ngx.shared.tls_fp_blocklist, ngx.shared.meta,
         { status = 200, body = b4, headers = { ["X-Catalog-Version"] = "1.0" } }, nil)
     check(ngx.shared.meta:get(fp_state.META_GEN_KEY), 2, "soak: gen=2 after second 200")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_a", 2)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_a", 2)), "block",
         "soak: fp_a present under gen 2")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_c", 2)), "block",
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_c", 2)), "block",
         "soak: fp_c present under gen 2")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_b", 1)), nil,
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_b", 1)), nil,
         "soak: fp_b from old gen swept")
-    check(ngx.shared.fp_blocklist:get(fp_state.key("fp_a", 1)), nil,
+    check(ngx.shared.tls_fp_blocklist:get(fp_state.key("fp_a", 1)), nil,
         "soak: old-gen fp_a swept (gen 2 has its own copy)")
 end
 
@@ -488,7 +488,7 @@ do
         -- for the SAME catalog. It must short-circuit at the in_flight guard
         -- without making a real call.
         local outcomes_before = #logged
-        cp.fetch("fp_blocklist")
+        cp.fetch("tls_fp_blocklist")
         local outcomes_after = #logged
         check_true(outcomes_after > outcomes_before,
             "in-flight guard: nested fetch logs the skip")
@@ -503,7 +503,7 @@ do
 
     -- Outer tick: this one makes the "real" call (via the stub), and from
     -- inside the stub we recursively try fetch() again to model overlap.
-    cp.fetch("fp_blocklist")
+    cp.fetch("tls_fp_blocklist")
 
     -- After the outer fetch returns, in_flight must be cleared so the next
     -- tick can proceed normally.
@@ -511,7 +511,7 @@ do
         return { status = 304, body = "", headers = {} }, nil
     end
     local before = #logged
-    cp.fetch("fp_blocklist")  -- this one must NOT short-circuit
+    cp.fetch("tls_fp_blocklist")  -- this one must NOT short-circuit
     check_false(log_contains("still in flight") and #logged > before
                 and logged[#logged]:find("still in flight", 1, true),
         "in-flight guard: cleared after outer tick returns")
@@ -586,7 +586,7 @@ do
     cp.backend_url = "https://stub:0"
     cp.timeout_ms  = 1000
     cp.ssl_verify  = true
-    cp.fetch("fp_blocklist")
+    cp.fetch("tls_fp_blocklist")
     check(captured_opts and captured_opts.ssl_client_cert, CERT_SENTINEL,
         "fetch: req_opts.ssl_client_cert is parsed cert")
     check(captured_opts and captured_opts.ssl_client_priv_key, KEY_SENTINEL,
@@ -599,7 +599,7 @@ do
     cp.parsed_key  = nil
     captured_opts = nil
     cp.http_module = { new = function() return httpc_stub end }
-    cp.fetch("fp_blocklist")
+    cp.fetch("tls_fp_blocklist")
     check(captured_opts and captured_opts.ssl_client_cert, nil,
         "fetch: no ssl_client_cert when mTLS not configured")
     check(captured_opts and captured_opts.ssl_client_priv_key, nil,

@@ -33,7 +33,7 @@ docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_
 
 Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog and the `fp_blocklist` ships empty, so the stand emits a uniform `shadow`; `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog and the `tls_fp_blocklist` ships empty, so the stand emits a uniform `shadow`; `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md), [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
@@ -58,7 +58,7 @@ cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 echo 'ORIGIN_URL=https://your-origin.example' > infra/demo-stand/.env
 
 # (Optional, B6) Connect to antibot-backend for live Channel C catalog pulls.
-# Without these the stand runs on the static fp_blocklist seed only.
+# Without these the stand runs on the static tls_fp_blocklist seed only.
 #   ANTIBOT_BACKEND_URL — scheme+host[:port], no trailing slash. UNSET or
 #     empty → no timer fires (out-of-box: static seed, clean error.log).
 #   ANTIBOT_BACKEND_HOST — Host header override (if URL is an IP).

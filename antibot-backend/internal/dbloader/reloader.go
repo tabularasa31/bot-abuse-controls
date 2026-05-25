@@ -81,7 +81,7 @@ func NewReloader(
 	}
 	if fileLoader == nil {
 		// Source-of-truth для медленных каталогов теперь обязателен. Без
-		// него merge выдал бы пустые fp_blocklist / ua_blacklist / etc.,
+		// него merge выдал бы пустые tls_fp_blocklist / ua_blacklist / etc.,
 		// и эдж получил бы «успешный» payload, в котором уже-добавленные
 		// в catalogs/ записи отсутствуют — silent regression на проде.
 		return nil, fmt.Errorf("dbloader: fileLoader is required (catalogs dir source)")
@@ -188,7 +188,7 @@ func (r *Reloader) tickWith(ctx context.Context, timeout time.Duration) error {
 	r.logger.Debug("catalog reloaded",
 		"version", d.Version,
 		"hosts", len(d.Policy),
-		"fp_blocklist", len(d.FPBlocklist),
+		"tls_fp_blocklist", len(d.TLSFPBlocklist),
 		"ua_blacklist", len(d.UABlacklist),
 		"ip_blocklist", len(d.IPBlocklist),
 		"ip_whitelist", len(d.IPWhitelist),

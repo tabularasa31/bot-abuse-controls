@@ -47,7 +47,7 @@ services:
       INSTANCE_NAME: backend-1
       HTTP_ADDR: ":8080"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-antibot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antibot}?sslmode=disable"
-      # Slow-каталоги (fp_blocklist / ua_blacklist / ...) — git-репо
+      # Slow-каталоги (tls_fp_blocklist / ua_blacklist / ...) — git-репо
       # ../../catalogs/, монтируется ниже как read-only volume. Обе
       # реплики читают тот же снапшот (mtime-кеш в reloader защищает от
       # лишних YAML-парсов между тиками). См. ADR-006.

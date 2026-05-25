@@ -17,7 +17,7 @@
 -- through the same bac_log contract as hygiene/reputation. The remaining
 -- Phase 1 stages (rate_limits) are separate tasks. The
 -- stand runs shadow: tls_fp_blocklist.conf ships empty (init.lua seeds the
--- fp_blocklist dict from it), so verdict is always "allow" and nothing is
+-- tls_fp_blocklist dict from it), so verdict is always "allow" and nothing is
 -- blocked. The ngx.exit(403) path stays wired so adding an fp to that
 -- config and restarting flips it to active without code changes.
 
@@ -27,7 +27,7 @@ local hygiene    = require "hygiene"
 local reputation = require "reputation"
 local tls_fp     = require "tls_fp"
 local rate_limit = require "rate_limit"
-local fp_state   = require "fp_blocklist_state"
+local fp_state   = require "tls_fp_blocklist_state"
 local config     = require "config"
 
 -- Global kill-switch (A12). When set, the whole cascade is a no-op: we return
@@ -89,7 +89,7 @@ if config.stage_enabled(config.defaults, "tls_fp") then
     if cached == "block" or cached == "allow" then
         verdict = cached
     else
-        verdict = ngx.shared.fp_blocklist:get(key) or "allow"
+        verdict = ngx.shared.tls_fp_blocklist:get(key) or "allow"
         cache:set(key, verdict, 60)
     end
 

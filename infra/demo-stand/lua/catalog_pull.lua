@@ -19,10 +19,10 @@
 --                     pool with N workers does N× fewer pulls, not N×.
 --
 -- Two catalogs are wired today:
---   * fp_blocklist     — consumed by verdict.lua (§A1 `fp:gen` lookup).
+--   * tls_fp_blocklist     — consumed by verdict.lua (§A1 `fp:gen` lookup).
 --   * verified_bot_ips — consumed by verified_bots.lua (B8) for the L2.2
 --                        bot_verified / bot_verified_pending fastpath
---                        (same `<key>:<gen>` shape as fp_blocklist so the
+--                        (same `<key>:<gen>` shape as tls_fp_blocklist so the
 --                        atomic-swap pattern is symmetric).
 -- The remaining catalogs from docs/architecture/config-distribution.md
 -- §"The 'catalog' concept" migrate to Channel C in [B12] (hot-reload of
@@ -30,7 +30,7 @@
 -- dict nobody reads.
 
 local cjson        = require "cjson.safe"
-local fp_state     = require "fp_blocklist_state"
+local fp_state     = require "tls_fp_blocklist_state"
 
 local _M = {}
 
@@ -48,19 +48,19 @@ _M.SUPPORTED_VERSION_MAJOR = "1"
 -- table) duplicated as a field, so handle_response can stamp metrics under
 -- the CATALOG name rather than the dict name. metrics.lua iterates the
 -- known catalogs by name and reads `catalog_last_pull_ts:<name>` /
--- `edge_sidecar_version_mismatch_total:<name>` — for fp_blocklist the two
+-- `edge_sidecar_version_mismatch_total:<name>` — for tls_fp_blocklist the two
 -- are the same string and the bug was invisible; verified_bot_ips
 -- (dict_name=verified_bots) is the case that surfaced it (PR #55 review P1).
 -- Keeping `name` and `dict_name` distinct also leaves room for two catalogs
 -- to share a dict in the future (none today).
 _M.catalogs = {
-    fp_blocklist = {
-        name        = "fp_blocklist",
-        endpoint    = "/catalog/fp_blocklist",
-        dict_name   = "fp_blocklist",
-        gen_key     = fp_state.META_GEN_KEY,   -- "fp_blocklist_gen"
-        etag_key    = "fp_blocklist_etag",
-        version_key = "fp_blocklist_version",
+    tls_fp_blocklist = {
+        name        = "tls_fp_blocklist",
+        endpoint    = "/catalog/tls_fp_blocklist",
+        dict_name   = "tls_fp_blocklist",
+        gen_key     = fp_state.META_GEN_KEY,   -- "tls_fp_blocklist_gen"
+        etag_key    = "tls_fp_blocklist_etag",
+        version_key = "tls_fp_blocklist_version",
         -- Возвращает (ok, count). `ok=false` если хоть один dict:set провалился
         -- (типично "no memory" при фрагментации shared_dict, либо ключ длиннее
         -- 255 байт). handle_response в этом случае откатится до flip'a и
@@ -72,7 +72,7 @@ _M.catalogs = {
             for fp, verdict in pairs(entries) do
                 local ok, err = dict:set(fp_state.key(fp, new_gen), verdict)
                 if not ok then
-                    ngx.log(ngx.ERR, "fp_blocklist:set failed: ", err,
+                    ngx.log(ngx.ERR, "tls_fp_blocklist:set failed: ", err,
                         " (fp=", fp, ", gen=", new_gen, ")")
                     return false, n
                 end
@@ -91,7 +91,7 @@ _M.catalogs = {
         -- писать что-то ещё (admin.lua, со-tenant каталог), сырой суффикс
         -- удалил бы их по совпадению хвоста (например, `manual_override:1`
         -- при sweep(1)). fp_state.match возвращает nil на любом ключе, чей
-        -- хвост не соответствует ИМЕННО формату fp_blocklist'a — sweep
+        -- хвост не соответствует ИМЕННО формату tls_fp_blocklist'a — sweep
         -- останется сфокусированным на своих записях.
         sweep = function(dict, old_gen)
             -- old_gen == 0 is the static seed from init.lua; sweeping it on
@@ -111,7 +111,7 @@ _M.catalogs = {
 
     -- verified_bot_ips (B8) — map(ip → "<status>:<family>") with status
     -- in {verified, rejected} (config-distribution.md §catalogs). Stored
-    -- key is `<ip>:<gen>`, mirroring fp_blocklist's §В1 atomic-swap shape
+    -- key is `<ip>:<gen>`, mirroring tls_fp_blocklist's §В1 atomic-swap shape
     -- so two generations coexist during the write→flip→sweep window.
     -- Reader: verified_bots.classify(ip) composes the key from
     -- meta:get("verified_bots_gen"). Empty dict ⇒ all searchbot UAs land
@@ -141,17 +141,17 @@ _M.catalogs = {
         -- dict is written exclusively by this catalog (no admin.lua / no
         -- co-tenant), so the IP-shaped prefix has no collisions to worry
         -- about; if a future writer joins, switch to a typed match the
-        -- way fp_state.match() guards fp_blocklist (see fp_blocklist's
+        -- way fp_state.match() guards tls_fp_blocklist (see tls_fp_blocklist's
         -- sweep comment for the worked example).
         --
-        -- Перформанс — тот же trade-off, что в fp_blocklist sweep'e:
+        -- Перформанс — тот же trade-off, что в tls_fp_blocklist sweep'e:
         -- `dict:get_keys(0)` лочит весь shared_dict на время скана.
         -- nginx.demo.conf размечает verified_bots под "tens of thousands
         -- of IPs", где блокировка становится видна на p99 (gemini-review
         -- B5 и снова на этом PR). План тот же: side-index «keys-of-gen-N»
         -- в отдельном ключе `meta`, чтобы sweep шёл по узкому списку
         -- вместо полного скана. Пока что осознанно держим симметрию с
-        -- fp_blocklist'ом (RFC §В1 алгоритм) — мигрируем оба каталога
+        -- tls_fp_blocklist'ом (RFC §В1 алгоритм) — мигрируем оба каталога
         -- одной задачей, когда реальный размер verified_bot_ips перейдёт
         -- этот порог (на стенде без backend dict пустой, фактического
         -- риска нет).
@@ -279,7 +279,7 @@ end
 -- dict_name. metrics.lua iterates `catalog_pull.catalogs` by key and reads
 -- this metric under the same key; using `dict_name` makes the staleness
 -- gauge stuck at -1 for any catalog whose dict has a different name (this
--- was invisible for fp_blocklist where name==dict_name; PR #55 review P1
+-- was invisible for tls_fp_blocklist where name==dict_name; PR #55 review P1
 -- surfaced it via verified_bot_ips → dict verified_bots). Called from both
 -- the 200 and 304 paths in handle_response (both are "successful contact
 -- with backend" — see the 304 branch comment for why this is a liveness
@@ -329,7 +329,7 @@ function _M.handle_response(cat, dict, meta, res, err)
         -- (config-distribution §Channel C "edge_catalog_staleness_seconds
         -- ... drives alerting" with the ≤30s / ≤15m SLA from the B6 spec),
         -- not on stale-but-correct data. Skipping the bump here made the
-        -- gauge grow linearly between catalog updates — for a `fp_blocklist`
+        -- gauge grow linearly between catalog updates — for a `tls_fp_blocklist`
         -- that changes weekly via PR, the alert would fire 24/7 even with
         -- a perfectly healthy backend. Bump on 304 so the gauge means
         -- "seconds since the last successful contact" (the contract the
@@ -617,7 +617,7 @@ function _M.start(opts)
         _M.ssl_verify = truthy_env(os.getenv("ANTIBOT_BACKEND_SSL_VERIFY"), true)
     end
     _M.interval            = opts.interval or 30
-    local catalogs         = opts.catalogs or { "fp_blocklist" }
+    local catalogs         = opts.catalogs or { "tls_fp_blocklist" }
 
     -- [B6] mTLS material: preferred to be preloaded by init_by_lua (so 0600
     -- root-owned keys are readable before privilege drop). preload_mtls is

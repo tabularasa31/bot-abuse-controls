@@ -14,7 +14,7 @@
 | Файл                              | Что внутри                                              |
 |-----------------------------------|---------------------------------------------------------|
 | `version`                         | semver схемы payload, идёт в `X-Catalog-Version`.       |
-| `tls_fp_blocklist.yaml`           | TLS fingerprints → status. `verdict=block` для active. Channel C endpoint исторически зовётся `/catalog/fp_blocklist` (без `tls_` префикса). |
+| `tls_fp_blocklist.yaml`           | TLS fingerprints → status. `verdict=block` для active.  |
 | `ua_blacklist.yaml`               | RE2-regex по User-Agent → status. Складывается в combined regex. |
 | `ip_blocklist.yaml`               | CIDR → status. `verdict=block` для active.              |
 | `ip_whitelist.yaml`               | CIDR (без status). Системный allow-list.                |
@@ -41,7 +41,7 @@
 
 ## Staged rollout
 
-Для каталогов со status (`fp_blocklist`, `ua_blacklist`, `ip_blocklist`)
+Для каталогов со status (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`)
 работает A11 staged rollout:
 
 1. **PR-1**: добавить запись со `status: staging`. Эдж матчит, пишет

@@ -54,7 +54,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string) {
 
 	// Чистая схема — DROP+Migrate. Тесты не должны зависеть от соседей.
 	tables := []string{
-		"catalog_version", "fp_blocklist", "ua_blacklist",
+		"catalog_version", "tls_fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
 		"verified_bot_ips", "policy", "logs",
 	}

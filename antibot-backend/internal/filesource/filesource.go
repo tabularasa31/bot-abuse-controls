@@ -10,8 +10,7 @@
 // Структура файлов:
 //
 //	<dir>/version                 — singleton semver (text, одна строка).
-//	<dir>/tls_fp_blocklist.yaml   — map(fp → "active"|"staging"); endpoint
-//	                                `/catalog/fp_blocklist` (wire-имя historical).
+//	<dir>/tls_fp_blocklist.yaml   — map(fp → "active"|"staging").
 //	<dir>/ua_blacklist.yaml       — map(pattern → "active"|"staging").
 //	<dir>/ip_blocklist.yaml       — map(cidr → "active"|"staging").
 //	<dir>/ip_whitelist.yaml       — sequence of cidr (без status).
@@ -46,13 +45,6 @@ import (
 // каталог — добавь сюда и в Load().
 var trackedFiles = []string{
 	"version",
-	// tls_fp_blocklist.yaml — vision/entities-reference.md называет этот
-	// каталог `tls_fp_blocklist` (L3 TLS-fp blocking). На wire-уровне
-	// (Channel C endpoint, shared_dict на эдже) и в catalog.Data поле
-	// исторически зовётся `fp_blocklist` — обе именования живут параллельно,
-	// для file-system источника выбираем doc-имя. Endpoint
-	// `/catalog/fp_blocklist` НЕ переименован — это сломало бы edge без
-	// функциональной выгоды.
 	"tls_fp_blocklist.yaml",
 	"ua_blacklist.yaml",
 	"ip_blocklist.yaml",
@@ -138,7 +130,7 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 
 	slow := &catalog.SlowData{
 		Version:              version,
-		FPBlocklist:          map[string]string{},
+		TLSFPBlocklist:       map[string]string{},
 		IPBlocklist:          map[string]string{},
 		UABlacklist:          []string{},
 		IPWhitelist:          []string{},
@@ -148,14 +140,9 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	}
 
 	// tls_fp_blocklist: map(fp → status). Активные → fp: "block" в SlowData.
-	// File-system имя файла — `tls_fp_blocklist.yaml` (имя из vision /
-	// entities-reference.md). Внутреннее поле `SlowData.FPBlocklist` и
-	// wire-endpoint `/catalog/fp_blocklist` оставлены historical (edge
-	// shared_dict и модули зовут это `fp_blocklist`); расхождение задокументировано
-	// в trackedFiles и catalogs/README.md.
 	if mt, err := loadStatusMap(l.dir, "tls_fp_blocklist.yaml", func(active []string) error {
 		for _, fp := range active {
-			slow.FPBlocklist[fp] = "block"
+			slow.TLSFPBlocklist[fp] = "block"
 		}
 		return nil
 	}); err != nil {
