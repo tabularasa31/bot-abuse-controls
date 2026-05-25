@@ -107,8 +107,8 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 		err  error
 	)
 	switch catalog {
-	case "fp_blocklist":
-		body, err = jsonBytes(d.FPBlocklist)
+	case "tls_fp_blocklist":
+		body, err = jsonBytes(d.TLSFPBlocklist)
 	case "ua_blacklist":
 		body, err = buildUABlacklist(d, site)
 	case "ip_blocklist":
@@ -117,6 +117,10 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 		body, err = buildIPWhitelist(d, site)
 	case "asn_datacenters":
 		body = buildASNDatacenters(d) // ручная сборка ради числовой сортировки, ошибок нет
+	case "tls_fp_catalog":
+		body, err = buildTLSFPCatalog(d)
+	case "tls_fp_browser_profiles":
+		body, err = buildTLSFPBrowserProfiles(d)
 	case "verified_bot_ips":
 		body, err = jsonBytes(d.VerifiedBotIPs)
 	case "policy":
@@ -268,6 +272,30 @@ func buildPolicy(d *Data, site string) ([]byte, error) {
 	// Без site — полный map. На практике эдж всегда зовёт с site (он знает
 	// $host), но контракт оставляет lookup-режим для дашборда [B10] / аудита.
 	return jsonBytes(d.Policy)
+}
+
+// buildTLSFPCatalog кладёт каждую запись в payload как composite string
+// `<status>:<family>` — симметрично verified_bot_ips ("<status>:<family>"),
+// чтобы shared_dict на эдже хранил готовое значение без per-entry JSON-
+// разбора. Edge парсит split-по-первой-`:` и решает active vs staging
+// своей логикой (build_catalog в tls_fp.lua возвращает (active, staging) tuple).
+func buildTLSFPCatalog(d *Data) ([]byte, error) {
+	out := make(map[string]string, len(d.TLSFPCatalog))
+	for hb, entry := range d.TLSFPCatalog {
+		out[hb] = entry.Status + ":" + entry.Family
+	}
+	return jsonBytes(out)
+}
+
+// buildTLSFPBrowserProfiles — то же composite-кодирование, но во второй
+// позиции число (десятичная строка). Edge на cipher_count числовое
+// сравнение, поэтому tonumber на стороне Lua.
+func buildTLSFPBrowserProfiles(d *Data) ([]byte, error) {
+	out := make(map[string]string, len(d.TLSFPBrowserProfiles))
+	for family, prof := range d.TLSFPBrowserProfiles {
+		out[family] = prof.Status + ":" + strconv.Itoa(prof.ExpectedCipherCnt)
+	}
+	return jsonBytes(out)
 }
 
 func buildAttackMode(d *Data, site string) ([]byte, error) {

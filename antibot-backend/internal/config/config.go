@@ -44,7 +44,7 @@ type Config struct {
 	// ShutdownTimeout — таймаут graceful-shutdown HTTP-сервера.
 	ShutdownTimeout time.Duration
 	// CatalogsDir — корневая папка медленных каталогов из git-репо (ADR-006).
-	// Backend читает оттуда fp_blocklist.yaml / ua_blacklist.yaml / etc. на
+	// Backend читает оттуда tls_fp_blocklist.yaml / ua_blacklist.yaml / etc. на
 	// каждом тике reloader'a; mtime-кеш в reloader защищает от лишних
 	// YAML-парсов, когда файлы не двигались. Источник обязательный — без
 	// файлов медленные каталоги пусты, эдж получит «успешный» payload без

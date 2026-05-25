@@ -1,12 +1,17 @@
 -- Cascade configuration, loaded once in init_by_lua and held read-only.
 --
--- load() reads all eight config files (Phase 1: defaults, whitelist_ip,
--- blocklist_ip, ua_blacklist, asn_datacenters; Phase 2: tls_fp_blocklist,
--- tls_fp_catalog, tls_fp_browser_profiles) and stashes the parsed result
--- on this module's table. Because init_by_lua runs in the master before
--- workers fork, every worker inherits these fields for free — no shared
--- dict needed for config that only changes on restart (hot-reload is a
--- separate task per the A3 ticket's out-of-scope list).
+-- load() reads on-disk cascade configs (Phase 1: defaults, whitelist_ip,
+-- blocklist_ip, ua_blacklist, asn_datacenters; Phase 2: tls_fp_blocklist)
+-- and stashes the parsed result on this module's table. Because init_by_lua
+-- runs in the master before workers fork, every worker inherits these
+-- fields for free — no shared dict needed for config that only changes on
+-- restart (hot-reload is a separate task per the A3 ticket's out-of-scope
+-- list).
+--
+-- PR2 (ADR-006): tls_fp_catalog и tls_fp_browser_profiles больше не
+-- читаются с диска — они приезжают через Channel C из git-репо catalogs/
+-- (см. catalog_pull.lua descriptors). На эдже tls_fp.lua сам собирает
+-- lookup-таблицы из shared_dict через refresh() при гене-флипе.
 --
 -- A missing or unreadable file is fatal: the acceptance criterion is that
 -- the stand loads ALL configs at start, so we fail loudly rather than run
@@ -83,8 +88,8 @@ function _M.load()
     _M.ua_blacklist            = load_or_die(loader.parse_list, "ua_blacklist.conf")
     _M.asn_datacenters         = load_or_die(loader.parse_list, "asn_datacenters.conf")
     _M.tls_fp_blocklist        = load_or_die(loader.parse_list, "tls_fp_blocklist.conf")
-    _M.tls_fp_catalog          = load_or_die(loader.parse_ini,  "tls_fp_catalog.conf")
-    _M.tls_fp_browser_profiles = load_or_die(loader.parse_ini,  "tls_fp_browser_profiles.conf")
+    -- tls_fp_catalog / tls_fp_browser_profiles переехали в catalogs/ (PR2,
+    -- ADR-006). На эдже их собирает tls_fp.refresh() из shared_dict.
     return _M
 end
 

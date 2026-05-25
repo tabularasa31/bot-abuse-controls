@@ -53,17 +53,33 @@ yaml_sq() {
   printf "'%s'" "$s"
 }
 
-# fp_blocklist: map fp → status.
+# tls_fp_blocklist: map fp → status. Legacy DB-таблица из 0001_init.sql
+# называется `fp_blocklist` (миграция 0004 её дропнет); выходной файл —
+# `tls_fp_blocklist.yaml` (имя из vision/entities-reference.md, PR-62 rename).
+# Скрипт идёт ДО 0004, поэтому SQL читает старое имя.
 {
-  echo "# fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
+  echo "# tls_fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <fp>: <status>"
   psql_q "SELECT fp, status FROM fp_blocklist ORDER BY fp" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
+        # Trim whitespace и CR (Windows-edited rows, manual UPDATEs):
+        # bash-builtin не trim'ит без extglob, поэтому через parameter
+        # expansion. Иначе ' ' / '\r' проходят guard как «non-empty»
+        # и попадают в YAML как невалидный status → catalog.Validate
+        # отвергает весь slow-слой на reloader тике (PR-62 round-6).
+        status="${status#"${status%%[![:space:]]*}"}"
+        status="${status%"${status##*[![:space:]]}"}"
+        if [[ "$status" != "active" && "$status" != "staging" ]]; then
+          printf "# %s: <status from DB was %q, fill manually with active|staging>\n" \
+            "$(yaml_sq "$key")" "$status"
+          echo "WARN: $key has invalid status \"$status\" in DB — written as comment, fix manually before merge" >&2
+          continue
+        fi
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
       done
-} > "$OUT_DIR/fp_blocklist.yaml"
-echo "wrote $OUT_DIR/fp_blocklist.yaml"
+} > "$OUT_DIR/tls_fp_blocklist.yaml"
+echo "wrote $OUT_DIR/tls_fp_blocklist.yaml"
 
 # ua_blacklist: map pattern → status. Pattern содержит спецсимволы regex —
 # YAML single-quoted скаляр доставляет их без интерпретации.
@@ -73,6 +89,19 @@ echo "wrote $OUT_DIR/fp_blocklist.yaml"
   psql_q "SELECT pattern, status FROM ua_blacklist ORDER BY pattern" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
+        # Trim whitespace и CR (Windows-edited rows, manual UPDATEs):
+        # bash-builtin не trim'ит без extglob, поэтому через parameter
+        # expansion. Иначе ' ' / '\r' проходят guard как «non-empty»
+        # и попадают в YAML как невалидный status → catalog.Validate
+        # отвергает весь slow-слой на reloader тике (PR-62 round-6).
+        status="${status#"${status%%[![:space:]]*}"}"
+        status="${status%"${status##*[![:space:]]}"}"
+        if [[ "$status" != "active" && "$status" != "staging" ]]; then
+          printf "# %s: <status from DB was %q, fill manually with active|staging>\n" \
+            "$(yaml_sq "$key")" "$status"
+          echo "WARN: $key has invalid status \"$status\" in DB — written as comment, fix manually before merge" >&2
+          continue
+        fi
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
       done
 } > "$OUT_DIR/ua_blacklist.yaml"
@@ -85,6 +114,19 @@ echo "wrote $OUT_DIR/ua_blacklist.yaml"
   psql_q "SELECT cidr, status FROM ip_blocklist ORDER BY cidr" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
+        # Trim whitespace и CR (Windows-edited rows, manual UPDATEs):
+        # bash-builtin не trim'ит без extglob, поэтому через parameter
+        # expansion. Иначе ' ' / '\r' проходят guard как «non-empty»
+        # и попадают в YAML как невалидный status → catalog.Validate
+        # отвергает весь slow-слой на reloader тике (PR-62 round-6).
+        status="${status#"${status%%[![:space:]]*}"}"
+        status="${status%"${status##*[![:space:]]}"}"
+        if [[ "$status" != "active" && "$status" != "staging" ]]; then
+          printf "# %s: <status from DB was %q, fill manually with active|staging>\n" \
+            "$(yaml_sq "$key")" "$status"
+          echo "WARN: $key has invalid status \"$status\" in DB — written as comment, fix manually before merge" >&2
+          continue
+        fi
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
       done
 } > "$OUT_DIR/ip_blocklist.yaml"

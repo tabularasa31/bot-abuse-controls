@@ -31,13 +31,35 @@ type Data struct {
 	// (parser нужно обновлять). За свежесть контента отвечает ETag, не Version.
 	Version string `yaml:"version"`
 
-	FPBlocklist    map[string]string `yaml:"fp_blocklist"`     // fp → "block"
-	UABlacklist    []string          `yaml:"ua_blacklist"`     // глобальные regex-паттерны
-	IPBlocklist    map[string]string `yaml:"ip_blocklist"`     // CIDR → "block"
-	IPWhitelist    []string          `yaml:"ip_whitelist"`     // CIDR (системный)
-	ASNDatacenters []uint32          `yaml:"asn_datacenters"`  // ASN-номера
-	VerifiedBotIPs map[string]string `yaml:"verified_bot_ips"` // IP → "<status>:<family>" where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}. Отсутствие ключа = provisional (см. vision §Шаг 2.2).
-	Policy         map[string]Policy `yaml:"policy"`           // host → policy (включая attack_mode)
+	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → "block"
+	UABlacklist          []string                  `yaml:"ua_blacklist"`            // глобальные regex-паттерны
+	IPBlocklist          map[string]string         `yaml:"ip_blocklist"`            // CIDR → "block"
+	IPWhitelist          []string                  `yaml:"ip_whitelist"`            // CIDR (системный)
+	ASNDatacenters       []uint32                  `yaml:"asn_datacenters"`         // ASN-номера
+	TLSFPCatalog         map[string]TLSFPCatalog   `yaml:"tls_fp_catalog"`          // hash_b → { family, status }; правило tls_fp_impersonator
+	TLSFPBrowserProfiles map[string]BrowserProfile `yaml:"tls_fp_browser_profiles"` // family → { expected_cipher_cnt, status }; правило tls_fp_suspicious_ciphers
+	VerifiedBotIPs       map[string]string         `yaml:"verified_bot_ips"`        // IP → "<status>:<family>" where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}. Отсутствие ключа = provisional (см. vision §Шаг 2.2).
+	Policy               map[string]Policy         `yaml:"policy"`                  // host → policy (включая attack_mode)
+}
+
+// TLSFPCatalog — одна запись каталога сигнатур автоматизации (Phase 2+).
+// Используется правилом tls_fp_impersonator в [tls_fp.lua].
+//
+// Wire-формат payload'а Channel C — `<status>:<family>` (симметрично
+// verified_bot_ips, чтобы shared_dict на эдже хранил строки без JSON-
+// разбора per-entry). См. buildTLSFPCatalog в store.go.
+type TLSFPCatalog struct {
+	Family string `yaml:"family" json:"family"`
+	Status string `yaml:"status" json:"status"` // active | staging
+}
+
+// BrowserProfile — ожидаемый cipher_cnt для семейства браузера (Phase 2+).
+// Используется правилом tls_fp_suspicious_ciphers.
+//
+// Wire-формат — `<status>:<expected_cipher_cnt>` (число как desimal-строка).
+type BrowserProfile struct {
+	ExpectedCipherCnt int    `yaml:"expected_cipher_cnt" json:"expected_cipher_cnt"`
+	Status            string `yaml:"status" json:"status"` // active | staging
 }
 
 // Policy — per-resource настройки одного host'a. ВСЕ поля без omitempty:
@@ -76,12 +98,14 @@ type RateRule struct {
 // Версия каталога (для X-Catalog-Version) приходит из файла catalogs/version
 // и кладётся сюда: это часть «конфига», а не runtime state.
 type SlowData struct {
-	Version        string
-	FPBlocklist    map[string]string
-	UABlacklist    []string
-	IPBlocklist    map[string]string
-	IPWhitelist    []string
-	ASNDatacenters []uint32
+	Version              string
+	TLSFPBlocklist       map[string]string
+	UABlacklist          []string
+	IPBlocklist          map[string]string
+	IPWhitelist          []string
+	ASNDatacenters       []uint32
+	TLSFPCatalog         map[string]TLSFPCatalog
+	TLSFPBrowserProfiles map[string]BrowserProfile
 }
 
 // RuntimeData — слой runtime state, который пишут другие подсистемы
@@ -104,18 +128,20 @@ type RuntimeData struct {
 // читали», тот же сигнал, что в emptyData().
 func Merge(s *SlowData, r *RuntimeData) *Data {
 	d := &Data{
-		Version:        defaultVersion,
-		FPBlocklist:    map[string]string{},
-		IPBlocklist:    map[string]string{},
-		VerifiedBotIPs: map[string]string{},
-		Policy:         map[string]Policy{},
+		Version:              defaultVersion,
+		TLSFPBlocklist:       map[string]string{},
+		IPBlocklist:          map[string]string{},
+		TLSFPCatalog:         map[string]TLSFPCatalog{},
+		TLSFPBrowserProfiles: map[string]BrowserProfile{},
+		VerifiedBotIPs:       map[string]string{},
+		Policy:               map[string]Policy{},
 	}
 	if s != nil {
 		if s.Version != "" {
 			d.Version = s.Version
 		}
-		if s.FPBlocklist != nil {
-			d.FPBlocklist = s.FPBlocklist
+		if s.TLSFPBlocklist != nil {
+			d.TLSFPBlocklist = s.TLSFPBlocklist
 		}
 		d.UABlacklist = s.UABlacklist
 		if s.IPBlocklist != nil {
@@ -123,6 +149,12 @@ func Merge(s *SlowData, r *RuntimeData) *Data {
 		}
 		d.IPWhitelist = s.IPWhitelist
 		d.ASNDatacenters = s.ASNDatacenters
+		if s.TLSFPCatalog != nil {
+			d.TLSFPCatalog = s.TLSFPCatalog
+		}
+		if s.TLSFPBrowserProfiles != nil {
+			d.TLSFPBrowserProfiles = s.TLSFPBrowserProfiles
+		}
 	}
 	if r != nil {
 		if r.VerifiedBotIPs != nil {
@@ -160,14 +192,16 @@ func PoolDefault() Policy {
 // present" vs "header absent" по wire.
 func emptyData() *Data {
 	return &Data{
-		Version:        defaultVersion,
-		FPBlocklist:    map[string]string{},
-		UABlacklist:    nil,
-		IPBlocklist:    map[string]string{},
-		IPWhitelist:    nil,
-		ASNDatacenters: nil,
-		VerifiedBotIPs: map[string]string{},
-		Policy:         map[string]Policy{},
+		Version:              defaultVersion,
+		TLSFPBlocklist:       map[string]string{},
+		UABlacklist:          nil,
+		IPBlocklist:          map[string]string{},
+		IPWhitelist:          nil,
+		ASNDatacenters:       nil,
+		TLSFPCatalog:         map[string]TLSFPCatalog{},
+		TLSFPBrowserProfiles: map[string]BrowserProfile{},
+		VerifiedBotIPs:       map[string]string{},
+		Policy:               map[string]Policy{},
 	}
 }
 
@@ -305,7 +339,48 @@ func Validate(d *Data) error {
 			}
 		}
 	}
+	// tls_fp_catalog (Phase 2+, ADR-006): hash_b → {family, status}. Family
+	// должен быть непустым (на эдже идёт в attrs.family для is_impersonator);
+	// status — active | staging. Битый status или пустой family здесь ловим
+	// до Store.Replace, иначе на эдже хешировались бы pending-вычеты.
+	for hb, entry := range d.TLSFPCatalog {
+		if hb == "" {
+			return fmt.Errorf("tls_fp_catalog: empty hash_b key")
+		}
+		if entry.Family == "" {
+			return fmt.Errorf("tls_fp_catalog[%q]: empty family", hb)
+		}
+		if !isValidEntryStatus(entry.Status) {
+			return fmt.Errorf("tls_fp_catalog[%q]: invalid status %q (expected active | staging)", hb, entry.Status)
+		}
+	}
+	// tls_fp_browser_profiles (Phase 2+): family → {expected_cipher_cnt, status}.
+	// expected_cipher_cnt > 0 обязательно для ВСЕХ entries (active И staging).
+	// PR-62 re-audit: расслаблять для staging нельзя — edge build_profiles
+	// фильтрует `if n and n > 0` симметрично из defense-in-depth, и запись
+	// со staging:0 тихо исчезает с эджа в ОБЕИХ active/staging таблицах →
+	// staging_match никогда не сработает, promotion-workflow ломается.
+	// Если продакт хочет «зарегистрировать family заранее», он должен ОДНОВРЕМЕННО
+	// поставить разумный начальный cipher_cnt; перекалибровать = отдельный PR.
+	for family, prof := range d.TLSFPBrowserProfiles {
+		if family == "" {
+			return fmt.Errorf("tls_fp_browser_profiles: empty family key")
+		}
+		if !isValidEntryStatus(prof.Status) {
+			return fmt.Errorf("tls_fp_browser_profiles[%q]: invalid status %q (expected active | staging)", family, prof.Status)
+		}
+		if prof.ExpectedCipherCnt <= 0 {
+			return fmt.Errorf("tls_fp_browser_profiles[%q]: expected_cipher_cnt must be > 0 (got %d) — edge filters non-positive in both active and staging tables, entry would be invisible", family, prof.ExpectedCipherCnt)
+		}
+	}
 	return nil
+}
+
+// isValidEntryStatus — общий предикат для статуса записи slow-каталога с
+// поддержкой staged rollout (см. catalogs/README.md, A11). Симметрично
+// CHECK-констрейнту, который был в миграции 0001 до ADR-006.
+func isValidEntryStatus(s string) bool {
+	return s == "active" || s == "staging"
 }
 
 // ValidateCIDR принимает либо «сырой» IP («1.2.3.4», «2001:db8::1»),

@@ -5,7 +5,7 @@
 **Формат:** показан как YAML с комментариями для удобства чтения. Главное — структура данных и семантика полей, не конкретный синтаксис.
 
 > **Реальная реализация slow-каталогов (Phase 1+, фактически в репо):**
-> файлы лежат в [`../../catalogs/`](../../catalogs/) (`fp_blocklist.yaml`,
+> файлы лежат в [`../../catalogs/`](../../catalogs/) (`tls_fp_blocklist.yaml`,
 > `ua_blacklist.yaml`, `ip_blocklist.yaml`, `ip_whitelist.yaml`,
 > `asn_datacenters.yaml`, `version`). Формат отличается от иллюстративного
 > `.conf` ниже: используется компактный YAML map `<entry>: <status>`

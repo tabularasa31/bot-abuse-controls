@@ -1,9 +1,9 @@
 -- Demo-stand init (init_by_lua). Loads the cascade config files, seeds the
--- fp_blocklist shared_dict from tls_fp_blocklist.conf, primes the metrics
+-- tls_fp_blocklist shared_dict from tls_fp_blocklist.conf, primes the metrics
 -- shared_dict with zero-valued counter keys (so /metrics shows them from the
 -- very first scrape), and records the start time for /__version uptime.
 --
--- The fp_blocklist dict is the one config the request path consumes today
+-- The tls_fp_blocklist dict is the one config the request path consumes today
 -- (verdict.lua). The other catalogs (ip/ua/asn lists, tls_fp catalog/
 -- profiles, defaults) are parsed and held on the `config` module for the
 -- cascade-rule tasks that will read them — they are not wired into a
@@ -38,13 +38,13 @@ local _, vb_alts_n = require("verified_bots").build(config)
 -- TAT state). Returns the active profile count for the startup log.
 local _, rate_n = require("rate_limit").build(config)
 
--- Compile the L3 tls_fp soft-rule stage (hash_b → automation-family catalog +
--- browser cipher-count profiles from the loaded config) — also in the master
--- so workers inherit the lookup tables on fork (see tls_fp.lua). The blocking
--- half (tls_fp_blocklist) is seeded separately below. Returns active entry
--- counts for the startup log.
-local tls_fp, tls_cat_n, tls_prof_n, tls_stg_cat_n, tls_stg_prof_n, tls_stg_bl_n =
-    require("tls_fp").build(config)
+-- Compile the L3 tls_fp soft-rule stage. После PR2 (ADR-006)
+-- tls_fp_catalog / tls_fp_browser_profiles приезжают через Channel C, так
+-- что build() заводит только cold-start state + kill-switch flag; staging
+-- counts для них всегда 0 на init (заполнятся после первого pull). Только
+-- tls_fp_blocklist staging остаётся file-based — его counter `tls_stg_bl_n`
+-- идёт в startup-log и в metrics:safe_add ниже.
+local tls_fp, _, _, _, _, tls_stg_bl_n = require("tls_fp").build(config)
 
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
@@ -63,37 +63,193 @@ require("catalog_pull").preload_mtls(
     os.getenv("ANTIBOT_BACKEND_CLIENT_CERT"),
     os.getenv("ANTIBOT_BACKEND_CLIENT_KEY"))
 
--- Seed the fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
+-- Seed the tls_fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging — staged fps match-but-don't-block
 -- and are held in tls_fp.blocklist_staging (recorded into staging_match by the
 -- tls_fp stage, A11), never seeded here. An empty file => SHADOW mode.
 --
 -- Keys are written under generation 0 (`fp .. ":" .. 0`, §В1 format) and
--- fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
+-- tls_fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
 -- The static seed IS generation 0; when the Channel C catalog pull lands
 -- (task 86exmk08u) it bumps to gen 1+ and atomically swaps the set.
-local fp_state = require "fp_blocklist_state"
-local fp_dict = ngx.shared.fp_blocklist
-local n = 0
-for _, entry in ipairs(config.tls_fp_blocklist) do
-    if entry.attrs.status ~= "staging" then
-        local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
-        if ok then
-            n = n + 1
-        else
-            ngx.log(ngx.ERR, "fp_blocklist:set failed: ", err)
+--
+-- PR-62 audit round-6: reload-survive. `meta` и `tls_fp_blocklist` shared_dict
+-- выживают `nginx -s reload`. Если в прошлой жизни Channel C доставил gen=N
+-- с расширенным набором fp (например 50 vs 10 в локальном .conf), force-reset
+-- gen=0 + re-seed под `:0` СКРЫВАЕТ те 40 extra fps до следующего payload
+-- change на backend (304 на первом pull → gen остаётся 0). Поэтому: seed
+-- (как cold-start fallback) делаем ТОЛЬКО когда gen-key отсутствует в meta
+-- (полностью fresh start). Если key уже есть — Channel C state выжил, data
+-- shared_dict тоже выжил, читатели verdict.lua найдут `:N` записи как раньше.
+local fp_state    = require "tls_fp_blocklist_state"
+local catalog_pull = require "catalog_pull"
+local fp_dict = ngx.shared.tls_fp_blocklist
+local meta    = ngx.shared.meta
+
+-- seed_blocklist_cold — пишет локальный fallback под `:0`. Используется
+-- на cold-start пути (key только что создан через meta:add). На этом
+-- пути data dict гарантированно пуст или содержит только ghost-keys от
+-- предыдущей worker-генерации, которые верно reader'ятся (gen=0); очищать
+-- ghosts не нужно — мы их сейчас перепишем под тем же `:0` suffix.
+local function seed_blocklist_cold()
+    local seeded = 0
+    for _, entry in ipairs(config.tls_fp_blocklist) do
+        if entry.attrs.status ~= "staging" then
+            local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
+            if ok then
+                seeded = seeded + 1
+            else
+                ngx.log(ngx.ERR, "tls_fp_blocklist:set failed: ", err)
+            end
         end
     end
+    return seeded
 end
--- Publish the generation last (after the keys exist), matching §В1's
--- write-then-flip order so a reader never resolves to a gen with no keys.
-ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 
--- verified_bots has no static seed (the catalog is rDNS-worker output, not
--- a checked-in file). Seed gen=0 so verified_bots.classify() reads cleanly
--- on an empty dict and lookups consistently return nil → "absent" →
--- bot_verified_pending until catalog_pull lands the first generation.
-ngx.shared.meta:set("verified_bots_gen", 0)
+-- seed_blocklist_after_meta_failure — пишет fallback под `:0` + очищает
+-- ghost-keys предыдущей генерации перед записью. Используется ТОЛЬКО на
+-- meta:add ERR-пути (no_memory), когда мы force-set'нули gen=0 поверх
+-- неизвестного предыдущего значения N. data dict может содержать `:N`
+-- ключи, которые никто больше не читает (мы только что сбросили gen),
+-- но занимают slots — clear освобождает. Безопасность: fp_dict —
+-- exclusive writer-zone для blocklist (init + catalog_pull, оба нашего
+-- авторства); если будущий PR добавит admin-override или co-tenant
+-- writer, эта функция wipe'нет их keys тоже — переключи на typed
+-- filter `fp_state.match(k, anything)` ИЛИ запрети сторонних writers
+-- комментом в tls_fp_blocklist_state.lua.
+local function seed_blocklist_after_meta_failure()
+    for _, k in ipairs(fp_dict:get_keys(0)) do
+        fp_dict:delete(k)
+    end
+    return seed_blocklist_cold()
+end
+
+-- meta_add_gen — общий helper: meta:add(gen_key, 0) + распознание err.
+-- Возвращает (status, cur_gen_for_logging) где status ∈ {"cold_start",
+-- "reload", "err"}. "err" — meta:add fail с не-"exists" (no_memory). На
+-- "err" вызывает meta:set(gen_key, 0) — best-effort. verdict.lua и
+-- friends везде защищены `meta:get(...) or 0`, так что даже если set
+-- тоже fail'нет — readers увидят gen=0 через nil-default.
+-- PR-62 round-9 audit: вынесено из tls_fp_blocklist в общий helper, чтобы
+-- три sibling catalogs (verified_bots / tls_fp_catalog / tls_fp_browser_profiles)
+-- получили те же diagnostics+force-set fallback вместо silent SHADOW.
+local function meta_add_gen(gen_key)
+    local was_added, add_err = meta:add(gen_key, 0)
+    if was_added then return "cold_start" end
+    if add_err == "exists" then return "reload" end
+    ngx.log(ngx.ERR, "[demo] meta:add ", gen_key, " failed (",
+        tostring(add_err), ") — forcing gen=0; readers fall back via `or 0`")
+    meta:set(gen_key, 0)
+    return "err"
+end
+
+local blocklist_status = meta_add_gen(fp_state.META_GEN_KEY)
+local n = 0
+if blocklist_status == "cold_start" then
+    -- Свежий старт: data dict не содержит ничего нашего, seed напрямую.
+    n = seed_blocklist_cold()
+elseif blocklist_status == "err" then
+    -- meta-add failed: force-set'нули gen=0 но не знаем предыдущего gen.
+    -- Чистим ghost'ы перед re-seed.
+    n = seed_blocklist_after_meta_failure()
+else
+    -- Reload-survive: meta:add no-op потому что key exists. Не трогаем data
+    -- shared_dict — Channel C `:N` entries уже там, verdict.lua найдёт их по
+    -- meta:get(gen)=N. Считаем выжившие entries под current gen для
+    -- blocklist_entries gauge + ACTIVE/SHADOW лог (analyze.py парсит
+    -- «tls_fp_blocklist loaded: N»). Используем typed fp_state.match() вместо
+    -- bare suffix-string — симметрично catalog_pull.sweep (PR-55 review #5
+    -- guard от sharing dict с другим writer'ом).
+    local cur_gen = meta:get(fp_state.META_GEN_KEY) or 0
+    for _, k in ipairs(fp_dict:get_keys(0)) do
+        if fp_state.match(k, cur_gen) then
+            n = n + 1
+        end
+    end
+    -- Detect divergence: meta:gen=N>0 + data dict empty. PR-62 round-8 audit:
+    -- ИНТЕНЦИОНАЛЬНО empty backend catalog и data-dict-wiped operator действие
+    -- неотличимы из init.lua. Если бы мы re-seedили локально — overрode'нули бы
+    -- product intent для legitimate empty case. Решение: только drop etag
+    -- (заставить next pull сделать полный 200 GET) + WARN. catalog_pull
+    -- следующего тика принесёт actual backend state: если empty — будет empty;
+    -- если был resize/wipe — backend re-доставит entries. Окно «между reload
+    -- и next pull» (≤30 сек) — каталог пуст; для тех редких ситуаций,
+    -- когда backend ALSO down — operator увидит WARN и решит вручную.
+    if cur_gen > 0 and n == 0 then
+        ngx.log(ngx.WARN, "[demo] tls_fp_blocklist: meta says gen=", cur_gen,
+            " but data dict has no matching entries — possibly zone wipe or ",
+            "intentionally-empty Channel C payload. Dropping etag to force next ",
+            "pull to verify; NOT re-seeding (preserves product intent if empty ",
+            "was deliberate). Recover via catalog_pull within ≤30s if backend ",
+            "reachable; see infra/demo-stand/README.md «Divergence WARN triage».")
+        meta:delete(fp_state.META_ETAG_KEY)
+    else
+        ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", n, ")")
+    end
+end
+
+-- verified_bots / tls_fp_catalog / tls_fp_browser_profiles — no static
+-- seed (catalogs приезжают через Channel C). Изначально (cold start)
+-- gen-keys отсутствуют в `meta`; meta shared_dict выживает `nginx -s
+-- reload` (zone сохраняется при неизменном name+size), поэтому используем
+-- `meta:add(key, 0)` — присвоение ТОЛЬКО если ключ не существует.
+--
+-- check_data_dict_divergence — те же detection-семантики, что выше для
+-- tls_fp_blocklist (round-8 audit, B1): meta:gen=N + data dict empty значит
+-- либо operator resize zone, либо backend опубликовал empty. Drop etag,
+-- WARN. Без re-seed (для этих трёх каталогов нет файлового fallback'а —
+-- catalog'и приходят только через Channel C, и intentional-empty
+-- неразличим от divergence).
+--
+-- Принимает catalog-descriptor из catalog_pull.lua (single source of truth
+-- для dict_name/gen_key/etag_key — устраняет sync-drift trap, который
+-- round-8 fix #5 закрыл для blocklist; round-9 audit B-R8-2: тот же
+-- trap не должен reintroduce'иться для siblings). dict missing → ERR
+-- log + return (вместо silent — чтобы typo в catalog name ловилась).
+local function check_data_dict_divergence(cat)
+    local dict = ngx.shared[cat.dict_name]
+    if not dict then
+        ngx.log(ngx.ERR, "[demo] check_data_dict_divergence: shared_dict ",
+            cat.dict_name, " not declared (catalog ", cat.name,
+            ") — declare in nginx.conf or remove from divergence check list")
+        return
+    end
+    local cur_gen = meta:get(cat.gen_key)
+    if not cur_gen or cur_gen <= 0 then return end
+    -- Bare suffix-match: writer везде кладёт `<key>:<gen>` с gen как
+    -- ПОСЛЕДНИЙ `:`-segment (catalog_pull.lua apply: `key .. ":" .. new_gen`).
+    -- Ghost от старой gen=M (M≠N) ends `:M` — НЕ match `:N`. IPv6 ключи
+    -- (verified_bots) проверены: gen всегда последний segment, false-positive
+    -- невозможен пока writer-side контракт держится. Если когда-то поменяется
+    -- на content-hash gen — добавить typed match per-catalog.
+    local suffix = ":" .. cur_gen
+    for _, k in ipairs(dict:get_keys(0)) do
+        if k:sub(-#suffix) == suffix then return end
+    end
+    -- Reached: cur_gen > 0 + no matching entry → divergence.
+    ngx.log(ngx.WARN, "[demo] ", cat.name, ": meta says gen=", cur_gen,
+        " but data dict has no matching entries — possibly zone wipe or ",
+        "intentionally-empty Channel C payload. Dropping etag to force next ",
+        "pull to verify (recover ≤30s if backend reachable); see ",
+        "infra/demo-stand/README.md «Divergence WARN triage».")
+    meta:delete(cat.etag_key)
+end
+
+-- gen=0 seeding + divergence detection для трёх Channel-C-only каталогов.
+-- meta_add_gen использует общий ERR-handling (fix B-R8-1: no_memory не
+-- маскируется под reload, force-set + log). catalog descriptors берутся
+-- из catalog_pull.catalogs — single source of truth для dict/gen/etag
+-- имён (fix B-R8-2: literals не дублируются между init.lua и descriptors).
+for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser_profiles"}) do
+    local cat = catalog_pull.catalogs[cat_name]
+    if not cat then
+        ngx.log(ngx.ERR, "[demo] catalog_pull.catalogs[", cat_name,
+            "] missing — divergence detection skipped")
+    else
+        meta_add_gen(cat.gen_key)
+        check_data_dict_divergence(cat)
+    end
+end
 
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").
@@ -104,9 +260,9 @@ ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
     " ua_blacklist=", #config.ua_blacklist,
     " asn_datacenters=", #config.asn_datacenters)
 -- Marker text is a contract: scripts/analyze.py INIT_RE parses the
--- blocklist size out of "[demo] fp_blocklist loaded: N". Do not reword
+-- blocklist size out of "[demo] tls_fp_blocklist loaded: N". Do not reword
 -- without updating that regex, or daily reports mislabel the stand SHADOW.
-ngx.log(ngx.NOTICE, "[demo] fp_blocklist loaded: ", n, " active entries")
+ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist loaded: ", n, " active entries")
 -- Reputation matchers: active (non-staging) entry counts compiled into the
 -- ipmatcher objects. Empty whitelist/blocklist => that check is a no-op.
 local asn_dc_n = 0
@@ -129,14 +285,17 @@ if (require "verified_bots").enabled and vb_alts_n == 0 then
 end
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
-ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,
-    " active, browser_profiles=", tls_prof_n,
-    " active (impersonator/suspicious_ciphers → verdict=challenge, observe-only)")
--- Staged (status=staging) patterns: matched into staging_match, never a verdict
--- (A11). Counts let a reviewer confirm a staging PR landed on the stand.
-ngx.log(ngx.NOTICE, "[demo] tls_fp staged: tls_fp_catalog=", tls_stg_cat_n,
-    " browser_profiles=", tls_stg_prof_n, " tls_fp_blocklist=", tls_stg_bl_n,
-    " (observe-only into staging_match, no verdict)")
+-- PR2 (ADR-006): tls_fp_catalog / tls_fp_browser_profiles переехали с
+-- локальных INI на Channel C, на init их ещё нет (pull тикает после
+-- init_worker_by_lua). Внешний monitoring следит за метриками
+-- `antibot_tls_fp_catalog_gen` / `antibot_tls_fp_browser_profiles_gen`
+-- (metrics.lua), а не за init-логом — никакой post-pull лог-маркер
+-- здесь не печатается специально, чтобы дашборды не путали «нулевая
+-- gen на старте» с «catalog не landed». Для tls_fp_blocklist staging
+-- (всё ещё file-based) сохраняем традиционную stand-line.
+ngx.log(ngx.NOTICE, "[demo] tls_fp blocklist staged: ", tls_stg_bl_n,
+    " (file-based; tls_fp_catalog / browser_profiles см. /metrics ",
+    "*_gen после первого Channel C pull)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
@@ -189,15 +348,19 @@ end
 -- increments, metrics.lua parses). Pattern_ids are dynamic (depend on which
 -- patterns are staged), so unlike the fixed flag/tag list above they are
 -- primed from the compiled staging tables rather than hard-coded.
-for hb in pairs(tls_fp.catalog_staging) do
-    metrics:safe_add("staging:tls_fp_catalog:" .. hb, 0)
-end
-for family in pairs(tls_fp.profiles_staging) do
-    metrics:safe_add("staging:tls_fp_browser_profiles:" .. family, 0)
-end
+--
+-- PR-62 round-6: для двух Channel C-каталогов (tls_fp_catalog,
+-- tls_fp_browser_profiles) на init соответствующие staging-таблицы пусты —
+-- данные приедут только после первого pull. Priming для них делает
+-- `reconcile_staging_metrics` в tls_fp.refresh() на каждом gen flip
+-- (одновременно с удалением stale counters). Здесь оставляем только
+-- file-based tls_fp_blocklist staging (его данные есть на init из
+-- локального conf-файла).
 for fp_tok in pairs(tls_fp.blocklist_staging) do
     metrics:safe_add("staging:tls_fp_blocklist:" .. fp_tok, 0)
 end
+-- Удалены no-op loops для tls_fp.catalog_staging / profiles_staging (после
+-- PR2 они всегда пустые на init; priming живёт в tls_fp.refresh()).
 
 metrics:set("start_time", ngx.time())
 metrics:set("blocklist_entries", n)

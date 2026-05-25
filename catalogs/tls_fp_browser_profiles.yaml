@@ -1,0 +1,35 @@
+# tls_fp_browser_profiles.yaml — ожидаемые cipher_cnt для семейств браузеров
+# (Phase 2+).
+#
+# Используется правилом tls_fp_suspicious_ciphers (категория soft): если UA
+# похож на браузер, но cipher_cnt не совпадает с ожидаемым для семейства —
+# challenge. См. docs/product/phase2-spec.md.
+#
+# Формат: map family -> { expected_cipher_cnt, status }.
+#   - family — короткое имя браузерного семейства, как его эмитит парсер UA
+#     (`chrome`, `firefox`, `safari`, `edge`, …).
+#   - expected_cipher_cnt — ожидаемое число cipher'ов в TLS-handshake.
+#   - status — active | staging.
+#     active  → правило tls_fp_suspicious_ciphers сравнивает observed vs expected.
+#     staging → staging_match в bac_log, не challenge'ит.
+#
+# Стартовый набор — текущие наблюдения по основным браузерам. При сдвиге
+# у новой мажорной версии браузера сначала PR со status=staging рядом со
+# старым, потом промоут после калибровки.
+
+chrome:
+  expected_cipher_cnt: 15
+  status: active
+
+firefox:
+  expected_cipher_cnt: 16
+  status: active
+
+safari:
+  expected_cipher_cnt: 20
+  status: active
+
+# Edge на Blink обычно совпадает с Chrome.
+edge:
+  expected_cipher_cnt: 15
+  status: active

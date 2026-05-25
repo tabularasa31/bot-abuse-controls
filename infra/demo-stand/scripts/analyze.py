@@ -53,7 +53,7 @@ CONTAINER = os.environ.get("BAC_CONTAINER", "nginx-demo")
 # Resty's init marker (nginx error_log) carries the loaded blocklist size;
 # 0 == shadow. Captured opportunistically — defaults to 0 if outside the
 # docker-logs window (the container is reloaded, not restarted, on update).
-INIT_RE = re.compile(r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}).*?\[demo\] fp_blocklist loaded: (\d+)")
+INIT_RE = re.compile(r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}).*?\[demo\] tls_fp_blocklist loaded: (\d+)")
 
 LOG_TS_TZ = timezone.utc
 WINDOW_HOURS = 24
@@ -203,7 +203,7 @@ def _fetch_one(container):
     """Pull recent BAC_LOG json records from the stand's docker log.
 
     `--since 25h` bounds the fetch as uptime grows. The resty init marker
-    (`[demo] fp_blocklist loaded: N`) gives the blocklist size; if it is
+    (`[demo] tls_fp_blocklist loaded: N`) gives the blocklist size; if it is
     outside the window (the container is reloaded, not restarted, on
     update) the size defaults to 0 and the report still works.
 

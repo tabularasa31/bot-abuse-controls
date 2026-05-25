@@ -54,6 +54,8 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string) {
 
 	// Чистая схема — DROP+Migrate. Тесты не должны зависеть от соседей.
 	tables := []string{
+		// PR-62 audit: legacy DB-таблица — `fp_blocklist` (из 0001_init.sql),
+		// НЕ `tls_fp_blocklist` (file-system имя из PR-62 rename).
 		"catalog_version", "fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
 		"verified_bot_ips", "policy", "logs",

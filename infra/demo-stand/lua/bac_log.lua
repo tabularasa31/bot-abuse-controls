@@ -25,7 +25,7 @@ local _M = {}
 local EDGE_ID = os.getenv("EDGE_ID") or "stand-bac"
 
 -- Per-resource business mode (shadow / active) stamped into each log
--- record. Phase 1 has no policy catalog and the stand's fp_blocklist
+-- record. Phase 1 has no policy catalog and the stand's tls_fp_blocklist
 -- ships empty (nothing is blocked), so every record is "shadow". Per-
 -- resource modes arrive with the policy catalog (Phase 3); the field
 -- name does not change.

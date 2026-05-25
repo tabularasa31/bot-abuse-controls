@@ -72,33 +72,50 @@ check(tls_fp.cipher_count("L13d11h2_x_y"), 11, "cipher_count 11")
 check(tls_fp.cipher_count("nope"), nil,        "cipher_count malformed → nil")
 
 -- ===========================================================================
--- build_catalog / build_profiles — active-only compilation
+-- build_catalog / build_profiles — parse Channel C wire format
+-- "<status>:<value>" into (active, staging) tables. After PR2 (ADR-006)
+-- this is the only build path; on-disk INI source removed.
 -- ===========================================================================
 
-local cat = tls_fp.build_catalog({
-    ["1ed0482b9b4c"] = { family = "python-requests", status = "active" },
-    ["a1b2c3d4e5f6"] = { family = "curl",            status = "staging" },
-    ["dead00000000"] = { status = "active" },  -- no family → skipped
+local cat_active, cat_staging = tls_fp.build_catalog({
+    ["1ed0482b9b4c"] = "active:python-requests",
+    ["a1b2c3d4e5f6"] = "staging:curl",
+    ["dead00000000"] = "active:",            -- empty family → skipped
+    ["bad-status"]   = "unknown:something",  -- неизвестный status → skip
+    ["malformed"]    = "no-colon-here",      -- битый wire → skip
 })
-check(cat["1ed0482b9b4c"], "python-requests", "build_catalog keeps active")
-check(cat["a1b2c3d4e5f6"], nil,               "build_catalog drops staging")
-check(cat["dead00000000"], nil,               "build_catalog drops family-less")
-check(next(tls_fp.build_catalog(nil)), nil,   "build_catalog nil → empty")
+check(cat_active["1ed0482b9b4c"],  "python-requests", "build_catalog active")
+check(cat_active["a1b2c3d4e5f6"],  nil,               "build_catalog active drops staging")
+check(cat_staging["a1b2c3d4e5f6"], "curl",            "build_catalog staging")
+check(cat_active["dead00000000"],  nil,               "build_catalog drops empty family")
+check(cat_active["bad-status"],    nil,               "build_catalog drops unknown status")
+check(cat_active["malformed"],     nil,               "build_catalog drops malformed wire")
+local empty_a, empty_s = tls_fp.build_catalog(nil)
+check(next(empty_a), nil, "build_catalog nil active → empty")
+check(next(empty_s), nil, "build_catalog nil staging → empty")
 
-local prof = tls_fp.build_profiles({
-    chrome  = { expected_cipher_cnt = 15, status = "active" },
-    firefox = { expected_cipher_cnt = 16, status = "active" },
-    safari  = { expected_cipher_cnt = 20, status = "active" },
-    edge    = { expected_cipher_cnt = 15, status = "active" },
-    beta    = { expected_cipher_cnt = 18, status = "staging" },  -- excluded
-    bad     = { status = "active" },                              -- no cnt → skip
+local prof_active, prof_staging = tls_fp.build_profiles({
+    chrome  = "active:15",
+    firefox = "active:16",
+    safari  = "active:20",
+    edge    = "active:15",
+    beta    = "staging:18",
+    bad     = "active:notanumber",  -- non-numeric → skipped
+    zero    = "active:0",            -- non-positive → skipped (defense; backend Validate тоже ловит)
 })
-check(prof.chrome,  15,  "build_profiles chrome=15")
-check(prof.firefox, 16,  "build_profiles firefox=16")
-check(prof.safari,  20,  "build_profiles safari=20")
-check(prof.edge,    15,  "build_profiles edge=15")
-check(prof.beta,    nil, "build_profiles drops staging")
-check(prof.bad,     nil, "build_profiles drops cnt-less")
+check(prof_active.chrome,  15,  "build_profiles chrome=15")
+check(prof_active.firefox, 16,  "build_profiles firefox=16")
+check(prof_active.safari,  20,  "build_profiles safari=20")
+check(prof_active.edge,    15,  "build_profiles edge=15")
+check(prof_active.beta,    nil, "build_profiles active drops staging")
+check(prof_staging.beta,   18,  "build_profiles staging beta=18")
+check(prof_active.bad,     nil, "build_profiles drops non-numeric")
+check(prof_active.zero,    nil, "build_profiles drops zero cipher_cnt")
+
+-- Локальные алиасы для остальных тестов файла — they expected single-table
+-- shape, теперь build_* возвращает (active, staging).
+local cat  = cat_active
+local prof = prof_active
 
 -- ===========================================================================
 -- is_impersonator — UA browser + fp hash_b is a known automation signature
@@ -146,6 +163,54 @@ check(tls_fp.has_tag({ "reputation:asn_dc", "hygiene:header_anomaly" }, "reputat
 check(tls_fp.has_tag({ "hygiene:header_anomaly" }, "reputation:asn_dc"),
     false, "has_tag missing tag → false")
 check(tls_fp.has_tag(nil, "reputation:asn_dc"), false, "has_tag nil tags → false")
+
+-- ===========================================================================
+-- Cold-start fallback semantics (PR-62 re-review + round-6 staging-gate)
+-- ===========================================================================
+-- Signature: is_suspicious_ciphers(ua_family, cc, profiles, allow_fallback)
+-- allow_fallback=true → active-call (cold-start coverage до первого pull).
+-- allow_fallback=false/nil → staging-call (никаких phantom matches).
+tls_fp._cached_gen_profiles = nil
+local empty = {}
+
+-- Active-call (allow_fallback=true): cold start → fallback chrome=15.
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, true), true,
+    "active cold start: chrome UA + cipher=11 vs fallback chrome=15 → suspicious")
+check(tls_fp.is_suspicious_ciphers("chrome", 15, empty, true), false,
+    "active cold start: chrome UA + cipher=15 matches fallback → ok")
+
+-- STAGING-call (allow_fallback=false): пустая таблица → НИКАКОГО fallback,
+-- никакого phantom staging_match. Это PR-62 round-6 fix.
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, false), false,
+    "staging cold start: empty profiles_staging → NO fallback → no phantom match")
+check(tls_fp.is_suspicious_ciphers("chrome", 15, empty, false), false,
+    "staging cold start: empty staging table → no match regardless of cipher")
+
+-- fp_looks_like_browser один call site (active), всегда применяет fallback на cold start.
+check(tls_fp.fp_looks_like_browser(15, empty), true,
+    "cold start: cipher=15 matches fallback chrome/edge → browser-shaped")
+check(tls_fp.fp_looks_like_browser(99, empty), false,
+    "cold start: cipher=99 off every fallback → not browser")
+
+-- After first successful pull (gen >= 1): Channel C is authoritative.
+-- Fallback MUST NOT mask backend decisions (e.g. backend dropped chrome,
+-- moved cipher_cnt to 16, etc.). Empty dynamic table = «no profiles known»,
+-- the rule simply doesn't fire — fallback не подменяет это решение.
+tls_fp._cached_gen_profiles = 1
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, true), false,
+    "post-pull active: backend dropped chrome → no profile → no verdict (fallback off after landed)")
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty, false), false,
+    "post-pull staging: empty table → no match (fallback never applies to staging anyway)")
+check(tls_fp.fp_looks_like_browser(15, empty), false,
+    "post-pull: empty profiles, cipher=15 NOT browser-shaped (fallback off)")
+-- А если backend подвинул chrome на 16 — старый 15 больше не считается chrome:
+local moved = { chrome = 16 }
+check(tls_fp.is_suspicious_ciphers("chrome", 15, moved, true), true,
+    "post-pull active: backend moved chrome to 16, observed cipher=15 → suspicious vs new value")
+check(tls_fp.is_suspicious_ciphers("chrome", 16, moved, true), false,
+    "post-pull active: chrome matches updated profile → ok")
+-- Reset для последующих тестов (если будут добавлены ниже).
+tls_fp._cached_gen_profiles = nil
 
 -- ===========================================================================
 -- Reporting

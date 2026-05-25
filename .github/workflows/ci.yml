@@ -40,7 +40,7 @@ jobs:
                    luajit tests/hygiene_test.lua && \
                    luajit tests/reputation_test.lua && \
                    luajit tests/rate_limit_test.lua && \
-                   luajit tests/fp_blocklist_state_test.lua && \
+                   luajit tests/tls_fp_blocklist_state_test.lua && \
                    luajit tests/tls_fp_test.lua && \
                    luajit tests/catalog_pull_test.lua && \
                    luajit tests/log_shipper_test.lua && \

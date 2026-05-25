@@ -4,9 +4,9 @@
 -- reviewer eyeball the pipeline without learning Prometheus query syntax.
 
 local recent   = require "recent"
-local fp_state = require "fp_blocklist_state"
+local fp_state = require "tls_fp_blocklist_state"
 local m        = ngx.shared.metrics
-local fp_dict  = ngx.shared.fp_blocklist
+local fp_dict  = ngx.shared.tls_fp_blocklist
 
 local function get(key) return m:get(key) or 0 end
 

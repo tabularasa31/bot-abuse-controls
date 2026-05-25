@@ -234,7 +234,7 @@ matched, no new data, channel still healthy) reset it. Transport errors,
 non-200/304 statuses, and decode failures leave the gauge growing. **This
 is a liveness signal, not a data-freshness one** — the alert fires when
 backend stops answering, not when a PR-merged catalog has been the same
-payload for a week (which is the steady state for `fp_blocklist`,
+payload for a week (which is the steady state for `tls_fp_blocklist`,
 `ua_blacklist`, IP lists). Pinned by `tests/catalog_pull_test.lua` case 2.
 
 Contract per config-distribution §Channel C and the B6 task:

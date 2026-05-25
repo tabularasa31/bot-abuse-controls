@@ -28,11 +28,11 @@
 -- where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}.
 -- The absent state is just a missing key.
 --
--- Storage shape inside the shared_dict mirrors `fp_blocklist`'s §В1 atomic
+-- Storage shape inside the shared_dict mirrors `tls_fp_blocklist`'s §В1 atomic
 -- swap: keys are `<ip>:<gen>` so two generations can coexist during the
 -- write→flip→sweep window, and readers compose the key with the gen they
 -- read from `ngx.shared.meta:get("verified_bots_gen")`. catalog_pull's
--- descriptor (apply/sweep) keeps this contract symmetric with fp_blocklist.
+-- descriptor (apply/sweep) keeps this contract symmetric with tls_fp_blocklist.
 --
 -- The UA "looks like a searchbot" test is a plain-substring alternation
 -- compiled from defaults.conf `[allow.bot_verified].ua_pattern` ("Googlebot|

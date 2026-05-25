@@ -33,7 +33,7 @@ docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_
 
 Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog and the `fp_blocklist` ships empty, so the stand emits a uniform `shadow`; `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog and the `tls_fp_blocklist` ships empty, so the stand emits a uniform `shadow`; `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md), [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
@@ -58,7 +58,7 @@ cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 echo 'ORIGIN_URL=https://your-origin.example' > infra/demo-stand/.env
 
 # (Optional, B6) Connect to antibot-backend for live Channel C catalog pulls.
-# Without these the stand runs on the static fp_blocklist seed only.
+# Without these the stand runs on the static tls_fp_blocklist seed only.
 #   ANTIBOT_BACKEND_URL — scheme+host[:port], no trailing slash. UNSET or
 #     empty → no timer fires (out-of-box: static seed, clean error.log).
 #   ANTIBOT_BACKEND_HOST — Host header override (if URL is an IP).
@@ -316,3 +316,26 @@ infra/demo-stand/
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). The stand already runs shadow (empty blocklist) — observability on, enforcement off — so "shadow vs active" is just whether the blocklist has entries. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
+
+## Divergence WARN triage
+
+При reload edge'a (`nginx -s reload` или recreate-контейнера) можно увидеть в error.log одно из:
+
+```
+[demo] tls_fp_blocklist: meta says gen=N but data dict has no matching entries — possibly zone wipe or intentionally-empty Channel C payload. Dropping etag to force next pull to verify…
+[demo] verified_bot_ips: meta says gen=N but data dict has no matching entries — …
+[demo] tls_fp_catalog: meta says gen=N …
+[demo] tls_fp_browser_profiles: meta says gen=N …
+```
+
+Это значит: `meta` shared_dict пережил reload с gen=N (Channel C исторически доставлял payload), но соответствующий data dict пуст (нет ни одного `:N` ключа). Два возможных сценария:
+
+1. **Operator resized data dict zone в nginx.conf** (e.g. `lua_shared_dict tls_fp_catalog 1m → 4m`) — nginx пересоздаёт zone, ключи теряются. `meta` (unchanged) сохраняет stale gen+etag.
+2. **Backend опубликовал intentional empty payload** — продакт удалил все entries из `catalogs/<name>.yaml`, Channel C доставил пустой ответ. Edge state корректно отражает product intent.
+
+Edge не может различить эти два случая из init.lua, поэтому **не делает re-seed** (это override'нуло бы product intent во втором случае). Действия:
+
+- **Триаж**: `curl <antibot-backend>/catalog/<name>` чтобы увидеть текущий backend payload. Если пусто — сценарий (2), всё корректно. Если есть entries — сценарий (1), wait ≤30s.
+- **Auto-recovery**: edge сбрасывает etag → catalog_pull следующего тика (≤30s) делает полный 200 GET → backend re-доставит entries (если они есть) → стенд recovery'нется automatically.
+- **Manual override** (если backend ALSO unreachable и intentional-empty НЕ ваш случай): рестарт edge (`docker compose restart` или `nginx -s stop` + `start`) — на полном рестарте `meta` zone re-create'ится, gen-key отсутствует → init.lua идёт cold-start path → локальный seed из `config/tls_fp_blocklist.conf` (для tls_fp_blocklist) или пустое состояние (для других — у них нет file-fallback'а).
+- **Между WARN и recovery**: соответствующий rule молча наблюдает (no blocks/challenges). Для tls_fp_browser_profiles cold-start fallback (chrome=15, firefox=16, safari=20, edge=15) применяется только пока `_M._cached_gen_profiles > 0` НЕ выставлен — после первого refresh fallback OFF, observe-only без profiles.

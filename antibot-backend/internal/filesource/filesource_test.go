@@ -14,12 +14,14 @@ func seed(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"version":              "1.0.0\n",
-		"fp_blocklist.yaml":    "# empty seed\n",
-		"ua_blacklist.yaml":    "# empty seed\n",
-		"ip_blocklist.yaml":    "# empty seed\n",
-		"ip_whitelist.yaml":    "# empty seed\n",
-		"asn_datacenters.yaml": "# empty seed\n",
+		"version":                      "1.0.0\n",
+		"tls_fp_blocklist.yaml":        "# empty seed\n",
+		"ua_blacklist.yaml":            "# empty seed\n",
+		"ip_blocklist.yaml":            "# empty seed\n",
+		"ip_whitelist.yaml":            "# empty seed\n",
+		"asn_datacenters.yaml":         "# empty seed\n",
+		"tls_fp_catalog.yaml":          "# empty seed\n",
+		"tls_fp_browser_profiles.yaml": "# empty seed\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
@@ -46,17 +48,94 @@ func TestLoad_EmptySeed(t *testing.T) {
 	if s.Version != "1.0.0" {
 		t.Errorf("Version=%q want 1.0.0", s.Version)
 	}
-	if len(s.FPBlocklist) != 0 || len(s.UABlacklist) != 0 ||
+	if len(s.TLSFPBlocklist) != 0 || len(s.UABlacklist) != 0 ||
 		len(s.IPBlocklist) != 0 || len(s.IPWhitelist) != 0 ||
-		len(s.ASNDatacenters) != 0 {
+		len(s.ASNDatacenters) != 0 ||
+		len(s.TLSFPCatalog) != 0 || len(s.TLSFPBrowserProfiles) != 0 {
 		t.Errorf("ожидался пустой slow-слой, получили: %+v", s)
+	}
+}
+
+func TestLoad_TLSFPCatalogAndProfiles(t *testing.T) {
+	dir := seed(t)
+	write(t, dir, "tls_fp_catalog.yaml", `
+"1ed0482b9b4c":
+  family: python-requests
+  status: active
+"a1b2c3d4e5f6":
+  family: curl
+  status: staging
+`)
+	write(t, dir, "tls_fp_browser_profiles.yaml", `
+chrome:
+  expected_cipher_cnt: 15
+  status: active
+firefox:
+  expected_cipher_cnt: 16
+  status: active
+`)
+	s, err := New(dir).Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := len(s.TLSFPCatalog); got != 2 {
+		t.Errorf("tls_fp_catalog len=%d want 2 (active+staging оба остаются)", got)
+	}
+	if s.TLSFPCatalog["1ed0482b9b4c"].Family != "python-requests" ||
+		s.TLSFPCatalog["1ed0482b9b4c"].Status != "active" {
+		t.Errorf("tls_fp_catalog[python-requests] = %+v", s.TLSFPCatalog["1ed0482b9b4c"])
+	}
+	if s.TLSFPCatalog["a1b2c3d4e5f6"].Status != "staging" {
+		t.Errorf("tls_fp_catalog[curl].Status = %q, want staging", s.TLSFPCatalog["a1b2c3d4e5f6"].Status)
+	}
+	if got := len(s.TLSFPBrowserProfiles); got != 2 {
+		t.Errorf("tls_fp_browser_profiles len=%d want 2", got)
+	}
+	if s.TLSFPBrowserProfiles["chrome"].ExpectedCipherCnt != 15 {
+		t.Errorf("chrome.ExpectedCipherCnt=%d want 15", s.TLSFPBrowserProfiles["chrome"].ExpectedCipherCnt)
+	}
+}
+
+func TestLoad_TLSFPCatalogInvalidStatus(t *testing.T) {
+	dir := seed(t)
+	write(t, dir, "tls_fp_catalog.yaml", `
+"deadbeef":
+  family: curl
+  status: rolled-out
+`)
+	if _, err := New(dir).Load(); err == nil {
+		t.Fatal("ожидалась ошибка для status=rolled-out в tls_fp_catalog")
+	}
+}
+
+func TestLoad_TLSFPCatalogEmptyFamily(t *testing.T) {
+	dir := seed(t)
+	write(t, dir, "tls_fp_catalog.yaml", `
+"deadbeef":
+  family: ""
+  status: active
+`)
+	if _, err := New(dir).Load(); err == nil {
+		t.Fatal("ожидалась ошибка для пустого family в tls_fp_catalog")
+	}
+}
+
+func TestLoad_BrowserProfileZeroCipherCnt(t *testing.T) {
+	dir := seed(t)
+	write(t, dir, "tls_fp_browser_profiles.yaml", `
+chrome:
+  expected_cipher_cnt: 0
+  status: active
+`)
+	if _, err := New(dir).Load(); err == nil {
+		t.Fatal("ожидалась ошибка для expected_cipher_cnt=0")
 	}
 }
 
 func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
 	dir := seed(t)
-	// fp_blocklist: один active, один staging.
-	write(t, dir, "fp_blocklist.yaml", `
+	// tls_fp_blocklist: один active, один staging.
+	write(t, dir, "tls_fp_blocklist.yaml", `
 "L13i17h2_aaa_bbb": active
 "L12i14h1_ccc_ddd": staging
 `)
@@ -86,11 +165,11 @@ func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got, want := len(s.FPBlocklist), 1; got != want {
-		t.Errorf("fp_blocklist len=%d want %d (staging должен быть отфильтрован)", got, want)
+	if got, want := len(s.TLSFPBlocklist), 1; got != want {
+		t.Errorf("tls_fp_blocklist len=%d want %d (staging должен быть отфильтрован)", got, want)
 	}
-	if s.FPBlocklist["L13i17h2_aaa_bbb"] != "block" {
-		t.Errorf("fp_blocklist active record missing: %+v", s.FPBlocklist)
+	if s.TLSFPBlocklist["L13i17h2_aaa_bbb"] != "block" {
+		t.Errorf("tls_fp_blocklist active record missing: %+v", s.TLSFPBlocklist)
 	}
 	if got, want := len(s.UABlacklist), 2; got != want {
 		t.Errorf("ua_blacklist len=%d want %d", got, want)
@@ -136,7 +215,7 @@ func TestLoad_MissingCatalogFile(t *testing.T) {
 
 func TestLoad_InvalidStatus(t *testing.T) {
 	dir := seed(t)
-	write(t, dir, "fp_blocklist.yaml", `"L13i17h2_aaa_bbb": rolled-out`)
+	write(t, dir, "tls_fp_blocklist.yaml", `"L13i17h2_aaa_bbb": rolled-out`)
 	if _, err := New(dir).Load(); err == nil {
 		t.Fatal("ожидалась ошибка для status=rolled-out")
 	}

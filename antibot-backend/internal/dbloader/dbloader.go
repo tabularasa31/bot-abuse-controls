@@ -3,7 +3,7 @@
 // После ADR-006 в БД лежат только данные, которые меняются автоматически
 // (SLA ≤ 30 сек) и не подходят файлам по природе: `verified_bot_ips`
 // пишет rDNS-воркер ([B7]), `policy` — antibotapi из дашборда ([B10]).
-// Курируемые продактом «медленные» каталоги (fp_blocklist, ua_blacklist,
+// Курируемые продактом «медленные» каталоги (tls_fp_blocklist, ua_blacklist,
 // ip_blocklist, ip_whitelist, asn_datacenters) переехали в git-репо
 // catalogs/ и грузятся через internal/filesource.
 //

@@ -118,11 +118,11 @@ else
 fi
 
 echo "4. /catalog/* mounted (B2 skeleton; B3 fills bodies + ETag)"
-code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/catalog/fp_blocklist")" || code=000
+code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/catalog/tls_fp_blocklist")" || code=000
 if [ "${code}" = "501" ]; then
-    pass "GET /catalog/fp_blocklist -> 501 (skeleton)"
+    pass "GET /catalog/tls_fp_blocklist -> 501 (skeleton)"
 else
-    bad "GET /catalog/fp_blocklist -> ${code} (expected 501 from B2 skeleton)"
+    bad "GET /catalog/tls_fp_blocklist -> ${code} (expected 501 from B2 skeleton)"
 fi
 code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://${HOST}/catalog/bogus")" || code=000
 if [ "${code}" = "404" ]; then

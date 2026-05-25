@@ -11,20 +11,20 @@
 
 ## Файлы
 
-| Файл                     | Что внутри                                              |
-|--------------------------|---------------------------------------------------------|
-| `version`                | semver схемы payload, идёт в `X-Catalog-Version`.       |
-| `fp_blocklist.yaml`      | TLS fingerprints → status. `verdict=block` для active.  |
-| `ua_blacklist.yaml`      | RE2-regex по User-Agent → status. Складывается в combined regex. |
-| `ip_blocklist.yaml`      | CIDR → status. `verdict=block` для active.              |
-| `ip_whitelist.yaml`      | CIDR (без status). Системный allow-list.                |
-| `asn_datacenters.yaml`   | uint32 ASN. Справочник для тега `reputation:asn_dc`.    |
+| Файл                              | Что внутри                                              |
+|-----------------------------------|---------------------------------------------------------|
+| `version`                         | semver схемы payload, идёт в `X-Catalog-Version`.       |
+| `tls_fp_blocklist.yaml`           | TLS fingerprints → status. `verdict=block` для active.  |
+| `ua_blacklist.yaml`               | RE2-regex по User-Agent → status. Складывается в combined regex. |
+| `ip_blocklist.yaml`               | CIDR → status. `verdict=block` для active.              |
+| `ip_whitelist.yaml`               | CIDR (без status). Системный allow-list.                |
+| `asn_datacenters.yaml`            | uint32 ASN. Справочник для тега `reputation:asn_dc`.    |
+| `tls_fp_catalog.yaml`             | hash_b → { family, status }. Правило tls_fp_impersonator. |
+| `tls_fp_browser_profiles.yaml`    | family → { expected_cipher_cnt, status }. Правило tls_fp_suspicious_ciphers. |
 
 Что **не** здесь:
 - `policy/<host>` — клиентские настройки, живут в БД, правятся через дашборд.
 - `verified_bot_ips` — runtime state от rDNS-воркера, живёт в БД.
-- `tls_fp_catalog`, `tls_fp_browser_profiles` — будут добавлены отдельным
-  PR ([PR2 этой задачи](https://app.clickup.com/t/86exqhftu)).
 
 ## Как вносить изменения
 
@@ -41,7 +41,7 @@
 
 ## Staged rollout
 
-Для каталогов со status (`fp_blocklist`, `ua_blacklist`, `ip_blocklist`)
+Для каталогов со status (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`)
 работает A11 staged rollout:
 
 1. **PR-1**: добавить запись со `status: staging`. Эдж матчит, пишет

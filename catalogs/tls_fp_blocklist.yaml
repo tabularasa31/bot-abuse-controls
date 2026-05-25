@@ -1,4 +1,5 @@
-# fp_blocklist.yaml — TLS fingerprints, которые каскад трактует как ботов.
+# tls_fp_blocklist.yaml — TLS fingerprints, которые каскад трактует как
+# ботов (vision/entities-reference §«Каталоги», правило `tls_fp_blocklist`).
 #
 # Формат: <fp>: <status>, где
 #   - fp     — строка вида L<ver><sni><cipher_cnt><alpn>_<hash_b>_<hash_c>
