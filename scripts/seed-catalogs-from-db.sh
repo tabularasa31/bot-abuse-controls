@@ -59,7 +59,7 @@ yaml_sq() {
 {
   echo "# tls_fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <fp>: <status>"
-  psql_q "SELECT fp, status FROM tls_fp_blocklist ORDER BY fp" \
+  psql_q "SELECT fp, status FROM fp_blocklist ORDER BY fp" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
