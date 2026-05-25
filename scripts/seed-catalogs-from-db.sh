@@ -63,6 +63,15 @@ yaml_sq() {
   psql_q "SELECT fp, status FROM fp_blocklist ORDER BY fp" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
+        # NULL status (legacy pre-CHECK rows) → пустая строка от psql -At.
+        # Пишем закомментированной строкой, чтобы продакт явно увидел и решил
+        # руками (active vs staging); пустой статус в YAML провалил бы
+        # catalog.Validate на следующем reloader-тике для всего slow-слоя.
+        if [[ -z "$status" ]]; then
+          printf "# %s: <NULL-status-from-db, заполнить вручную>\n" "$(yaml_sq "$key")"
+          echo "WARN: $key has NULL status in DB — written as comment, fill in manually before merge" >&2
+          continue
+        fi
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
       done
 } > "$OUT_DIR/tls_fp_blocklist.yaml"
@@ -76,6 +85,15 @@ echo "wrote $OUT_DIR/tls_fp_blocklist.yaml"
   psql_q "SELECT pattern, status FROM ua_blacklist ORDER BY pattern" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
+        # NULL status (legacy pre-CHECK rows) → пустая строка от psql -At.
+        # Пишем закомментированной строкой, чтобы продакт явно увидел и решил
+        # руками (active vs staging); пустой статус в YAML провалил бы
+        # catalog.Validate на следующем reloader-тике для всего slow-слоя.
+        if [[ -z "$status" ]]; then
+          printf "# %s: <NULL-status-from-db, заполнить вручную>\n" "$(yaml_sq "$key")"
+          echo "WARN: $key has NULL status in DB — written as comment, fill in manually before merge" >&2
+          continue
+        fi
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
       done
 } > "$OUT_DIR/ua_blacklist.yaml"
@@ -88,6 +106,15 @@ echo "wrote $OUT_DIR/ua_blacklist.yaml"
   psql_q "SELECT cidr, status FROM ip_blocklist ORDER BY cidr" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
+        # NULL status (legacy pre-CHECK rows) → пустая строка от psql -At.
+        # Пишем закомментированной строкой, чтобы продакт явно увидел и решил
+        # руками (active vs staging); пустой статус в YAML провалил бы
+        # catalog.Validate на следующем reloader-тике для всего slow-слоя.
+        if [[ -z "$status" ]]; then
+          printf "# %s: <NULL-status-from-db, заполнить вручную>\n" "$(yaml_sq "$key")"
+          echo "WARN: $key has NULL status in DB — written as comment, fill in manually before merge" >&2
+          continue
+        fi
         printf "%s: %s\n" "$(yaml_sq "$key")" "$status"
       done
 } > "$OUT_DIR/ip_blocklist.yaml"

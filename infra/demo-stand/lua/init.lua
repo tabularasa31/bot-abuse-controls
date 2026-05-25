@@ -89,20 +89,20 @@ end
 -- write-then-flip order so a reader never resolves to a gen with no keys.
 ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 
--- verified_bots has no static seed (the catalog is rDNS-worker output, not
--- a checked-in file). Seed gen=0 so verified_bots.classify() reads cleanly
--- on an empty dict and lookups consistently return nil → "absent" →
--- bot_verified_pending until catalog_pull lands the first generation.
-ngx.shared.meta:set("verified_bots_gen", 0)
-
--- tls_fp_catalog / tls_fp_browser_profiles (PR2, ADR-006): тот же приём,
--- что и для verified_bots — каталоги приезжают через Channel C, на init
--- их нет, но gen=0 публикуем чтобы tls_fp.refresh() и любые будущие
--- читатели не различали «никогда не пулили» от «первая генерация»
--- через nil-checks. tls_fp.refresh() сейчас защищён `or 0`, но контракт
--- (см. соседние `:set ... gen", 0)` блоки) — явная инициализация.
-ngx.shared.meta:set("tls_fp_catalog_gen", 0)
-ngx.shared.meta:set("tls_fp_browser_profiles_gen", 0)
+-- verified_bots / tls_fp_catalog / tls_fp_browser_profiles — no static
+-- seed (catalogs приезжают через Channel C). Изначально (cold start)
+-- gen-keys отсутствуют в `meta`; mета shared_dict выживает `nginx -s
+-- reload` (zone сохраняется при неизменном name+size), поэтому используем
+-- `meta:add(key, 0)` — присвоение ТОЛЬКО если ключ не существует. Это
+-- закрывает PR-62 audit-bug: при reload meta:gen уже содержит реальное
+-- значение (например 7), `add` не перетирает в 0; refresh() видит 7,
+-- сканирует `:7` суффикс в data shared_dict (зона тоже выжила reload),
+-- находит выжившие entries → каталог не залипает на 304.
+-- Контракт: после первого вызова gen-key всегда существует, любой
+-- читатель без `or 0`-защиты не nil-ошибётся.
+ngx.shared.meta:add("verified_bots_gen", 0)
+ngx.shared.meta:add("tls_fp_catalog_gen", 0)
+ngx.shared.meta:add("tls_fp_browser_profiles_gen", 0)
 
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").

@@ -46,13 +46,13 @@
 -- soft flag persists in `flags`. run() therefore only writes verdict=challenge
 -- when the current verdict is not already "block"; the flag is always added.
 --
--- Config model. Like hygiene/reputation: tls_fp_catalog.conf and
--- tls_fp_browser_profiles.conf are parsed once in init_by_lua (config.lua) and
--- compiled into per-process lookup tables by build() — in the master before
--- workers fork, so every worker inherits them for free (no shared dict;
--- hot-reload over Channel C is a later task). Phase 3 swaps the data source to
--- the catalog pull without changing rule names, stage, category or the log
--- contract.
+-- Config model. After PR2 (ADR-006) tls_fp_catalog and tls_fp_browser_profiles
+-- live in git-репо `catalogs/` и приезжают через Channel C: backend читает
+-- YAML в catalog server, edge polls via catalog_pull.lua + atomic-swap в
+-- shared_dict. refresh() — gen-cached rebuild per-worker, дёшево на каждом
+-- run(), rebuild только при flip'е. До первого pull действует cold-start
+-- fallback (COLD_START_PROFILES); после profiles_landed() → fallback OFF,
+-- backend single source of truth. Pre-PR2 INI-парсинг в config.lua удалён.
 --
 -- Staging (A11, phase2-spec §"Staged rollout для PR-каталогов"). Catalog
 -- entries with status=staging are kept OUT of the active lookup tables (so they
@@ -363,6 +363,22 @@ local function rebuild_from_dict(dict_name, cur_gen, builder)
     return builder(wire)
 end
 
+-- prime_staging_metrics — на каждом gen flip Channel C-каталога заводит
+-- counter `staging:<catalog>:<pattern_id>` со значением 0 в metrics
+-- shared_dict. Это даёт promotion-дашбордам видеть «staged signature
+-- объявлена, ноль матчей» вместо «metric absent» (отличает «PR landed,
+-- traffic не было» от «PR не доехал»). Init.lua симметрично prim'ит
+-- counter'ы для tls_fp_blocklist staging (file-based), PR-62 audit:
+-- для двух Channel C каталогов до этого fix'а priming не было —
+-- counter'ы появлялись лениво на первом матче.
+local function prime_staging_metrics(catalog_name, staging_table)
+    local m = ngx.shared.metrics
+    if not m then return end
+    for pattern_id in pairs(staging_table) do
+        m:safe_add("staging:" .. catalog_name .. ":" .. pattern_id, 0)
+    end
+end
+
 function _M.refresh()
     if not ngx or not ngx.shared then return end
     local meta = ngx.shared.meta
@@ -375,6 +391,7 @@ function _M.refresh()
         _M.catalog          = active
         _M.catalog_staging  = staging
         _M._cached_gen_catalog = cat_gen
+        prime_staging_metrics("tls_fp_catalog", staging)
     end
 
     local prof_gen = meta:get("tls_fp_browser_profiles_gen") or 0
@@ -384,6 +401,7 @@ function _M.refresh()
         _M.profiles          = active
         _M.profiles_staging  = staging
         _M._cached_gen_profiles = prof_gen
+        prime_staging_metrics("tls_fp_browser_profiles", staging)
     end
 end
 

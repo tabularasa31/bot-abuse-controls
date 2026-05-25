@@ -355,12 +355,13 @@ func Validate(d *Data) error {
 		}
 	}
 	// tls_fp_browser_profiles (Phase 2+): family → {expected_cipher_cnt, status}.
-	// expected_cipher_cnt > 0 — обязательно для active (cipher_cnt=0 бессмыслен,
-	// is_suspicious_ciphers стал бы тривиальным). Для staging — допустим
-	// placeholder без cipher_cnt: продакт может зарегистрировать family
-	// заранее («chrome_v140 будет, cipher_cnt после калибровки»), edge
-	// build_profiles_staging такие записи скипает по n>0-фильтру (PR-62 review:
-	// pre-PR2 INI-парсер тоже молча скипал staging-строки без cipher_cnt).
+	// expected_cipher_cnt > 0 обязательно для ВСЕХ entries (active И staging).
+	// PR-62 re-audit: расслаблять для staging нельзя — edge build_profiles
+	// фильтрует `if n and n > 0` симметрично из defense-in-depth, и запись
+	// со staging:0 тихо исчезает с эджа в ОБЕИХ active/staging таблицах →
+	// staging_match никогда не сработает, promotion-workflow ломается.
+	// Если продакт хочет «зарегистрировать family заранее», он должен ОДНОВРЕМЕННО
+	// поставить разумный начальный cipher_cnt; перекалибровать = отдельный PR.
 	for family, prof := range d.TLSFPBrowserProfiles {
 		if family == "" {
 			return fmt.Errorf("tls_fp_browser_profiles: empty family key")
@@ -368,8 +369,8 @@ func Validate(d *Data) error {
 		if !isValidEntryStatus(prof.Status) {
 			return fmt.Errorf("tls_fp_browser_profiles[%q]: invalid status %q (expected active | staging)", family, prof.Status)
 		}
-		if prof.Status == "active" && prof.ExpectedCipherCnt <= 0 {
-			return fmt.Errorf("tls_fp_browser_profiles[%q]: expected_cipher_cnt must be > 0 for active entries, got %d", family, prof.ExpectedCipherCnt)
+		if prof.ExpectedCipherCnt <= 0 {
+			return fmt.Errorf("tls_fp_browser_profiles[%q]: expected_cipher_cnt must be > 0 (got %d) — edge filters non-positive in both active and staging tables, entry would be invisible", family, prof.ExpectedCipherCnt)
 		}
 	}
 	return nil

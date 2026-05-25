@@ -278,7 +278,7 @@ func buildPolicy(d *Data, site string) ([]byte, error) {
 // `<status>:<family>` — симметрично verified_bot_ips ("<status>:<family>"),
 // чтобы shared_dict на эдже хранил готовое значение без per-entry JSON-
 // разбора. Edge парсит split-по-первой-`:` и решает active vs staging
-// своей логикой (build_catalog / build_catalog_staging в tls_fp.lua).
+// своей логикой (build_catalog в tls_fp.lua возвращает (active, staging) tuple).
 func buildTLSFPCatalog(d *Data) ([]byte, error) {
 	out := make(map[string]string, len(d.TLSFPCatalog))
 	for hb, entry := range d.TLSFPCatalog {
