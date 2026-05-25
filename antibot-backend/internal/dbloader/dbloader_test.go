@@ -76,7 +76,7 @@ func seedCatalogs(t *testing.T) *filesource.Loader {
 	dir := t.TempDir()
 	files := map[string]string{
 		"version":              "1.0.0\n",
-		"fp_blocklist.yaml":    "# empty\n",
+		"tls_fp_blocklist.yaml":    "# empty\n",
 		"ua_blacklist.yaml":    "# empty\n",
 		"ip_blocklist.yaml":    "# empty\n",
 		"ip_whitelist.yaml":    "# empty\n",

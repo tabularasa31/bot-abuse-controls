@@ -10,7 +10,8 @@
 // Структура файлов:
 //
 //	<dir>/version                 — singleton semver (text, одна строка).
-//	<dir>/fp_blocklist.yaml       — map(fp → "active"|"staging").
+//	<dir>/tls_fp_blocklist.yaml   — map(fp → "active"|"staging"); endpoint
+//	                                `/catalog/fp_blocklist` (wire-имя historical).
 //	<dir>/ua_blacklist.yaml       — map(pattern → "active"|"staging").
 //	<dir>/ip_blocklist.yaml       — map(cidr → "active"|"staging").
 //	<dir>/ip_whitelist.yaml       — sequence of cidr (без status).
@@ -45,7 +46,14 @@ import (
 // каталог — добавь сюда и в Load().
 var trackedFiles = []string{
 	"version",
-	"fp_blocklist.yaml",
+	// tls_fp_blocklist.yaml — vision/entities-reference.md называет этот
+	// каталог `tls_fp_blocklist` (L3 TLS-fp blocking). На wire-уровне
+	// (Channel C endpoint, shared_dict на эдже) и в catalog.Data поле
+	// исторически зовётся `fp_blocklist` — обе именования живут параллельно,
+	// для file-system источника выбираем doc-имя. Endpoint
+	// `/catalog/fp_blocklist` НЕ переименован — это сломало бы edge без
+	// функциональной выгоды.
+	"tls_fp_blocklist.yaml",
 	"ua_blacklist.yaml",
 	"ip_blocklist.yaml",
 	"ip_whitelist.yaml",
@@ -139,8 +147,13 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		TLSFPBrowserProfiles: map[string]catalog.BrowserProfile{},
 	}
 
-	// fp_blocklist: map(fp → status). Активные → fp: "block" в SlowData.
-	if mt, err := loadStatusMap(l.dir, "fp_blocklist.yaml", func(active []string) error {
+	// tls_fp_blocklist: map(fp → status). Активные → fp: "block" в SlowData.
+	// File-system имя файла — `tls_fp_blocklist.yaml` (имя из vision /
+	// entities-reference.md). Внутреннее поле `SlowData.FPBlocklist` и
+	// wire-endpoint `/catalog/fp_blocklist` оставлены historical (edge
+	// shared_dict и модули зовут это `fp_blocklist`); расхождение задокументировано
+	// в trackedFiles и catalogs/README.md.
+	if mt, err := loadStatusMap(l.dir, "tls_fp_blocklist.yaml", func(active []string) error {
 		for _, fp := range active {
 			slow.FPBlocklist[fp] = "block"
 		}
@@ -148,7 +161,7 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	}); err != nil {
 		return nil, err
 	} else {
-		mtimes["fp_blocklist.yaml"] = mt
+		mtimes["tls_fp_blocklist.yaml"] = mt
 	}
 
 	// ua_blacklist: map(pattern → status). Активные → []string в SlowData.

@@ -15,7 +15,7 @@ func seed(t *testing.T) string {
 	dir := t.TempDir()
 	files := map[string]string{
 		"version":                      "1.0.0\n",
-		"fp_blocklist.yaml":            "# empty seed\n",
+		"tls_fp_blocklist.yaml":            "# empty seed\n",
 		"ua_blacklist.yaml":            "# empty seed\n",
 		"ip_blocklist.yaml":            "# empty seed\n",
 		"ip_whitelist.yaml":            "# empty seed\n",
@@ -135,7 +135,7 @@ chrome:
 func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
 	dir := seed(t)
 	// fp_blocklist: один active, один staging.
-	write(t, dir, "fp_blocklist.yaml", `
+	write(t, dir, "tls_fp_blocklist.yaml", `
 "L13i17h2_aaa_bbb": active
 "L12i14h1_ccc_ddd": staging
 `)
@@ -215,7 +215,7 @@ func TestLoad_MissingCatalogFile(t *testing.T) {
 
 func TestLoad_InvalidStatus(t *testing.T) {
 	dir := seed(t)
-	write(t, dir, "fp_blocklist.yaml", `"L13i17h2_aaa_bbb": rolled-out`)
+	write(t, dir, "tls_fp_blocklist.yaml", `"L13i17h2_aaa_bbb": rolled-out`)
 	if _, err := New(dir).Load(); err == nil {
 		t.Fatal("ожидалась ошибка для status=rolled-out")
 	}

@@ -14,7 +14,7 @@
 | Файл                              | Что внутри                                              |
 |-----------------------------------|---------------------------------------------------------|
 | `version`                         | semver схемы payload, идёт в `X-Catalog-Version`.       |
-| `fp_blocklist.yaml`               | TLS fingerprints → status. `verdict=block` для active.  |
+| `tls_fp_blocklist.yaml`           | TLS fingerprints → status. `verdict=block` для active. Channel C endpoint исторически зовётся `/catalog/fp_blocklist` (без `tls_` префикса). |
 | `ua_blacklist.yaml`               | RE2-regex по User-Agent → status. Складывается в combined regex. |
 | `ip_blocklist.yaml`               | CIDR → status. `verdict=block` для active.              |
 | `ip_whitelist.yaml`               | CIDR (без status). Системный allow-list.                |
