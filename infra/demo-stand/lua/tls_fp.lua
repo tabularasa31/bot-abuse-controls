@@ -217,8 +217,26 @@ end
 -- pure: tls_fp_suspicious_ciphers decision. Fires when the UA claims a browser
 -- family with a known profile AND the observed cipher_count differs from it.
 -- Unknown family (no profile) or an unparseable cipher_count never fires.
+-- Cold-start fallback для is_suspicious_ciphers / fp_looks_like_browser:
+-- маленькая статичная карта семейств → expected_cipher_cnt. До PR2
+-- (ADR-006) эти значения жили в infra/demo-stand/config/tls_fp_browser_profiles.conf
+-- и парсились в init_by_lua, поэтому каскад работал с первой секунды и
+-- продолжал работать даже при недоступном backend. После PR2 каталог
+-- приезжает через Channel C, есть ~30 сек cold-start window после рестарта
+-- + неограниченный простой при недоступном backend. Cold-start fallback
+-- закрывает оба сценария: lookup `profiles[family] or COLD_START_PROFILES[family]`.
+-- Channel C source-of-truth: если backend прислал запись для family,
+-- она перекрывает fallback автоматически (profiles[family] truthy → не
+-- идём к `or`-ветке).
+local COLD_START_PROFILES = {
+    chrome  = 15,
+    firefox = 16,
+    safari  = 20,
+    edge    = 15,
+}
+
 function _M.is_suspicious_ciphers(ua_family, cc, profiles)
-    local expected = profiles[ua_family]
+    local expected = profiles[ua_family] or COLD_START_PROFILES[ua_family]
     if not expected then return false end
     if not cc then return false end
     return cc ~= expected
@@ -228,9 +246,19 @@ end
 -- tag — the L3 half of the signal. We treat "cipher_count matches some browser
 -- profile" as browser-shaped: it's a property of the TLS stack (the fp), not
 -- of the spoofable UA, which is what "fp выглядит как браузер" means.
+--
+-- Same cold-start fallback semantics: после рестарта до первого Channel C
+-- pull `profiles` пуст, итерируемся по COLD_START_PROFILES. После flip'а
+-- gen — profiles становится source of truth, fallback не trigger'ится,
+-- т.к. ANY-match семантика «один из ожидаемых» одинаково удовлетворяется.
 function _M.fp_looks_like_browser(cc, profiles)
     if not cc then return false end
     for _, expected in pairs(profiles) do
+        if cc == expected then return true end
+    end
+    -- Fallback: scan static defaults if dynamic table didn't match (covers
+    -- pre-first-pull + dynamic table empty cases).
+    for _, expected in pairs(COLD_START_PROFILES) do
         if cc == expected then return true end
     end
     return false

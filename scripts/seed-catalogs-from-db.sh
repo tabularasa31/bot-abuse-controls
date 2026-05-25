@@ -53,9 +53,10 @@ yaml_sq() {
   printf "'%s'" "$s"
 }
 
-# tls_fp_blocklist: map fp → status. DB-таблица называется `tls_fp_blocklist`
-# (historical, до миграции 0004), файл — `tls_fp_blocklist.yaml` (имя из
-# vision/entities-reference.md).
+# tls_fp_blocklist: map fp → status. Legacy DB-таблица из 0001_init.sql
+# называется `fp_blocklist` (миграция 0004 её дропнет); выходной файл —
+# `tls_fp_blocklist.yaml` (имя из vision/entities-reference.md, PR-62 rename).
+# Скрипт идёт ДО 0004, поэтому SQL читает старое имя.
 {
   echo "# tls_fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
   echo "# Формат: <fp>: <status>"

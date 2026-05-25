@@ -55,7 +55,9 @@ func resetSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		// Текущие runtime-таблицы.
 		"verified_bot_ips", "policy", "logs",
 		// Дропнуты 0004, но возможны в старых БД — IF EXISTS защищает.
-		"catalog_version", "tls_fp_blocklist", "ua_blacklist",
+		// PR-62 audit: имя legacy DB-таблицы — `fp_blocklist` (из 0001),
+		// НЕ `tls_fp_blocklist` (это file-system / wire-имя из PR-62 rename).
+		"catalog_version", "fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
 	}
 	for _, tbl := range tables {

@@ -51,6 +51,14 @@ antibot_blocklist_entries %d
 # TYPE antibot_tls_fp_blocklist_gen gauge
 antibot_tls_fp_blocklist_gen %d
 
+# HELP antibot_tls_fp_catalog_gen Current tls_fp_catalog generation (0 = init seed; bumped on each successful Channel C pull). PR-62.
+# TYPE antibot_tls_fp_catalog_gen gauge
+antibot_tls_fp_catalog_gen %d
+
+# HELP antibot_tls_fp_browser_profiles_gen Current tls_fp_browser_profiles generation (0 = init seed; bumped on each successful Channel C pull). PR-62.
+# TYPE antibot_tls_fp_browser_profiles_gen gauge
+antibot_tls_fp_browser_profiles_gen %d
+
 # HELP antibot_uptime_seconds Seconds since this worker started.
 # TYPE antibot_uptime_seconds gauge
 antibot_uptime_seconds %d
@@ -69,6 +77,8 @@ antibot_fp_unique %d
     cache_hit_ratio,
     get("blocklist_entries"),
     ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0,
+    ngx.shared.meta:get("tls_fp_catalog_gen") or 0,
+    ngx.shared.meta:get("tls_fp_browser_profiles_gen") or 0,
     uptime,
     get("fp_unique")))
 

@@ -38,13 +38,13 @@ local _, vb_alts_n = require("verified_bots").build(config)
 -- TAT state). Returns the active profile count for the startup log.
 local _, rate_n = require("rate_limit").build(config)
 
--- Compile the L3 tls_fp soft-rule stage (hash_b → automation-family catalog +
--- browser cipher-count profiles from the loaded config) — also in the master
--- so workers inherit the lookup tables on fork (see tls_fp.lua). The blocking
--- half (tls_fp_blocklist) is seeded separately below. Returns active entry
--- counts for the startup log.
-local tls_fp, tls_cat_n, tls_prof_n, tls_stg_cat_n, tls_stg_prof_n, tls_stg_bl_n =
-    require("tls_fp").build(config)
+-- Compile the L3 tls_fp soft-rule stage. После PR2 (ADR-006)
+-- tls_fp_catalog / tls_fp_browser_profiles приезжают через Channel C, так
+-- что build() заводит только cold-start state + kill-switch flag; staging
+-- counts для них всегда 0 на init (заполнятся после первого pull). Только
+-- tls_fp_blocklist staging остаётся file-based — его counter `tls_stg_bl_n`
+-- идёт в startup-log и в metrics:safe_add ниже.
+local tls_fp, _, _, _, _, tls_stg_bl_n = require("tls_fp").build(config)
 
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
@@ -95,6 +95,15 @@ ngx.shared.meta:set(fp_state.META_GEN_KEY, 0)
 -- bot_verified_pending until catalog_pull lands the first generation.
 ngx.shared.meta:set("verified_bots_gen", 0)
 
+-- tls_fp_catalog / tls_fp_browser_profiles (PR2, ADR-006): тот же приём,
+-- что и для verified_bots — каталоги приезжают через Channel C, на init
+-- их нет, но gen=0 публикуем чтобы tls_fp.refresh() и любые будущие
+-- читатели не различали «никогда не пулили» от «первая генерация»
+-- через nil-checks. tls_fp.refresh() сейчас защищён `or 0`, но контракт
+-- (см. соседние `:set ... gen", 0)` блоки) — явная инициализация.
+ngx.shared.meta:set("tls_fp_catalog_gen", 0)
+ngx.shared.meta:set("tls_fp_browser_profiles_gen", 0)
+
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").
 ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
@@ -129,18 +138,17 @@ if (require "verified_bots").enabled and vb_alts_n == 0 then
 end
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
--- PR2 (ADR-006): tls_fp_catalog / tls_fp_browser_profiles теперь приезжают
--- через Channel C, не из локального config.tls_fp_*. На init их ещё нет
--- (pull выполняется после init_worker_by_lua); счётчики ниже всегда нули,
--- актуальные значения видны в /metrics после первого тика catalog_pull
--- (≤ 30 сек после старта). Оставлены as-is, чтобы формат лога не сломал
--- скрипты, которые grep'ают по нему.
-ngx.log(ngx.NOTICE, "[demo] tls_fp soft rules: tls_fp_catalog=", tls_cat_n,
-    " active, browser_profiles=", tls_prof_n,
-    " active at init (Channel C will populate; check /metrics after first pull)")
-ngx.log(ngx.NOTICE, "[demo] tls_fp staged: tls_fp_catalog=", tls_stg_cat_n,
-    " browser_profiles=", tls_stg_prof_n, " tls_fp_blocklist=", tls_stg_bl_n,
-    " (observe-only into staging_match, no verdict)")
+-- PR2 (ADR-006): tls_fp_catalog / tls_fp_browser_profiles переехали с
+-- локальных INI на Channel C, на init их ещё нет (pull тикает после
+-- init_worker_by_lua). Внешний monitoring следит за метриками
+-- `antibot_tls_fp_catalog_gen` / `antibot_tls_fp_browser_profiles_gen`
+-- (metrics.lua), а не за init-логом — никакой post-pull лог-маркер
+-- здесь не печатается специально, чтобы дашборды не путали «нулевая
+-- gen на старте» с «catalog не landed». Для tls_fp_blocklist staging
+-- (всё ещё file-based) сохраняем традиционную stand-line.
+ngx.log(ngx.NOTICE, "[demo] tls_fp blocklist staged: ", tls_stg_bl_n,
+    " (file-based; tls_fp_catalog / browser_profiles см. /metrics ",
+    "*_gen после первого Channel C pull)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics

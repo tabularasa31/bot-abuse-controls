@@ -114,6 +114,17 @@ func (l *Loader) Changed() bool {
 // предыдущим хорошим payload'ом. Обновляет mtime-cache только при успехе:
 // частичный успех (например, version прочли, ua_blacklist упал) не
 // должен «потерять» сигнал об изменении на следующем тике.
+//
+// Blast radius (PR-62 audit): Load атомарен по всему slow-слою — одна
+// битая запись в любом из 8 файлов валит публикацию ВСЕХ slow-каталогов
+// (ua/ip/asn/fp/tls_fp_*) одновременно. Runtime-слой (policy,
+// verified_bot_ips) НЕ страдает, dbloader.LoadRuntime — независимый
+// путь. Это сознательно: per-каталог-загрузка дала бы окно частичной
+// консистентности, когда ETag разных файлов меняется в разном порядке —
+// эдж видел бы то старую UA-blacklist + новую IP-blacklist, то наоборот.
+// Лучше явный fail-stale: оператор видит `antibot_backend_catalog_reload_failures_total`
+// + log error, fix в одном PR, на эдже всё остаётся в последнем хорошем
+// состоянии.
 func (l *Loader) Load() (*catalog.SlowData, error) {
 	mtimes := make(map[string]time.Time, len(trackedFiles))
 
