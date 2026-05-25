@@ -223,11 +223,16 @@ end
 -- и парсились в init_by_lua, поэтому каскад работал с первой секунды и
 -- продолжал работать даже при недоступном backend. После PR2 каталог
 -- приезжает через Channel C, есть ~30 сек cold-start window после рестарта
--- + неограниченный простой при недоступном backend. Cold-start fallback
--- закрывает оба сценария: lookup `profiles[family] or COLD_START_PROFILES[family]`.
--- Channel C source-of-truth: если backend прислал запись для family,
--- она перекрывает fallback автоматически (profiles[family] truthy → не
--- идём к `or`-ветке).
+-- + неограниченный простой при недоступном backend. Fallback закрывает
+-- оба сценария.
+--
+-- ВАЖНО (PR-62 re-review): fallback активен ТОЛЬКО до первого успешного
+-- Channel C pull (`profiles_landed()` ниже). После того как gen флипнулся
+-- хотя бы один раз (gen >= 1), Channel C — единственный source of truth:
+-- если backend намеренно убрал/изменил профиль (chrome ушёл с 15 → 16,
+-- или удалили целиком), edge ДОЛЖЕН follow'ить backend, не залипать на
+-- старом захардкоженном значении. Без этого условия always-on fallback
+-- маскировал бы реальные обновления каталога.
 local COLD_START_PROFILES = {
     chrome  = 15,
     firefox = 16,
@@ -235,8 +240,24 @@ local COLD_START_PROFILES = {
     edge    = 15,
 }
 
+-- profiles_landed — true если хотя бы один успешный Channel C pull
+-- доставил tls_fp_browser_profiles в shared_dict (refresh() сдвинул
+-- _cached_gen_profiles в число > 0). До этого момента fallback легитимен;
+-- после — backend авторитетен даже если прислал пустой каталог.
+--
+-- Если `_M._cached_gen_profiles` пуст (тесты вызывают is_*-helpers
+-- напрямую без refresh) — считаем как cold start (fallback on), чтобы
+-- сохранить детерминизм юнит-тестов независимо от ngx-инициализации.
+local function profiles_landed()
+    local g = _M._cached_gen_profiles
+    return type(g) == "number" and g > 0
+end
+
 function _M.is_suspicious_ciphers(ua_family, cc, profiles)
-    local expected = profiles[ua_family] or COLD_START_PROFILES[ua_family]
+    local expected = profiles[ua_family]
+    if not expected and not profiles_landed() then
+        expected = COLD_START_PROFILES[ua_family]
+    end
     if not expected then return false end
     if not cc then return false end
     return cc ~= expected
@@ -246,20 +267,19 @@ end
 -- tag — the L3 half of the signal. We treat "cipher_count matches some browser
 -- profile" as browser-shaped: it's a property of the TLS stack (the fp), not
 -- of the spoofable UA, which is what "fp выглядит как браузер" means.
---
--- Same cold-start fallback semantics: после рестарта до первого Channel C
--- pull `profiles` пуст, итерируемся по COLD_START_PROFILES. После flip'а
--- gen — profiles становится source of truth, fallback не trigger'ится,
--- т.к. ANY-match семантика «один из ожидаемых» одинаково удовлетворяется.
 function _M.fp_looks_like_browser(cc, profiles)
     if not cc then return false end
     for _, expected in pairs(profiles) do
         if cc == expected then return true end
     end
-    -- Fallback: scan static defaults if dynamic table didn't match (covers
-    -- pre-first-pull + dynamic table empty cases).
-    for _, expected in pairs(COLD_START_PROFILES) do
-        if cc == expected then return true end
+    -- Fallback ТОЛЬКО на cold start (до первого Channel C pull). После
+    -- успешного pull dynamic-table — окончательный источник; пустой dynamic
+    -- значит «backend намеренно не профилирует ни одного браузера», ни
+    -- одного истинного match быть не должно.
+    if not profiles_landed() then
+        for _, expected in pairs(COLD_START_PROFILES) do
+            if cc == expected then return true end
+        end
     end
     return false
 end

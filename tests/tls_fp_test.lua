@@ -165,6 +165,40 @@ check(tls_fp.has_tag({ "hygiene:header_anomaly" }, "reputation:asn_dc"),
 check(tls_fp.has_tag(nil, "reputation:asn_dc"), false, "has_tag nil tags → false")
 
 -- ===========================================================================
+-- Cold-start fallback semantics (PR-62 re-review)
+-- ===========================================================================
+-- Cold start (no Channel C pull landed yet, _cached_gen_profiles == nil):
+-- fallback active → unknown family lookups fall to COLD_START_PROFILES.
+tls_fp._cached_gen_profiles = nil
+local empty = {}
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty), true,
+    "cold start: chrome UA + cipher=11 vs fallback chrome=15 → suspicious")
+check(tls_fp.is_suspicious_ciphers("chrome", 15, empty), false,
+    "cold start: chrome UA + cipher=15 matches fallback → ok")
+check(tls_fp.fp_looks_like_browser(15, empty), true,
+    "cold start: cipher=15 matches fallback chrome/edge → browser-shaped")
+check(tls_fp.fp_looks_like_browser(99, empty), false,
+    "cold start: cipher=99 off every fallback → not browser")
+
+-- After first successful pull (gen >= 1): Channel C is authoritative.
+-- Fallback MUST NOT mask backend decisions (e.g. backend dropped chrome,
+-- moved cipher_cnt to 16, etc.). Empty dynamic table = «no profiles known»,
+-- the rule simply doesn't fire — fallback не подменяет это решение.
+tls_fp._cached_gen_profiles = 1
+check(tls_fp.is_suspicious_ciphers("chrome", 11, empty), false,
+    "post-pull: backend dropped chrome → no profile → no verdict (no fallback override)")
+check(tls_fp.fp_looks_like_browser(15, empty), false,
+    "post-pull: empty profiles, cipher=15 NOT browser-shaped (fallback off)")
+-- А если backend подвинул chrome на 16 — старый 15 больше не считается chrome:
+local moved = { chrome = 16 }
+check(tls_fp.is_suspicious_ciphers("chrome", 15, moved), true,
+    "post-pull: backend moved chrome to 16, observed cipher=15 → suspicious vs new value")
+check(tls_fp.is_suspicious_ciphers("chrome", 16, moved), false,
+    "post-pull: chrome matches updated profile → ok")
+-- Reset для последующих тестов (если будут добавлены ниже).
+tls_fp._cached_gen_profiles = nil
+
+-- ===========================================================================
 -- Reporting
 -- ===========================================================================
 
