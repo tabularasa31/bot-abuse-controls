@@ -125,7 +125,13 @@ services:
       # audit #1). Operator copies dashboard-cidr.conf.example, fills with
       # the dashboard-backend egress CIDR. If missing, `nginx -t` fails →
       # explicit signal vs. silently-public policy API.
-      - ./auth/dashboard-cidr.conf:/etc/nginx/conf.d/dashboard-cidr.conf:ro
+      #
+      # Mounted outside /etc/nginx/conf.d/ for the same reason as
+      # auth-channelc.conf above: contains `deny all;`, which is valid on
+      # http-level but would silently block ALL traffic except the allowed
+      # CIDRs across every location. Must load only inside its
+      # `location /antibot/v1/` (lb.conf:55).
+      - ./auth/dashboard-cidr.conf:/etc/nginx/dashboard-cidr.conf:ro
     restart: unless-stopped
 
 volumes:
