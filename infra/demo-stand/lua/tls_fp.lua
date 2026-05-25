@@ -280,25 +280,31 @@ function _M.build(config)
     return _M, 0, 0, 0, 0, stg_bl_n
 end
 
--- refresh — читает текущий gen из meta:get(gen_key) и, если он
--- отличается от закешированного для этого worker'а, пересобирает Lua-
--- таблицы _M.catalog / _M.catalog_staging (и аналогично profiles) из
--- shared_dict. Дешево в steady state (один meta:get + сравнение чисел);
--- rebuild — только когда Channel C доставил новый snapshot (~раз в 30с).
--- Вызывается в начале run(), чтобы каскад работал на актуальном
--- catalog'е без явного pub/sub между catalog_pull и tls_fp.
+-- refresh — читает текущий gen из meta:get(gen_key) и, если он отличается
+-- от закешированного для этого worker'а, пересобирает Lua-таблицы
+-- _M.catalog / _M.catalog_staging (и аналогично profiles) из shared_dict.
+-- Дешево в steady state: один meta:get на катаолог + сравнение чисел.
+-- Rebuild — только когда Channel C доставил новый snapshot (≈ раз в 30с).
+-- Вызывается в начале run(), чтобы каскад работал на актуальном catalog'е
+-- без явного pub/sub между catalog_pull и tls_fp.
 --
 -- Вариант с per-request dict:get_keys(0) был отвергнут: для tls_fp_catalog
 -- размер маленький (десятки), но dict:get_keys лочит shared_dict на время
 -- скана, что добавляет latency-вариативности per-request. Per-gen rebuild
 -- амортизирует это до одного lock'а на pull.
-local function rebuild_from_dict(dict_name, gen_key, builder)
-    local meta = ngx.shared.meta
+--
+-- Performance trade-off (PR-62 gemini high): `dict:get_keys(0)` лочит весь
+-- shared_dict на время скана. Для tls_fp_catalog (<100 записей) и
+-- tls_fp_browser_profiles (≈5 записей) лок измеряется микросекундами —
+-- допустимо. Если каталог вырастет за ~10K записей, нужно завести
+-- side-index «keys-of-gen-N» в `meta` shared_dict и итерировать по нему
+-- (тот же план оставлен открытым для fp_blocklist / verified_bot_ips,
+-- см. комментарий в catalog_pull.lua sweep).
+local function rebuild_from_dict(dict_name, cur_gen, builder)
     local dict = ngx.shared[dict_name]
-    if not meta or not dict then return {}, {}, nil end
-    local cur_gen = meta:get(gen_key) or 0
-    local suffix  = ":" .. cur_gen
-    local wire    = {}
+    if not dict then return {}, {} end
+    local suffix = ":" .. cur_gen
+    local wire   = {}
     for _, k in ipairs(dict:get_keys(0)) do
         if k:sub(-#suffix) == suffix then
             local base = k:sub(1, -#suffix - 1)
@@ -306,26 +312,27 @@ local function rebuild_from_dict(dict_name, gen_key, builder)
             if val then wire[base] = val end
         end
     end
-    local active, staging = builder(wire)
-    return active, staging, cur_gen
+    return builder(wire)
 end
 
 function _M.refresh()
     if not ngx or not ngx.shared then return end
+    local meta = ngx.shared.meta
+    if not meta then return end
 
-    local cat_gen = (ngx.shared.meta and ngx.shared.meta:get("tls_fp_catalog_gen")) or 0
+    local cat_gen = meta:get("tls_fp_catalog_gen") or 0
     if cat_gen ~= _M._cached_gen_catalog then
         local active, staging = rebuild_from_dict(
-            "tls_fp_catalog", "tls_fp_catalog_gen", _M.build_catalog)
+            "tls_fp_catalog", cat_gen, _M.build_catalog)
         _M.catalog          = active
         _M.catalog_staging  = staging
         _M._cached_gen_catalog = cat_gen
     end
 
-    local prof_gen = (ngx.shared.meta and ngx.shared.meta:get("tls_fp_browser_profiles_gen")) or 0
+    local prof_gen = meta:get("tls_fp_browser_profiles_gen") or 0
     if prof_gen ~= _M._cached_gen_profiles then
         local active, staging = rebuild_from_dict(
-            "tls_fp_browser_profiles", "tls_fp_browser_profiles_gen", _M.build_profiles)
+            "tls_fp_browser_profiles", prof_gen, _M.build_profiles)
         _M.profiles          = active
         _M.profiles_staging  = staging
         _M._cached_gen_profiles = prof_gen
