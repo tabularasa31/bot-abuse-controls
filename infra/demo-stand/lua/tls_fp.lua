@@ -395,20 +395,29 @@ local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging
     local prefix = "staging:" .. catalog_name .. ":"
 
     -- Add zero counter для новых entries. Под shm pressure safe_add может
-    -- вернуть (nil, "no memory") для каждого entry — агрегируем счётчик
-    -- ошибок в одну WARN-строку на refresh-цикл, чтобы 200 staging hashes
-    -- не превращались в 200 строк error.log (PR-62 round-7 fix).
+    -- вернуть (nil, "no memory") для каждого entry. Hybrid log policy
+    -- (PR-62 round-8): первые VERBOSE_LIMIT failures логируем с pattern_id
+    -- (важно для дебага non-OOM ошибок типа «key too long», unique
+    -- collision); остальные агрегируем в один WARN. Сохраняем читаемость
+    -- лога под high-volume failures и attribution под low-volume.
+    local VERBOSE_LIMIT = 3
     local fail_count, last_err = 0, nil
     for pattern_id in pairs(new_staging) do
         local ok, err = m:safe_add(prefix .. pattern_id, 0)
         if not ok and err ~= "exists" then
             fail_count = fail_count + 1
             last_err = err
+            if fail_count <= VERBOSE_LIMIT then
+                ngx.log(ngx.WARN, "tls_fp: ", catalog_name,
+                    " staging-counter add failed (pattern=", pattern_id,
+                    "): ", tostring(err))
+            end
         end
     end
-    if fail_count > 0 then
-        ngx.log(ngx.WARN, "tls_fp: ", catalog_name, " staging-counter priming: ",
-            fail_count, " failures (last err: ", tostring(last_err), ")")
+    if fail_count > VERBOSE_LIMIT then
+        ngx.log(ngx.WARN, "tls_fp: ", catalog_name,
+            " staging-counter priming: ", fail_count - VERBOSE_LIMIT,
+            " additional failures elided (last err: ", tostring(last_err), ")")
     end
 
     -- Delete counter для entries, которых больше нет в new (promoted-to-active
@@ -438,20 +447,28 @@ function _M.refresh()
     if cat_gen ~= _M._cached_gen_catalog then
         local active, staging = rebuild_from_dict(
             "tls_fp_catalog", cat_gen, _M.build_catalog)
-        reconcile_staging_metrics("tls_fp_catalog", _M.catalog_staging, staging)
+        -- PR-62 round-8: swap до reconcile, чтобы log_event.incr из
+        -- параллельного запроса не race'нул с reconcile.delete-if-zero
+        -- (после swap run() уже не видит promoted/removed pattern в
+        -- staging-таблице → не вызывает incr → delete безопасен).
+        -- `prev_staging` всё ещё доступен через локальную ссылку на
+        -- ранее присвоенную table (Lua table-by-reference).
+        local prev_staging = _M.catalog_staging
         _M.catalog          = active
         _M.catalog_staging  = staging
         _M._cached_gen_catalog = cat_gen
+        reconcile_staging_metrics("tls_fp_catalog", prev_staging, staging)
     end
 
     local prof_gen = meta:get("tls_fp_browser_profiles_gen") or 0
     if prof_gen ~= _M._cached_gen_profiles then
         local active, staging = rebuild_from_dict(
             "tls_fp_browser_profiles", prof_gen, _M.build_profiles)
-        reconcile_staging_metrics("tls_fp_browser_profiles", _M.profiles_staging, staging)
+        local prev_staging = _M.profiles_staging
         _M.profiles          = active
         _M.profiles_staging  = staging
         _M._cached_gen_profiles = prof_gen
+        reconcile_staging_metrics("tls_fp_browser_profiles", prev_staging, staging)
     end
 end
 

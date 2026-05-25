@@ -59,7 +59,7 @@ _M.catalogs = {
         endpoint    = "/catalog/tls_fp_blocklist",
         dict_name   = "tls_fp_blocklist",
         gen_key     = fp_state.META_GEN_KEY,   -- "tls_fp_blocklist_gen"
-        etag_key    = "tls_fp_blocklist_etag",
+        etag_key    = fp_state.META_ETAG_KEY,
         version_key = "tls_fp_blocklist_version",
         -- Возвращает (ok, count). `ok=false` если хоть один dict:set провалился
         -- (типично "no memory" при фрагментации shared_dict, либо ключ длиннее
