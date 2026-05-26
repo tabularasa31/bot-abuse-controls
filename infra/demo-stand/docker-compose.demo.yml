@@ -131,14 +131,22 @@ services:
       # once you mount a backend-CA bundle as a trust root (prod path).
       LOKI_PUSH_INSECURE_TLS: ${LOKI_PUSH_INSECURE_TLS:-true}
     healthcheck:
-      # /ready on promtail's HTTP server returns 200 only after the
-      # config has parsed and the scrape targets are wired up. If the
-      # preflight above exits (empty URL), or promtail crashes on a
-      # bad cert / unreachable Loki / malformed config, the port never
-      # opens and this transitions to `unhealthy` after `start_period
-      # + retries × interval` — surfaces as a clear status in
-      # `docker compose ps` instead of a hidden tight restart loop.
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:9080/ready || exit 1"]
+      # The grafana/promtail image ships without wget/curl/nc, so the
+      # previous wget-based probe always returned 127 and flagged the
+      # container as unhealthy even when it was working fine. Bash IS
+      # present and supports the /dev/tcp/<host>/<port> pseudo-device,
+      # which gives a portable TCP-handshake probe with zero external
+      # tooling. A successful connect = promtail finished parsing its
+      # config and the HTTP server is listening (the preflight exit and
+      # config-parse failures both happen BEFORE the port binds), which
+      # is the signal we care about.
+      #
+      # `2>/dev/null` swallows bash's "connect: Connection refused"
+      # line during start-up / restart-loop probes — without it every
+      # failed probe writes one line to docker logs. FD 3 stays open
+      # only until bash exits at the end of the -c, so no explicit
+      # close is needed (kernel reaps it on process exit).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9080 2>/dev/null"]
       interval: 10s
       timeout: 3s
       retries: 3
