@@ -50,6 +50,18 @@ test-docker:
 test-integration:
 	$(HARNESS_DIR)/scripts/setup.sh
 	docker compose -f $(HARNESS_COMPOSE) up -d --wait --quiet-pull
+	@# Backend has no docker healthcheck (distroless image), so --wait
+	@# doesn't gate cases on a ready /health. Poll host-side for up to
+	@# 60s; the cascade tolerates a not-ready backend (fail-stale) but
+	@# case 01 needs a working PATCH endpoint immediately.
+	@printf "Waiting for backend /health..."
+	@for i in $$(seq 1 60); do \
+	  if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then \
+	    echo " ready in $${i}s"; break; \
+	  fi; \
+	  printf "."; sleep 1; \
+	  if [ "$$i" -eq 60 ]; then echo " TIMEOUT"; exit 1; fi; \
+	done
 	@trap 'docker compose -f $(HARNESS_COMPOSE) down -v --remove-orphans >/dev/null' EXIT; \
 	  tests/integration/run.sh
 

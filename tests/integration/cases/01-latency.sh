@@ -11,7 +11,7 @@
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=../lib.sh
+# shellcheck source=tests/integration/lib.sh
 . "$HERE/../lib.sh"
 
 # 1. PATCH a unique mode value so we know we're seeing the new state,

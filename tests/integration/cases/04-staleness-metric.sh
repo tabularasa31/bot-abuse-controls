@@ -12,7 +12,7 @@
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=../lib.sh
+# shellcheck source=tests/integration/lib.sh
 . "$HERE/../lib.sh"
 
 # Invoked by EXIT trap below; shellcheck can't see that call.

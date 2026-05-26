@@ -20,7 +20,7 @@
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=../lib.sh
+# shellcheck source=tests/integration/lib.sh
 . "$HERE/../lib.sh"
 
 LOAD_DURATION=8       # seconds of concurrent reads
@@ -70,7 +70,7 @@ reader() {
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Spawning patcher (${PATCH_INTERVAL_MS}ms flips) + ${READS_PARALLEL} readers (${LOAD_DURATION}s)..."
+echo "Spawning patcher (${PATCH_SLEEP}s flips) + ${READS_PARALLEL} readers (${LOAD_DURATION}s)..."
 
 patcher &
 PATCHER_PID=$!

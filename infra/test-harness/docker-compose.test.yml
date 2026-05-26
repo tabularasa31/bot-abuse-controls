@@ -63,12 +63,15 @@ services:
     ports:
       # Loopback only — test runner on host curls policy PATCH via this.
       - "127.0.0.1:18080:8080"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
-      interval: 1s
-      timeout: 2s
-      retries: 60
-      start_period: 5s
+    # No container-level healthcheck: the antibot-backend image is
+    # distroless/static-debian12 (Dockerfile uses gcr.io/distroless/static),
+    # which has no shell and no wget/curl, so CMD-SHELL probes can't
+    # touch /health. Production demo-backend (infra/demo-backend) takes
+    # the same shape — backend containers carry no healthcheck and the
+    # LB / edge tolerate not-ready-yet via fail-stale (catalog_pull
+    # retries on the next tick). Makefile test-integration target adds
+    # a host-side curl poll for /health after `compose up --wait` so
+    # tests don't race the backend coming up.
 
   edge:
     build:
@@ -89,7 +92,13 @@ services:
       BAC_DEMO_GEO_HEADER: "off"
     depends_on:
       backend:
-        condition: service_healthy
+        # Backend has no container healthcheck (distroless image has
+        # no shell — see backend service notes). service_started is
+        # the strongest condition we can rely on; the edge tolerates
+        # a backend that's listening-but-not-ready via fail-stale,
+        # and the runner verifies backend /health on host port 18080
+        # before running cases.
+        condition: service_started
     volumes:
       - ../demo-stand/lua:/etc/nginx/lua:ro
       - ../demo-stand/config:/etc/nginx/config:ro
