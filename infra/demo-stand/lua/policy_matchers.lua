@@ -58,12 +58,17 @@ local EMPTY = {
 }
 
 -- to_set — array of strings/numbers → { [v] = true }. nil/empty array
--- returns nil so callers can do `if set then` cheaply.
+-- (or all-empty/wrong-type entries) returns nil so callers can do
+-- `if set then` cheaply. Defensive type-filter: cjson.safe decodes JSON
+-- `null` as a `cjson.null` userdata and bad backend payloads could mix
+-- arbitrary types into the array; tostring on userdata produces noise
+-- like `"userdata: 0x...\"` which would shadow a real ASN/country key.
 local function to_set(arr)
     if not arr or #arr == 0 then return nil end
     local set = {}
     for _, v in ipairs(arr) do
-        if v ~= nil and v ~= "" then
+        local t = type(v)
+        if (t == "string" or t == "number") and v ~= "" then
             set[tostring(v)] = true
         end
     end
@@ -73,10 +78,18 @@ end
 -- compile_ip — wraps ipmatcher.new with fail-stale: a malformed CIDR
 -- (shouldn't happen after backend ValidateCIDR, but defence in depth)
 -- logs ERR and yields nil so the rule simply doesn't fire — pre-PR
--- behaviour preserved for that one host.
+-- behaviour preserved for that one host. Pre-filters non-string entries
+-- (e.g., a stray cjson.null) so ipmatcher.new doesn't see them.
 local function compile_ip(cidrs, host, label)
     if not cidrs or #cidrs == 0 then return nil end
-    local m, err = ipmatcher.new(cidrs)
+    local clean = {}
+    for _, c in ipairs(cidrs) do
+        if type(c) == "string" and c ~= "" then
+            clean[#clean + 1] = c
+        end
+    end
+    if #clean == 0 then return nil end
+    local m, err = ipmatcher.new(clean)
     if not m then
         ngx.log(ngx.ERR, "policy_matchers: ipmatcher.new failed for ",
             label, " of host=", host, ": ", tostring(err))
@@ -91,11 +104,16 @@ end
 -- skip the ngx.re.find entirely. No status filtering: per-host lists
 -- come from the dashboard, every entry is "active" by definition (the
 -- staging/active toggle is a catalog property, not a policy one).
+-- Type-filtered so `table.concat` can't choke on a cjson.null userdata
+-- or a stray number (a 500 from a malformed dashboard payload would be
+-- a much worse outcome than a silently-skipped entry).
 local function compile_ua(patterns)
     if not patterns or #patterns == 0 then return nil end
     local nonempty = {}
     for _, p in ipairs(patterns) do
-        if p and p ~= "" then nonempty[#nonempty + 1] = p end
+        if type(p) == "string" and p ~= "" then
+            nonempty[#nonempty + 1] = p
+        end
     end
     if #nonempty == 0 then return nil end
     return "(" .. table.concat(nonempty, ")|(") .. ")"
@@ -123,8 +141,26 @@ end
 -- get(host) → matcher bundle. Always non-nil; an unregistered host or
 -- a host with all-empty lists returns the shared EMPTY sentinel so
 -- callers can field-test (`if m.blocklist then ...`) without nil guards.
+--
+-- Two-tier cache:
+--   1. ngx.ctx.policy_matchers_cache[host] — per-request memoization.
+--      hygiene and reputation both call get(host) for the same Host
+--      header on a single request; without this every stage would
+--      repeat the canonical_host + meta:get + lrucache:get path.
+--   2. Worker-level lrucache keyed by (canonical_host, gen) — survives
+--      across requests within a worker. gen flips on every Channel C
+--      pull and invalidates the old key automatically.
 function _M.get(host)
     if not host or host == "" then return EMPTY end
+    local ctx = ngx.ctx
+    local req_cache
+    if ctx then
+        req_cache = ctx.policy_matchers_cache
+        if req_cache then
+            local hit = req_cache[host]
+            if hit then return hit end
+        end
+    end
     local meta = ngx.shared.meta
     if not meta then return EMPTY end
     local gen = meta:get("antibot_policy_gen")
@@ -132,14 +168,23 @@ function _M.get(host)
     local canonical = policy.canonical_host(host)
     if not canonical then return EMPTY end
     local key = canonical .. ":" .. gen
+    local m
     if cache_inst then
-        local hit = cache_inst:get(key)
-        if hit then return hit end
+        m = cache_inst:get(key)
     end
-    local p = policy.get(host)
-    local m = build(canonical, p)
-    if cache_inst then
-        cache_inst:set(key, m, CACHE_TTL)
+    if not m then
+        local p = policy.get(host)
+        m = build(canonical, p)
+        if cache_inst then
+            cache_inst:set(key, m, CACHE_TTL)
+        end
+    end
+    if ctx then
+        if not req_cache then
+            req_cache = {}
+            ctx.policy_matchers_cache = req_cache
+        end
+        req_cache[host] = m
     end
     return m
 end

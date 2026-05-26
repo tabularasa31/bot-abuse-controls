@@ -80,6 +80,22 @@ do
     check(s, nil, "to_set all-blank -> nil")
 end
 
+-- Non-string / non-number entries are silently dropped (cjson.null
+-- userdata, nested tables, booleans). Without the type guard, tostring
+-- would produce "userdata: 0x..." / "table: 0x..." keys that could
+-- shadow real ones.
+do
+    local s = pm._to_set({ "13335", {}, true, "16509" })
+    check(s and s["13335"]   or false, true, "to_set ignores table entry")
+    check(s and s["16509"]   or false, true, "to_set ignores boolean entry")
+    -- tostring(boolean/table) NOT in the set
+    local has_garbage = false
+    for k in pairs(s or {}) do
+        if k:match("table:") or k == "true" then has_garbage = true end
+    end
+    check(has_garbage, false, "to_set type-filter: no userdata/table/bool strings")
+end
+
 -- ===========================================================================
 -- compile_ua — array of regex strings → combined alternation
 -- ===========================================================================
@@ -96,6 +112,15 @@ check(
 -- regex to `()|(real)` which matches the empty string and 403s every UA.
 check(pm._compile_ua({ "", "curl", "" }), "(curl)", "compile_ua skips blank entries")
 check(pm._compile_ua({ "", "" }),         nil,      "compile_ua all-blank -> nil")
+
+-- type-filter: tables / booleans / numbers in the patterns array would
+-- otherwise be picked up by table.concat and throw a runtime "invalid
+-- value at index N in table for 'concat'" → 500 to the client. Filter
+-- to non-empty strings only.
+check(pm._compile_ua({ "curl", {}, true, 42 }), "(curl)",
+    "compile_ua type-filter: tables/booleans/numbers dropped")
+check(pm._compile_ua({ {}, true, 42 }), nil,
+    "compile_ua type-filter: all-non-string -> nil")
 
 -- ===========================================================================
 -- EMPTY sentinel shape — readers must be able to field-test without nil deref.

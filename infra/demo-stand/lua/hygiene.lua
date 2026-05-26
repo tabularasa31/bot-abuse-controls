@@ -110,9 +110,17 @@ function _M.build(config)
 
     _M.method_set = _M.method_lookup(hygiene_cfg.method_whitelist)
 
-    -- ua_blacklist rule can be disabled via defaults.conf.
+    -- ua_blacklist rule can be disabled via defaults.conf. The toggle
+    -- is stored separately from active_re because the per-host check
+    -- (policy[host].ua_blacklist via policy_matchers) must also honour
+    -- the kill-switch: an operator disabling the rule for incident
+    -- rollback expects no UA-based blocking ANYWHERE, system or
+    -- per-host (codex P1 on PR #71). active_re=nil collapses the
+    -- "no system patterns" and "rule disabled" cases — we can't
+    -- distinguish them from run() without the explicit flag.
     local ua_rule = (defaults.blocking or {}).ua_blacklist or {}
-    if ua_rule.enabled == false then
+    _M.ua_blacklist_enabled = ua_rule.enabled ~= false
+    if not _M.ua_blacklist_enabled then
         _M.active_re = nil
     else
         _M.active_re = _M.build_combined(config.ua_blacklist)
@@ -176,15 +184,20 @@ function _M.run()
     -- once per (host, gen) in policy_matchers via the same combined-
     -- alternation shape build_combined produces. nil when the host has
     -- no custom patterns (pool default) — pre-PR behaviour preserved.
-    local pm = policy_matchers.get(ngx.var.host)
-    if pm.ua_blacklist_re then
-        local from, _, err = ngx.re.find(ua, pm.ua_blacklist_re, "jo")
-        if err then
-            ngx.log(ngx.ERR, "policy.ua_blacklist regex error, fail-open: ", err)
-        elseif from then
-            bac_log.set_verdict("hygiene", "block", "policy.ua_blacklist")
-            policy.enforce(403)
-            return true
+    -- Gated on the same _M.ua_blacklist_enabled flag as the system
+    -- list: an operator disabling the ua_blacklist rule expects no UA
+    -- blocking, including per-host.
+    if _M.ua_blacklist_enabled then
+        local pm = policy_matchers.get(ngx.var.host)
+        if pm.ua_blacklist_re then
+            local from, _, err = ngx.re.find(ua, pm.ua_blacklist_re, "jo")
+            if err then
+                ngx.log(ngx.ERR, "policy.ua_blacklist regex error, fail-open: ", err)
+            elseif from then
+                bac_log.set_verdict("hygiene", "block", "policy.ua_blacklist")
+                policy.enforce(403)
+                return true
+            end
         end
     end
 

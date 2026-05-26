@@ -175,11 +175,21 @@ function _M.build(config)
         return m, #values
     end
 
+    -- Toggle flags are stored separately from the matchers because the
+    -- per-host equivalents (policy[host].ip_whitelist / ip_blocklist
+    -- via policy_matchers) must also honour the kill-switch — an
+    -- operator disabling ip_blocklist for incident rollback expects no
+    -- IP-based blocking ANYWHERE, system or per-host (codex P1 on PR
+    -- #71). matcher-nil collapses "disabled" and "no entries"; we can't
+    -- distinguish them in run() without the explicit flag.
+    _M.ip_whitelist_enabled = rule_enabled("allow", "ip_whitelist")
+    _M.ip_blocklist_enabled = rule_enabled("blocking", "ip_blocklist")
+
     local wl_n, bl_n
     _M.whitelist, wl_n = matcher(config.whitelist_ip, "whitelist_ip.conf",
-                                 rule_enabled("allow", "ip_whitelist"))
+                                 _M.ip_whitelist_enabled)
     _M.blocklist, bl_n = matcher(config.blocklist_ip, "blocklist_ip.conf",
-                                 rule_enabled("blocking", "ip_blocklist"))
+                                 _M.ip_blocklist_enabled)
 
     -- asn_datacenters.conf -> membership set for the reputation:asn_dc tag.
     -- Reuses active_values (drops blanks/staging). The tag has no enable flag
@@ -250,7 +260,7 @@ function _M.run()
         bac_log.set_verdict("reputation", "allow", "ip_whitelist")
         return true
     end
-    if pm.whitelist and pm.whitelist:match(ip) then
+    if _M.ip_whitelist_enabled and pm.whitelist and pm.whitelist:match(ip) then
         bac_log.set_verdict("reputation", "allow", "policy.ip_whitelist")
         return true
     end
@@ -285,7 +295,7 @@ function _M.run()
         policy.enforce(403)
         return true
     end
-    if pm.blocklist and pm.blocklist:match(ip) then
+    if _M.ip_blocklist_enabled and pm.blocklist and pm.blocklist:match(ip) then
         bac_log.set_verdict("reputation", "block", "policy.ip_blocklist")
         policy.enforce(403)
         return true
