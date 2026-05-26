@@ -21,6 +21,16 @@ package.loaded["policy"] = {
     canonical_host = function(h) return h end,
 }
 
+-- policy_matchers pulls in resty.lrucache + resty.ipmatcher + cjson via
+-- policy.lua. Same stub strategy — pure helpers don't exercise the
+-- request-time matcher path.
+package.loaded["policy_matchers"] = {
+    get   = function() return { whitelist = nil, blocklist = nil, asn_block = nil,
+                                geo_whitelist = nil, ua_blacklist_re = nil } end,
+    EMPTY = { whitelist = nil, blocklist = nil, asn_block = nil,
+              geo_whitelist = nil, ua_blacklist_re = nil },
+}
+
 local hygiene = require "hygiene"
 
 local failed, passed = 0, 0
