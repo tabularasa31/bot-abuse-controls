@@ -233,6 +233,35 @@ error.log, L2.1 cookie verify и L5 cookie issue откажутся работа
 (<32 байт) файле — ERR + тот же fail-closed путь. Сам секрет в логах не
 светим, только fingerprint.
 
+## Challenge page asset + cascade version pin (Phase 4, C2)
+
+Phase 4 «Ветка A» (vision §5.2) выдает браузеру HTML+JS-страницу, JS считает
+`SHA-256(nonce + JS_SECRET)` и POST-ит токен на verify-эндпоинт; edge
+подставляет в шаблон одноразовый nonce (TTL 60с, подписан тем же HMAC
+secret'ом, что и clearance cookie, см. предыдущую секцию). В C2 на стенд
+заехала **только сама эмиссия** (шаблон + nonce + version-pin); привязка к
+`verdict=challenge` и серверный verify — за C5.
+
+**Файлы.**
+
+- `infra/demo-stand/challenge/page.html` — единственный шаблон. Плейсхолдеры
+  `{{NONCE}}`, `{{EXPIRY}}`, `{{CASCADE_VERSION}}` подставляются на render.
+  Bind-mount в `/etc/nginx/challenge:ro` (Channel A на демо = file mount).
+- `infra/demo-stand/CASCADE_VERSION` — semver-строка (текущая `0.1.0`).
+  Bind-mount в `/etc/nginx/CASCADE_VERSION:ro`. **Bump обязателен** в любом PR,
+  который меняет nonce-формат, `JS_SECRET`, поля fingerprint, путь verify или
+  ожидаемый контракт ответа. Контракт версия↔шаблон описан в
+  [challenge/README.md](challenge/README.md).
+- `infra/demo-stand/lua/challenge.lua` — `preload()` сверяет
+  `<meta name="cascade-version">` шаблона с содержимым `CASCADE_VERSION` на
+  init_by_lua (mismatch валит nginx старт), `render(host)` / `issue_nonce(host)`
+  для C5.
+
+**Verify it took.** После старта `/__version` показывает строку
+`cascade_version: 0.1.0`. Подмена `CASCADE_VERSION` (`echo 0.0.0 > …`) +
+`docker compose restart nginx-demo` → контейнер падает с понятной ошибкой
+в `docker logs` (`challenge: cascade/template version mismatch …`).
+
 ## Migrating a snapshot deploy to a git checkout
 
 If `~/abuse-controls` on the VM is a file copy (no `.git`), turn it into a
@@ -392,7 +421,12 @@ infra/demo-stand/
 │   ├── probe.lua                   /__fp educational endpoint
 │   ├── bac_log.lua                 Phase 1 structured-log contract (init/set_verdict/add_tag/emit)
 │   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
-│   └── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
+│   ├── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
+│   └── challenge.lua               [C2] Phase 4 challenge page renderer + nonce issuer (version-pinned)
+├── CASCADE_VERSION                 [C2] semver, сверяется с meta-тегом шаблона на init
+├── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
+│   ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}} / {{CASCADE_VERSION}}
+│   └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
 └── sites/default-site/
     └── index.html                  demo landing page (served via content_by_lua)
 ```

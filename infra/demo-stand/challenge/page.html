@@ -1,0 +1,134 @@
+<!doctype html>
+<!-- cascade-version: {{CASCADE_VERSION}} -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="cascade-version" content="{{CASCADE_VERSION}}">
+<meta name="robots" content="noindex,nofollow">
+<title>Checking your connection…</title>
+<style>
+  html,body{height:100%;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#0e1116;color:#e6edf3}
+  main{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center}
+  h1{font-size:20px;font-weight:600;margin:0 0 12px}
+  p{font-size:14px;margin:0 0 24px;color:#9aa4b2;max-width:480px;line-height:1.5}
+  .spinner{width:36px;height:36px;border:3px solid #2a313b;border-top-color:#58a6ff;border-radius:50%;animation:spin 1s linear infinite;margin-bottom:24px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  label{display:flex;align-items:center;gap:8px;font-size:13px;color:#c9d1d9;margin-top:16px;cursor:pointer}
+  #status{margin-top:16px;font-size:12px;color:#6e7681;min-height:1em}
+  noscript{color:#f85149;font-size:13px;margin-top:16px;display:block;max-width:480px}
+</style>
+</head>
+<body>
+<main>
+  <div class="spinner" aria-hidden="true"></div>
+  <h1>Checking your connection…</h1>
+  <p>This only takes a moment. Your browser is solving an automatic challenge so we can verify the request is coming from a real user.</p>
+  <label><input type="checkbox" id="not-a-robot"> I am not a robot</label>
+  <div id="status" role="status" aria-live="polite"></div>
+  <noscript>This page requires JavaScript to verify your browser. Please enable JavaScript and reload.</noscript>
+</main>
+
+<!-- Edge-substituted challenge data. Single source consumed by the JS below;
+     do not duplicate these values elsewhere in the page. -->
+<div id="challenge-data"
+     data-nonce="{{NONCE}}"
+     data-expiry="{{EXPIRY}}"
+     data-cascade-version="{{CASCADE_VERSION}}"
+     data-verify-path="/__challenge/verify"
+     hidden></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // SHA-256(nonce + JS_SECRET). JS_SECRET — фиксированный «pepper», вшитый в
+  // шаблон. Real cryptographic security приходит от HMAC-подписи nonce на
+  // server-side (challenge_secret.lua); этот константный пеппер нужен только
+  // как «proof of JS execution»: бот без JS-движка не вычислит SHA-256 и
+  // не отправит токен. Любая ротация семантики (новый pepper / алгоритм /
+  // payload) должна сопровождаться bump'ом CASCADE_VERSION, чтобы старый
+  // шаблон не оказался в одной паре с новым каскадом.
+  var JS_SECRET = "tf_challenge_v1_proof_of_execution";
+
+  var data = document.getElementById("challenge-data").dataset;
+  var status = document.getElementById("status");
+
+  function setStatus(text) { if (status) status.textContent = text; }
+
+  function toHex(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var out = new Array(bytes.length);
+    for (var i = 0; i < bytes.length; i++) {
+      out[i] = (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    }
+    return out.join("");
+  }
+
+  function fingerprint() {
+    var screen = window.screen || {};
+    var tz = "";
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
+    return {
+      ua: navigator.userAgent || "",
+      languages: (navigator.languages || [navigator.language || ""]).slice(0, 8),
+      screen: {
+        width: screen.width || 0,
+        height: screen.height || 0,
+        depth: screen.colorDepth || 0
+      },
+      timezone: tz,
+      hwc: navigator.hardwareConcurrency || 0,
+      platform: navigator.platform || ""
+    };
+  }
+
+  async function solve() {
+    setStatus("Verifying…");
+    if (!window.crypto || !window.crypto.subtle) {
+      setStatus("This browser does not support the required crypto API.");
+      return;
+    }
+    var nonce = data.nonce || "";
+    var enc = new TextEncoder();
+    var hash = await window.crypto.subtle.digest("SHA-256", enc.encode(nonce + JS_SECRET));
+    var token = toHex(hash);
+
+    var payload = {
+      nonce: nonce,
+      token: token,
+      cascade_version: data.cascadeVersion,
+      not_a_robot: !!document.getElementById("not-a-robot").checked,
+      fp: fingerprint()
+    };
+
+    try {
+      var resp = await fetch(data.verifyPath, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (resp.ok) {
+        setStatus("Verified. Reloading…");
+        window.location.reload();
+      } else if (resp.status === 404) {
+        // Expected on a C2-only stand: verify endpoint lands with C5.
+        setStatus("Challenge solved (verifier not deployed yet).");
+      } else {
+        setStatus("Verification failed (HTTP " + resp.status + "). Try reloading.");
+      }
+    } catch (err) {
+      setStatus("Network error while verifying. Try reloading.");
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", solve);
+  } else {
+    solve();
+  }
+})();
+</script>
+</body>
+</html>

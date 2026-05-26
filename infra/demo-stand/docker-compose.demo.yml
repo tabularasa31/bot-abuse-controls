@@ -97,6 +97,15 @@ services:
       - ./config:/etc/nginx/config:ro
       - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
+      # [C2] Phase 4 challenge page asset. Channel A on the demo = file
+      # mount (Puppet on prod). Read once in init_by_lua via challenge.lua;
+      # change = bump CASCADE_VERSION + edit page.html + `openresty -s
+      # reload`. See infra/demo-stand/challenge/README.md.
+      - ./challenge:/etc/nginx/challenge:ro
+      # Cascade version pin. challenge.lua сверяет это значение с
+      # <meta name="cascade-version"> в шаблоне на init_by_lua; mismatch
+      # валит старт — защита от рассинхрона шаблона и Lua-каскада.
+      - ./CASCADE_VERSION:/etc/nginx/CASCADE_VERSION:ro
       # GeoLite2 databases for the A6 geo/ASN lookup. License-gated, NOT
       # committed — populate with scripts/fetch-geoip.sh. If empty the stand
       # still starts (geoip.lua fail-open); geo is just undetermined.
