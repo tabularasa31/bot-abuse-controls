@@ -290,11 +290,29 @@ _M.catalogs = {
         version_key = "antibot_policy_version",
         apply = function(dict, entries, new_gen)
             local canonical_host = require("policy").canonical_host
+            -- Track which canonical keys we've already written this tick.
+            -- Backend ValidateSite is case-preserving (validate.go:19-20),
+            -- so two distinct policy rows whose hosts differ only by case
+            -- (`Foo.example.com` and `foo.example.com`) would collapse to
+            -- the same shared_dict key after canonical_host. Without this
+            -- guard the second write would silently overwrite the first
+            -- and Lua's unspecified pairs() order would decide which
+            -- policy applies — pure last-writer-wins on a non-determined
+            -- iterator. Log + skip the duplicate so the operator sees the
+            -- conflict in error.log and can collapse the rows at the
+            -- backend; keep the first-seen policy to stay deterministic
+            -- across pulls.
+            local seen = {}
             local n = 0
             for host, p in pairs(entries) do
                 local key_host = canonical_host(host)
                 if not key_host then
                     ngx.log(ngx.WARN, "antibot_policy: skipping empty host key")
+                elseif seen[key_host] then
+                    ngx.log(ngx.ERR, "antibot_policy: host case collision: '",
+                        host, "' and '", seen[key_host],
+                        "' both canonicalize to '", key_host,
+                        "' — keeping first, skipping this one")
                 else
                     local encoded, eerr = cjson.encode(p)
                     if not encoded then
@@ -308,6 +326,7 @@ _M.catalogs = {
                             " (host=", host, ", gen=", new_gen, ")")
                         return false, n
                     end
+                    seen[key_host] = host
                     n = n + 1
                 end
             end

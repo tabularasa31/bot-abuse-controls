@@ -23,7 +23,7 @@
 -- enforce, so the would-be verdict is recorded in either mode; only the
 -- physical exit is gated.
 --
--- Today the only caller is verdict.lua:101 (tls_fp_blocklist). Future
+-- Today the only caller is verdict.lua's tls_fp_blocklist branch. Future
 -- enforcement points (rate_limit 429, hygiene/reputation per-host block,
 -- challenge) hook into the same helper — see PROGRESS.md follow-up tickets.
 
@@ -77,9 +77,19 @@ local function canonical_host(host)
     return host
 end
 
+-- VALID_MODES / VALID_STRICTNESSES — mirror antibot-backend's
+-- ValidateMode / ValidateStrictness (validate.go:46-48). Drift here would
+-- mean the edge silently demotes a valid policy (e.g., backend adds a
+-- third mode the edge doesn't know about) instead of failing loud —
+-- intentional fail-stale, but the operator should see it in error.log.
+local VALID_MODES         = { shadow = true, active = true }
+local VALID_STRICTNESSES  = { standard = true, permissive = true }
+
 -- get(host) → Policy table. Always non-nil. Falls back to POOL_DEFAULT on
 -- any miss/error so callers can read `.mode` / `.strictness` directly
--- without nil-guards.
+-- without nil-guards. The fallback also covers schema drift (missing /
+-- invalid mode|strictness): pool default treats the host as shadow rather
+-- than guessing, and the ERR-log surfaces the bad payload to the operator.
 function _M.get(host)
     local key_host = canonical_host(host)
     if not key_host then return new_pool_default() end
@@ -93,6 +103,20 @@ function _M.get(host)
     local p, err = cjson.decode(raw)
     if not p or type(p) ~= "table" then
         ngx.log(ngx.ERR, "policy: decode failed for ", host, ": ", tostring(err))
+        return new_pool_default()
+    end
+    -- Enum guards: a malformed Policy that's missing `mode` or carries a
+    -- value outside the known set would otherwise silently degrade an
+    -- active client to shadow (`nil == "active"` is false). Fail to pool
+    -- default + ERR so the misconfiguration is visible.
+    if type(p.mode) ~= "string" or not VALID_MODES[p.mode] then
+        ngx.log(ngx.ERR, "policy: invalid mode for ", host, ": ",
+            tostring(p.mode), " — falling back to pool default")
+        return new_pool_default()
+    end
+    if type(p.strictness) ~= "string" or not VALID_STRICTNESSES[p.strictness] then
+        ngx.log(ngx.ERR, "policy: invalid strictness for ", host, ": ",
+            tostring(p.strictness), " — falling back to pool default")
         return new_pool_default()
     end
     return p
