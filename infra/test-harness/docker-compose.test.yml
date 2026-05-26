@@ -1,0 +1,109 @@
+# Integration test harness for the Channel C contract (B13 / D8).
+#
+# Minimal stack: postgres + antibot-backend + edge. Reuses the same image
+# builds as infra/demo-{backend,stand}/ so what tests run matches what
+# the demo VM runs. Differences vs demo composes:
+#   - no HA (single backend instance; the LB layer adds nothing to the
+#     contract being tested and doubles bootup time).
+#   - no LB / TLS termination on backend (edge talks plain HTTP to
+#     backend over the compose network).
+#   - postgres on tmpfs (no persistent volume; ephemeral CI cattle).
+#   - short reload + pull intervals so tests don't pay for the 30s
+#     production cadence on every assertion (≤30s SLA from
+#     vision.md §«Обновление каталогов» is still asserted by tests;
+#     CI just gets to verify it in 3-5s instead of 30s).
+#
+# Edge port 18443 → host. Backend port 18080 → host. Both on loopback
+# only so a CI runner with multiple parallel jobs doesn't collide.
+#
+# Run:
+#   make test-integration           # full lifecycle (up + run.sh + down)
+#   docker compose -f docker-compose.test.yml up -d --wait  # manual
+
+name: bac-test
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: antibot
+      POSTGRES_USER: antibot
+      POSTGRES_PASSWORD: testpw
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antibot -d antibot"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  backend:
+    build:
+      context: ../../antibot-backend
+    image: antibot-backend:test
+    environment:
+      INSTANCE_NAME: backend-test
+      HTTP_ADDR: ":8080"
+      POSTGRES_DSN: "postgres://antibot:testpw@postgres:5432/antibot?sslmode=disable"
+      CATALOGS_DIR: "/catalogs"
+      LOGS_SINK_SPOOL_DIR: "/tmp/log-spool"
+      # Short reload tick so backend picks up a /antibot/v1/policy PATCH
+      # in seconds, not 5s. Combined with edge's pull_interval below,
+      # makes the full "PATCH → edge applied" loop fit a 10s budget.
+      CATALOG_RELOAD_INTERVAL: "1s"
+      # Shared M2M secret for /antibot/v1/* (dashboard API). Hardcoded
+      # here because tests need it; never use this token outside CI.
+      DASHBOARD_API_TOKEN: "test-token-not-secret"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../catalogs:/catalogs:ro
+    ports:
+      # Loopback only — test runner on host curls policy PATCH via this.
+      - "127.0.0.1:18080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+  edge:
+    build:
+      context: ../demo-stand
+      dockerfile: Dockerfile
+    image: bac-demo-stand:test
+    environment:
+      EDGE_ID: stand-test
+      # Origin not exercised — tests target admin endpoints (/__policy,
+      # /__health, /metrics). Set to localhost so proxy_pass locations
+      # don't 503 if a test scenario accidentally hits one.
+      ORIGIN_URL: "http://127.0.0.1:80"
+      ANTIBOT_BACKEND_URL: "http://backend:8080"
+      ANTIBOT_BACKEND_SSL_VERIFY: "false"
+      # B11 / D8: override the 30s pull cadence so a PATCH → edge-visible
+      # round-trip fits a 5s assertion window. Production stays at 30s.
+      ANTIBOT_BACKEND_PULL_INTERVAL: "2"
+      BAC_DEMO_GEO_HEADER: "off"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ../demo-stand/lua:/etc/nginx/lua:ro
+      - ../demo-stand/config:/etc/nginx/config:ro
+      - ../demo-stand/sites:/etc/nginx/sites:ro
+      - ../demo-stand/geoip:/etc/nginx/geoip:ro
+      - ../demo-stand/nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./test-certs:/etc/nginx/certs:ro
+    ports:
+      - "127.0.0.1:18443:443"
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsk https://localhost/__health >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
