@@ -297,12 +297,17 @@ jobs:
         with:
           token: ${{ github.token }}
           persist-credentials: true
-      - name: Run integration harness
-        run: make test-integration
-      - name: Dump container logs on failure
-        if: failure()
+      - name: Bring up integration stack
+        run: make test-integration-up
+      - name: Run cases
+        run: make test-integration-run
+      - name: Dump container logs (on success or failure)
+        if: always()
         run: |
           docker compose -f infra/test-harness/docker-compose.test.yml \
             -p bac-test ps || true
           docker compose -f infra/test-harness/docker-compose.test.yml \
-            -p bac-test logs --no-color || true
+            -p bac-test logs --no-color --tail=300 || true
+      - name: Tear down integration stack
+        if: always()
+        run: make test-integration-down

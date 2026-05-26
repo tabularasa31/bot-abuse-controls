@@ -13,7 +13,7 @@ SH_FILES  := $(shell find scripts infra tests -name "*.sh" 2>/dev/null)
 
 # ---------- Top-level ----------
 
-.PHONY: help test test-host test-docker test-integration lint lint-lua lint-sh ci
+.PHONY: help test test-host test-docker test-integration test-integration-up test-integration-run test-integration-down lint lint-lua lint-sh ci
 
 HARNESS_DIR := infra/test-harness
 HARNESS_COMPOSE := $(HARNESS_DIR)/docker-compose.test.yml
@@ -47,7 +47,9 @@ test-docker:
 # everything down regardless of outcome. Pass -v on the down step so
 # postgres tmpfs / images that linger don't accumulate across CI jobs.
 # `--wait` blocks `up` until all healthchecks are green; failures bail.
-test-integration:
+test-integration: test-integration-up test-integration-run
+
+test-integration-up:
 	$(HARNESS_DIR)/scripts/setup.sh
 	docker compose -f $(HARNESS_COMPOSE) up -d --wait --quiet-pull
 	@# Backend has no docker healthcheck (distroless image), so --wait
@@ -62,8 +64,16 @@ test-integration:
 	  printf "."; sleep 1; \
 	  if [ "$$i" -eq 60 ]; then echo " TIMEOUT"; exit 1; fi; \
 	done
-	@trap 'docker compose -f $(HARNESS_COMPOSE) down -v --remove-orphans >/dev/null' EXIT; \
-	  tests/integration/run.sh
+
+test-integration-run:
+	tests/integration/run.sh
+
+# Separate target so CI can call it from an `if: always()` step AFTER the
+# failure-dump step (which needs the containers still running to gather
+# logs). `make test-integration` keeps the historical lifecycle for
+# local devs.
+test-integration-down:
+	-docker compose -f $(HARNESS_COMPOSE) down -v --remove-orphans
 
 # ---------- Linters ----------
 
