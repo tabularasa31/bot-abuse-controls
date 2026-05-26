@@ -85,6 +85,19 @@ end
 
 local tests = {}
 
+-- 0. Nil / empty path → ERR, no crash (defensive guard so a misconfigured
+--    caller can't take the worker down at init_by_lua time).
+tests.nil_path = function()
+    reset()
+    assert_eq(cs.load(nil), false, "load(nil) should return false")
+    assert_eq(cs.load(""), false, "load('') should return false")
+    local errs = 0
+    for _, c in ipairs(log_calls) do
+        if c.level == "ERR" then errs = errs + 1 end
+    end
+    if errs < 2 then error("expected ERR for nil and empty path") end
+end
+
 -- 1. Missing file → WARN, get()/fingerprint() return nil.
 tests.missing_file = function()
     reset()

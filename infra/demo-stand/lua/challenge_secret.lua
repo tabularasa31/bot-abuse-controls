@@ -63,6 +63,12 @@ end
 -- со stale секретом). Вызывается из init_by_lua, поэтому ngx.log
 -- доступен. Возвращает true при успехе, false иначе — для тестов.
 function _M.load(path)
+    if type(path) ~= "string" or path == "" then
+        ngx.log(ngx.ERR, "challenge_secret: load(path) needs a non-empty string, got ",
+            type(path))
+        return false
+    end
+
     local dict = ngx.shared[DICT_NAME]
     if not dict then
         ngx.log(ngx.ERR, "challenge_secret: shared_dict `", DICT_NAME,
@@ -95,14 +101,20 @@ function _M.load(path)
         return false
     end
 
+    -- Set both keys, treat partial success as failure: a stored secret
+    -- without its fp (or vice versa) would let /__admin and /__version
+    -- report stale "null" / wrong fingerprint while get() still returns
+    -- the secret. clear() wipes both on any failure (fail-closed).
     local fp = fingerprint(secret)
     local ok, set_err = dict:set(KEY_SECRET, secret)
+    if ok then
+        ok, set_err = dict:set(KEY_FP, fp)
+    end
     if not ok then
         ngx.log(ngx.ERR, "challenge_secret: shared_dict set failed: ", set_err)
         clear(dict)
         return false
     end
-    dict:set(KEY_FP, fp)
     ngx.log(ngx.INFO, "challenge_secret: loaded from ", path, " (fp=", fp, ")")
     return true
 end

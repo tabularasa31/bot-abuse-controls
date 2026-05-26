@@ -43,8 +43,10 @@ chmod 600 "$dest"
 
 # 8-hex fingerprint = first 4 bytes of sha256(secret), same shape as
 # challenge_secret.lua reports via /__version and /__admin so the operator
-# can cross-check what the stand loaded after reload.
-fp=$(openssl dgst -sha256 -binary < "$dest" | od -An -tx1 -N4 | tr -d ' \n')
+# can cross-check what the stand loaded after reload. `openssl dgst -r`
+# prints "<hex>  <name>" (coreutils-style), works on both OpenSSL 1.1+ and
+# LibreSSL — verified on the alpine base image the stand runs on.
+fp=$(openssl dgst -sha256 -r < "$dest" | cut -c1-8)
 
 echo "wrote $dest (fp=$fp)"
 echo "next: docker compose -f infra/demo-stand/docker-compose.demo.yml exec nginx-demo openresty -s reload"
