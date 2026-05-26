@@ -49,15 +49,14 @@ end
 bac_log.init()
 
 -- L1 hygiene (method_not_allowed / ua_blacklist + hygiene:header_anomaly tag).
--- Observe-only: records the would-be verdict and tag via bac_log but never
--- blocks. We deliberately do NOT short-circuit the cascade here — the tls_fp
--- stage below is the only stage that actually enforces (ngx.exit on a
--- blocklisted fp), so every request must still reach it. Returning early
--- would let a request bypass an active tls_fp block simply by also tripping
--- an (observe-only) hygiene rule. Last-writer-wins on the verdict matches the
--- phase1-spec "финальное сработавшее правило" logging contract: if tls_fp
--- later blocks it overwrites the hygiene verdict; otherwise the hygiene
--- verdict stands.
+-- Mode-gated: hygiene.run records the would-be verdict and informational
+-- tag via bac_log; on a blocking rule it then calls policy.enforce(403) so
+-- a mode=active host gets 403 right inside run (ngx.exit, cascade dies).
+-- For mode=shadow (pool default) enforce is a no-op and run returns
+-- normally, so the cascade continues to tls_fp / rate_limit and their
+-- would-be verdicts/tags still accumulate — last-writer-wins matches
+-- phase1-spec "финальное сработавшее правило" (e.g., a later tls_fp
+-- block overwrites the hygiene verdict in the log).
 hygiene.run()
 
 -- L2 reputation (ip_whitelist / ip_blocklist). Observe-only and, like

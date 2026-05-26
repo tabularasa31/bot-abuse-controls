@@ -3,19 +3,25 @@
 -- Runs first in the cascade (cheapest checks). Records the would-be verdict
 -- (and the informational tag) through bac_log.
 --
--- Phase 1 is OBSERVE-ONLY: nothing is physically blocked (no ngx.exit) — the
--- request always reaches origin and the structured log records what WOULD
--- have happened (phase1-spec: "каскад в MVP только наблюдает, ничего не
--- блокирует"). Flipping a rule to enforce is the future per-rule-enforce
--- task, not Phase 1.
+-- Mode-gated enforcement: when a blocking hygiene rule (method_not_allowed
+-- or ua_blacklist) matches, the would-be verdict is recorded via bac_log
+-- and then policy.enforce(403) decides whether to physically 403. For a
+-- host with policy.mode=active the request gets 403 right here (cascade
+-- dies, later stages do not run). For mode=shadow (pool default) enforce
+-- is a no-op: the cascade continues to tls_fp/rate_limit so their would-be
+-- verdicts and tags still accumulate in the log, with last-writer-wins on
+-- the verdict ("финальное сработавшее правило"). The per-rule choice
+-- mirrors phase1-spec §36 "blocking rules return 403 in боевой режим" and
+-- rules-reference L1: both method_not_allowed and ua_blacklist are
+-- declared blocking.
 --
--- run() does NOT short-circuit the cascade: the caller (verdict.lua) keeps
--- going to the tls_fp stage, which is the only stage that actually enforces
--- (ngx.exit on a blocklisted fp). Stopping here would let a request bypass an
--- active tls_fp block by also tripping an observe-only hygiene rule. The
--- bac_log verdict is last-writer-wins, so a later tls_fp block overwrites the
--- hygiene verdict; otherwise the hygiene verdict stands ("финальное
--- сработавшее правило").
+-- Why hygiene does not short-circuit the cascade in shadow: the design
+-- accepts losing the hygiene-rule label in the log to a later, more
+-- specific match (tls_fp_blocklist). A bot that trips method_not_allowed
+-- AND has a blocklisted fp is more usefully recorded as a tls_fp hit; in
+-- active mode hygiene's ngx.exit wins because it fires first, which is
+-- the same trade-off the tls_fp_blocklist branch in verdict.lua makes
+-- (see its header comment).
 --
 -- Informational tag (NOT a rule — emits no verdict, never stops the cascade):
 --   * hygiene:header_anomaly — header combination a real browser does not
@@ -111,13 +117,18 @@ function _M.build(config)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the
--- header_anomaly tag and the would-be verdict via bac_log. Never blocks the
--- request and never stops the cascade (observe-only); the boolean return
--- (true when a hygiene blocking rule matched) is informational only.
+-- header_anomaly tag and the would-be verdict via bac_log. For a host with
+-- policy.mode=active a matched blocking rule physically 403s the request
+-- via policy.enforce (cascade stops inside hygiene.run). For mode=shadow
+-- the function returns normally; verdict.lua continues the cascade. The
+-- boolean return (true when a hygiene blocking rule matched) is
+-- informational only — verdict.lua does not branch on it (per-stage
+-- last-writer-wins on the verdict is intentional).
 function _M.run()
     if not _M.enabled then return false end
 
     local bac_log = require "bac_log"
+    local policy  = require "policy"
 
     -- Informational tag — evaluated first and unconditionally so it is
     -- recorded even when a blocking rule fires below (tags accumulate
@@ -129,6 +140,9 @@ function _M.run()
     -- 1. method whitelist (only when one is configured).
     if next(_M.method_set) and not _M.method_set[ngx.var.request_method] then
         bac_log.set_verdict("hygiene", "block", "method_not_allowed")
+        -- mode-gate: active → ngx.exit(403); shadow → no-op, cascade
+        -- continues so later stages still tag/verdict (see header comment).
+        policy.enforce(403)
         return true
     end
 
@@ -143,6 +157,7 @@ function _M.run()
             ngx.log(ngx.ERR, "ua_blacklist regex error, fail-open: ", err)
         elseif from then
             bac_log.set_verdict("hygiene", "block", "ua_blacklist")
+            policy.enforce(403)
             return true
         end
     end
