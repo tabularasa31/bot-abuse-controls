@@ -102,7 +102,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum by (verdict) (rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [$__rate_interval]))",
+          "expr": "sum by (verdict) (rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [$__interval]))",
           "legendFormat": "{{verdict}}",
           "queryType": "range",
           "refId": "A"
