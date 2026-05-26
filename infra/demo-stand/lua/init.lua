@@ -63,6 +63,16 @@ require("catalog_pull").preload_mtls(
     os.getenv("ANTIBOT_BACKEND_CLIENT_CERT"),
     os.getenv("ANTIBOT_BACKEND_CLIENT_KEY"))
 
+-- [C1] Phase 4 HMAC secret для clearance cookie (vision §«HMAC secret для
+-- clearance cookie», §Channel A). Доставка на демо-стенде = file/mount
+-- (./certs bind-mount), ротация = `openresty -s reload`. C3/C5 ещё не
+-- реализованы — load() выполняется здесь, чтобы когда они появятся, secret
+-- уже лежал в shared_dict; до тех пор отсутствие файла — WARN, не fatal
+-- (Phase 1-3 запросы продолжают работать).
+require("challenge_secret").load(
+    os.getenv("CHALLENGE_HMAC_SECRET_FILE")
+        or "/etc/nginx/certs/challenge_secret.key")
+
 -- Seed the tls_fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging — staged fps match-but-don't-block
 -- and are held in tls_fp.blocklist_staging (recorded into staging_match by the

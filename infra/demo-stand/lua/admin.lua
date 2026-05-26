@@ -41,6 +41,11 @@ local blocklist_n    = #blocklist
 local mode    = blocklist_n > 0 and "ACTIVE" or "SHADOW"
 local edge_id = os.getenv("EDGE_ID") or "stand-bac"
 
+-- [C1] Phase 4 HMAC secret fingerprint (challenge_secret.lua). Surfaced
+-- read-only so a reviewer can confirm a rotation reload landed; the secret
+-- itself never leaves init_by_lua memory.
+local challenge_secret_fp = require("challenge_secret").fingerprint()
+
 local now = ngx.time()
 local uptime_s = now - (m:get("start_time") or now)
 local uptime_h = string.format("%dh %dm %ds",
@@ -91,7 +96,10 @@ hr { border: 0; border-top: 1px solid #eee; margin: 2em 0; }
 ]] .. (mode == "SHADOW"
     and "The verdict pipeline runs on every request and logs a verdict, but the blocklist is empty so nothing is blocked (200 for everyone)."
     or  ("Blocking is active on " .. blocklist_n .. " fingerprint(s) — matching clients get 403.")) .. [[
-Same pipeline as production. <a href="https://github.com/tabularasa31/abuse-controls">repo</a>.</p>
+Same pipeline as production. <a href="https://github.com/tabularasa31/abuse-controls">repo</a>.<br>
+Challenge HMAC secret: ]] .. (challenge_secret_fp
+    and ('<code>loaded</code> (fp=<code>' .. esc(challenge_secret_fp) .. '</code>)')
+    or '<code>not configured</code> <span class="note">(Phase 4 file mount; see README)</span>') .. [[</p>
 
 <h2>Counters</h2>
 ]])
