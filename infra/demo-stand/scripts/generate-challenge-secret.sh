@@ -33,12 +33,31 @@ if ! command -v openssl >/dev/null 2>&1; then
     exit 1
 fi
 
-mkdir -p "$(dirname "$dest")"
+# umask set BEFORE mkdir so a first-run that creates ./certs/ ends up with
+# 0700 dir perms, not the inherited (typically 0755) umask — otherwise the
+# secret file inside is 0600 but its name is enumerable to other local users.
+# Pre-existing dirs are left alone (operator's choice; e.g. /tmp can't be
+# chmodded).
 umask 077
+mkdir -p "$(dirname "$dest")"
+
+# Capture the random bytes into a variable so we can check the openssl
+# exit status — `set -e` does NOT propagate failures from inside `$(...)`
+# in POSIX sh, so a broken openssl (denied /dev/urandom, seccomp etc.)
+# would otherwise silently write an empty file and the script would
+# happily report a fingerprint of the empty string.
+raw=$(openssl rand -base64 32) || {
+    echo "openssl rand failed — refusing to write empty secret" >&2
+    exit 1
+}
+if [ -z "$raw" ]; then
+    echo "openssl rand returned empty output — refusing to write" >&2
+    exit 1
+fi
 # No trailing newline: challenge_secret.lua trims whitespace before hashing,
 # so a `>` redirect (which appends `\n`) would print a fingerprint that
 # disagrees with /__version. printf '%s' guarantees byte-for-byte match.
-printf '%s' "$(openssl rand -base64 32)" > "$dest"
+printf '%s' "$raw" > "$dest"
 chmod 600 "$dest"
 
 # 8-hex fingerprint = first 4 bytes of sha256(secret), same shape as

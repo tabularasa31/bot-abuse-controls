@@ -29,6 +29,13 @@ local KEY_FP     = "fp"
 -- через `openssl rand -base64 32` (~44 символа base64). Меньшие отвергаем,
 -- чтобы случайно не подгрузить "TODO"/"changeme"/тестовую строку.
 local MIN_BYTES = 32
+-- Жёсткий потолок на размер файла — защита от мисмаунта (например
+-- CHALLENGE_HMAC_SECRET_FILE случайно указали на /dev/urandom или на
+-- большой файл): f:read('*a') блокировал бы master в init_by_lua и стенд
+-- не поднимался. Реальный секрет — ~44 байта; 1024 даёт большой запас и
+-- гарантированно завершается за один read. Если у кого-то когда-то появится
+-- нужда в более длинных ключах — поднять этот предел осознанно.
+local MAX_BYTES = 1024
 
 local _M = {}
 
@@ -84,10 +91,20 @@ function _M.load(path)
         clear(dict)
         return false
     end
-    local raw = f:read("*a")
+    -- Bounded read: MAX_BYTES + 1, чтобы отличить «ровно по лимиту» от
+    -- «больше лимита» (защита от мисмаунта на /dev/urandom или большой файл —
+    -- f:read('*a') блокировал бы master в init_by_lua).
+    local raw = f:read(MAX_BYTES + 1)
     f:close()
     if not raw then
         ngx.log(ngx.ERR, "challenge_secret: read failed at ", path)
+        clear(dict)
+        return false
+    end
+    if #raw > MAX_BYTES then
+        ngx.log(ngx.ERR, "challenge_secret: ", path, " is larger than ",
+            MAX_BYTES, " bytes — refusing to load (check the mount path; ",
+            "a real HMAC secret is ~44 base64 bytes)")
         clear(dict)
         return false
     end

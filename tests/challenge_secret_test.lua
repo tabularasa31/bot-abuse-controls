@@ -130,6 +130,27 @@ tests.too_short = function()
     if errs == 0 then error("expected ERR log for short secret") end
 end
 
+-- 2b. Oversize file (e.g. mount accidentally pointing at /dev/urandom or
+--     a large file) → ERR, dict cleared. Bounded read keeps init_by_lua
+--     from blocking the master.
+tests.too_large = function()
+    reset()
+    -- 2 KiB body — well over MAX_BYTES (1024) so the bounded read returns
+    -- MAX_BYTES+1 bytes and the size guard rejects it.
+    local path = write_tmp(string.rep("A", 2048))
+    local ok = cs.load(path)
+    os.remove(path)
+    assert_eq(ok, false, "load should fail on oversize secret")
+    assert_eq(cs.get(), nil)
+    local saw_size_err = false
+    for _, c in ipairs(log_calls) do
+        if c.level == "ERR" and c.msg:find("larger than", 1, true) then
+            saw_size_err = true
+        end
+    end
+    if not saw_size_err then error("expected ERR mentioning size limit") end
+end
+
 -- 3. Valid secret → secret + fp in dict, INFO log, get/fingerprint match.
 tests.valid_load = function()
     reset()
