@@ -105,6 +105,11 @@ services:
       - ../demo-stand/sites:/etc/nginx/sites:ro
       - ../demo-stand/geoip:/etc/nginx/geoip:ro
       - ../demo-stand/nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      # Override the production resolver.conf with a docker-DNS-aware
+      # version so cosockets in ngx.timer / init_worker (catalog_pull.lua)
+      # can resolve compose service names like `backend`. Same target
+      # path that demo-stand mounts the production version to.
+      - ./resolver.conf:/etc/nginx/resolver.conf:ro
       - ./test-certs:/etc/nginx/certs:ro
     ports:
       - "127.0.0.1:18443:443"

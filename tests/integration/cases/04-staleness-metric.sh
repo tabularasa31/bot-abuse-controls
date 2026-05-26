@@ -75,12 +75,17 @@ fi
 delta=$((after - base))
 echo "  after stop = ${after}s (delta = ${delta}s)"
 
-# Allow some slack: at minimum the wall-clock 5s sleep MINUS one
-# second for jitter (script timing isn't monotonic-precise; backend
-# stop takes a moment to take effect; the metric scrape itself is
-# instantaneous but the baseline scrape was a few ms earlier).
-if [ "$delta" -lt 4 ]; then
-    echo "FAIL: gauge did not grow as expected (delta=${delta}s, need ≥4s after 5s outage)"
+# Slack of 2s on a 5s sleep. The gauge formula `now - last_pull_ts`
+# means baseline+delta could be off by up to one pull interval (2s)
+# depending on where the baseline scrape lands in the pull cycle.
+# Earlier `delta >= 4` left only 1s of slack and started flaking on
+# warm GH runners where the baseline scrape happened just before a
+# successful pull bumped the gauge to 0. `>= 3` keeps the test
+# faithful (we're asserting "gauge grows on outage", not "gauge
+# matches wall-clock exactly") while leaving headroom for the
+# steady-state pull jitter.
+if [ "$delta" -lt 3 ]; then
+    echo "FAIL: gauge did not grow as expected (delta=${delta}s, need ≥3s after 5s outage)"
     exit 1
 fi
 

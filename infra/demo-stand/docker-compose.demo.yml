@@ -66,6 +66,12 @@ services:
 
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      # http-level resolver, included from nginx.demo.conf. Production
+      # default = public DNS. Integration harness bind-mounts a
+      # docker-DNS-aware version over the same path inside
+      # infra/test-harness/docker-compose.test.yml so it can resolve
+      # compose service names from timer-context cosockets.
+      - ./resolver.conf:/etc/nginx/resolver.conf:ro
       # Cascade Lua: stage modules + shared fp compute
       # (ja4_compute + ja4_helpers, источник правды теперь здесь же).
       - ./lua:/etc/nginx/lua:ro

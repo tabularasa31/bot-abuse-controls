@@ -14,6 +14,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=tests/integration/lib.sh
 . "$HERE/../lib.sh"
 
+# Symmetric with cases 03/04: revert to shadow on exit so a failure
+# here doesn't leave the row at mode=active and surprise the next
+# case in a clean run. The case-02 atomic-swap test doesn't care
+# about initial state (it alternates) but we keep the suite's
+# between-case baseline predictable for future cases.
+# shellcheck disable=SC2329
+cleanup() {
+    dash_patch '{"mode":"shadow"}' >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
 # 1. PATCH a unique mode value so we know we're seeing the new state,
 # not a leftover. mode=active is benign for /__policy (read-only view)
 # but provides a clear pre/post signal vs the pool default mode=shadow.
@@ -49,7 +60,5 @@ if ! echo "$other_body" | grep -q '"mode":"shadow"'; then
 fi
 echo "  pool default OK for unregistered host"
 
-# 4. Cleanup: revert to shadow so case 02 starts from a known baseline.
-dash_patch '{"mode":"shadow"}' >/dev/null
-
+# Cleanup (revert to shadow) runs from the EXIT trap above.
 exit 0
