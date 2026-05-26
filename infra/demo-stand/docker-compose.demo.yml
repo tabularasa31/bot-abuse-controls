@@ -73,8 +73,12 @@ services:
     # actually live), so the cascade still proxies to the real origin
     # regardless of what public DNS does. Add more pairs here when new
     # cascade-fronted hostnames go live.
+    #
+    # The backend IP is parameterised so a staging/local deploy can override
+    # it via .env without touching this committed file; the default matches
+    # the current production example backend.
     extra_hosts:
-      - "dashboard.example.com:<TENANT_ORIGIN_IP>"
+      - "dashboard.example.com:${DASHBOARD_BACKEND_IP:-<TENANT_ORIGIN_IP>}"
 
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
