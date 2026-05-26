@@ -240,7 +240,7 @@ end
 -- маскируется под reload, force-set + log). catalog descriptors берутся
 -- из catalog_pull.catalogs — single source of truth для dict/gen/etag
 -- имён (fix B-R8-2: literals не дублируются между init.lua и descriptors).
-for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser_profiles"}) do
+for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser_profiles", "policy"}) do
     local cat = catalog_pull.catalogs[cat_name]
     if not cat then
         ngx.log(ngx.ERR, "[demo] catalog_pull.catalogs[", cat_name,
