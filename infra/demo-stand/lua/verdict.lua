@@ -15,11 +15,16 @@
 --
 -- The fp-based block is the Phase 2 `tls_fp` stage; it is recorded
 -- through the same bac_log contract as hygiene/reputation. The remaining
--- Phase 1 stages (rate_limits) are separate tasks. The
--- stand runs shadow: tls_fp_blocklist.conf ships empty (init.lua seeds the
--- tls_fp_blocklist dict from it), so verdict is always "allow" and nothing is
--- blocked. The ngx.exit(403) path stays wired so adding an fp to that
--- config and restarting flips it to active without code changes.
+-- Phase 1 stages (rate_limits) are separate tasks.
+--
+-- Mode-gated enforcement (B11): the only physical exit in the cascade —
+-- tls_fp_blocklist hit below — goes through policy.enforce(403). For
+-- clients with policy[host].mode=shadow (pool default), the would-be
+-- verdict is still recorded via bac_log.set_verdict and the request
+-- passes through to origin. For clients with mode=active, ngx.exit(403)
+-- fires. Future enforcement points (rate_limit 429, per-host
+-- ip_blocklist, challenge) MUST go through the same helper — see
+-- policy.lua header for the convention.
 
 local ja4        = require "ja4_compute"
 local bac_log    = require "bac_log"
@@ -29,6 +34,7 @@ local tls_fp     = require "tls_fp"
 local rate_limit = require "rate_limit"
 local fp_state   = require "tls_fp_blocklist_state"
 local config     = require "config"
+local policy     = require "policy"
 
 -- Global kill-switch (A12). When set, the whole cascade is a no-op: we return
 -- before bac_log.init so the request proxies straight to the origin and emits
@@ -98,7 +104,15 @@ if config.stage_enabled(config.defaults, "tls_fp") then
 
     if verdict == "block" then
         bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
-        return ngx.exit(403)
+        -- B11: active → ngx.exit(403) below; shadow → enforce is a no-op,
+        -- we then `return` from access_by_lua to short-circuit the rest of
+        -- the cascade so a later stage (tls_fp soft / rate_limit) can't
+        -- overwrite the "block" verdict via last-writer-wins. The log
+        -- reflects the same final state the active path would have
+        -- emitted (verdict=block, rule=tls_fp_blocklist), the only
+        -- difference being that the request still proxies to origin.
+        policy.enforce(403)
+        return
     end
 
     -- tls_fp soft rules + tls_fp:* tags (A9). Observe-only: records the would-be
