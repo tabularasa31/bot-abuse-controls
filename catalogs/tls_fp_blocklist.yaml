@@ -34,12 +34,6 @@
 # jitsi-scanner-go/1.0, 8 IP, Jitsi-эндпоинты
 "L13d1900_f3fd9e8f6e2b_fac63a6ff214": active
 
-# unknown-impersonator-A, 22 IP, recon (/.env, /.git/config), пустой UA
-"L13i1900_f3fd9e8f6e2b_fac63a6ff214": active
-
-# visionheight.com/scan, 4 IP (Azure/AWS), OWA/metadatauploader
-"L12i1300_f610f019e565_2d5d451aa175": active
-
 # go-http-client as Chrome/78, Atlassian recon (actuator, confluence, Jira API)
 "L13i1300_69e852b66fc7_1bb3b57910c1": active
 
