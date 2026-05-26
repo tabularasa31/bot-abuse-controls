@@ -120,22 +120,28 @@ else
 fi
 
 # Promtail config is bind-mounted from infra/demo-stand/observability/ into a
-# separate service gated by `--profile observability`. promtail reads its
-# config once at start, so a `git pull` that touches observability/ doesn't
-# take effect until the container restarts — and the nginx-demo recreate
-# above does NOT cover it (the service name in --force-recreate is hard-coded).
-# Detect a change to that directory and restart promtail if it's actually
-# running on this host. Best-effort: hosts that never enabled the profile
-# don't have the container to restart and the grep below silently no-ops; a
-# restart failure logs a warning but doesn't block marker advance since the
-# nginx-demo deploy (the live serving surface) already succeeded.
+# separate service gated by `--profile observability`. The promtail-config
+# files are single-file bind-mounts, so git's inode swap on pull leaves the
+# running container pinned to the OLD file (same trap as nginx.demo.conf,
+# documented above) — `docker compose restart promtail` would re-read the
+# stale in-container inode, NOT the freshly-pulled host file. Only `up -d
+# --force-recreate` re-resolves the mount, exactly like the nginx-demo
+# branch above. Also use `ps --services` without a status filter: a promtail
+# in a crash-loop reports status=restarting, not running, and would be
+# silently skipped if we filtered to running-only (caught in prod when a
+# previously-merged bad WAL field kept promtail crash-looping past a fix).
+# Best-effort: hosts that never enabled the profile have no service in the
+# ps output and the grep silently no-ops; a recreate failure logs a warning
+# but doesn't block marker advance since the nginx-demo deploy (the live
+# serving surface) already succeeded.
 if [ -n "$last" ] && ! git diff --quiet "$last" "$head" -- \
      "infra/demo-stand/observability/"; then
   if docker compose -f "$COMPOSE_FILE" --profile observability ps \
-       --services --filter status=running 2>/dev/null | grep -qx promtail; then
-    echo "$(date -Is) promtail config changed — restarting promtail"
-    docker compose -f "$COMPOSE_FILE" --profile observability restart promtail || \
-      echo "$(date -Is) WARN: promtail restart failed (continuing)" >&2
+       --services 2>/dev/null | grep -qx promtail; then
+    echo "$(date -Is) promtail config changed — recreating promtail"
+    docker compose -f "$COMPOSE_FILE" --profile observability \
+        up -d --force-recreate promtail || \
+      echo "$(date -Is) WARN: promtail recreate failed (continuing)" >&2
   fi
 fi
 
