@@ -10,7 +10,12 @@
 
 set -u
 
+# Cases reference BACKEND_URL / EDGE_URL after sourcing — shellcheck
+# doesn't see that without `-x`, and even with `-x` SC2034 still fires
+# on lib.sh because the file alone doesn't use them. Explicit disable.
+# shellcheck disable=SC2034
 BACKEND_URL="${BAC_TEST_BACKEND_URL:-http://127.0.0.1:18080}"
+# shellcheck disable=SC2034
 EDGE_URL="${BAC_TEST_EDGE_URL:-https://127.0.0.1:18443}"
 DASH_TOKEN="test-token-not-secret"
 

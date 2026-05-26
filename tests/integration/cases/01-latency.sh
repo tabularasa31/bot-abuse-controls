@@ -22,6 +22,8 @@ dash_patch '{"mode":"active","strictness":"standard"}' \
     || { echo "  PATCH failed"; exit 1; }
 
 # 2. Poll /__policy until the mode flips to "active" on the edge.
+# Invoked indirectly via poll_until; shellcheck can't see the call.
+# shellcheck disable=SC2329
 check_edge_active() {
     local body
     body="$(edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}")" || return 1
@@ -31,7 +33,8 @@ check_edge_active() {
 if ! poll_until 10 check_edge_active; then
     echo "FAIL: edge did not see mode=active within 10s"
     echo "  last /__policy:"
-    edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}" | sed 's/^/    /'
+    last_body="$(edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}")"
+    echo "    ${last_body}"
     exit 1
 fi
 
@@ -41,7 +44,7 @@ fi
 other_body="$(edge_curl "${EDGE_URL}/__policy?host=unregistered.example")"
 if ! echo "$other_body" | grep -q '"mode":"shadow"'; then
     echo "FAIL: pool default broken — unregistered host returned:"
-    echo "$other_body" | sed 's/^/    /'
+    echo "    ${other_body}"
     exit 1
 fi
 echo "  pool default OK for unregistered host"

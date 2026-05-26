@@ -63,7 +63,7 @@ lint-lua:
 
 lint-sh:
 	docker run --rm -v $(PWD):/work -w /work $(SHELLCHECK_IMAGE) \
-		$(SH_FILES)
+		-x $(SH_FILES)
 
 # ---------- CI ----------
 

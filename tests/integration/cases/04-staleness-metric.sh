@@ -15,6 +15,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib.sh
 . "$HERE/../lib.sh"
 
+# Invoked by EXIT trap below; shellcheck can't see that call.
+# shellcheck disable=SC2329
 cleanup() {
     compose_start_svc backend || true
 }

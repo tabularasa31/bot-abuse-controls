@@ -18,6 +18,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../lib.sh
 . "$HERE/../lib.sh"
 
+# Invoked by EXIT trap below; shellcheck can't see that call.
+# shellcheck disable=SC2329
 cleanup() {
     echo "  cleanup: ensure backend is running"
     compose_start_svc backend || true
@@ -34,6 +36,8 @@ echo "PATCH policy/${TEST_HOST} mode=active"
 dash_patch '{"mode":"active","strictness":"standard"}' \
     || { echo "  PATCH failed"; exit 1; }
 
+# Invoked indirectly via poll_until; shellcheck can't see the call.
+# shellcheck disable=SC2329
 check_edge_active() {
     local body
     body="$(edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}")" || return 1
