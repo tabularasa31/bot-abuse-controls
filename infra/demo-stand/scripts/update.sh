@@ -126,23 +126,33 @@ fi
 # documented above) — `docker compose restart promtail` would re-read the
 # stale in-container inode, NOT the freshly-pulled host file. Only `up -d
 # --force-recreate` re-resolves the mount, exactly like the nginx-demo
-# branch above. Also use `ps --services` without a status filter: a promtail
-# in a crash-loop reports status=restarting, not running, and would be
-# silently skipped if we filtered to running-only (caught in prod when a
-# previously-merged bad WAL field kept promtail crash-looping past a fix).
-# Best-effort: hosts that never enabled the profile have no service in the
-# ps output and the grep silently no-ops; a recreate failure logs a warning
-# but doesn't block marker advance since the nginx-demo deploy (the live
-# serving surface) already succeeded.
+# branch above.
+#
+# Whether to recreate depends on the current container state:
+#   - running     → operator opted into observability and the service is
+#                   live; recreate to pick up the new config.
+#   - restarting  → crash-loop (config-parse failure or similar); recreate
+#                   because a fix has just landed and a docker `restart`
+#                   would only re-read the same stale inode anyway.
+#   - exited / stopped → operator explicitly took promtail down (debug,
+#                        maintenance); do NOT resurrect it — that's not
+#                        the update.sh's call to make.
+#   - absent (no container) → host never enabled the profile; nothing
+#                             to do.
+# Best-effort: a recreate failure logs a warning but doesn't block marker
+# advance since the nginx-demo deploy (the live serving surface) above
+# already succeeded.
 if [ -n "$last" ] && ! git diff --quiet "$last" "$head" -- \
      "infra/demo-stand/observability/"; then
-  if docker compose -f "$COMPOSE_FILE" --profile observability ps \
-       --services 2>/dev/null | grep -qx promtail; then
-    echo "$(date -Is) promtail config changed — recreating promtail"
-    docker compose -f "$COMPOSE_FILE" --profile observability \
-        up -d --force-recreate promtail || \
-      echo "$(date -Is) WARN: promtail recreate failed (continuing)" >&2
-  fi
+  promtail_state="$(docker inspect promtail --format '{{.State.Status}}' 2>/dev/null || true)"
+  case "$promtail_state" in
+    running|restarting)
+      echo "$(date -Is) promtail config changed (state=${promtail_state}) — recreating"
+      docker compose -f "$COMPOSE_FILE" --profile observability \
+          up -d --force-recreate promtail || \
+        echo "$(date -Is) WARN: promtail recreate failed (continuing)" >&2
+      ;;
+  esac
 fi
 
 # Reload succeeded: expose the live sha to /__version and record success so

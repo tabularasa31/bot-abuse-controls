@@ -139,9 +139,14 @@ services:
       # tooling. A successful connect = promtail finished parsing its
       # config and the HTTP server is listening (the preflight exit and
       # config-parse failures both happen BEFORE the port binds), which
-      # is the signal we care about. The redirect to /dev/null is to
-      # close FD 3 cleanly after the handshake.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9080 || exit 1"]
+      # is the signal we care about.
+      #
+      # `2>/dev/null` swallows bash's "connect: Connection refused"
+      # line during start-up / restart-loop probes — without it every
+      # failed probe writes one line to docker logs. FD 3 stays open
+      # only until bash exits at the end of the -c, so no explicit
+      # close is needed (kernel reaps it on process exit).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9080 2>/dev/null"]
       interval: 10s
       timeout: 3s
       retries: 3
