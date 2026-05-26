@@ -1,0 +1,18 @@
+# Provisioned Loki datasource for the BAC log viewer. Reads from the
+# in-network Loki service — Grafana never goes through the public LB.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    # Stable UID so the committed dashboard JSON below can reference this
+    # datasource without a per-deploy mapping step.
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    jsonData:
+      # Hint to Grafana that records emitted by promtail's `output` stage are
+      # JSON, so the "Log details" pane parses them and shows all fields.
+      derivedFields: []
+    editable: false

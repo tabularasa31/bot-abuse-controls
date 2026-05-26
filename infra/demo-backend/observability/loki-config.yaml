@@ -1,0 +1,61 @@
+# Loki single-binary config for the demo BAC log viewer. Filesystem storage,
+# 7-day retention, sized for demo-stand traffic (units of RPS, not thousands).
+#
+# Loki sits inside the antibot-backend compose network; it is NEVER published
+# on the host. Promtail on the edge VM pushes through the LB-nginx at
+# /loki/api/v1/push (mTLS-gated, see ../nginx/lb.conf); Grafana reads it via
+# the in-network http://loki:3100 datasource. The read API is not exposed
+# externally.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+  # info is too noisy for the demo; warn keeps the docker logs readable.
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Tight ingestion budget — demo load is small, generous limits would just mask
+# a misbehaving promtail (eg. an accidental high-cardinality label suddenly
+# pushing millions of streams). If the demo ever needs more, raise here, not
+# silently on the edge.
+limits_config:
+  retention_period: 168h
+  reject_old_samples: true
+  # Buffered-on-edge tolerance: promtail WAL can replay logs up to this old.
+  reject_old_samples_max_age: 24h
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  max_streams_per_user: 5000
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+# Loki's ruler / analytics / cache_results subsystems are off by default for
+# the single-binary mode; nothing more to disable here.
+analytics:
+  reporting_enabled: false

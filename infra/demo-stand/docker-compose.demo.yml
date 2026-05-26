@@ -81,3 +81,55 @@ services:
       - ./geoip:/etc/nginx/geoip:ro
     # Log via the default json-file driver — fine for the demo. Real
     # production would point to a log aggregator (Loki / fluentd / etc.).
+    # Promtail below ships the BAC_LOG stream off to the backend Loki when
+    # the `observability` profile is enabled.
+
+  # Ships BAC_LOG records from nginx-demo's stdout to the antibot-backend's
+  # Loki (via the LB-nginx mTLS gate). Behind `profiles: [observability]`
+  # so `docker compose up` без флагов поднимает только nginx-demo, как
+  # сейчас — это сохраняет старый workflow стенда. To ship logs:
+  #   LOKI_PUSH_URL=https://<backend>/loki/api/v1/push docker compose \
+  #     -f docker-compose.demo.yml --profile observability up -d
+  #
+  # The mTLS material is the same edge-client.{crt,key} catalog_pull
+  # uses — no new cert distribution channel.
+  promtail:
+    image: grafana/promtail:3.4.1
+    container_name: promtail
+    profiles: ["observability"]
+    depends_on:
+      - nginx-demo
+    # -config.expand-env=true lets ${LOKI_PUSH_URL} etc. land from compose
+    # env without a templating step. -config.file points at the bind-mount.
+    command:
+      - "-config.file=/etc/promtail/config.yaml"
+      - "-config.expand-env=true"
+    environment:
+      # Compose evaluates ${VAR:?msg} at parse time, BEFORE profile
+      # filtering — using it here would break `docker compose up` без
+      # observability profile (the default workflow) when LOKI_PUSH_URL
+      # is unset. Empty default lets the non-observability path parse;
+      # promtail itself errors out on start with an invalid URL when the
+      # profile IS enabled and the env-var wasn't set — fail-loud, not
+      # silent buffering to WAL.
+      LOKI_PUSH_URL: ${LOKI_PUSH_URL:-}
+      # The backend in demo runs with a self-signed cert; flip to false
+      # once you mount a backend-CA bundle as a trust root (prod path).
+      LOKI_PUSH_INSECURE_TLS: ${LOKI_PUSH_INSECURE_TLS:-true}
+    volumes:
+      - ./observability/promtail-config.yaml:/etc/promtail/config.yaml:ro
+      # docker_sd_configs needs read access to the docker daemon to
+      # enumerate the nginx-demo container and follow its log stream.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Reuse the existing edge-client mTLS material — same cert/key
+      # catalog_pull already uses (install-edge-client-cert.sh writes
+      # into ./certs/).
+      - ./certs:/etc/promtail/certs:ro
+      # WAL + positions survive container restarts in a named volume so
+      # promtail can resume from the last shipped offset instead of
+      # re-shipping (or worse, missing) the tail on every restart.
+      - promtail-data:/var/lib/promtail
+    restart: unless-stopped
+
+volumes:
+  promtail-data:

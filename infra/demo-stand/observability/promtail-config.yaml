@@ -1,0 +1,124 @@
+# Promtail on the edge VM. Tails the nginx-demo container's stdout via the
+# docker daemon, filters out everything except the structured BAC_LOG lines,
+# applies a low-cardinality label set, and pushes to Loki on the
+# antibot-backend VM through the LB-nginx mTLS gate.
+#
+# Why docker_sd over reading /var/lib/docker/containers/*/*.log directly:
+# nginx restarts (hot reload, image rebuild) rotate the json-file pathname
+# and promtail's positions file would lose track; docker_sd follows the
+# container by name and rebinds on restart automatically.
+#
+# Loaded with `-config.expand-env=true` so ${VAR} pulls from the container
+# env set by compose.
+
+server:
+  http_listen_port: 9080
+  log_level: info
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: ${LOKI_PUSH_URL}
+    # mTLS to the backend LB — same edge-client cert that catalog_pull uses
+    # (see infra/demo-stand/scripts/install-edge-client-cert.sh). The
+    # backend's self-signed server cert is not in any standard trust store,
+    # hence insecure_skip_verify=true by default for the demo; flip to false
+    # and mount a backend-CA bundle for a prod-grade chain.
+    tls_config:
+      cert_file: /etc/promtail/certs/edge-client.crt
+      key_file: /etc/promtail/certs/edge-client.key
+      insecure_skip_verify: ${LOKI_PUSH_INSECURE_TLS:-true}
+    # Retry/backoff if Loki is briefly unreachable; combined with the WAL
+    # below this absorbs a backend restart without dropping records.
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 10
+    batchwait: 1s
+    batchsize: 1048576
+
+# WAL — buffers on disk when Loki is unreachable. Caps are sized so a
+# long outage (>1h) drops the oldest segments rather than filling the edge
+# disk.
+wal:
+  enabled: true
+  dir: /var/lib/promtail/wal
+  max_segment_age: 1h
+
+scrape_configs:
+  - job_name: bac-edge
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        # Only the openresty stand container. Other containers on the host
+        # (none in the current compose, but be future-proof) are ignored.
+        filters:
+          - name: name
+            values: ["nginx-demo"]
+    relabel_configs:
+      # Container name comes in as "/nginx-demo" — strip the leading slash.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      # Defence in depth: even if filters above misfire, drop anything
+      # that's not the openresty container.
+      - source_labels: ["container"]
+        regex: "nginx-demo"
+        action: keep
+      - target_label: job
+        replacement: bac-edge
+    pipeline_stages:
+      # Match BAC_LOG lines only. The "BAC_LOG " prefix is what bac_log.lua
+      # emits in front of every JSON payload (see bac_log.lua:266) — it
+      # lets us separate the structured stream from nginx's access/error
+      # log lines that share docker stdout.
+      - match:
+          selector: '{container="nginx-demo"}'
+          stages:
+            - regex:
+                expression: '^BAC_LOG\s+(?P<payload>\{.*\})\s*$'
+            # Lines that didn't match the regex have empty payload and get
+            # dropped — keeps nginx access/error log noise out of Loki.
+            - drop:
+                source: payload
+                expression: '^$'
+            # Parse the JSON record so individual fields are addressable in
+            # subsequent stages and can be promoted to Loki labels.
+            - json:
+                expressions:
+                  edge_id: edge_id
+                  host: host
+                  verdict: verdict
+                  stage: stage
+                  mode: mode
+                  action: action
+                  ts: timestamp
+                source: payload
+            # Stamp the entry with the request's real start time
+            # (iso8601_ms in bac_log.lua:175). Without this Grafana would
+            # plot promtail's ingest time, which lags real-time during
+            # WAL replay.
+            - timestamp:
+                source: ts
+                format: RFC3339Nano
+                fallback_format: "2006-01-02T15:04:05.000Z"
+            # The label set is deliberately small. NEVER add request_id,
+            # ip, tls_fp, ua, or path here: each unique value spawns a
+            # new Loki stream, and at demo scale TLS fingerprints alone
+            # would explode the index within hours (rules-reference.md,
+            # vision.md). Those fields stay inside the JSON payload and
+            # are queryable via LogQL `| json | <field>="…"`.
+            - labels:
+                edge_id:
+                host:
+                verdict:
+                stage:
+                mode:
+                action:
+            # Preserve the raw JSON line as the entry body so Grafana's
+            # "Log details" pane parses it and surfaces all fields,
+            # including the high-cardinality ones we deliberately didn't
+            # promote to labels.
+            - output:
+                source: payload

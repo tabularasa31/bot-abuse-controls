@@ -1,0 +1,16 @@
+# Provisioner config — Grafana scans this folder on startup and registers
+# every dashboard JSON it finds under it. We mount the same host folder twice
+# in compose: once at /etc/grafana/provisioning/dashboards (this file) and
+# once at /var/lib/grafana/dashboards/bac (the JSON files below).
+apiVersion: 1
+
+providers:
+  - name: bac
+    orgId: 1
+    folder: BAC
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/bac

@@ -329,3 +329,82 @@ with the restart.
 Dashboard mutation → backend reload tick (5s, [B4]) → edge `/catalog/*` pull
 (30s, [B5]) → swap on edge. End-to-end ≤30s under the contract from
 [`config-distribution.md`](../../docs/architecture/config-distribution.md).
+
+## BAC log viewer (Loki + Grafana)
+
+The compose ships two extra services — **loki** and **grafana** — that
+together give a kickable URL for raw BAC cascade logs. They piggy-back
+the existing LB-nginx and mTLS material; no new cert distribution
+channel.
+
+```
+edge-stand (promtail) ──HTTPS push──► lb:443 ──► /loki/api/v1/push ──► loki:3100
+                                          \
+                                           └─► /grafana/        ──► grafana:3000
+```
+
+- **Loki** is never published on the host. The write path enters
+  through the existing lb-nginx at `/loki/api/v1/push`, gated by the
+  Channel C `auth-channelc.conf` include (`AUTH_MODE=mtls` → cert
+  required; `ip-allowlist` → `allow.list`). The read path is the
+  in-network `http://loki:3100` from the grafana service.
+- **Grafana** sits behind `/grafana/` with `serve_from_sub_path=true`.
+  Access is gated by [`auth/grafana-cidr.conf`](auth/grafana-cidr.conf)
+  — same baseline-commit / edit-on-VM pattern as
+  [`auth/dashboard-cidr.conf`](auth/dashboard-cidr.conf). Ships with
+  loopback-only defaults; operators replace with real reviewer source
+  CIDRs in-place on the VM.
+- Pre-provisioned dashboard `BAC raw logs` at
+  `/grafana/d/bac-raw-logs` — logs panel + verdict rate timeseries +
+  filters on `host / verdict / mode / edge_id`.
+
+### Setup
+
+```sh
+# .env on this VM:
+GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 24)
+BACKEND_HOST=antibot.internal   # whatever the LB cert CN is
+# (optional) anonymous viewer access — only if the CIDR-allowlist
+# already restricts /grafana/ to trusted reviewers.
+GF_ANON=false
+
+# Edit auth/grafana-cidr.conf with the real viewer source CIDR(s).
+# `nginx -t` in the lb container will fail loudly if the file is missing.
+
+docker compose -f docker-compose.backend.yml up -d
+docker compose -f docker-compose.backend.yml ps   # loki + grafana healthy
+```
+
+Then on the edge VM, set `LOKI_PUSH_URL` in its `.env` and bring up
+the `observability` profile — see
+[`../demo-stand/README.md`](../demo-stand/README.md#shipping-logs-to-backend-grafana).
+
+Open `https://<backend-host>/grafana/` (or via ssh-tunnel from a host
+not in the CIDR-allowlist: `ssh -L 8443:127.0.0.1:443 backend-vm`,
+then `https://localhost:8443/grafana/`). Login: `admin` /
+`$GRAFANA_ADMIN_PASSWORD`. The default dashboard is **BAC raw logs**.
+
+### What's intentionally not surfaced through this path
+
+- **No public read API on Loki.** Only `POST /loki/api/v1/push` is
+  proxied through the LB; queries / labels / series APIs are
+  in-network only. A leaked edge-client cert can write fake logs but
+  not exfiltrate them.
+- **No alerting rules.** This is an operational-view UI for the demo,
+  not a paging surface. Alertmanager and Grafana alerting are
+  deliberately not wired — long-term retention + alerts belong on
+  ADR-005's BAC_LOG sink (Postgres via `log_shipper`), not Loki.
+- **Sharing same self-signed cert as the catalog API.** mTLS rotation
+  for catalog clients (see "mTLS rotation" above) is also a log-push
+  rotation. On prod, issue a separate `edge-logs-client` cert if you
+  want independent rotation domains.
+
+### Cardinality
+
+Promtail's pipeline only promotes `edge_id, host, verdict, stage,
+mode, action` to Loki labels. High-cardinality fields (`request_id,
+ip, tls_fp, ua, path`) stay in the JSON payload — Grafana's "Log
+details" pane shows them, and LogQL `| json | ip="…"` filters on
+them. This is the contract; never add new labels casually. The full
+rule lives in the edge-side
+[`observability/promtail-config.yaml`](../demo-stand/observability/promtail-config.yaml).
