@@ -38,13 +38,17 @@ clients:
     batchwait: 1s
     batchsize: 1048576
 
-# WAL — buffers on disk when Loki is unreachable. Caps are sized so a
-# long outage (>1h) drops the oldest segments rather than filling the edge
-# disk.
+# WAL — buffers on disk when Loki is unreachable. The cleanup threshold
+# (clients/pkg/promtail/wal/config.go: MaxSegmentAge, yaml-tagged
+# `cleanSegmentsOlderThan`) defaults to 1h; matching that here would
+# only restate the default, so we leave it implicit. NB: the field tag
+# is the misleading camelCase `cleanSegmentsOlderThan`, NOT
+# `max_segment_age` (which is the Go field name — promtail v3.4.1
+# rejects the snake_case form with `field max_segment_age not found in
+# type wal.plain`).
 wal:
   enabled: true
   dir: /var/lib/promtail/wal
-  max_segment_age: 1h
 
 scrape_configs:
   - job_name: bac-edge
