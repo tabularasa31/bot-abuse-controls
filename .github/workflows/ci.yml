@@ -137,6 +137,30 @@ jobs:
             koalaman/shellcheck:stable \
             $(find scripts infra -name '*.sh')
 
+  validate-catalogs:
+    name: Validate catalogs/ (filesource decode)
+    # Catches the class of mistakes where catalogs/*.yaml parses with a lax
+    # loader (e.g. `python -c "import yaml; yaml.safe_load(...)"`) but
+    # `gopkg.in/yaml.v3` in strict mode — which is what the backend
+    # filesource uses — rejects on reload. Concretely: duplicate map keys
+    # (yaml.v3 strict: "mapping key already defined") and unknown status
+    # values. Without this gate a merged PR sails through review and only
+    # surfaces as `catalog reload failed` in backend logs minutes later, with
+    # the stand silently serving the previous gen.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          persist-credentials: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: antibot-backend/go.sum
+      - name: Run validate-catalogs against catalogs/
+        working-directory: antibot-backend
+        run: go run ./cmd/validate-catalogs ../catalogs
+
   smoke-demo-stand:
     name: Smoke (demo-stand brings up)
     # Catches broken Dockerfile / nginx.demo.conf / init_by_lua / Lua module
