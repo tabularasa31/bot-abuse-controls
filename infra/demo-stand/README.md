@@ -270,6 +270,50 @@ Scoring: impersonator +3 · suspicious cipher count +2 · automation UA +1
 · multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 days +1 · recon URI +1.
 Tiers: HIGH ≥5 → blocklist candidate · MEDIUM 3-4 → watch · LOW 1-2.
 
+## Shipping logs to backend Grafana
+
+The stand emits one `BAC_LOG {json}` line per request to `nginx-demo`'s
+stdout (see [`lua/bac_log.lua`](lua/bac_log.lua)). The `observability`
+profile turns on a small **promtail** sidecar that tails the container,
+parses those lines, and pushes them to the **Loki** instance running on
+the antibot-backend VM. A pre-provisioned Grafana dashboard at
+`https://<backend-host>/grafana/d/bac-raw-logs` renders the result with
+filters on `verdict / host / mode / edge_id` — the per-request UI
+`/__admin` is missing.
+
+Reuses existing infra:
+- Push goes through the same LB-nginx mTLS gate as Channel C
+  (`auth/mtls.conf` on backend). No new cert distribution channel —
+  the `edge-client.{crt,key}` installed by
+  [`scripts/install-edge-client-cert.sh`](scripts/install-edge-client-cert.sh)
+  is reused.
+- No changes to the Lua cascade: the on-stdout JSON contract from
+  Phase 1 is already what promtail consumes.
+
+Setup (after `infra/demo-backend/` has the Loki + Grafana profile up —
+see [its README](../demo-backend/README.md#bac-log-viewer)):
+
+```sh
+# .env on the edge:
+LOKI_PUSH_URL=https://antibot.internal/loki/api/v1/push
+# (optional; default true for the demo's self-signed backend cert)
+LOKI_PUSH_INSECURE_TLS=true
+
+docker compose -f docker-compose.demo.yml --profile observability up -d
+docker logs promtail --tail 30   # expect no "tls bad cert" / 401 / 429
+```
+
+Cardinality contract: only `edge_id, host, verdict, stage, mode,
+action` are promoted to Loki labels. High-cardinality fields
+(`request_id, ip, tls_fp, ua, path`) stay inside the JSON payload —
+filter on them via LogQL `| json | <field>="…"`.
+[`observability/promtail-config.yaml`](observability/promtail-config.yaml)
+spells this out; do not add new labels casually.
+
+When the `observability` profile is **not** enabled (the default),
+nothing changes — `docker compose up -d` brings up only `nginx-demo`
+and the cascade behaves identically.
+
 ## What this does NOT show
 
 - **Hot-reload of the blocklist** (cascade task [В1](https://app.clickup.com/t/86exmk08u)). The demo uses a static blocklist loaded at init.

@@ -132,9 +132,94 @@ services:
       # CIDRs across every location. Must load only inside its
       # `location /antibot/v1/` (lb.conf:55).
       - ./auth/dashboard-cidr.conf:/etc/nginx/dashboard-cidr.conf:ro
+      # CIDR-allowlist for /grafana/ (the BAC log viewer UI). Same mount
+      # pattern as dashboard-cidr.conf — ships committed with loopback
+      # baseline; operators edit on the VM with real viewer source CIDRs.
+      - ./auth/grafana-cidr.conf:/etc/nginx/grafana-cidr.conf:ro
+    restart: unless-stopped
+
+  # ─── BAC log viewer (Loki + Grafana) ────────────────────────────────────
+  # Promtail on the edge VM (infra/demo-stand/) ships BAC_LOG stdout lines
+  # here over HTTPS + mTLS (same edge-client cert as catalog_pull). Loki is
+  # never published on the host: edge → /loki/api/v1/push via lb-nginx,
+  # Grafana reads it in-network at http://loki:3100. The viewer UI is
+  # served at https://<backend-host>/grafana/ behind a CIDR-allowlist
+  # (auth/grafana-cidr.conf) — symmetric to the dashboard policy API.
+  loki:
+    image: grafana/loki:3.4.1
+    container_name: antibot-loki
+    # Profile-gated so the default `docker compose up -d` keeps bringing up
+    # only the existing postgres / backend / lb services (the catalog +
+    # policy + log-receiver path). Operators opt in to the BAC log viewer
+    # with `--profile observability`.
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      # `/ready` returns 200 once the ingester is ready to accept pushes.
+      # Without this Grafana's depends_on:service_healthy can't gate the
+      # datasource health-check against Loki's real cold-start latency
+      # (TSDB schema + index + compactor init can take ~10-20s).
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    # No `ports:` — Loki is reachable only via the compose network. The
+    # write path enters through the lb-nginx mTLS-gated location; the read
+    # path is the in-network grafana service. Surface Loki on the host
+    # only if you genuinely need direct LogCLI access — and put it behind
+    # the host firewall, not on a public bind.
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: antibot-grafana
+    profiles: ["observability"]
+    depends_on:
+      loki:
+        condition: service_healthy
+    environment:
+      # Grafana sits behind the existing TLS-terminating lb-nginx at the
+      # /grafana/ sub-path. With serve_from_sub_path=true Grafana itself
+      # mounts at /grafana/* — so the lb proxy_pass keeps the URI prefix
+      # rather than rewriting it (simpler, fewer static-asset gotchas).
+      GF_SERVER_ROOT_URL: "https://${BACKEND_HOST:-antibot.internal}/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # Empty default (not :? required) for the same reason promtail's
+      # LOKI_PUSH_URL uses :- on the edge: compose evaluates ${VAR:?}
+      # at parse time regardless of whether the profile is active, so a
+      # required form here would break `docker compose -f
+      # docker-compose.backend.yml up -d` (the default workflow) for
+      # operators who never enable the observability profile. Unset =
+      # Grafana falls back to its built-in `admin/admin` default and
+      # forces a password change on first login. .env.example marks this
+      # as required when the profile IS enabled.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-}"
+      # Don't phone home from a demo VM that may be behind CDN operator's egress
+      # filtering — and there's nothing useful to report from this scale.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Anonymous viewer is OFF by default. Flip to true in .env if your
+      # CIDR-allowlist already gates /grafana/ to trusted reviewers and you
+      # want a read-only no-login UX. Defence-in-depth: the CIDR layer is
+      # ALWAYS on regardless of this flag.
+      GF_AUTH_ANONYMOUS_ENABLED: "${GF_ANON:-false}"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Provisioner config (./provisioning/dashboards/bac.yaml) points the
+      # dashboard provider at /var/lib/grafana/dashboards/bac — so the
+      # JSON sources live there, not in /etc/grafana/.
+      - ./observability/grafana/provisioning/dashboards:/var/lib/grafana/dashboards/bac:ro
+      - grafana-data:/var/lib/grafana
     restart: unless-stopped
 
 volumes:
   pgdata:
   log-spool-1:
   log-spool-2:
+  loki-data:
+  grafana-data:
