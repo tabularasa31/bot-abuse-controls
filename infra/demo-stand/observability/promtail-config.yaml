@@ -101,8 +101,13 @@ scrape_configs:
             # WAL replay.
             - timestamp:
                 source: ts
+                # bac_log.lua's iso8601_ms (bac_log.lua:175) emits
+                # `2026-05-18T14:30:00.123Z` — RFC3339Nano accepts variable
+                # fractional digits including ms, so a single format is
+                # enough. `action_on_failure` defaults to `fudge` (use
+                # the previous entry's timestamp), so a malformed record
+                # doesn't fail the whole batch.
                 format: RFC3339Nano
-                fallback_format: "2006-01-02T15:04:05.000Z"
             # The label set is deliberately small. NEVER add request_id,
             # ip, tls_fp, ua, or path here: each unique value spawns a
             # new Loki stream, and at demo scale TLS fingerprints alone

@@ -129,7 +129,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "{job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} |= \"BAC_LOG\" | json",
+          "expr": "{job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} | json",
           "queryType": "range",
           "refId": "A"
         }
