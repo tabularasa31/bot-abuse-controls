@@ -274,6 +274,13 @@ _M.catalogs = {
     -- and tls_fp_catalog but at table granularity. Endpoint is called
     -- without `?site=` to pull the whole map at once; on the demo we
     -- have ≤O(10) clients, fits comfortably in 1m antibot_policy dict.
+    --
+    -- Host normalisation goes through policy.canonical_host so the
+    -- write key matches what policy.get() looks up at request time
+    -- (lowercased + length-capped). Backend may store a host with mixed
+    -- case via PATCH; without the same normalisation here, the edge
+    -- would silently miss and fall back to POOL_DEFAULT, masking active
+    -- mode for the affected client.
     policy = {
         name        = "policy",
         endpoint    = "/catalog/policy",
@@ -282,21 +289,27 @@ _M.catalogs = {
         etag_key    = "antibot_policy_etag",
         version_key = "antibot_policy_version",
         apply = function(dict, entries, new_gen)
+            local canonical_host = require("policy").canonical_host
             local n = 0
             for host, p in pairs(entries) do
-                local encoded, eerr = cjson.encode(p)
-                if not encoded then
-                    ngx.log(ngx.ERR, "antibot_policy:encode failed: ",
-                        tostring(eerr), " (host=", host, ", gen=", new_gen, ")")
-                    return false, n
+                local key_host = canonical_host(host)
+                if not key_host then
+                    ngx.log(ngx.WARN, "antibot_policy: skipping empty host key")
+                else
+                    local encoded, eerr = cjson.encode(p)
+                    if not encoded then
+                        ngx.log(ngx.ERR, "antibot_policy:encode failed: ",
+                            tostring(eerr), " (host=", host, ", gen=", new_gen, ")")
+                        return false, n
+                    end
+                    local ok, err = dict:set(key_host .. ":" .. new_gen, encoded)
+                    if not ok then
+                        ngx.log(ngx.ERR, "antibot_policy:set failed: ", err,
+                            " (host=", host, ", gen=", new_gen, ")")
+                        return false, n
+                    end
+                    n = n + 1
                 end
-                local ok, err = dict:set(host .. ":" .. new_gen, encoded)
-                if not ok then
-                    ngx.log(ngx.ERR, "antibot_policy:set failed: ", err,
-                        " (host=", host, ", gen=", new_gen, ")")
-                    return false, n
-                end
-                n = n + 1
             end
             return true, n
         end,

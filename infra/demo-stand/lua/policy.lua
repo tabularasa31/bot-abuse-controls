@@ -29,46 +29,79 @@
 
 local _M = {}
 
-local cjson = require "cjson.safe"
+local cjson      = require "cjson.safe"
+local cjson_base = require "cjson"   -- empty_array_mt sentinel
+
+-- empty_array — short-hand for a `{}` that cjson.encode emits as JSON `[]`
+-- rather than `{}`. Used for POOL_DEFAULT list fields below: dashboard and
+-- other Channel C clients expect array-shape for ua_blacklist / ip_*
+-- / asn_block / geo_whitelist / rate_rules (see Data.Policy json tags in
+-- backend data.go), so the default returned to /__policy must match.
+local function empty_array()
+    return setmetatable({}, cjson_base.empty_array_mt)
+end
 
 -- POOL_DEFAULT: must match catalog.PoolDefault() in the backend
--- (antibot-backend/internal/catalog/data.go:170). Empty tables use `{}`
--- which Lua treats as an array-shaped value — fine for our readers
--- (bac_log emits mode/strictness only; /__policy serialises whole struct
--- and cjson.encode renders `{}` as a JSON array, but consumers
--- (dashboard / Channel C clients) already expect array-shape for these
--- list fields, see Data.Policy field tags).
-local POOL_DEFAULT = {
-    mode         = "shadow",
-    strictness   = "standard",
-    ua_blacklist = {},
-    ip_whitelist = {},
-    ip_blocklist = {},
-    asn_block    = {},
-    geo_whitelist = {},
-    rate_rules   = {},
-    attack_mode  = false,
-}
+-- (antibot-backend/internal/catalog/data.go:170). Built per-call via
+-- new_pool_default() so callers can't accidentally mutate a shared
+-- instance and leak state across requests.
+local function new_pool_default()
+    return {
+        mode          = "shadow",
+        strictness    = "standard",
+        ua_blacklist  = empty_array(),
+        ip_whitelist  = empty_array(),
+        ip_blocklist  = empty_array(),
+        asn_block     = empty_array(),
+        geo_whitelist = empty_array(),
+        rate_rules    = empty_array(),
+        attack_mode   = false,
+    }
+end
+
+-- canonical_host — match the dashboard write path. Backend's antibotapi
+-- stores policy rows under the {site} path param as received, but DNS host
+-- names are case-insensitive (RFC 4343). nginx already lowercases
+-- $host, so for a request-side caller this is a no-op; for callers that
+-- pass an arbitrary string (/__policy?host=Foo.Example) we normalise here
+-- so a mixed-case PATCH still resolves. Also caps length: shared_dict
+-- keys are limited to 255 bytes; a malicious client-controlled Host could
+-- otherwise crash the lookup. RFC 1035 says ≤253 chars total, but defence
+-- in depth — hash anything past 64 to keep the dict key short.
+local function canonical_host(host)
+    if not host or host == "" then return nil end
+    host = string.lower(host)
+    if #host > 64 then
+        host = ngx.md5(host)
+    end
+    return host
+end
 
 -- get(host) → Policy table. Always non-nil. Falls back to POOL_DEFAULT on
 -- any miss/error so callers can read `.mode` / `.strictness` directly
 -- without nil-guards.
 function _M.get(host)
-    if not host or host == "" then return POOL_DEFAULT end
+    local key_host = canonical_host(host)
+    if not key_host then return new_pool_default() end
     local dict = ngx.shared.antibot_policy
     local meta = ngx.shared.meta
-    if not dict or not meta then return POOL_DEFAULT end
+    if not dict or not meta then return new_pool_default() end
     local gen = meta:get("antibot_policy_gen")
-    if not gen then return POOL_DEFAULT end
-    local raw = dict:get(host .. ":" .. gen)
-    if not raw then return POOL_DEFAULT end
+    if not gen then return new_pool_default() end
+    local raw = dict:get(key_host .. ":" .. gen)
+    if not raw then return new_pool_default() end
     local p, err = cjson.decode(raw)
     if not p or type(p) ~= "table" then
         ngx.log(ngx.ERR, "policy: decode failed for ", host, ": ", tostring(err))
-        return POOL_DEFAULT
+        return new_pool_default()
     end
     return p
 end
+
+-- canonical_host is exposed so catalog_pull's `policy` apply() writes
+-- shared_dict keys with the same normalisation get() reads. Drift between
+-- the two would resurface the case-sensitivity bug this guards against.
+_M.canonical_host = canonical_host
 
 -- enforce(status) — physically exit with `status` iff the current Host's
 -- policy is mode=active. mode=shadow returns nil so the caller falls
