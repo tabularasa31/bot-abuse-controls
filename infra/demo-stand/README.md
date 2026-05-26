@@ -2,14 +2,14 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (CDN operator admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand runs in **shadow mode** — the cascade computes and logs a verdict for every request, but the blocklist is empty so nothing is actually blocked (`200` for everyone). Blocking default curl/python would also block our own devs, and real bots masquerade as browsers anyway; we accumulate data first and decide what to block later. The cascade лежит целиком в `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`). The multi-scenario endpoints below front this cascade. To switch to active blocking, paste fp tokens into [`lua/blocklist.lua`](lua/blocklist.lua) and reload.
+The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (B11). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The cascade лежит целиком в `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
 
 ## Scenarios a reviewer can probe
 
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
 | `/` (and any path) | a real browser | 200, origin page | Cascade passes → request proxied to `ORIGIN_URL`. The stand is a real edge in front of the origin. |
-| `/` | `curl -k https://<host>/` | 200 | Shadow mode: the cascade computes curl's fp and logs the verdict, but the empty blocklist means no block, so it's proxied to origin. Confirm the fp via `/__fp`. |
+| `/` | `curl -k https://<host>/` | 200 (pool default Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | The cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether the verdict actually 403's the request or only logs. Confirm the fp via `/__fp`. |
 | `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, then proxied. |
 | `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in `/__fp` and the logs. |
 | `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
@@ -21,7 +21,7 @@ The stand runs in **shadow mode** — the cascade computes and logs a verdict fo
 
 **Origin.** The stand is a real reverse proxy: the cascade runs, then (on allow) the request is proxied to an origin (vision Step 6 — antibot in front of origin). The origin is `ORIGIN_URL` (scheme+host, no trailing slash) set in the gitignored `infra/demo-stand/.env` on the VM; it is not committed. When `ORIGIN_URL` is **unset**, `/` falls back to the bundled landing page (the cascade still runs, so the demo works out-of-box without an upstream); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally.
 
-The blocklist (in [`lua/blocklist.lua`](lua/blocklist.lua)) ships **empty** — shadow mode. Promoting candidate automation fps into it is a deliberate, data-driven step (see `analyze.py` HIGH-confidence candidates), not the default.
+The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` (B11) — see the section above and `policy.lua`.
 
 ## Structured log (Phase 1 schema)
 
@@ -31,9 +31,9 @@ Every request through the pipeline emits exactly one JSON record to docker stdou
 docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_LOG //' | jq -c .
 ```
 
-Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
+Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `strictness`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` is the per-resource business mode — Phase 1 has no policy catalog and the `tls_fp_blocklist` ships empty, so the stand emits a uniform `shadow`; `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` (B11) — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, [ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md), [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
@@ -82,7 +82,7 @@ REVISION=$(git rev-parse --short HEAD) \
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # 200, proxied to ORIGIN_URL (shadow: nothing blocked)
+curl -k https://localhost/                   # 200, proxied to ORIGIN_URL (pool default Host: shadow)
 curl -k https://localhost/__fp               # see your fp
 curl -k https://localhost/metrics            # prometheus text
 ```
@@ -218,10 +218,11 @@ REVISION=$(git rev-parse --short HEAD) \
 curl -k https://localhost/__version
 ```
 
-The blocklist ships empty (shadow), so a fresh clone needs no local
-override. Analytics state (`state/`, `reports/`) is gitignored — copy it
-from `abuse-controls.bak.*` to keep history, or start clean. Then install
-the cron line from "Updating a running stand" above.
+The `tls_fp_blocklist` content lives in `catalogs/tls_fp_blocklist.yaml` and
+arrives via Channel C; per-Host `policy.mode` decides whether a hit blocks
+or only logs (B11). Analytics state (`state/`, `reports/`) is gitignored —
+copy it from `abuse-controls.bak.*` to keep history, or start clean. Then
+install the cron line from "Updating a running stand" above.
 
 ## Daily analytics
 
@@ -313,7 +314,7 @@ infra/demo-stand/
 | "Is this AI-generated slop?" | `make ci` passes 61 unit tests + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
 | "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен). |
-| "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). The stand already runs shadow (empty blocklist) — observability on, enforcement off — so "shadow vs active" is just whether the blocklist has entries. |
+| "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). Per-Host rollback to observe-only is one PATCH against `/antibot/v1/policy/<host>` flipping `mode` back to `shadow` — Channel C delivers the change to the edge in ≤30s without redeploy. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
 

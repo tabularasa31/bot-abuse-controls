@@ -264,6 +264,102 @@ _M.catalogs = {
             return n
         end,
     },
+
+    -- policy (B11) — per-host Policy table delivered by Channel C as a
+    -- single map(host → Policy). Wire-payload: JSON object where each
+    -- value is the full Policy struct (mode/strictness/ua_blacklist/
+    -- ip_blocklist/.../attack_mode). We re-encode each value as JSON
+    -- before stashing under `<host>:<gen>` so the reader (policy.lua)
+    -- does one cjson.decode per request — symmetric with verified_bots
+    -- and tls_fp_catalog but at table granularity. Endpoint is called
+    -- without `?site=` to pull the whole map at once; on the demo we
+    -- have ≤O(10) clients, fits comfortably in 1m antibot_policy dict.
+    --
+    -- Host normalisation goes through policy.canonical_host so the
+    -- write key matches what policy.get() looks up at request time
+    -- (lowercased + length-capped). Backend may store a host with mixed
+    -- case via PATCH; without the same normalisation here, the edge
+    -- would silently miss and fall back to POOL_DEFAULT, masking active
+    -- mode for the affected client.
+    policy = {
+        name        = "policy",
+        endpoint    = "/catalog/policy",
+        dict_name   = "antibot_policy",
+        gen_key     = "antibot_policy_gen",
+        etag_key    = "antibot_policy_etag",
+        version_key = "antibot_policy_version",
+        apply = function(dict, entries, new_gen)
+            local canonical_host = require("policy").canonical_host
+            -- Pre-flight: backend ValidateSite is case-preserving
+            -- (validate.go:19-20), so two distinct policy rows whose
+            -- hosts differ only by case (`Foo.example.com` and
+            -- `foo.example.com`) collapse to the same shared_dict key
+            -- after canonical_host. Lua's pairs() iteration order is
+            -- unspecified, so picking "first-seen" would resolve which
+            -- mode wins arbitrarily and inconsistently across pulls.
+            -- Fail-stale instead: detect ALL collisions before any
+            -- write, return false → handle_response keeps the previous
+            -- gen, the operator sees an ERR for each duplicate and
+            -- collapses the rows at the backend (or fixes case there).
+            -- Skip empty keys (they were already silently ignored).
+            local seen = {}
+            local collided = false
+            for host, _ in pairs(entries) do
+                local key_host = canonical_host(host)
+                if key_host then
+                    if seen[key_host] then
+                        ngx.log(ngx.ERR, "antibot_policy: host case collision: '",
+                            host, "' and '", seen[key_host],
+                            "' both canonicalize to '", key_host,
+                            "' — failing the pull; collapse the duplicate at the backend")
+                        collided = true
+                    else
+                        seen[key_host] = host
+                    end
+                end
+            end
+            if collided then
+                return false, 0
+            end
+            local n = 0
+            for host, p in pairs(entries) do
+                local key_host = canonical_host(host)
+                if not key_host then
+                    ngx.log(ngx.WARN, "antibot_policy: skipping empty host key")
+                else
+                    local encoded, eerr = cjson.encode(p)
+                    if not encoded then
+                        ngx.log(ngx.ERR, "antibot_policy:encode failed: ",
+                            tostring(eerr), " (host=", host, ", gen=", new_gen, ")")
+                        return false, n
+                    end
+                    local ok, err = dict:set(key_host .. ":" .. new_gen, encoded)
+                    if not ok then
+                        ngx.log(ngx.ERR, "antibot_policy:set failed: ", err,
+                            " (host=", host, ", gen=", new_gen, ")")
+                        return false, n
+                    end
+                    n = n + 1
+                end
+            end
+            return true, n
+        end,
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "policy.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
 }
 
 -- bump_metric — best-effort counter increment on the `metrics` shared_dict.

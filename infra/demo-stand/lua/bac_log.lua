@@ -17,6 +17,7 @@
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt + null sentinels
+local policy     = require "policy"  -- per-host mode/strictness (B11)
 
 local _M = {}
 
@@ -24,12 +25,9 @@ local _M = {}
 -- EDGE_ID env var (must be listed in nginx.conf `env EDGE_ID;`).
 local EDGE_ID = os.getenv("EDGE_ID") or "stand-bac"
 
--- Per-resource business mode (shadow / active) stamped into each log
--- record. Phase 1 has no policy catalog and the stand's tls_fp_blocklist
--- ships empty (nothing is blocked), so every record is "shadow". Per-
--- resource modes arrive with the policy catalog (Phase 3); the field
--- name does not change.
-local MODE = "shadow"
+-- Per-request business mode/strictness come from policy[ngx.var.host]
+-- (B11). Unregistered host falls back to POOL_DEFAULT (shadow/standard)
+-- inside policy.get. Both fields are stable enum strings.
 
 -- action = the effective action the final rule's category implies, kept
 -- separate from verdict so analytics can distinguish "what was decided"
@@ -206,6 +204,11 @@ function _M.emit()
     local ua = ngx.var.http_user_agent
     if ua and #ua > 2048 then ua = ua:sub(1, 2048) end
 
+    -- Per-host policy for mode/strictness. Reader is null-safe: unregistered
+    -- host or absent shared_dict → POOL_DEFAULT (shadow/standard). Done once
+    -- per emit so a slow shared_dict miss doesn't double-count.
+    local p = policy.get(ngx.var.host)
+
     -- Optional/absent fields fall back to a JSON null sentinel so every
     -- record carries the full key set — a stable schema for the sink.
     local record = {
@@ -229,7 +232,8 @@ function _M.emit()
         verdict       = ctx.verdict,
         rule          = ctx.rule or cjson_base.null,
         action        = VERDICT_TO_ACTION[ctx.verdict] or "pass",
-        mode          = MODE,
+        mode          = p.mode,
+        strictness    = p.strictness,
         latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
         tags          = ctx.tags,
         flags         = ctx.flags,
