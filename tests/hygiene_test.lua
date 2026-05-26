@@ -8,6 +8,19 @@
 --   make test-docker     (inside openresty/openresty:alpine)
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
+
+-- Stub the `policy` module so `require "hygiene"` resolves under bare
+-- luajit. hygiene requires policy at module-top (B11 / 86exr05fn), and
+-- the real policy.lua pulls in cjson.safe which isn't shipped with the
+-- host luajit used by `make test-host`. The pure helpers covered here
+-- never invoke hygiene.run(), so the stub's bodies don't run — only its
+-- shape matters (same approach catalog_pull_test takes for cjson.safe).
+package.loaded["policy"] = {
+    enforce        = function() end,
+    get            = function() return { mode = "shadow", strictness = "standard" } end,
+    canonical_host = function(h) return h end,
+}
+
 local hygiene = require "hygiene"
 
 local failed, passed = 0, 0

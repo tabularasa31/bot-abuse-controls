@@ -85,12 +85,14 @@ end
 local VALID_MODES         = { shadow = true, active = true }
 local VALID_STRICTNESSES  = { standard = true, permissive = true }
 
--- get(host) → Policy table. Always non-nil. Falls back to POOL_DEFAULT on
--- any miss/error so callers can read `.mode` / `.strictness` directly
--- without nil-guards. The fallback also covers schema drift (missing /
--- invalid mode|strictness): pool default treats the host as shadow rather
--- than guessing, and the ERR-log surfaces the bad payload to the operator.
-function _M.get(host)
+-- lookup(host) — uncached read path: shared_dict + cjson.decode + enum
+-- guards. Always returns a non-nil Policy table; falls back to a fresh
+-- POOL_DEFAULT on any miss/error so callers can read `.mode` /
+-- `.strictness` directly without nil-guards. The fallback also covers
+-- schema drift (missing / invalid mode|strictness): pool default treats
+-- the host as shadow rather than guessing, and the ERR-log surfaces the
+-- bad payload to the operator.
+local function lookup(host)
     local key_host = canonical_host(host)
     if not key_host then return new_pool_default() end
     local dict = ngx.shared.antibot_policy
@@ -119,6 +121,43 @@ function _M.get(host)
             tostring(p.strictness), " — falling back to pool default")
         return new_pool_default()
     end
+    return p
+end
+
+-- get(host) → Policy table. Per-request memoization on ngx.ctx: the same
+-- host is read multiple times per request (policy.enforce in the cascade,
+-- bac_log.emit in log_by_lua), each call would otherwise repeat a
+-- shared_dict lookup + cjson.decode of the full Policy JSON. Cache is
+-- keyed by canonical host so /__policy?host=other still gets a fresh
+-- lookup for a different name. Cache lives for one request only and dies
+-- with ngx.ctx; gen-flips between two reads in the same request are
+-- intentionally not visible (consistency within a single request > 30s
+-- staleness window across requests).
+--
+-- READ-ONLY CONTRACT: callers MUST NOT mutate the returned table. The
+-- same instance is handed back for every get() on the same host in the
+-- same request — mutating it would smash the cached view for every
+-- subsequent caller in this request (most often bac_log.emit reading
+-- mode/strictness for the access record). If a future caller needs to
+-- augment per-host state, attach it to ngx.ctx, not to the Policy table.
+--
+-- The `if not ctx` fallback is a belt-and-braces guard for callers in
+-- phases where ngx.ctx isn't a table (e.g., balancer_by_lua* on some
+-- builds). It will never fire from init_by_lua* — accessing ngx.ctx in
+-- those phases raises before this check can run.
+function _M.get(host)
+    local ctx = ngx.ctx
+    if not ctx then return lookup(host) end
+    local key = canonical_host(host) or ""
+    local cache = ctx.policy_cache
+    if not cache then
+        cache = {}
+        ctx.policy_cache = cache
+    end
+    local hit = cache[key]
+    if hit ~= nil then return hit end
+    local p = lookup(host)
+    cache[key] = p
     return p
 end
 
