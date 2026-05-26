@@ -79,8 +79,13 @@ poll_until() {
 }
 
 # Stop a compose service without removing it (so we can start it again).
+# `-t 0` skips the SIGTERM grace period and sends SIGKILL immediately:
+# fail-stale tests need the backend gone NOW, not in 10s. Without this
+# the staleness gauge test (case 04) can fail because the backend keeps
+# serving pulls during graceful shutdown, resetting the gauge while
+# we're trying to measure it grow.
 compose_stop_svc() {
-    docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" stop "$1" >/dev/null
+    docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" stop -t 0 "$1" >/dev/null
 }
 
 compose_start_svc() {
