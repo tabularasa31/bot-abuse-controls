@@ -113,8 +113,135 @@
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
+      "description": "One row per request. JSON payload (Loki Line) is extracted into typed columns; high-cardinality fields stay readable here even though they're deliberately NOT in Loki labels.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "verdict" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "basic" } },
+              { "id": "mappings", "value": [
+                { "type": "value", "options": {
+                    "block":      { "color": "red",    "index": 0 },
+                    "pass":       { "color": "green",  "index": 1 },
+                    "challenge":  { "color": "yellow", "index": 2 },
+                    "allow":      { "color": "blue",   "index": 3 },
+                    "permissive": { "color": "purple", "index": 4 }
+                } }
+              ]},
+              { "id": "custom.width", "value": 90 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "latency_ms" },
+            "properties": [
+              { "id": "unit", "value": "ms" },
+              { "id": "custom.width", "value": 80 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "status" },
+            "properties": [ { "id": "custom.width", "value": 70 } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "ip" },
+            "properties": [ { "id": "custom.width", "value": 130 } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "tls_fp" },
+            "properties": [ { "id": "custom.width", "value": 280 } ]
+          }
+        ]
+      },
       "gridPos": { "h": 18, "w": 24, "x": 0, "y": 6 },
       "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "show": false },
+        "showHeader": true,
+        "sortBy": [ { "displayName": "time", "desc": true } ]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "source": "Line", "format": "json", "keepTime": false }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true,
+              "id": true,
+              "tsNs": true,
+              "labels": true,
+              "labelTypes": true,
+              "container": true,
+              "service_name": true,
+              "detected_level": true,
+              "job": true,
+              "edge_id": true,
+              "action": true,
+              "stage": true,
+              "mode": true,
+              "asn": true,
+              "geo_country": true,
+              "resource_id": true,
+              "tls_alpn": true,
+              "tls_sni_present": true,
+              "tls_cipher_count": true,
+              "flags": true,
+              "staging_match": true,
+              "strictness": true,
+              "method": true,
+              "path": true,
+              "timestamp": true
+            },
+            "indexByName": {
+              "Time":        0,
+              "verdict":     1,
+              "rule":        2,
+              "status":      3,
+              "host":        4,
+              "ip":          5,
+              "latency_ms":  6,
+              "tls_fp":      7,
+              "ua":          8,
+              "tags":        9,
+              "request_id": 10
+            },
+            "renameByName": {
+              "Time": "time",
+              "latency_ms": "latency"
+            }
+          }
+        }
+      ],
+      "title": "BAC records (per-request)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Raw JSON-line view — open this when you need a field that the table above hides (path, method, geo_country, asn, full TLS sub-fields, etc.).",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 24 },
+      "id": 4,
       "options": {
         "dedupStrategy": "none",
         "enableLogDetails": true,
@@ -134,7 +261,7 @@
           "refId": "A"
         }
       ],
-      "title": "Raw BAC logs",
+      "title": "Raw JSON (collapse-friendly details)",
       "type": "logs"
     }
   ],
