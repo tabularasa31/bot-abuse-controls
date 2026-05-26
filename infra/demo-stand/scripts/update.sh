@@ -119,6 +119,26 @@ else
   docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" openresty -s reload
 fi
 
+# Promtail config is bind-mounted from infra/demo-stand/observability/ into a
+# separate service gated by `--profile observability`. promtail reads its
+# config once at start, so a `git pull` that touches observability/ doesn't
+# take effect until the container restarts — and the nginx-demo recreate
+# above does NOT cover it (the service name in --force-recreate is hard-coded).
+# Detect a change to that directory and restart promtail if it's actually
+# running on this host. Best-effort: hosts that never enabled the profile
+# don't have the container to restart and the grep below silently no-ops; a
+# restart failure logs a warning but doesn't block marker advance since the
+# nginx-demo deploy (the live serving surface) already succeeded.
+if [ -n "$last" ] && ! git diff --quiet "$last" "$head" -- \
+     "infra/demo-stand/observability/"; then
+  if docker compose -f "$COMPOSE_FILE" --profile observability ps \
+       --services --filter status=running 2>/dev/null | grep -qx promtail; then
+    echo "$(date -Is) promtail config changed — restarting promtail"
+    docker compose -f "$COMPOSE_FILE" --profile observability restart promtail || \
+      echo "$(date -Is) WARN: promtail restart failed (continuing)" >&2
+  fi
+fi
+
 # Reload succeeded: expose the live sha to /__version and record success so
 # the next tick no-ops.
 printf '%s\n' "${head:0:7}" > "$REVISION_FILE"

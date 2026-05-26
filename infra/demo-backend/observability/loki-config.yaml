@@ -44,8 +44,13 @@ schema_config:
 limits_config:
   retention_period: 168h
   reject_old_samples: true
-  # Buffered-on-edge tolerance: promtail WAL can replay logs up to this old.
-  reject_old_samples_max_age: 24h
+  # Validator (pkg/distributor/validator.go) compares this against the
+  # **entry's** timestamp — and promtail's `timestamp` pipeline stage
+  # sets that to the real bac_log.lua iso8601_ms event time, NOT the
+  # ingest wall-clock. With a 24h cap a >24h promtail outage would
+  # silently lose history on WAL replay; align with retention_period
+  # so the cap matches what we actually keep.
+  reject_old_samples_max_age: 168h
   ingestion_rate_mb: 8
   ingestion_burst_size_mb: 16
   max_streams_per_user: 5000

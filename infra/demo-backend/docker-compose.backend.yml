@@ -148,10 +148,25 @@ services:
   loki:
     image: grafana/loki:3.4.1
     container_name: antibot-loki
+    # Profile-gated so the default `docker compose up -d` keeps bringing up
+    # only the existing postgres / backend / lb services (the catalog +
+    # policy + log-receiver path). Operators opt in to the BAC log viewer
+    # with `--profile observability`.
+    profiles: ["observability"]
     command: ["-config.file=/etc/loki/config.yaml"]
     volumes:
       - ./observability/loki-config.yaml:/etc/loki/config.yaml:ro
       - loki-data:/loki
+    healthcheck:
+      # `/ready` returns 200 once the ingester is ready to accept pushes.
+      # Without this Grafana's depends_on:service_healthy can't gate the
+      # datasource health-check against Loki's real cold-start latency
+      # (TSDB schema + index + compactor init can take ~10-20s).
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
     # No `ports:` — Loki is reachable only via the compose network. The
     # write path enters through the lb-nginx mTLS-gated location; the read
@@ -162,8 +177,10 @@ services:
   grafana:
     image: grafana/grafana:11.4.0
     container_name: antibot-grafana
+    profiles: ["observability"]
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
     environment:
       # Grafana sits behind the existing TLS-terminating lb-nginx at the
       # /grafana/ sub-path. With serve_from_sub_path=true Grafana itself
@@ -171,7 +188,16 @@ services:
       # rather than rewriting it (simpler, fewer static-asset gotchas).
       GF_SERVER_ROOT_URL: "https://${BACKEND_HOST:-antibot.internal}/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env (see .env.example)}"
+      # Empty default (not :? required) for the same reason promtail's
+      # LOKI_PUSH_URL uses :- on the edge: compose evaluates ${VAR:?}
+      # at parse time regardless of whether the profile is active, so a
+      # required form here would break `docker compose -f
+      # docker-compose.backend.yml up -d` (the default workflow) for
+      # operators who never enable the observability profile. Unset =
+      # Grafana falls back to its built-in `admin/admin` default and
+      # forces a password change on first login. .env.example marks this
+      # as required when the profile IS enabled.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-}"
       # Don't phone home from a demo VM that may be behind CDN operator's egress
       # filtering — and there's nothing useful to report from this scale.
       GF_ANALYTICS_REPORTING_ENABLED: "false"

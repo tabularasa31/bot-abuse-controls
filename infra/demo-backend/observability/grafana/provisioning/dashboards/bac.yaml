@@ -9,8 +9,14 @@ providers:
     orgId: 1
     folder: BAC
     type: file
-    disableDeletion: false
-    editable: true
-    allowUiUpdates: true
+    # The dashboard JSON is bind-mounted :ro from the repo (the file IS
+    # the source of truth, edited via PR). Match that with editable=false
+    # + allowUiUpdates=false so Grafana renders a "read-only" badge in
+    # the UI rather than offering a Save button whose writeback would
+    # EROFS-fail against the mount. UI users who want to experiment can
+    # "Save As..." to create a personal copy in Grafana's DB.
+    disableDeletion: true
+    editable: false
+    allowUiUpdates: false
     options:
       path: /var/lib/grafana/dashboards/bac

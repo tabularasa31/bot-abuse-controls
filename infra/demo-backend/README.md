@@ -360,6 +360,10 @@ edge-stand (promtail) ──HTTPS push──► lb:443 ──► /loki/api/v1/pu
 
 ### Setup
 
+The loki + grafana services are behind `profiles: [observability]` —
+the default `docker compose up -d` keeps bringing up only the catalog +
+policy + log-receiver services. Enable the viewer with the flag:
+
 ```sh
 # .env on this VM:
 GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 24)
@@ -371,9 +375,13 @@ GF_ANON=false
 # Edit auth/grafana-cidr.conf with the real viewer source CIDR(s).
 # `nginx -t` in the lb container will fail loudly if the file is missing.
 
-docker compose -f docker-compose.backend.yml up -d
-docker compose -f docker-compose.backend.yml ps   # loki + grafana healthy
+docker compose -f docker-compose.backend.yml --profile observability up -d
+docker compose -f docker-compose.backend.yml --profile observability ps
+# postgres / backend-1 / backend-2 / lb / loki / grafana all healthy
 ```
+
+To take the viewer down without stopping the rest:
+`docker compose -f docker-compose.backend.yml stop loki grafana`.
 
 Then on the edge VM, set `LOKI_PUSH_URL` in its `.env` and bring up
 the `observability` profile — see
