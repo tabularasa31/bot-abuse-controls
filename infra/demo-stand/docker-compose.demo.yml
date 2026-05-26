@@ -64,6 +64,22 @@ services:
       - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
       - "${DEMO_BIND_IP:-0.0.0.0}:80:80"   # 80 reserved for ACME http-01 challenge
 
+    # Pin upstream resolution for hosts that the cascade itself is the
+    # public-facing entry-point for. Without this, when `dashboard.example.com`
+    # public DNS points at THIS edge VM, an `ORIGIN_URL=https://dashboard.example.com`
+    # would resolve back to the edge and proxy_pass loops nginx into itself.
+    # /etc/hosts inside the container forces the upstream lookup to the
+    # private dashboard-backend address (the VM where Caddy + the platform-app
+    # actually live), so the cascade still proxies to the real origin
+    # regardless of what public DNS does. Add more pairs here when new
+    # cascade-fronted hostnames go live.
+    #
+    # The backend IP is parameterised so a staging/local deploy can override
+    # it via .env without touching this committed file; the default matches
+    # the current production example backend.
+    extra_hosts:
+      - "dashboard.example.com:${DASHBOARD_BACKEND_IP:-<TENANT_ORIGIN_IP>}"
+
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
       # http-level resolver, included from nginx.demo.conf. Production
