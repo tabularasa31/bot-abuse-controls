@@ -24,6 +24,16 @@ package.loaded["policy"] = {
     canonical_host = function(h) return h end,
 }
 
+-- policy_matchers (86exr05xt) — same stub rationale: tests cover pure
+-- helpers that never reach the per-host matcher path. EMPTY sentinel
+-- shape mirrors the real module.
+package.loaded["policy_matchers"] = {
+    get   = function() return { whitelist = nil, blocklist = nil, asn_block = nil,
+                                geo_whitelist = nil, ua_blacklist_re = nil } end,
+    EMPTY = { whitelist = nil, blocklist = nil, asn_block = nil,
+              geo_whitelist = nil, ua_blacklist_re = nil },
+}
+
 local reputation = require "reputation"
 
 local failed, passed = 0, 0

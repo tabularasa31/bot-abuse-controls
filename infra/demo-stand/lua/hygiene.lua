@@ -34,13 +34,18 @@
 --
 -- Blocking checks, in order (first hygiene match wins; this only decides which
 -- hygiene rule is recorded — it does not stop the wider cascade):
---   1. method_not_allowed — method outside the configured whitelist
---   2. ua_blacklist       — UA matches the combined regex of ACTIVE patterns.
---                           Staged patterns are dropped (build_combined skips
---                           status=staging) and not yet recorded into
---                           staging_match: A11 implemented staging_match for the
---                           three tls_fp catalogs (tls_fp.lua); extending it to
---                           ua_blacklist / ip_blocklist is the "и далее" follow-up.
+--   1.  method_not_allowed     — method outside the configured whitelist
+--   2.  ua_blacklist           — UA matches the combined regex of ACTIVE
+--                                system patterns. Staged patterns are dropped
+--                                (build_combined skips status=staging) and not
+--                                yet recorded into staging_match: A11 implemented
+--                                staging_match for the three tls_fp catalogs
+--                                (tls_fp.lua); extending it to ua_blacklist /
+--                                ip_blocklist is the "и далее" follow-up.
+--   2b. policy.ua_blacklist    — UA matches the per-host pattern list pulled
+--                                from policy[host].ua_blacklist (86exr05xt).
+--                                Compiled once per (host, gen) in
+--                                policy_matchers; empty list = no-op.
 --
 -- resource_id is intentionally NOT derived here: the edge works from Host
 -- only and the backend enriches resource_id on log ingest (ADR-005,
@@ -55,7 +60,8 @@
 -- every worker for free; no shared dict, no generation handshake (hot-reload
 -- is out of scope).
 
-local policy = require "policy"
+local policy          = require "policy"
+local policy_matchers = require "policy_matchers"
 
 local _M = {
     enabled    = true,
@@ -147,9 +153,12 @@ function _M.run()
         return true
     end
 
-    -- 2. ua_blacklist (active patterns).
+    -- 2. ua_blacklist (active patterns). System list first, then the
+    --    per-host list from policy[host].ua_blacklist. Both are
+    --    namespaced in the log via the rule name (`ua_blacklist` vs
+    --    `policy.ua_blacklist`) so analytics can attribute hits.
+    local ua = ngx.var.http_user_agent or ""
     if _M.active_re then
-        local ua = ngx.var.http_user_agent or ""
         -- "jo": JIT + per-worker compile cache keyed by the regex string.
         -- ngx.re.find returns (nil, nil, err) on a bad pattern rather than
         -- throwing — treat that as fail-open and never flag on our own error.
@@ -158,6 +167,22 @@ function _M.run()
             ngx.log(ngx.ERR, "ua_blacklist regex error, fail-open: ", err)
         elseif from then
             bac_log.set_verdict("hygiene", "block", "ua_blacklist")
+            policy.enforce(403)
+            return true
+        end
+    end
+
+    -- 2b. per-host ua_blacklist (policy[host].ua_blacklist). Compiled
+    -- once per (host, gen) in policy_matchers via the same combined-
+    -- alternation shape build_combined produces. nil when the host has
+    -- no custom patterns (pool default) — pre-PR behaviour preserved.
+    local pm = policy_matchers.get(ngx.var.host)
+    if pm.ua_blacklist_re then
+        local from, _, err = ngx.re.find(ua, pm.ua_blacklist_re, "jo")
+        if err then
+            ngx.log(ngx.ERR, "policy.ua_blacklist regex error, fail-open: ", err)
+        elseif from then
+            bac_log.set_verdict("hygiene", "block", "policy.ua_blacklist")
             policy.enforce(403)
             return true
         end

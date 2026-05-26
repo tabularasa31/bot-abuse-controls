@@ -49,19 +49,30 @@
 --     request ASN is in asn_datacenters.conf. Accumulates in `tags` like
 --     hygiene:header_anomaly, independent of the verdict.
 --   * geo_blocklist — blocking rule, country NOT in the allowed-countries
---     whitelist. Its only source is per-resource policy[host].geo_whitelist
---     (Phase 3); there is no system-wide country list (geo-allow is a
---     per-resource choice, not global). With no policy catalog on the stand
---     yet the rule is DORMANT: wired + unit-tested, but its allow-set is empty
---     so it never fires. Phase 3 supplies the per-host whitelist; the code
---     here is unchanged. (Same "rule wired, data empty" shape as ua_blacklist
---     / ip_blocklist.)
+--     whitelist. Source is per-resource policy[host].geo_whitelist; there
+--     is no system-wide country list (geo-allow is a per-resource choice).
+--     Live as of 86exr05xt — fires when the host's policy has a non-empty
+--     geo_whitelist and the request country is outside it.
 --
--- Per-resource policy ip_whitelist is a future task (Phase 3). The
--- verified-bot fastpath (B8) lives in verified_bots.lua and is invoked
--- inline below between the ip_whitelist and ip_blocklist checks.
+-- Per-host policy lists (86exr05xt). For each request the stage also
+-- matches against policy[host].{ip_whitelist, ip_blocklist, asn_block,
+-- geo_whitelist} pulled from antibot_policy shared_dict and compiled
+-- through policy_matchers.lua (lrucache by (host, gen) — see that
+-- module's header). Rule names in the log are namespaced so analytics
+-- can split per-host hits from system-list hits:
+--   * `ip_whitelist`        / `policy.ip_whitelist`
+--   * `ip_blocklist`        / `policy.ip_blocklist`
+--   * (no system asn rule)  / `policy.asn_block`
+--   * (no system geo rule)  / `policy.geo_blocklist`
+-- Empty per-host lists (pool default, untouched dashboard) are the
+-- backwards-compatible no-op: policy_matchers returns the EMPTY
+-- sentinel and every per-host check short-circuits at the first guard.
+-- The verified-bot fastpath (B8) lives in verified_bots.lua and is
+-- invoked inline below between the whitelist allow-checks and the
+-- blocklist block-checks.
 
-local policy = require "policy"
+local policy          = require "policy"
+local policy_matchers = require "policy_matchers"
 
 local _M = {
     enabled        = true,
@@ -221,11 +232,26 @@ function _M.run()
         bac_log.add_tag("reputation:asn_dc")
     end
 
+    -- Per-host policy matchers (86exr05xt). Compiled once per (host, gen)
+    -- and lru-cached; the call below is a constant-time dictionary lookup
+    -- after the first hit per worker. EMPTY sentinel means the host has
+    -- no per-host lists at all — every `if pm.x then ...` guard then
+    -- short-circuits and the stage runs at pre-PR cost.
+    local host = ngx.var.host
+    local pm   = policy_matchers.get(host)
+
     -- Verdict rules, first match wins within the stage (allow before blocking,
     -- vision §2.3 → §2.4 → geo). A match returns so a later same-stage rule
-    -- doesn't overwrite it under bac_log's last-writer-wins.
+    -- doesn't overwrite it under bac_log's last-writer-wins. System lists
+    -- are checked alongside per-host lists in each category — rule name
+    -- distinguishes them in the log (`ip_whitelist` vs `policy.ip_whitelist`)
+    -- so analytics can attribute hits to the right source.
     if _M.whitelist and _M.whitelist:match(ip) then
         bac_log.set_verdict("reputation", "allow", "ip_whitelist")
+        return true
+    end
+    if pm.whitelist and pm.whitelist:match(ip) then
+        bac_log.set_verdict("reputation", "allow", "policy.ip_whitelist")
         return true
     end
 
@@ -259,16 +285,30 @@ function _M.run()
         policy.enforce(403)
         return true
     end
+    if pm.blocklist and pm.blocklist:match(ip) then
+        bac_log.set_verdict("reputation", "block", "policy.ip_blocklist")
+        policy.enforce(403)
+        return true
+    end
 
-    -- geo_blocklist — dormant in Phase 1: the allowed-countries whitelist comes
-    -- from per-resource policy[host].geo_whitelist (Phase 3), which the stand
-    -- has no source for yet, so `allow` is empty and country_blocked is always
-    -- false. When the policy catalog lands this resolves the per-host set; the
-    -- check below is unchanged.
-    if _M.geo_enabled then
-        local allow = nil  -- Phase 3: policy[host].geo_whitelist for ngx.var.host
-        if _M.country_blocked(allow, cc) then
-            bac_log.set_verdict("reputation", "block", "geo_blocklist")
+    -- Per-host asn_block. The asn_dc tag above is system-level
+    -- (analytics-only); the per-host block is a separate rule the client
+    -- opts into via policy. Reads asn from the geoip lookup we already
+    -- did; tostring matches policy_matchers.to_set which keys by string.
+    if asn and pm.asn_block and pm.asn_block[asn] then
+        bac_log.set_verdict("reputation", "block", "policy.asn_block")
+        policy.enforce(403)
+        return true
+    end
+
+    -- geo_blocklist. Per vision.md geo gating is per-resource — there is
+    -- no system-wide country whitelist (geo-allow is a client choice).
+    -- When pm.geo_whitelist is nil the rule never fires; when set, any
+    -- country not in the set blocks. The `_M.geo_enabled` toggle stays as
+    -- a master kill-switch (incident rollback for the whole rule).
+    if _M.geo_enabled and pm.geo_whitelist then
+        if _M.country_blocked(pm.geo_whitelist, cc) then
+            bac_log.set_verdict("reputation", "block", "policy.geo_blocklist")
             policy.enforce(403)
             return true
         end
