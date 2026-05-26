@@ -166,14 +166,25 @@ end
 -- the two would resurface the case-sensitivity bug this guards against.
 _M.canonical_host = canonical_host
 
--- enforce(status) — physically exit with `status` iff the current Host's
--- policy is mode=active. mode=shadow returns nil so the caller falls
--- through to its next instruction (typically continuing the cascade and
--- proxying to origin). The would-be verdict must already be recorded via
--- bac_log.set_verdict before this call so analytics see the block intent
--- in either mode.
-function _M.enforce(status)
+-- enforce(status, headers) — physically exit with `status` iff the
+-- current Host's policy is mode=active. mode=shadow returns nil so the
+-- caller falls through to its next instruction (typically continuing
+-- the cascade and proxying to origin). The would-be verdict must
+-- already be recorded via bac_log.set_verdict before this call so
+-- analytics see the block intent in either mode.
+--
+-- Optional `headers` table is applied via ngx.header[k]=v BEFORE the
+-- exit — used for rate-limit's `Retry-After` (phase1-spec §"429 с
+-- Retry-After") and future challenge response headers. Skipped in
+-- shadow mode: the response is going to origin, our headers would
+-- pollute the user's traffic.
+function _M.enforce(status, headers)
     if _M.get(ngx.var.host).mode == "active" then
+        if headers then
+            for k, v in pairs(headers) do
+                ngx.header[k] = v
+            end
+        end
         return ngx.exit(status)
     end
 end
