@@ -44,7 +44,8 @@ jobs:
                    luajit tests/tls_fp_test.lua && \
                    luajit tests/catalog_pull_test.lua && \
                    luajit tests/log_shipper_test.lua && \
-                   luajit tests/verified_bots_test.lua'
+                   luajit tests/verified_bots_test.lua && \
+                   luajit tests/policy_matchers_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)
@@ -133,9 +134,11 @@ jobs:
           persist-credentials: true
       - name: Run shellcheck
         run: |
+          # -x: follow `. ./lib.sh` sources (otherwise SC1091 fires on
+          # every case sourcing tests/integration/lib.sh).
           docker run --rm -v "$PWD:/work" -w /work \
             koalaman/shellcheck:stable \
-            $(find scripts infra -name '*.sh')
+            -x $(find scripts infra tests -name '*.sh')
 
   validate-catalogs:
     name: Validate catalogs/ (filesource decode)
@@ -274,3 +277,37 @@ jobs:
         run: |
           cd infra/demo-backend
           docker compose -f docker-compose.backend.yml down -v --remove-orphans
+
+  test-integration:
+    name: Integration (Channel C contract, D8/B13)
+    # End-to-end harness from infra/test-harness/: postgres + antibot-backend
+    # + edge under docker compose, four contract scenarios from
+    # vision.md §«Обновление каталогов» (latency / atomicity / fail-stale /
+    # staleness gauge). Catches regressions that pure-Lua unit tests can't
+    # see — wire-level swap behaviour, cross-process timing, the staleness
+    # metric as an external observable.
+    #
+    # Wall time budget: ~90s on a warm runner. The harness compresses pull
+    # intervals to 1-2s (vs production 5s+30s) so the contract is asserted
+    # in seconds, not minutes — see infra/test-harness/README.md
+    # §"What's different vs production".
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          persist-credentials: true
+      - name: Bring up integration stack
+        run: make test-integration-up
+      - name: Run cases
+        run: make test-integration-run
+      - name: Dump container logs (on success or failure)
+        if: always()
+        run: |
+          docker compose -f infra/test-harness/docker-compose.test.yml \
+            -p bac-test ps || true
+          docker compose -f infra/test-harness/docker-compose.test.yml \
+            -p bac-test logs --no-color --tail=300 || true
+      - name: Tear down integration stack
+        if: always()
+        run: make test-integration-down
