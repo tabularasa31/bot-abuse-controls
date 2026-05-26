@@ -47,7 +47,14 @@ test-docker:
 # everything down regardless of outcome. Pass -v on the down step so
 # postgres tmpfs / images that linger don't accumulate across CI jobs.
 # `--wait` blocks `up` until all healthchecks are green; failures bail.
-test-integration: test-integration-up test-integration-run
+# Local convenience target: full lifecycle in a single shell so the
+# trap runs even if `up` fails (CI uses the granular up/run/down
+# targets directly so it can dump container logs between run and
+# down — see ci.yml integration job).
+test-integration:
+	@trap '$(MAKE) test-integration-down' EXIT INT TERM; \
+	  $(MAKE) test-integration-up && \
+	  $(MAKE) test-integration-run
 
 test-integration-up:
 	$(HARNESS_DIR)/scripts/setup.sh

@@ -47,8 +47,11 @@ reader() {
     local idx="$1"
     local stats_file="$2"
     local consistent=0 malformed=0 failed=0
-    local end=$(( $(date +%s) + LOAD_DURATION ))
-    while [ "$(date +%s)" -lt "$end" ]; do
+    # bash $SECONDS is monotonic seconds-since-shell-start; using
+    # $(date +%s) in this tight loop would fork+exec date on every
+    # iteration and pin a CPU on what should be a curl-bound workload.
+    local end=$(( SECONDS + LOAD_DURATION ))
+    while [ "$SECONDS" -lt "$end" ]; do
         local body
         if ! body="$(edge_curl --max-time 2 "${EDGE_URL}/__policy?host=${TEST_HOST}" 2>/dev/null)"; then
             failed=$((failed + 1))
