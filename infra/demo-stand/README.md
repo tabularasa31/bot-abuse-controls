@@ -188,6 +188,51 @@ commit `kill_switch.local.conf` — it is operational state, gitignored; only th
 no `BAC_LOG` lines (`docker logs --since 1m nginx-demo | grep BAC_LOG`); with the
 `tls_fp` kill on, `BAC_LOG` lines drop their `tls_fp` field and `tls_fp:*` tags.
 
+## Challenge HMAC secret (Phase 4)
+
+Phase 4 (L5 active verification) подписывает clearance cookie и self-signed
+nonce challenge-страницы локальным HMAC-секретом — без обращения к backend
+(vision §«HMAC secret для clearance cookie», §Channel A). Один секрет на весь
+edge-пул; в проде доставляется через Puppet (Channel A), на демо-стенде Channel
+A = file mount, как и для `./certs/*.pem` и `kill_switch.local.conf`.
+
+**Файл.** `infra/demo-stand/certs/challenge_secret.key` — одна строка
+base64 (32+ байта энтропии). Bind-mount в контейнер на
+`/etc/nginx/certs/challenge_secret.key` (override через env
+`CHALLENGE_HMAC_SECRET_FILE`). `*.key` уже в `.gitignore` — секрет в репо не
+попадёт.
+
+**Генерация.**
+
+```sh
+./infra/demo-stand/scripts/generate-challenge-secret.sh
+```
+
+Скрипт пишет файл с правами `600` и печатает 8-hex fingerprint — тот же, что
+стенд показывает после load в `/__version` (`challenge_secret_fp: …`) и в
+`/__admin` (строка «Challenge HMAC secret»). Сам секрет наружу не выводится
+никогда.
+
+**Ротация = `openresty -s reload`.** `init_by_lua` перезапускается на каждом
+reload и перечитывает файл; cookie, подписанные старым секретом, перестают
+проходить HMAC verify на L2.1 — клиент идёт через каскад до L5 и получает
+новую cookie. Это by-design (vision §«Ротация»: «новая версия через PR +
+reload nginx; ротация инвалидирует все ранее выданные cookie разом»).
+
+```sh
+rm  infra/demo-stand/certs/challenge_secret.key
+./infra/demo-stand/scripts/generate-challenge-secret.sh
+docker compose -f infra/demo-stand/docker-compose.demo.yml \
+    exec nginx-demo openresty -s reload
+curl -k https://<host>/__version | grep challenge_secret_fp   # новый fp
+```
+
+**Failure-режим.** Если файла нет — стенд стартует, печатает WARN в
+error.log, L2.1 cookie verify и L5 cookie issue откажутся работать (Phase 4
+по факту off). Phase 1-3 запросы продолжают идти. При пустом или коротком
+(<32 байт) файле — ERR + тот же fail-closed путь. Сам секрет в логах не
+светим, только fingerprint.
+
 ## Migrating a snapshot deploy to a git checkout
 
 If `~/abuse-controls` on the VM is a file copy (no `.git`), turn it into a
@@ -331,7 +376,7 @@ infra/demo-stand/
 ├── README.md                       (this file)
 ├── nginx.demo.conf                 nginx config with all the scenario endpoints
 ├── docker-compose.demo.yml         stock openresty/openresty:alpine + bind mounts
-├── certs/                          TLS material (gitignored)
+├── certs/                          TLS material + challenge_secret.key (gitignored)
 ├── config/                         cascade config files, read at init_by_lua (config.lua)
 │   ├── defaults.conf               thresholds, rule toggles, kill_switch baseline (git-tracked)
 │   ├── kill_switch.local.conf.example   operator kill-switch template (copy → .local.conf, gitignored)
@@ -346,7 +391,8 @@ infra/demo-stand/
 │   ├── recent.lua                  last-N request ring buffer for /__admin (shared_dict)
 │   ├── probe.lua                   /__fp educational endpoint
 │   ├── bac_log.lua                 Phase 1 structured-log contract (init/set_verdict/add_tag/emit)
-│   └── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
+│   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
+│   └── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
 └── sites/default-site/
     └── index.html                  demo landing page (served via content_by_lua)
 ```
