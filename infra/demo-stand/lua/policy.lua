@@ -134,9 +134,17 @@ end
 -- intentionally not visible (consistency within a single request > 30s
 -- staleness window across requests).
 --
--- Outside an OpenResty request (no ngx.ctx) the cache is bypassed and
--- every call hits the uncached lookup — relevant for timer-phase /
--- init-phase callers that have no per-request scope.
+-- READ-ONLY CONTRACT: callers MUST NOT mutate the returned table. The
+-- same instance is handed back for every get() on the same host in the
+-- same request — mutating it would smash the cached view for every
+-- subsequent caller in this request (most often bac_log.emit reading
+-- mode/strictness for the access record). If a future caller needs to
+-- augment per-host state, attach it to ngx.ctx, not to the Policy table.
+--
+-- The `if not ctx` fallback is a belt-and-braces guard for callers in
+-- phases where ngx.ctx isn't a table (e.g., balancer_by_lua* on some
+-- builds). It will never fire from init_by_lua* — accessing ngx.ctx in
+-- those phases raises before this check can run.
 function _M.get(host)
     local ctx = ngx.ctx
     if not ctx then return lookup(host) end
