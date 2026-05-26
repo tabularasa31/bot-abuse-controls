@@ -55,6 +55,8 @@
 -- every worker for free; no shared dict, no generation handshake (hot-reload
 -- is out of scope).
 
+local policy = require "policy"
+
 local _M = {
     enabled    = true,
     method_set = {},
@@ -128,7 +130,6 @@ function _M.run()
     if not _M.enabled then return false end
 
     local bac_log = require "bac_log"
-    local policy  = require "policy"
 
     -- Informational tag — evaluated first and unconditionally so it is
     -- recorded even when a blocking rule fires below (tags accumulate

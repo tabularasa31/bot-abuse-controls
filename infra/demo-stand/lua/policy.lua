@@ -85,12 +85,14 @@ end
 local VALID_MODES         = { shadow = true, active = true }
 local VALID_STRICTNESSES  = { standard = true, permissive = true }
 
--- get(host) → Policy table. Always non-nil. Falls back to POOL_DEFAULT on
--- any miss/error so callers can read `.mode` / `.strictness` directly
--- without nil-guards. The fallback also covers schema drift (missing /
--- invalid mode|strictness): pool default treats the host as shadow rather
--- than guessing, and the ERR-log surfaces the bad payload to the operator.
-function _M.get(host)
+-- lookup(host) — uncached read path: shared_dict + cjson.decode + enum
+-- guards. Always returns a non-nil Policy table; falls back to a fresh
+-- POOL_DEFAULT on any miss/error so callers can read `.mode` /
+-- `.strictness` directly without nil-guards. The fallback also covers
+-- schema drift (missing / invalid mode|strictness): pool default treats
+-- the host as shadow rather than guessing, and the ERR-log surfaces the
+-- bad payload to the operator.
+local function lookup(host)
     local key_host = canonical_host(host)
     if not key_host then return new_pool_default() end
     local dict = ngx.shared.antibot_policy
@@ -119,6 +121,35 @@ function _M.get(host)
             tostring(p.strictness), " — falling back to pool default")
         return new_pool_default()
     end
+    return p
+end
+
+-- get(host) → Policy table. Per-request memoization on ngx.ctx: the same
+-- host is read multiple times per request (policy.enforce in the cascade,
+-- bac_log.emit in log_by_lua), each call would otherwise repeat a
+-- shared_dict lookup + cjson.decode of the full Policy JSON. Cache is
+-- keyed by canonical host so /__policy?host=other still gets a fresh
+-- lookup for a different name. Cache lives for one request only and dies
+-- with ngx.ctx; gen-flips between two reads in the same request are
+-- intentionally not visible (consistency within a single request > 30s
+-- staleness window across requests).
+--
+-- Outside an OpenResty request (no ngx.ctx) the cache is bypassed and
+-- every call hits the uncached lookup — relevant for timer-phase /
+-- init-phase callers that have no per-request scope.
+function _M.get(host)
+    local ctx = ngx.ctx
+    if not ctx then return lookup(host) end
+    local key = canonical_host(host) or ""
+    local cache = ctx.policy_cache
+    if not cache then
+        cache = {}
+        ctx.policy_cache = cache
+    end
+    local hit = cache[key]
+    if hit ~= nil then return hit end
+    local p = lookup(host)
+    cache[key] = p
     return p
 end
 
