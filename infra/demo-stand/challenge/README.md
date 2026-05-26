@@ -9,16 +9,19 @@ Puppet (`modules/nginx/files/lua/nginx2/`), но контракт «один ф�
 
 ## Файлы
 
-- `page.html` — единственный шаблон. Edge подставляет в плейсхолдеры:
+- `page.html` — единственный шаблон. Edge подставляет в плейсхолдеры на render:
   - `{{NONCE}}` — base64url payload + HMAC, выдается `challenge.issue_nonce(host)`
     (см. [../lua/challenge.lua](../lua/challenge.lua)). Подписан тем же HMAC
     secret'ом, что и clearance cookie ([C1](../lua/challenge_secret.lua));
     содержит `host` + `expiry` (TTL 60с). Любой proxy пула валидирует без
     shared state.
   - `{{EXPIRY}}` — unix-timestamp истечения nonce (для дебага в DevTools).
-  - `{{CASCADE_VERSION}}` — semver из [../CASCADE_VERSION](../CASCADE_VERSION).
-    Также присутствует в `<meta name="cascade-version">` и в HTML-комментарии;
-    init_by_lua сверяет meta с файлом и фейлит nginx старт при расхождении.
+
+  Версия каскада в шаблоне — **литералы** (не плейсхолдеры): в
+  `<meta name="cascade-version">`, в HTML-комментарии и в
+  `data-cascade-version` зашита та версия, с которой шаблон совместим.
+  `init_by_lua` сверяет meta с [../CASCADE_VERSION](../CASCADE_VERSION) и
+  фейлит nginx старт при расхождении.
 
 ## Контракт с C5 (verify endpoint)
 
@@ -60,6 +63,7 @@ Bump обязателен в любом PR, который меняет:
 - набор fingerprint-полей,
 - путь verify endpoint'a.
 
-Bump = одна строка в [../CASCADE_VERSION](../CASCADE_VERSION) и одно place в
-[`page.html`](page.html) (в `<meta>` и в комментарии). `init_by_lua` валит
-старт, если они разъехались.
+Bump = одна строка в [../CASCADE_VERSION](../CASCADE_VERSION) + замена всех
+литералов версии в [`page.html`](page.html) (HTML-комментарий + `<meta>` +
+`data-cascade-version`). `init_by_lua` валит старт, если meta и
+`CASCADE_VERSION` разъехались — это и есть страховка от забытого bump'a.

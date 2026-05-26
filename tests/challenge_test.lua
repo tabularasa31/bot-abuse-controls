@@ -86,6 +86,10 @@ local function write_tmp(content)
 end
 
 local function tmp_template(version)
+    -- Version is baked in as a literal (mirrors the real page.html: meta
+    -- tag is the source of truth, render() only substitutes per-request
+    -- NONCE/EXPIRY). Bumping the version = editing both CASCADE_VERSION
+    -- and every literal occurrence in the template.
     return write_tmp(string.format([[
 <!doctype html>
 <!-- cascade-version: %s -->
@@ -93,9 +97,9 @@ local function tmp_template(version)
 <meta name="cascade-version" content="%s">
 </head><body>
 <div id="challenge-data" data-nonce="{{NONCE}}" data-expiry="{{EXPIRY}}"
-     data-cascade-version="{{CASCADE_VERSION}}"></div>
+     data-cascade-version="%s"></div>
 </body></html>
-]], version, version))
+]], version, version, version))
 end
 
 local function load_challenge_with(version_file, template_file)
@@ -202,9 +206,8 @@ tests.render_substitutes = function()
     if not html then error("render failed: " .. tostring(err)) end
     if html:find("{{NONCE}}", 1, true) then error("NONCE placeholder not substituted") end
     if html:find("{{EXPIRY}}", 1, true) then error("EXPIRY placeholder not substituted") end
-    if html:find("{{CASCADE_VERSION}}", 1, true) then
-        error("CASCADE_VERSION placeholder not substituted")
-    end
+    -- Version is a literal in the template (not a placeholder), so it
+    -- appears as-is in the rendered HTML — see tmp_template above.
     assert_contains(html, "0.1.0", "version appears in the rendered HTML")
     assert_contains(html, tostring(fixed_time + 60), "expiry appears in the rendered HTML")
 end

@@ -1,10 +1,11 @@
 <!doctype html>
-<!-- cascade-version: {{CASCADE_VERSION}} -->
+<!-- cascade-version: 0.1.0 (must match infra/demo-stand/CASCADE_VERSION;
+     init_by_lua fails nginx start on mismatch — see challenge/README.md) -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="cascade-version" content="{{CASCADE_VERSION}}">
+<meta name="cascade-version" content="0.1.0">
 <meta name="robots" content="noindex,nofollow">
 <title>Checking your connection…</title>
 <style>
@@ -34,7 +35,7 @@
 <div id="challenge-data"
      data-nonce="{{NONCE}}"
      data-expiry="{{EXPIRY}}"
-     data-cascade-version="{{CASCADE_VERSION}}"
+     data-cascade-version="0.1.0"
      data-verify-path="/__challenge/verify"
      hidden></div>
 

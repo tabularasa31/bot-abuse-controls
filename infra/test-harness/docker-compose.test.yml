@@ -111,6 +111,13 @@ services:
       # path that demo-stand mounts the production version to.
       - ./resolver.conf:/etc/nginx/resolver.conf:ro
       - ./test-certs:/etc/nginx/certs:ro
+      # [C2] Same mounts the production demo-compose uses. challenge.lua's
+      # preload() reads CASCADE_VERSION on init_by_lua and fails nginx start
+      # without both files (mismatch or missing). Bundling them in the
+      # harness keeps the init contract identical between smoke and
+      # integration runs.
+      - ../demo-stand/challenge:/etc/nginx/challenge:ro
+      - ../demo-stand/CASCADE_VERSION:/etc/nginx/CASCADE_VERSION:ro
     ports:
       - "127.0.0.1:18443:443"
     ulimits:

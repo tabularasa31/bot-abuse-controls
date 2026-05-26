@@ -176,10 +176,12 @@ function _M.render(host, ttl_seconds)
     if not nonce then
         return nil, exp_or_err
     end
+    -- CASCADE_VERSION в шаблоне уже литерал (preload-инвариант: meta-тег
+    -- шаблона == содержимое CASCADE_VERSION файла). Подставляем только
+    -- per-request значения.
     return substitute(cached_template, {
-        NONCE            = nonce,
-        EXPIRY           = exp_or_err,
-        CASCADE_VERSION  = cached_version,
+        NONCE   = nonce,
+        EXPIRY  = exp_or_err,
     })
 end
 
