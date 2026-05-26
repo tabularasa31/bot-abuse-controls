@@ -127,11 +127,14 @@ if config.stage_enabled(config.defaults, "tls_fp") then
 end
 
 -- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_tls_fp /
--- rate_scan_urls). Runs last in the cascade. Observe-only like hygiene/
--- reputation: records the would-be verdict via bac_log but never returns 429 /
--- delays / short-circuits. last-writer-wins means a rate block overwrites the
--- egress default here. `fp` is passed so rate_tls_fp can key on it (and skip
--- gracefully when the fp was not computed for this request).
+-- rate_scan_urls). Runs last in the cascade. Mode-gated: a fired
+-- profile calls policy.enforce(429, {Retry-After=...}) — mode=active
+-- hosts get a real 429 with the Retry-After header (window size as
+-- upper bound); mode=shadow records the would-be verdict and lets the
+-- request reach origin. last-writer-wins on the verdict, so a rate
+-- block overwrites the egress default. `fp` is passed so rate_tls_fp
+-- can key on it (and skip gracefully when the fp was not computed
+-- for this request).
 rate_limit.run(fp)
 
 -- Fall through. If no rate profile fired the context keeps its defaults

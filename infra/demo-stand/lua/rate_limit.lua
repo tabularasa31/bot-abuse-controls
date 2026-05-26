@@ -29,14 +29,21 @@
 -- boundary — acceptable for an observe-only stand, and lua-resty-limit-req's
 -- locking is the productionize step, not Phase 1.
 --
--- Phase 1 is OBSERVE-ONLY, exactly like hygiene.lua / reputation.lua: run()
--- records the would-be verdict via bac_log but NEVER ngx.exit(429), NEVER
--- ngx.sleep (fair queueing), and NEVER short-circuits the cascade. phase1-spec
--- is explicit: "физически с запросом ничего не происходит — он всегда доходит
--- до origin". The 429 + Retry-After and the delay/fair-queueing behaviour the
--- RFC describes are the future per-rule-enforce task (synchronous with the
--- per-resource business mode), not Phase 1. The GCRA cell already computes the
--- retry-after gap; we just don't act on it yet.
+-- Mode-gated enforcement (86exr0627). When a profile fires, run() records
+-- the would-be verdict via bac_log and then calls policy.enforce(429,
+-- {Retry-After=...}). For a host with policy.mode=active that means
+-- ngx.exit(429) right inside run with a Retry-After header (the larger
+-- of the profile's windows, typically 60s — phase1-spec §"429 с
+-- Retry-After"). For mode=shadow (pool default) enforce is a no-op:
+-- run returns true, the cascade ends (rate_limit is already last), and
+-- the request continues to origin. The GCRA cell's exact retry-after
+-- gap is still not surfaced — using the window size is a safe upper
+-- bound and avoids leaking the cell's internal state; refining to the
+-- precise gap is a future optimization, not a correctness gap.
+--
+-- Fair-queueing / ngx.sleep delaying is explicitly NOT done: a block
+-- is a fast 429, not a hold. Spec mentions delay/fair-queue as
+-- possible future behaviour; current scope is plain 429.
 --
 -- Cascade order is hygiene → reputation → tls_fp → rate_limits → verification,
 -- so run() is called LAST in verdict.lua (after the tls_fp allow fall-through).
@@ -46,6 +53,8 @@
 -- automatically by log_event.lua as antibot_rule_total{stage="rate_limits",
 -- rule="rate_ip"|...} — the stand's per-rule counter model. (The dedicated
 -- lua-resty-prometheus histograms are cascade task В3.)
+
+local policy = require "policy"
 
 local _M = {
     enabled  = true,
@@ -316,6 +325,21 @@ function _M.run(fp)
 
         if fire then
             bac_log.set_verdict("rate_limits", "block", p.rule)
+            -- Retry-After in seconds. Use the larger of the profile's
+            -- two windows (typically 60s) as a safe upper bound on the
+            -- recovery time — the GCRA cell's exact gap isn't surfaced
+            -- here, but the window size is always ≥ the gap, so we
+            -- never under-advise the client (which would cause an
+            -- immediate retry that 429s again). Fall back to 60 if
+            -- neither window has a `.seconds` field, defensive only.
+            local retry = (p.w60 and p.w60.seconds)
+                       or (p.w10 and p.w10.seconds)
+                       or 60
+            -- mode-gate: active → ngx.exit(429) + Retry-After;
+            -- shadow → no-op, cascade ends naturally (rate_limit is
+            -- the last stage), request reaches origin with would-be
+            -- block in the log.
+            policy.enforce(429, { ["Retry-After"] = retry })
             return true
         end
     end
