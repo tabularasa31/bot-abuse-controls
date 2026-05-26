@@ -10,6 +10,20 @@
 --   make test-docker     (inside openresty/openresty:alpine)
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
+
+-- Stub the `policy` module so `require "reputation"` resolves under
+-- bare luajit. reputation requires policy at module-top (B11 /
+-- 86exr05q7), and the real policy.lua pulls in cjson.safe which isn't
+-- shipped with the host luajit used by `make test-host`. The pure
+-- helpers covered here never invoke reputation.run(), so the stub's
+-- bodies don't run — only its shape matters (same pattern hygiene_test
+-- uses).
+package.loaded["policy"] = {
+    enforce        = function() end,
+    get            = function() return { mode = "shadow", strictness = "standard" } end,
+    canonical_host = function(h) return h end,
+}
+
 local reputation = require "reputation"
 
 local failed, passed = 0, 0
