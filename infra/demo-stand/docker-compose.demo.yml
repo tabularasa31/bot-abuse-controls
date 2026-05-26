@@ -99,23 +99,50 @@ services:
     profiles: ["observability"]
     depends_on:
       - nginx-demo
-    # -config.expand-env=true lets ${LOKI_PUSH_URL} etc. land from compose
-    # env without a templating step. -config.file points at the bind-mount.
+    # Two-stage entrypoint:
+    #  1. Preflight that refuses to start with an empty LOKI_PUSH_URL.
+    #     The compose env can't use the ${VAR:?…} required form (it's
+    #     evaluated at parse time, BEFORE profile filtering — would
+    #     break the no-profile default workflow), so the check happens
+    #     here at runtime with a memorable FATAL line. The `sleep 5`
+    #     keeps the restart-loop from hammering the docker daemon and
+    #     fills `docker logs promtail` with one clear message per cycle
+    #     instead of a torrent of cryptic promtail parse errors.
+    #  2. `exec` the real promtail with -config.expand-env=true so
+    #     ${LOKI_PUSH_URL} / ${LOKI_PUSH_INSECURE_TLS} in promtail-config
+    #     are substituted from the compose env. drone/envsubst (which
+    #     promtail uses internally) supports the bash `${VAR:-default}`
+    #     form — that's how LOKI_PUSH_INSECURE_TLS defaults to true.
+    entrypoint: ["sh", "-c"]
     command:
-      - "-config.file=/etc/promtail/config.yaml"
-      - "-config.expand-env=true"
+      - |
+        if [ -z "$$LOKI_PUSH_URL" ]; then
+          echo 'FATAL: LOKI_PUSH_URL is empty — set it in .env when --profile observability is active' >&2
+          sleep 5
+          exit 1
+        fi
+        exec /usr/bin/promtail -config.file=/etc/promtail/config.yaml -config.expand-env=true
     environment:
-      # Compose evaluates ${VAR:?msg} at parse time, BEFORE profile
-      # filtering — using it here would break `docker compose up` без
-      # observability profile (the default workflow) when LOKI_PUSH_URL
-      # is unset. Empty default lets the non-observability path parse;
-      # promtail itself errors out on start with an invalid URL when the
-      # profile IS enabled and the env-var wasn't set — fail-loud, not
-      # silent buffering to WAL.
+      # Empty default lets the no-profile parse path succeed. The
+      # preflight above turns "operator forgot to set this" into a
+      # visible unhealthy state instead of a silent crash-loop.
       LOKI_PUSH_URL: ${LOKI_PUSH_URL:-}
       # The backend in demo runs with a self-signed cert; flip to false
       # once you mount a backend-CA bundle as a trust root (prod path).
       LOKI_PUSH_INSECURE_TLS: ${LOKI_PUSH_INSECURE_TLS:-true}
+    healthcheck:
+      # /ready on promtail's HTTP server returns 200 only after the
+      # config has parsed and the scrape targets are wired up. If the
+      # preflight above exits (empty URL), or promtail crashes on a
+      # bad cert / unreachable Loki / malformed config, the port never
+      # opens and this transitions to `unhealthy` after `start_period
+      # + retries × interval` — surfaces as a clear status in
+      # `docker compose ps` instead of a hidden tight restart loop.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9080/ready || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./observability/promtail-config.yaml:/etc/promtail/config.yaml:ro
       # docker_sd_configs needs read access to the docker daemon to
