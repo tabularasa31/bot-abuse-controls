@@ -59,11 +59,15 @@ bac_log.init()
 -- block overwrites the hygiene verdict in the log).
 hygiene.run()
 
--- L2 reputation (ip_whitelist / ip_blocklist). Observe-only and, like
--- hygiene, deliberately does NOT short-circuit the cascade — not even on an
--- ip_whitelist allow. A fastpass here would let a whitelisted IP skip the
--- tls_fp block below; on the stand every request must still reach tls_fp.
--- Last-writer-wins: a later tls_fp block overwrites the reputation verdict.
+-- L2 reputation (ip_whitelist / ip_blocklist / dormant geo_blocklist).
+-- Mode-gated like hygiene: ip_blocklist / geo_blocklist call
+-- policy.enforce(403) so mode=active hosts get 403 right inside run; for
+-- mode=shadow the would-be verdict is logged and the cascade continues.
+-- The allow-side (ip_whitelist, verified_bots) still does NOT short-
+-- circuit the cascade — a whitelisted IP that is also tls_fp_blocklisted
+-- must still hit tls_fp downstream, regardless of mode. Real allow-side
+-- fastpass is paired with per-host policy.ip_whitelist application
+-- (86exr05xt), not this stage.
 reputation.run()
 
 -- Per-stage kill-switch for tls_fp (A12). This gate covers the fp compute +

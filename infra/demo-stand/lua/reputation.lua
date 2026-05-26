@@ -9,16 +9,24 @@
 -- Runs AFTER hygiene, BEFORE tls_fp (cascade order hygiene → reputation →
 -- tls_fp → rate_limits → verification).
 --
--- Phase 1 is OBSERVE-ONLY, exactly like hygiene.lua: run() records the
--- would-be verdict via bac_log but NEVER ngx.exit and NEVER short-circuits the
--- cascade. In particular an ip_whitelist match does NOT fastpass here. In
--- production an allow short-circuits L3–L5 and a block returns 403; on the
--- stand it must not, because skipping the later stages would let a whitelisted
--- IP bypass an active tls_fp block (the same trap hygiene.lua documents). The
--- bac_log verdict is last-writer-wins, so a later tls_fp block overwrites the
--- reputation verdict; otherwise the reputation verdict stands ("финальное
--- сработавшее правило"). Production fastpass/403 enforcement is a future
--- per-rule-enforce task, not Phase 1.
+-- Mode-gated enforcement (B11 / 86exr05q7). The block-side rules
+-- (ip_blocklist and the dormant geo_blocklist) record the would-be
+-- verdict via bac_log and then call policy.enforce(403). For a host
+-- with policy.mode=active that means ngx.exit(403) right here (cascade
+-- dies, later stages do not run). For mode=shadow (pool default) the
+-- enforce is a no-op: run returns true, verdict.lua keeps going to
+-- tls_fp / rate_limit so their would-be verdicts and tags still
+-- accumulate. Last-writer-wins on the verdict matches phase1-spec
+-- "финальное сработавшее правило" (a later tls_fp block can still
+-- overwrite the reputation rule in the shadow log).
+--
+-- The allow-side (ip_whitelist match, verified_bots verified/pending)
+-- still does NOT short-circuit the cascade — in either mode. Production
+-- would fastpass past L3-L5 here, but the stand keeps going so a later
+-- tls_fp block can still demonstrate (and so an active-mode whitelisted
+-- IP can't accidentally skip a real tls_fp_blocklist hit downstream).
+-- Switching the allow-side to a real fastpass is a separate task (paired
+-- with per-host policy.ip_whitelist application, 86exr05xt).
 --
 -- Data. Phase 1: static whitelist_ip.conf / blocklist_ip.conf, parsed once in
 -- init_by_lua (config.lua) and compiled into ipmatcher objects by build()
@@ -52,6 +60,8 @@
 -- Per-resource policy ip_whitelist is a future task (Phase 3). The
 -- verified-bot fastpath (B8) lives in verified_bots.lua and is invoked
 -- inline below between the ip_whitelist and ip_blocklist checks.
+
+local policy = require "policy"
 
 local _M = {
     enabled        = true,
@@ -181,9 +191,13 @@ function _M.build(config)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the
--- would-be verdict via bac_log. Never blocks and never stops the cascade
--- (observe-only); the boolean return (true when a rule matched) is
--- informational only.
+-- would-be verdict via bac_log; on a block-side match (ip_blocklist /
+-- geo_blocklist) it then calls policy.enforce(403), which 403s the
+-- request for mode=active hosts and is a no-op for mode=shadow. The
+-- allow-side (ip_whitelist, verified_bots verified/pending) stays
+-- non-short-circuiting in either mode — see the header comment. The
+-- boolean return (true when any rule matched, including allow) is
+-- informational only; verdict.lua does not branch on it.
 function _M.run()
     if not _M.enabled then return false end
 
@@ -240,6 +254,9 @@ function _M.run()
 
     if _M.blocklist and _M.blocklist:match(ip) then
         bac_log.set_verdict("reputation", "block", "ip_blocklist")
+        -- mode-gate: active → ngx.exit(403); shadow → no-op, cascade
+        -- continues so later stages still tag/verdict (header comment).
+        policy.enforce(403)
         return true
     end
 
@@ -252,6 +269,7 @@ function _M.run()
         local allow = nil  -- Phase 3: policy[host].geo_whitelist for ngx.var.host
         if _M.country_blocked(allow, cc) then
             bac_log.set_verdict("reputation", "block", "geo_blocklist")
+            policy.enforce(403)
             return true
         end
     end
