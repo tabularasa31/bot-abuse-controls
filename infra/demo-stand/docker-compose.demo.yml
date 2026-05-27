@@ -70,7 +70,7 @@ services:
       ADMIN_ACL_CIDR: ${ADMIN_ACL_CIDR:-}
       # Private IP of the dashboard backend (the platform-app behind Caddy).
       # When set, nginx-demo's $origin_resolve substitutes this IP into
-      # the upstream URL for dashboard.example.com, bypassing the
+      # the upstream URL for DASHBOARD_PUBLIC_HOST, bypassing the
       # http-level `resolver` (which would otherwise hit public DNS,
       # get the edge's own IP, and loop the cascade into itself). Host
       # header + SNI sent to the upstream stay as the public hostname
@@ -80,6 +80,13 @@ services:
       # which bypasses /etc/hosts entirely. See nginx.demo.conf's
       # $origin_resolve set_by_lua_block for the full rationale.
       DASHBOARD_BACKEND_IP: ${DASHBOARD_BACKEND_IP:-<TENANT_ORIGIN_IP>}
+      # Public hostname the loop-fix substitution targets. Only
+      # ORIGIN_URLs whose host equals this value get rewritten to
+      # DASHBOARD_BACKEND_IP — other ORIGIN_URLs (custom-origin
+      # deployments per the README quickstart) pass through unchanged.
+      # See origin_resolve.resolve() and Codex review feedback on
+      # PR #89.
+      DASHBOARD_PUBLIC_HOST: ${DASHBOARD_PUBLIC_HOST:-dashboard.example.com}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's
