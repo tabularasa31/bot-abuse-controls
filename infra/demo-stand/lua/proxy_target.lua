@@ -26,30 +26,76 @@
 --     a normal-looking page, no signal we're filtering them.
 --
 -- The proxied-client list lives in env vars for now (DASHBOARD_PUBLIC_HOST +
--- ORIGIN_URL). Multi-tenant follow-up (sister ClickUp ticket 86exrefdz) moves
--- this into policy alongside per-host mode/strictness/origin_ip, so adding a
--- new client doesn't need a nginx.demo.conf change.
+-- ORIGIN_URL). Multi-tenant follow-up (ClickUp 86exrefdz) moves this into
+-- policy alongside per-host mode/strictness/origin_ip, so adding a new client
+-- doesn't need a nginx.demo.conf change.
 local _M = {}
 
--- origin(host, env) — return the upstream URL to proxy to, or "" for BAC.
+-- Module-level config cache. Populated lazily on the first origin() call
+-- and reused for every subsequent request — env vars don't change in a
+-- worker's lifetime (nginx -s reload re-runs init_by_lua* and re-requires
+-- modules, so a deploy that changes the env produces a fresh cache).
 --
--- host  — ngx.var.host (lowercased, no port). May be nil or "".
--- env   — table with two fields:
---           proxied_host = DASHBOARD_PUBLIC_HOST (single proxied client today)
---           origin_url   = ORIGIN_URL (upstream for that client)
---         Both treated as "" when nil. Either being empty means "no proxied
---         client configured" — everything routes to BAC.
+-- Calling os.getenv() per-request was the alternative and Gemini flagged
+-- it on PR #90: each set_by_lua_block fires once per request, getenv is
+-- a syscall-flavoured C lookup, doing it on the hot path is wasteful for
+-- a value that never changes. The cache also gives a single place to
+-- enforce the lowercase normalisation needed for case-insensitive Host
+-- matching (ngx.var.host is already lowercased by nginx, but the operator-
+-- supplied env var may not be — the comparison only works if both sides
+-- live in the same case domain).
+local cached_cfg
+
+local function load_cfg_from_env()
+    return {
+        proxied_host = string.lower(os.getenv("DASHBOARD_PUBLIC_HOST") or "dashboard.example.com"),
+        origin_url   = os.getenv("ORIGIN_URL") or "",
+    }
+end
+
+-- _reset_cache — test-only hook. Clears the module-level config cache so
+-- a test can swap env between cases. Production callers should never use
+-- this; the per-worker cache is the whole point of the optimisation.
+function _M._reset_cache()
+    cached_cfg = nil
+end
+
+-- origin(host, cfg_override) — return the upstream URL to proxy to, or
+-- "" for BAC's own surface.
 --
--- Returns env.origin_url iff host == env.proxied_host AND both env fields are
--- non-empty. Otherwise returns "" (caller in nginx.demo.conf uses `$origin = ""`
--- to short-circuit to /__landing in `location /`, which then serves BAC's
--- bundled landing while still running the cascade via access_by_lua).
-function _M.origin(host, env)
+-- host          — ngx.var.host (already lowercased by nginx, no port).
+--                 May be nil or "".
+-- cfg_override  — TEST-ONLY second argument. Production callers in
+--                 nginx.demo.conf pass nil; the module then reads
+--                 DASHBOARD_PUBLIC_HOST / ORIGIN_URL from env once and
+--                 caches them. Tests pass an explicit table
+--                 {proxied_host=..., origin_url=...} to vary config
+--                 across cases without touching the real environment.
+--                 The override path applies the same lowercase
+--                 normalisation as the env-load path, so tests cover
+--                 the case-insensitive comparison too.
+--
+-- Returns the configured origin_url iff host matches the configured
+-- proxied_host AND both config fields are non-empty. Otherwise returns
+-- "" (caller in nginx.demo.conf uses `$origin = ""` to short-circuit
+-- to /__landing in `location /`, which then serves BAC's bundled
+-- landing while still running the cascade via access_by_lua).
+function _M.origin(host, cfg_override)
     if not host or host == "" then return "" end
-    local proxied  = (env and env.proxied_host) or ""
-    local upstream = (env and env.origin_url)   or ""
-    if proxied == "" or upstream == "" then return "" end
-    if host == proxied then return upstream end
+
+    local cfg
+    if cfg_override then
+        cfg = {
+            proxied_host = string.lower(cfg_override.proxied_host or ""),
+            origin_url   = cfg_override.origin_url or "",
+        }
+    else
+        cached_cfg = cached_cfg or load_cfg_from_env()
+        cfg = cached_cfg
+    end
+
+    if cfg.proxied_host == "" or cfg.origin_url == "" then return "" end
+    if host == cfg.proxied_host then return cfg.origin_url end
     return ""
 end
 
