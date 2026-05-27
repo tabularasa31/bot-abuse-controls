@@ -69,16 +69,22 @@ if fp and seen then
     end
 end
 
--- Live ring buffer for /__admin.
+-- Live ring buffer for /__admin. host + flags added for [C6] recovery
+-- widget — host picks the per-resource policy to whitelist into, flags
+-- explain to the operator WHY the request was blocked (e.g. tls_fp soft
+-- rule worth recovering vs UA-blacklist hit that whitelisting the IP
+-- wouldn't unstick).
 recent.record({
     t       = ngx.time(),
     fp      = fp,
     ip      = ngx.var.remote_addr,
     ua      = ngx.var.http_user_agent,
+    host    = ngx.var.host,
     status  = tonumber(ngx.var.status),
     stage   = ctx.stage,
     verdict = ctx.verdict,
     rule    = ctx.rule,
+    flags   = ctx.flags,
 })
 
 bac_log.emit()
