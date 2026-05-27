@@ -48,13 +48,20 @@ _G.ngx = {
     end,
 }
 
--- Fake resty.openssl.hmac — returns a deterministic "signature" derived from
--- key+data so issue_nonce can be exercised without the real OpenSSL FFI.
+-- Fake resty.openssl.hmac — mirrors the real lua-resty-openssl API
+-- (update(data) then final()) so a regression in challenge.lua back to
+-- final(data) would fail loud here. Returns a deterministic "signature"
+-- derived from key+accumulated buffer.
 package.loaded["resty.openssl.hmac"] = {
     new = function(key, _algo)
+        local buf = ""
         return {
-            final = function(_self, data)
-                return "sig:" .. key:sub(1, 8) .. ":" .. data:sub(1, 16)
+            update = function(_self, data)
+                buf = buf .. (data or "")
+                return true
+            end,
+            final = function(_self)
+                return "sig:" .. key:sub(1, 8) .. ":" .. buf:sub(1, 16)
             end,
         }
     end,
@@ -77,11 +84,25 @@ package.loaded["challenge_secret"] = {
     get = function() return secret_state.key end,
 }
 
+-- Minimal `config` stub: real config.lua reads ngx.shared and parses INI on
+-- require, neither of which is available under host luajit. Mirrors the
+-- shape challenge.lua reads (`config.defaults.challenge.nonce_ttl_seconds`),
+-- with `nil` for nonce_ttl_seconds so the DEFAULT_NONCE_TTL fallback path
+-- is exercised in tests. Individual tests can mutate this table to assert
+-- the config-source branch.
+package.loaded["config"] = {
+    defaults = { challenge = { nonce_ttl_seconds = nil } },
+}
+
+-- Track tmp files so we can wipe them on exit — os.tmpname() leaks
+-- otherwise and would accumulate in /tmp across CI runs.
+local tmp_files = {}
 local function write_tmp(content)
     local path = os.tmpname()
     local f = assert(io.open(path, "w"))
     f:write(content)
     f:close()
+    table.insert(tmp_files, path)
     return path
 end
 
@@ -183,6 +204,23 @@ tests.issue_nonce_shape = function()
     if not b64payload then error("could not split payload from nonce") end
 end
 
+-- 4b. issue_nonce: TTL falls through to config.defaults.challenge.nonce_ttl_seconds
+-- when caller omits ttl_seconds. Guards against regression to a hard-coded
+-- fallback that ignored defaults.conf (PR #81 review).
+tests.issue_nonce_ttl_from_config = function()
+    secret_state.key = "secret-key-32bytes-............."
+    local v = write_tmp("0.1.0")
+    local t = tmp_template("0.1.0")
+    local cfg = package.loaded["config"]
+    local prev = cfg.defaults.challenge.nonce_ttl_seconds
+    cfg.defaults.challenge.nonce_ttl_seconds = 123
+    local mod = load_challenge_with(v, t)
+    mod.preload()
+    local _, exp = mod.issue_nonce("example.com")  -- no explicit TTL
+    cfg.defaults.challenge.nonce_ttl_seconds = prev
+    assert_eq(exp, fixed_time + 123, "TTL should come from config")
+end
+
 -- 5. issue_nonce: missing secret → nil + error mentioning C1 module.
 tests.issue_nonce_no_secret = function()
     secret_state.key = nil
@@ -221,6 +259,12 @@ for name, fn in pairs(tests) do
         failed = failed + 1
         print("FAIL " .. name .. ": " .. tostring(err))
     end
+end
+
+-- Clean up tmp files from write_tmp. Runs before os.exit so failures
+-- don't leak fixtures into /tmp on subsequent CI runs.
+for _, path in ipairs(tmp_files) do
+    os.remove(path)
 end
 
 if failed > 0 then

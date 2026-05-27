@@ -23,8 +23,21 @@
 local cjson  = require "cjson.safe"
 local hmac   = require "resty.openssl.hmac"
 local secret = require "challenge_secret"
+-- Lazy `config` resolution: challenge.lua loads in init_by_lua *after*
+-- config.load() runs, but unit tests bypass init.lua entirely. Require
+-- here (cheap), but defensively re-check `config.defaults` in issue_nonce
+-- since a test harness may inject a partial stub.
+local ok_config, config = pcall(require, "config")
+if not ok_config then config = nil end
 
 local _M = {}
+
+-- DEFAULT_NONCE_TTL — fallback only. Source of truth is defaults.conf
+-- [challenge].nonce_ttl_seconds (vision §5.2 «TTL 60с»). We keep a baked-in
+-- default so issue_nonce stays operational if the config section is missing
+-- (e.g., older defaults.conf during a partial rollout) — never silently
+-- "no TTL" / "TTL=0", which would invalidate every nonce instantly.
+local DEFAULT_NONCE_TTL = 60
 
 -- TEMPLATE_PATH / VERSION_PATH — резолвятся через env, чтобы integration
 -- harness и unit-тесты могли переопределить пути без правки defaults.conf.
@@ -134,7 +147,19 @@ function _M.issue_nonce(host, ttl_seconds)
     if not key then
         return nil, "challenge_secret not loaded (see C1: challenge_secret.lua)"
     end
-    local ttl = tonumber(ttl_seconds) or 60
+    -- TTL precedence: explicit argument > config > baked-in default. The
+    -- config branch reads through `config.defaults.challenge` so an empty
+    -- or missing [challenge] section in defaults.conf doesn't crash —
+    -- falls through to DEFAULT_NONCE_TTL. tonumber() guards a stringly-
+    -- typed INI value like "60".
+    local ttl = tonumber(ttl_seconds)
+    if not ttl and config and type(config.defaults) == "table" then
+        local ch = config.defaults.challenge
+        if type(ch) == "table" then
+            ttl = tonumber(ch.nonce_ttl_seconds)
+        end
+    end
+    ttl = ttl or DEFAULT_NONCE_TTL
     local now = ngx.time()
     local exp = now + ttl
 
@@ -144,9 +169,17 @@ function _M.issue_nonce(host, ttl_seconds)
     end
     local payload_b64 = b64url(payload)
 
+    -- Explicit update()+final() rather than final(data). Both shapes are
+    -- accepted by current lua-resty-openssl (final() calls update()
+    -- internally if data is passed), but the explicit form is bug-resistant
+    -- against version drift and lets the test fake mirror the real API
+    -- precisely (so a future regression to `final(data)` would fail loud
+    -- in unit tests, not silently sign the empty string).
     local h, hmac_err = hmac.new(key, "sha256")
     if not h then return nil, "hmac.new: " .. tostring(hmac_err) end
-    local sig, sig_err = h:final(payload_b64)
+    local upd_ok, upd_err = h:update(payload_b64)
+    if not upd_ok then return nil, "hmac.update: " .. tostring(upd_err) end
+    local sig, sig_err = h:final()
     if not sig then return nil, "hmac.final: " .. tostring(sig_err) end
 
     return payload_b64 .. "." .. b64url(sig), exp

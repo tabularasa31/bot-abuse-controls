@@ -86,24 +86,29 @@
 
   async function solve() {
     setStatus("Verifying…");
-    if (!window.crypto || !window.crypto.subtle) {
-      setStatus("This browser does not support the required crypto API.");
-      return;
-    }
-    var nonce = data.nonce || "";
-    var enc = new TextEncoder();
-    var hash = await window.crypto.subtle.digest("SHA-256", enc.encode(nonce + JS_SECRET));
-    var token = toHex(hash);
-
-    var payload = {
-      nonce: nonce,
-      token: token,
-      cascade_version: data.cascadeVersion,
-      not_a_robot: !!document.getElementById("not-a-robot").checked,
-      fp: fingerprint()
-    };
-
+    // Single try/catch covers every async/throwing step so a legitimate
+    // user never ends up staring at a frozen spinner — any failure flips
+    // setStatus to a human-readable line. Capability checks come first
+    // and bail before any throw, so the catch block only handles real
+    // runtime errors (network, digest, JSON), not feature detection.
     try {
+      if (!window.crypto || !window.crypto.subtle || !window.TextEncoder) {
+        setStatus("This browser does not support the required crypto API.");
+        return;
+      }
+      var nonce = data.nonce || "";
+      var enc = new TextEncoder();
+      var hash = await window.crypto.subtle.digest("SHA-256", enc.encode(nonce + JS_SECRET));
+      var token = toHex(hash);
+
+      var payload = {
+        nonce: nonce,
+        token: token,
+        cascade_version: data.cascadeVersion,
+        not_a_robot: !!document.getElementById("not-a-robot").checked,
+        fp: fingerprint()
+      };
+
       var resp = await fetch(data.verifyPath, {
         method: "POST",
         credentials: "same-origin",
@@ -120,7 +125,7 @@
         setStatus("Verification failed (HTTP " + resp.status + "). Try reloading.");
       }
     } catch (err) {
-      setStatus("Network error while verifying. Try reloading.");
+      setStatus("An error occurred during verification. Try reloading.");
     }
   }
 
