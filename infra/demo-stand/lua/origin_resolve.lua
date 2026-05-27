@@ -34,33 +34,55 @@
 -- change.
 local _M = {}
 
--- resolve(origin, origin_ip)
+-- resolve(origin, origin_ip, loop_host)
 --
 -- origin     — ORIGIN_URL as nginx sees it (e.g. "https://dashboard.example.com"
 --              or "http://dashboard.example.com:8443/path"). May be nil or "".
--- origin_ip  — operator-configured backend IP (DASHBOARD_BACKEND_IP for the
---              single-tenant case). May be nil or "".
+-- origin_ip  — operator-configured backend IP that loop_host should be
+--              rewritten to. DASHBOARD_BACKEND_IP for the single-tenant
+--              case. May be nil or "".
+-- loop_host  — the public hostname that the rewrite is targeting (i.e.
+--              the hostname that resolves back to THIS edge and would
+--              otherwise loop). DASHBOARD_PUBLIC_HOST for the single-
+--              tenant case. May be nil or "".
 --
 -- Returns the origin URL with its hostname portion replaced by origin_ip,
--- preserving scheme, port (if any) and path. If either input is empty, the
--- original origin is returned unchanged — that is the "don't try to be
--- clever" case for $origin = "" (bac.example.com landing path,
--- handled separately upstream).
+-- preserving scheme, port (if any) and path — but ONLY when origin's
+-- hostname matches loop_host. Any other ORIGIN_URL (a custom origin per
+-- the README quickstart, an operator's own `ORIGIN_URL=https://your-
+-- origin.example`) is returned unchanged so the rewrite cannot
+-- accidentally point custom-origin traffic at the dashboard backend.
+-- This is the bug Codex flagged on PR #89: an unconditional rewrite
+-- regressed every non-dashboard deployment.
 --
--- The substitution is UNCONDITIONAL with respect to the incoming Host
--- header. Previously this lived inline in $origin_resolve gated on
--- `Host == "dashboard.example.com"`; that gating let any other Host
--- (IP-scanners sending Host: <edge-IP>, scanners with empty/random Host,
--- HTTP/1.0 clients) fall through to the unmodified URL and loop. The
--- substitution applies to whatever hostname ORIGIN_URL contains, so the
--- network destination is always the operator-configured IP regardless of
--- what the client put in its Host header. The Host/SNI sent UPSTREAM are
--- still ORIGIN_URL-driven (see nginx.demo.conf $origin_host/$origin_sni),
--- so the backend continues to see the registered public hostname for
--- vhost selection.
-function _M.resolve(origin, origin_ip)
-    if not origin or origin == "" then return origin end
+-- If any of the three inputs is empty, the original origin is returned
+-- unchanged — that covers $origin = "" (bac.example.com landing
+-- path, handled separately upstream), unset DASHBOARD_BACKEND_IP, and
+-- unset DASHBOARD_PUBLIC_HOST. The substitution is gated on the
+-- HOSTNAME INSIDE ORIGIN_URL, not on the incoming Host header — that
+-- distinction is the actual fix for the loop. Earlier versions gated
+-- on `ngx.var.host == "dashboard.example.com"`, which let
+-- IP-scanners (Host: <edge-IP>) fall through to the unmodified URL
+-- and into the loop. Origin-side gating is loop-safe regardless of
+-- what the client puts in its Host header, and preserves custom-
+-- origin operators.
+--
+-- The Host/SNI sent UPSTREAM are still ORIGIN_URL-driven (see
+-- nginx.demo.conf $origin_host / $origin_sni), so the backend
+-- continues to see the registered public hostname for vhost
+-- selection.
+function _M.resolve(origin, origin_ip, loop_host)
+    if not origin    or origin    == "" then return origin end
     if not origin_ip or origin_ip == "" then return origin end
+    if not loop_host or loop_host == "" then return origin end
+
+    -- Extract origin's hostname (bracketed IPv6 first, then v4/hostname).
+    -- If it doesn't match loop_host, bail out unchanged — that's the
+    -- custom-origin path (operator points ORIGIN_URL at their own
+    -- backend; nothing to rewrite, nothing to loop).
+    local origin_host = origin:match("^https?://%[([^%]]+)%]")
+                     or origin:match("^https?://([^:/]+)")
+    if origin_host ~= loop_host then return origin end
 
     -- If origin_ip is IPv6 (contains a colon and isn't already bracketed),
     -- wrap it in brackets so the resulting URL is RFC 3986-shaped
