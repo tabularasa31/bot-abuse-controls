@@ -35,6 +35,7 @@ local rate_limit = require "rate_limit"
 local fp_state   = require "tls_fp_blocklist_state"
 local config     = require "config"
 local policy     = require "policy"
+local clearance  = require "clearance"
 
 -- Global kill-switch (A12). When set, the whole cascade is a no-op: we return
 -- before bac_log.init so the request proxies straight to the origin and emits
@@ -70,13 +71,60 @@ hygiene.run()
 -- (86exr05xt), not this stage.
 reputation.run()
 
+-- L2.1 clearance cookie verify (C3). vision §2.1 / rules-reference rule
+-- `cookie_valid`. HMAC-stateless: secret загружен через C1, никаких
+-- сетевых вызовов. Валидный cookie → verdict=allow,rule=cookie_valid +
+-- skip-flag `ngx.ctx.clearance_valid`, который L3 (tls_fp ниже) и L5
+-- (challenge, C5+ ещё не реализован) уважают и пропускают себя; L4
+-- (rate_limit) применяется к держателю cookie как обычно (vision §2.1
+-- «пропускает L3 и L5, но НЕ L4»).
+--
+-- Порядок относительно hygiene/reputation. clearance.run идёт ПОСЛЕ них,
+-- так что last-writer-wins работает в нашу пользу: L1 hygiene block
+-- (method/ua_blacklist) выставит verdict=block ДО нас — мы поверх не
+-- пишем (см. ниже `ctx.verdict ~= "block"` guard), и block корректно
+-- доживёт до log_event. Аналогично reputation ip_blocklist: записан до
+-- clearance, мы его не затираем. Если ничего блокирующего не сработало
+-- → clearance ставит verdict=allow, который потом может быть переписан
+-- L4 rate_limit (тоже by design — vision §2.1 «если сработал rate-лимит
+-- → выигрывает правило L4»).
+--
+-- Все исходы (valid/invalid/expired/missing/wrong_site/malformed) идут в
+-- метрику `antibot_clearance_verify_total{result=...}` (metrics.lua).
+-- Counter инкрементится здесь, а не в clearance.verify(), чтобы verify
+-- осталась чистой функцией для unit-тестов (та же логика, что у policy
+-- и rate_limit: модуль решает «что», caller — «что с этим сделать»).
+do
+    local host = ngx.var.host or ""
+    local result = clearance.verify(host)
+    ngx.shared.metrics:incr("clearance_verify_" .. result .. "_total", 1, 0)
+    if result == clearance.RESULT_VALID then
+        ngx.ctx.clearance_valid = true
+        local ctx = ngx.ctx.bac
+        -- Не затираем уже сработавший block (hygiene/reputation выше).
+        -- Per rules-reference: cookie_valid пропускает L3 и L5, но L1 и
+        -- L2.2/2.3 (включая ip_blocklist) всё равно применяются — их
+        -- блок > наш allow. Phase 4 L5 ничего не пишет ДО нас, так что
+        -- "block" здесь может прийти только из hygiene/reputation, что и
+        -- задумано.
+        if ctx and ctx.verdict ~= "block" then
+            bac_log.set_verdict("reputation", "allow", "cookie_valid")
+        end
+    end
+end
+
 -- Per-stage kill-switch for tls_fp (A12). This gate covers the fp compute +
 -- blocklist block-path that live inline here (not in tls_fp.lua, which gates
 -- its own soft rules via _M.enabled). When killed, fp stays nil — which is the
 -- same "fp not computed" signal rate_limit.run treats as a graceful skip of the
 -- rate_tls_fp profile (A10), so the per-IP profiles keep working.
+-- Skip L3 (tls_fp) entirely when L2.1 clearance fastpath fired (vision §2.1
+-- «пропускает L3 и L5»). `fp` stays nil → rate_limit.run treats it as the
+-- same "fp not computed" signal and gracefully skips the rate_tls_fp
+-- profile, while the per-IP/UA/API profiles continue to apply (L4 still
+-- enforced for cookie holders, by design).
 local fp
-if config.stage_enabled(config.defaults, "tls_fp") then
+if config.stage_enabled(config.defaults, "tls_fp") and not ngx.ctx.clearance_valid then
     fp = ja4.compute()
     bac_log.set_tls_fp(fp)
 

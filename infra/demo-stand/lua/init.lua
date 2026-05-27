@@ -360,6 +360,17 @@ for _, key in ipairs({
     -- успешного start(). Дашборд алертит на `bac_log_shipper_loaded == 0`
     -- — иначе silent-failure при regression в log_shipper.lua.
     "bac_log_shipper_loaded",
+    -- [C3] L2.1 clearance cookie verify. Six outcomes from clearance.verify
+    -- (metric labels match clearance.RESULT_*; metrics.lua emits the labelled
+    -- antibot_clearance_verify_total counter). Primed so /metrics shows them
+    -- at zero from the first scrape — dashboards distinguish «no fastpath
+    -- traffic yet» from «metric missing» without staring at NaN.
+    "clearance_verify_valid_total",
+    "clearance_verify_invalid_total",
+    "clearance_verify_expired_total",
+    "clearance_verify_missing_total",
+    "clearance_verify_malformed_total",
+    "clearance_verify_wrong_site_total",
 }) do
     metrics:safe_add(key, 0)
 end
