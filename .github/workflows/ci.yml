@@ -51,7 +51,8 @@ jobs:
                    luajit tests/clearance_test.lua && \
                    luajit tests/verification_test.lua && \
                    luajit tests/recovery_test.lua && \
-                   luajit tests/origin_resolve_test.lua'
+                   luajit tests/origin_resolve_test.lua && \
+                   luajit tests/proxy_target_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)

@@ -103,7 +103,7 @@ hr { border: 0; border-top: 1px solid #eee; margin: 2em 0; }
 ]] .. (mode == "SHADOW"
     and "The verdict pipeline runs on every request and logs a verdict, but the blocklist is empty so nothing is blocked (200 for everyone)."
     or  ("Blocking is active on " .. blocklist_n .. " fingerprint(s) — matching clients get 403.")) .. [[
-Same pipeline as production. <a href="https://github.com/tabularasa31/abuse-controls">repo</a>.<br>
+Same pipeline as production.<br>
 Challenge HMAC secret: ]] .. (challenge_secret_fp
     and ('<code>loaded</code> (fp=<code>' .. esc(challenge_secret_fp) .. '</code>)')
     or '<code>not configured</code> <span class="note">(Phase 4 file mount; see README)</span>') .. [[</p>
