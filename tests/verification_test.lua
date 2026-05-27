@@ -25,9 +25,10 @@ local function check(actual_v, actual_r, want_v, want_r, name)
 end
 
 -- Helpers
-local function ctx(verdict, flags, client)
+local function ctx(verdict, flags, client, rule)
     return {
         verdict = verdict or "pass",
+        rule = rule,
         flags = flags or {},
         client_challenge_flags = client,
     }
@@ -116,17 +117,69 @@ v, r = verification.decide(
 check(v, r, nil, nil, "non-system flag (informational) → no decision")
 
 -- ---------------------------------------------------------------------------
--- Guards: уже выставленный block/allow не перезаписываем.
+-- Guards: уже выставленный block не перезаписываем (даже attack_mode'ом).
 v, r = verification.decide(
     ctx("block", { "tls_fp_impersonator" }),
     pol("standard", false))
 check(v, r, nil, nil, "verdict=block already set → L5 keeps hands off")
 
 v, r = verification.decide(
-    ctx("allow", {}, { "rate_custom" }),
+    ctx("block", {}, nil, "ip_blocklist"),
+    pol("standard", true))
+check(v, r, nil, nil, "verdict=block + attack_mode → block wins, no override")
+
+-- allow guards — по rule различаем кто его поставил.
+-- cookie_valid под attack_mode → override → challenge (codex PR #86 review).
+v, r = verification.decide(
+    ctx("allow", {}, nil, "cookie_valid"),
+    pol("standard", true))
+check(v, r, "challenge", "attack_mode",
+    "attack_mode + verdict=allow,cookie_valid → challenge (pre-attack cookie)")
+
+v, r = verification.decide(
+    ctx("allow", { "tls_fp_impersonator" }, nil, "cookie_valid"),
+    pol("permissive", true))
+check(v, r, "challenge", "tls_fp_impersonator",
+    "attack_mode + cookie_valid allow + system flag → challenge (rule = last flag)")
+
+-- ip_whitelist / bot_verified allow остаются fastpass даже под attack_mode
+-- (rules-reference §attack_mode: verified-bot и IP-whitelist продолжают фастпасить).
+v, r = verification.decide(
+    ctx("allow", {}, nil, "ip_whitelist"),
+    pol("standard", true))
+check(v, r, nil, nil,
+    "attack_mode + verdict=allow,ip_whitelist → fastpass stays (no override)")
+
+v, r = verification.decide(
+    ctx("allow", { "tls_fp_impersonator" }, nil, "bot_verified"),
+    pol("standard", true))
+check(v, r, nil, nil,
+    "attack_mode + verdict=allow,bot_verified + system flag → fastpass stays")
+
+v, r = verification.decide(
+    ctx("allow", {}, nil, "policy.ip_whitelist"),
     pol("permissive", true))
 check(v, r, nil, nil,
-    "verdict=allow set (cookie_valid) → even attack_mode+client doesn't downgrade")
+    "attack_mode + verdict=allow,policy.ip_whitelist → fastpass stays")
+
+-- allow без attack_mode — L5 не трогает вне зависимости от rule.
+v, r = verification.decide(
+    ctx("allow", { "tls_fp_impersonator" }, { "rate_custom" }, "cookie_valid"),
+    pol("permissive", false))
+check(v, r, nil, nil,
+    "no attack_mode + allow + flags + client → fastpass (L5 keeps hands off)")
+
+-- Defensive: client_challenge_flags non-table (boolean/string) не должен ронять
+-- decide() — gemini PR #86 review.
+v, r = verification.decide(
+    { verdict = "pass", flags = {}, client_challenge_flags = true },
+    pol("standard", false))
+check(v, r, nil, nil, "non-table client_challenge_flags → ignored (no crash)")
+
+v, r = verification.decide(
+    { verdict = "pass", flags = {}, client_challenge_flags = "rate_custom" },
+    pol("standard", false))
+check(v, r, nil, nil, "string client_challenge_flags → ignored (no crash)")
 
 -- ---------------------------------------------------------------------------
 -- nil-safety

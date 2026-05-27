@@ -67,9 +67,12 @@ _M.SYSTEM_FLAGS = SYSTEM_FLAGS
 -- (tests/verification_test.lua).
 function _M.decide(ctx, p)
     if not ctx or not p then return nil, nil end
-    if ctx.verdict == "block" or ctx.verdict == "allow" then
-        return nil, nil
-    end
+
+    -- block — терминал, никогда не override'им (даже attack_mode'ом):
+    -- блокирующее правило выиграло L1/L2/L4, физически клиент уже ушёл с 403
+    -- (mode=active) или с записью block в логе (mode=shadow). Просить
+    -- challenge поверх блокировки бессмысленно.
+    if ctx.verdict == "block" then return nil, nil end
 
     -- Последний системный flag — для rule в Standard/Permissive ветке.
     local last_system
@@ -79,16 +82,40 @@ function _M.decide(ctx, p)
 
     -- Клиентское rate-rule action=challenge (Phase 3+). Сейчас всегда пусто,
     -- но контракт уже зафиксирован: client-flag всегда побеждает Permissive.
+    -- Defensive type-check (gemini PR #86 review): client_challenge_flags
+    -- ставится будущим L4 rate_custom; пока конкретного caller'a нет, явная
+    -- проверка type=="table" не даёт случайной non-table присваиванию (bool/
+    -- string) уронить L5 на `#client` (runtime error в Lua).
     local client = ctx.client_challenge_flags
     local last_client
-    if client and #client > 0 then
+    if type(client) == "table" and #client > 0 then
         last_client = client[#client]
     end
 
-    -- attack_mode (C7) — override. Любой запрос, дошедший до L5, → challenge.
+    -- attack_mode (C7) — override Strictness и cookie_valid allow.
+    -- ip_whitelist / verified_bot fastpath остаются (rules-reference
+    -- §attack_mode: «verified-bot и IP-whitelist продолжают фастпасить»).
+    -- cookie_valid под атакой → challenge (rule 3: cookie_valid действует
+    -- ТОЛЬКО при attack_mode=off; пре-атакные cookie не должны фастпасить).
+    -- Различаем по `rule`: cookie_valid override'им, остальные allow — нет.
+    -- Carve-out для cookie, выданных ВО ВРЕМЯ атаки (rules-reference §145:
+    -- «выданные во время атаки — фастпасят»), живёт в clearance.lua + C7
+    -- (iat vs attack_started_at) — там cookie_valid просто не выставится для
+    -- пре-атакных cookie, и эта ветка переписывания не сработает. До C7
+    -- здесь чрезмерно строго: ВСЕ cookie_valid под attack_mode идут в
+    -- challenge — это безопасно (false-positive на cookie issued during
+    -- attack), и C7 это сузит. Если verdict=allow с другим rule (ip_whitelist,
+    -- bot_verified, …) — отдаём fastpass (codex PR #86 review).
     if p.attack_mode then
-        return "challenge", last_client or last_system or "attack_mode"
+        local cookie_allow = (ctx.verdict == "allow" and ctx.rule == "cookie_valid")
+        if ctx.verdict ~= "allow" or cookie_allow then
+            return "challenge", last_client or last_system or "attack_mode"
+        end
     end
+
+    -- Без attack_mode: любой verdict=allow (cookie_valid / ip_whitelist /
+    -- bot_verified) — fastpass, L5 не трогает.
+    if ctx.verdict == "allow" then return nil, nil end
 
     -- Client rate-rule challenge — всегда честим, даже при Permissive.
     if last_client then
