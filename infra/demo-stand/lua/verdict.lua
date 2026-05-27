@@ -118,60 +118,67 @@ end
 -- its own soft rules via _M.enabled). When killed, fp stays nil — which is the
 -- same "fp not computed" signal rate_limit.run treats as a graceful skip of the
 -- rate_tls_fp profile (A10), so the per-IP profiles keep working.
--- Skip L3 (tls_fp) entirely when L2.1 clearance fastpath fired (vision §2.1
--- «пропускает L3 и L5»). `fp` stays nil → rate_limit.run treats it as the
--- same "fp not computed" signal and gracefully skips the rate_tls_fp
--- profile, while the per-IP/UA/API profiles continue to apply (L4 still
--- enforced for cookie holders, by design).
+--
+-- [C3] Clearance fastpath skips ONLY the L3 decision (blocklist hit + soft
+-- rules + tls_fp:* tags), NOT the fp compute. rate_tls_fp is part of L4
+-- (rate_limits), and per vision §2.1 / rules-reference rule 3 cookie_valid
+-- «пропускает L3 и L5, но НЕ L4» — including rate_tls_fp. Если бы fp
+-- оставался nil под cookie, rate_limit.run скипал бы rate_tls_fp_profile
+-- (rate_limit.lua `fp_ok`-guard), и держатель cookie получил бы бесплатный
+-- bypass per-fp лимита на 24 часа TTL (codex review on PR #85). Поэтому
+-- fp всё равно считаем + кладём в bac_log, но `if not clearance_valid`
+-- оборачивает только cache/blocklist check и `tls_fp.run(fp)`.
 local fp
-if config.stage_enabled(config.defaults, "tls_fp") and not ngx.ctx.clearance_valid then
+if config.stage_enabled(config.defaults, "tls_fp") then
     fp = ja4.compute()
     bac_log.set_tls_fp(fp)
 
-    -- §A1 read: pin the generation the catalog pull (§В1) last published and
-    -- key BOTH the verdict cache and the blocklist by `fp:gen`. Sharing the
-    -- generation key makes a catalog swap atomic for the cache too: when gen
-    -- bumps, old-gen cache entries become unreachable and age out on their TTL,
-    -- so the flip takes effect immediately instead of being masked by a stale
-    -- bare-fp entry for up to 60s. No pull on the stand yet, so gen stays at
-    -- the 0 init.lua seeds.
-    local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
-    local key = fp_state.key(fp, gen)
+    if not ngx.ctx.clearance_valid then
+        -- §A1 read: pin the generation the catalog pull (§В1) last published and
+        -- key BOTH the verdict cache and the blocklist by `fp:gen`. Sharing the
+        -- generation key makes a catalog swap atomic for the cache too: when gen
+        -- bumps, old-gen cache entries become unreachable and age out on their TTL,
+        -- so the flip takes effect immediately instead of being masked by a stale
+        -- bare-fp entry for up to 60s. No pull on the stand yet, so gen stays at
+        -- the 0 init.lua seeds.
+        local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
+        local key = fp_state.key(fp, gen)
 
-    local cache  = ngx.shared.verdict_cache
-    local cached = cache:get(key)
-    local cache_hit = (cached ~= nil)
+        local cache  = ngx.shared.verdict_cache
+        local cached = cache:get(key)
+        local cache_hit = (cached ~= nil)
 
-    local verdict
-    if cached == "block" or cached == "allow" then
-        verdict = cached
-    else
-        verdict = ngx.shared.tls_fp_blocklist:get(key) or "allow"
-        cache:set(key, verdict, 60)
+        local verdict
+        if cached == "block" or cached == "allow" then
+            verdict = cached
+        else
+            verdict = ngx.shared.tls_fp_blocklist:get(key) or "allow"
+            cache:set(key, verdict, 60)
+        end
+
+        -- Cache outcome is metrics-only; stash it for log_event.lua's counters.
+        ngx.ctx.bac_cache_hit = cache_hit
+
+        if verdict == "block" then
+            bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
+            -- B11: active → ngx.exit(403) below; shadow → enforce is a no-op,
+            -- we then `return` from access_by_lua to short-circuit the rest of
+            -- the cascade so a later stage (tls_fp soft / rate_limit) can't
+            -- overwrite the "block" verdict via last-writer-wins. The log
+            -- reflects the same final state the active path would have
+            -- emitted (verdict=block, rule=tls_fp_blocklist), the only
+            -- difference being that the request still proxies to origin.
+            policy.enforce(403)
+            return
+        end
+
+        -- tls_fp soft rules + tls_fp:* tags (A9). Observe-only: records the would-be
+        -- challenge verdict and the soft flags / informational tags via bac_log but
+        -- never blocks or short-circuits. Runs after the blocklist check (a
+        -- blocklisted fp has already exited above) and after reputation, so the
+        -- cross-layer tls_fp:dc_browser tag can see reputation:asn_dc.
+        tls_fp.run(fp)
     end
-
-    -- Cache outcome is metrics-only; stash it for log_event.lua's counters.
-    ngx.ctx.bac_cache_hit = cache_hit
-
-    if verdict == "block" then
-        bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
-        -- B11: active → ngx.exit(403) below; shadow → enforce is a no-op,
-        -- we then `return` from access_by_lua to short-circuit the rest of
-        -- the cascade so a later stage (tls_fp soft / rate_limit) can't
-        -- overwrite the "block" verdict via last-writer-wins. The log
-        -- reflects the same final state the active path would have
-        -- emitted (verdict=block, rule=tls_fp_blocklist), the only
-        -- difference being that the request still proxies to origin.
-        policy.enforce(403)
-        return
-    end
-
-    -- tls_fp soft rules + tls_fp:* tags (A9). Observe-only: records the would-be
-    -- challenge verdict and the soft flags / informational tags via bac_log but
-    -- never blocks or short-circuits. Runs after the blocklist check (a
-    -- blocklisted fp has already exited above) and after reputation, so the
-    -- cross-layer tls_fp:dc_browser tag can see reputation:asn_dc.
-    tls_fp.run(fp)
 end
 
 -- L4 rate_limits (rate_ip / rate_ip_ua / rate_api / rate_tls_fp /
