@@ -244,9 +244,13 @@ secret'ом, что и clearance cookie, см. предыдущую секцию
 
 **Файлы.**
 
-- `infra/demo-stand/challenge/page.html` — единственный шаблон. Плейсхолдеры
-  `{{NONCE}}`, `{{EXPIRY}}`, `{{CASCADE_VERSION}}` подставляются на render.
-  Bind-mount в `/etc/nginx/challenge:ro` (Channel A на демо = file mount).
+- `infra/demo-stand/challenge/page.html` — единственный шаблон. На render
+  подставляются только плейсхолдеры `{{NONCE}}` и `{{EXPIRY}}`. Версия
+  каскада зашита в шаблон литералом (в `<meta name="cascade-version">`, в
+  HTML-комментарии и в `data-cascade-version`) — НЕ плейсхолдер: это
+  source of truth, который сверяется с `CASCADE_VERSION` на init и
+  бампается одновременно. Bind-mount в `/etc/nginx/challenge:ro`
+  (Channel A на демо = file mount).
 - `infra/demo-stand/CASCADE_VERSION` — semver-строка (текущая `0.1.0`).
   Bind-mount в `/etc/nginx/CASCADE_VERSION:ro`. **Bump обязателен** в любом PR,
   который меняет nonce-формат, `JS_SECRET`, поля fingerprint, путь verify или
@@ -425,7 +429,7 @@ infra/demo-stand/
 │   └── challenge.lua               [C2] Phase 4 challenge page renderer + nonce issuer (version-pinned)
 ├── CASCADE_VERSION                 [C2] semver, сверяется с meta-тегом шаблона на init
 ├── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
-│   ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}} / {{CASCADE_VERSION}}
+│   ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}}; cascade-version зашит литералом
 │   └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
 └── sites/default-site/
     └── index.html                  demo landing page (served via content_by_lua)
