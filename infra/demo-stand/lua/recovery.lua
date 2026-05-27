@@ -22,20 +22,59 @@ local _M = {}
 -- lazy require "resty.http" внутри _call_backend.
 _M.http_module = nil
 
--- Бэкенд-URL читаем один раз — он не меняется в течение жизни worker'а
--- (ANTIBOT_BACKEND_URL — env, разделяется с catalog_pull / log_shipper).
-local function backend_url()
+-- Env читаем один раз при загрузке модуля — они не меняются в жизни worker'а
+-- (ANTIBOT_BACKEND_URL / DASHBOARD_API_TOKEN — env, разделяются с
+-- catalog_pull / log_shipper). Тесты могут переопределить через _M (см.
+-- recovery_test.lua), чтобы reset env между кейсами.
+local function load_env()
     local url = os.getenv("ANTIBOT_BACKEND_URL")
-    if url == nil or url == "" then return nil end
-    -- nginx.demo.conf принимает URL без trailing slash; добавим путь сами.
-    return (url:gsub("/+$", ""))
-end
-
-local function api_token()
+    if url == nil or url == "" then
+        _M.backend_url = nil
+    else
+        -- nginx.demo.conf принимает URL без trailing slash; добавим путь сами.
+        _M.backend_url = (url:gsub("/+$", ""))
+    end
     local t = os.getenv("DASHBOARD_API_TOKEN")
-    if t == nil or t == "" then return nil end
-    return t
+    _M.api_token = (t == nil or t == "") and nil or t
+    local s = os.getenv("ANTIBOT_BACKEND_SSL_VERIFY")
+    _M.ssl_verify = (s ~= "false")
+    return _M
 end
+_M.load_env = load_env
+load_env()
+
+-- [C6 security gate] ADMIN_ACL_CIDR — комма-разделённый список CIDR, кому
+-- разрешено вызывать /__admin/recover_ip. Unset/пусто → fail-closed (403 на
+-- все запросы). Это не настоящий auth, а network ACL уровня nginx-в-Lua:
+-- /__admin сам сейчас публичен на демо-VM, поэтому без gate'а атакующий
+-- мог бы whitelist'нуть свой IP на любой защищаемый host. Оператор VM
+-- ставит свой публичный IP (или /24-блок офиса) в .env. Парсим один раз
+-- при загрузке через lua-resty-ipmatcher (паттерн reputation.lua).
+local function build_admin_matcher()
+    local raw = os.getenv("ADMIN_ACL_CIDR") or ""
+    if raw == "" then return nil end
+    local cidrs = {}
+    for c in raw:gmatch("[^,%s]+") do cidrs[#cidrs + 1] = c end
+    if #cidrs == 0 then return nil end
+    local ok, ipmatcher = pcall(require, "resty.ipmatcher")
+    if not ok then return nil end
+    local m, err = ipmatcher.new(cidrs)
+    if not m then
+        ngx.log(ngx.ERR, "[C6] ADMIN_ACL_CIDR parse failed: ", err,
+            " (input=", raw, ") — recovery endpoint fail-closed")
+        return nil
+    end
+    return m
+end
+_M.admin_matcher = build_admin_matcher()
+
+local function client_allowed(remote_addr)
+    if not _M.admin_matcher then return false end
+    if not remote_addr or remote_addr == "" then return false end
+    local ok = _M.admin_matcher:match(remote_addr)
+    return ok and true or false
+end
+_M.client_allowed = client_allowed
 
 -- Валидация host (минимальная). Бэкенд per-resource policy keyed by host,
 -- так что мусорный host создаст там пустую запись — нам это не надо.
@@ -90,12 +129,10 @@ _M.to_cidr       = to_cidr
 -- Возвращает (ok, info, err). info = backend JSON-ответ (раскодированный)
 -- или nil при сетевой ошибке.
 local function call_backend(host, cidr)
-    local base = backend_url()
-    if not base then
+    if not _M.backend_url then
         return false, nil, "ANTIBOT_BACKEND_URL not configured"
     end
-    local token = api_token()
-    if not token then
+    if not _M.api_token then
         return false, nil, "DASHBOARD_API_TOKEN not configured"
     end
 
@@ -112,17 +149,17 @@ local function call_backend(host, cidr)
     local cjson = require "cjson.safe"
     local body = cjson.encode({ cidr = cidr })
     local res, err = httpc:request_uri(
-        base .. "/antibot/v1/policy/" .. host .. "/ip_whitelist",
+        _M.backend_url .. "/antibot/v1/policy/" .. host .. "/ip_whitelist",
         {
             method  = "POST",
             body    = body,
             headers = {
-                ["Authorization"] = "Bearer " .. token,
+                ["Authorization"] = "Bearer " .. _M.api_token,
                 ["Content-Type"]  = "application/json",
             },
             -- ssl_verify контролируется тем же флагом, что и catalog_pull —
             -- демо-бэкенд обычно self-signed на side-VM.
-            ssl_verify = (os.getenv("ANTIBOT_BACKEND_SSL_VERIFY") ~= "false"),
+            ssl_verify = _M.ssl_verify,
         })
     if not res then
         return false, nil, "transport error: " .. tostring(err)
@@ -131,8 +168,13 @@ local function call_backend(host, cidr)
         return false, { status = res.status, body = res.body },
             "backend returned " .. tostring(res.status)
     end
+    -- cjson.decode на `null`/число/пустой ответ возвращает userdata/scalar,
+    -- который truthy в Lua → `decoded or {}` пропустил бы non-table и
+    -- info.changed позже крашнул бы handle() с «attempt to index userdata».
+    -- Гарантируем table-результат явно (review on PR #88).
     local decoded = cjson.decode(res.body or "")
-    return true, decoded or {}, nil
+    if type(decoded) ~= "table" then decoded = {} end
+    return true, decoded, nil
 end
 
 _M.call_backend = call_backend
@@ -142,6 +184,18 @@ _M.call_backend = call_backend
 function _M.handle()
     ngx.header.content_type = "application/json; charset=utf-8"
     ngx.header.cache_control = "no-store"
+
+    -- [C6 security gate] ACL-проверка идёт ПЕРВОЙ — перед методом, телом,
+    -- env'ами. /__admin на демо публичен, без этого gate'а любой клиент
+    -- мог бы POST'ом whitelist'нуть свой IP на чужой защищаемый host
+    -- (codex P1 review on PR #88). Unset ADMIN_ACL_CIDR → fail-closed.
+    if not client_allowed(ngx.var.remote_addr) then
+        ngx.status = 403
+        ngx.log(ngx.WARN, "[C6] recovery: denied ", ngx.var.remote_addr,
+            " (ADMIN_ACL_CIDR ", (_M.admin_matcher and "set" or "unset"), ")")
+        ngx.say('{"error":"forbidden"}')
+        return
+    end
 
     if ngx.req.get_method() ~= "POST" then
         ngx.status = 405

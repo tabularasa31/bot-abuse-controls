@@ -60,8 +60,9 @@ local httpc_mock = {
     end,
 }
 
--- Env override: recovery читает os.getenv лениво на каждый вызов backend_url
--- /api_token, так что в тестах подменяем globally.
+-- Env override: recovery читает os.getenv ОДИН РАЗ при загрузке модуля
+-- (плюс через _M.load_env по требованию), так что в тестах подменяем
+-- globally + перезагружаем модуль между кейсами.
 local env_override = {}
 local real_getenv = os.getenv
 rawset(os, "getenv", function(k)
@@ -69,11 +70,28 @@ rawset(os, "getenv", function(k)
     return real_getenv(k)
 end)
 
+-- resty.ipmatcher mock — луажит без openresty не имеет нативной либы.
+-- Стаб принимает только конкретный whitelisted_ip = "10.0.0.5"; всё
+-- остальное → no match.
+local function install_ipmatcher_stub(allow_ip)
+    package.loaded["resty.ipmatcher"] = {
+        new = function(...)
+            local _ = ...  -- cidrs list ignored; stub matches by literal allow_ip
+            return {
+                match = function(_, ip)
+                    return ip == allow_ip
+                end,
+            }, nil
+        end,
+    }
+end
+
 local function reset()
     httpc_response = {}
     last_request = nil
     env_override = {}
     package.loaded["recovery"] = nil
+    package.loaded["resty.ipmatcher"] = nil
 end
 local function load_mod()
     local r = require "recovery"
@@ -144,8 +162,9 @@ end
 -- ---------------------------------------------------------------------------
 -- call_backend: ENV не настроены → ошибка без HTTP
 do
-    reset(); local r = load_mod()
+    reset()
     env_override["ANTIBOT_BACKEND_URL"] = nil
+    local r = load_mod()
     local ok_, info, err = r.call_backend("a.example", "1.2.3.4/32")
     eq(ok_, false, "no backend url → not ok")
     ok(err and err:find("ANTIBOT_BACKEND_URL"), "no backend url → err msg")
@@ -153,9 +172,10 @@ do
 end
 
 do
-    reset(); local r = load_mod()
+    reset()
     env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
     env_override["DASHBOARD_API_TOKEN"] = nil
+    local r = load_mod()
     local ok_, _, err = r.call_backend("a.example", "1.2.3.4/32")
     eq(ok_, false, "no token → not ok")
     ok(err and err:find("DASHBOARD_API_TOKEN"), "no token → err msg")
@@ -165,9 +185,10 @@ end
 -- ---------------------------------------------------------------------------
 -- call_backend: успех 200
 do
-    reset(); local r = load_mod()
+    reset()
     env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080/"  -- trailing slash
     env_override["DASHBOARD_API_TOKEN"] = "s3cret"
+    local r = load_mod()
     httpc_response.status = 200
     httpc_response.body = '{"changed":true}'
     local ok_, info, err = r.call_backend("a.example", "1.2.3.4/32")
@@ -185,9 +206,10 @@ end
 -- ---------------------------------------------------------------------------
 -- call_backend: backend ответил 4xx
 do
-    reset(); local r = load_mod()
+    reset()
     env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
     env_override["DASHBOARD_API_TOKEN"] = "s3cret"
+    local r = load_mod()
     httpc_response.status = 401
     httpc_response.body = '{"error":"unauthorized"}'
     local ok_, info, err = r.call_backend("a.example", "1.2.3.4/32")
@@ -199,14 +221,69 @@ end
 -- ---------------------------------------------------------------------------
 -- call_backend: transport error
 do
-    reset(); local r = load_mod()
+    reset()
     env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
     env_override["DASHBOARD_API_TOKEN"] = "s3cret"
+    local r = load_mod()
     httpc_response.err = "connection refused"
     local ok_, info, err = r.call_backend("a.example", "1.2.3.4/32")
     eq(ok_, false, "transport err → not ok")
     eq(info, nil, "transport err → no info")
     ok(err and err:find("transport"), "err is transport")
+end
+
+-- ---------------------------------------------------------------------------
+-- call_backend: backend вернул "null" / не-table JSON (gemini review on PR #88).
+-- decoded должен стать пустым table'ом, не userdata/scalar, иначе handle()
+-- крашится на info.changed.
+do
+    reset()
+    env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
+    env_override["DASHBOARD_API_TOKEN"] = "s3cret"
+    -- json_decode-стаб возвращает nil на "null"/число/пустую строку. Через
+    -- декодер пустой "" получаем nil → ветка type ~= "table" сработает.
+    -- Это тот же путь, что в проде даст cjson.null / cjson.decode error.
+    local r = load_mod()
+    httpc_response.status = 200
+    httpc_response.body = ""
+    local ok_, info, err = r.call_backend("a.example", "1.2.3.4/32")
+    eq(ok_, true, "empty body still ok=true (HTTP 200)")
+    eq(err, nil, "empty body err nil")
+    eq(type(info), "table", "empty body → info is table, not nil/userdata")
+    eq(info.changed, nil, "empty body → info.changed безопасно nil")
+end
+
+-- ---------------------------------------------------------------------------
+-- client_allowed: ADMIN_ACL_CIDR unset → fail-closed
+do
+    reset()
+    env_override["ADMIN_ACL_CIDR"] = nil
+    local r = load_mod()
+    eq(r.admin_matcher, nil, "unset env → no matcher")
+    eq(r.client_allowed("10.0.0.5"), false, "unset env → deny any IP")
+    eq(r.client_allowed(""), false, "unset env → deny empty IP")
+end
+
+-- client_allowed: empty string → fail-closed
+do
+    reset()
+    env_override["ADMIN_ACL_CIDR"] = ""
+    local r = load_mod()
+    eq(r.admin_matcher, nil, "empty env → no matcher")
+    eq(r.client_allowed("10.0.0.5"), false, "empty env → deny")
+end
+
+-- client_allowed: установленный allowlist → match
+do
+    reset()
+    env_override["ADMIN_ACL_CIDR"] = "10.0.0.0/8,127.0.0.1/32"
+    install_ipmatcher_stub("10.0.0.5")
+    local r = load_mod()
+    ok(r.admin_matcher ~= nil, "set env → matcher built")
+    eq(r.client_allowed("10.0.0.5"), true, "allowlisted IP → allow")
+    eq(r.client_allowed("8.8.8.8"), false, "non-allowlisted IP → deny")
+    eq(r.client_allowed(nil), false, "nil IP → deny")
+    eq(r.client_allowed(""), false, "empty IP → deny")
 end
 
 -- ---------------------------------------------------------------------------

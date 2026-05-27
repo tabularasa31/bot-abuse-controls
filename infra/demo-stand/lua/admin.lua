@@ -176,8 +176,9 @@ else
     end
     add('</table>')
     -- Inline JS: tiny fetch + status pill, no external deps. The endpoint
-    -- echoes {ok,host,cidr,changed,propagation_seconds}; we display it and
-    -- leave it to the operator to refresh and re-curl after ~30s.
+    -- echoes {ok,host,cidr,changed,propagation_seconds}; we display it via
+    -- textContent / createElement (not innerHTML) so a malicious backend
+    -- payload can't inject HTML into /__admin — review on PR #88.
     add([[
 <script>
 document.querySelectorAll('.rcv-btn').forEach(function(btn) {
@@ -185,25 +186,43 @@ document.querySelectorAll('.rcv-btn').forEach(function(btn) {
     var host = btn.dataset.host, ip = btn.dataset.ip, rowId = btn.dataset.row;
     var row  = document.getElementById(rowId);
     btn.disabled = true; btn.textContent = '...';
+    function setCell(color, parts) {
+      var cell = row.querySelector('td:last-child');
+      while (cell.firstChild) cell.removeChild(cell.firstChild);
+      var span = document.createElement('span');
+      span.style.color = color;
+      parts.forEach(function(p) {
+        if (p.tag) {
+          var el = document.createElement(p.tag);
+          el.textContent = p.text;
+          span.appendChild(el);
+        } else {
+          span.appendChild(document.createTextNode(p.text));
+        }
+      });
+      cell.appendChild(span);
+    }
     fetch('/__admin/recover_ip', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({host: host, ip: ip})
     }).then(function(r) { return r.json().then(function(j){ return {s:r.status, j:j}; }); })
       .then(function(res) {
-        var cell = row.querySelector('td:last-child');
         if (res.s === 200 && res.j.ok) {
           var verb = res.j.changed ? 'whitelisted' : 'already whitelisted';
-          cell.innerHTML = '<span style="color:#2e7d32">✓ ' + verb +
-            ' (<code>' + res.j.cidr + '</code>); ≤ ' + res.j.propagation_seconds +
-            's to fastpass</span>';
+          setCell('#2e7d32', [
+            {text: '✓ ' + verb + ' ('},
+            {tag: 'code', text: String(res.j.cidr || '')},
+            {text: '); ≤ ' + Number(res.j.propagation_seconds || 30) +
+                   's to fastpass'},
+          ]);
         } else {
           var msg = res.j.error || ('HTTP ' + res.s);
-          cell.innerHTML = '<span style="color:#c62828">✗ ' + msg + '</span>';
+          setCell('#c62828', [{text: '✗ ' + String(msg)}]);
         }
       }).catch(function(e) {
         btn.disabled = false; btn.textContent = 'Whitelist IP';
-        alert('recover_ip failed: ' + e);
+        setCell('#c62828', [{text: '✗ ' + String(e)}]);
       });
   });
 });
