@@ -189,5 +189,66 @@ v, r = verification.decide(ctx(), nil)
 check(v, r, nil, nil, "nil policy → no decision")
 
 -- ---------------------------------------------------------------------------
+-- C5 classify_branch (L5.2 Branch A/B/C selector). Pure function — no ngx,
+-- no policy. Acceptance:
+--   Branch A — browser-like UA + GET + Accept:text/html → JS challenge;
+--   Branch B — non-browser UA (curl/python/SDK) → non_browser_blocked;
+--   Branch C — browser UA but protocol incompatible (POST / WS / non-html
+--              Accept / absent Accept) → unchallengeable_request.
+-- Order tested: B wins over C when UA is non-browser AND request is also
+-- protocol-incompatible (curl POST → B, not C — vision §5.2 specifies
+-- non-browser is the more specific signal).
+local CHROME_UA = "Mozilla/5.0 (Macintosh) Chrome/148.0.0.0 Safari/537.36"
+local CURL_UA   = "curl/8.5.0"
+local PY_UA     = "python-requests/2.32"
+
+local function cb(want, req, name)
+    local got = verification.classify_branch(req)
+    if got == want then
+        passed = passed + 1
+    else
+        failed = failed + 1
+        io.write(string.format("FAIL classify_branch %s: got %s, want %s\n",
+            name, tostring(got), tostring(want)))
+    end
+end
+
+-- Branch A — happy path.
+cb("A", { user_agent = CHROME_UA, method = "GET", accept = "text/html,application/xhtml+xml" },
+    "browser GET text/html → A")
+cb("A", { user_agent = CHROME_UA, method = "HEAD", accept = "text/html" },
+    "browser HEAD text/html → A (HEAD safe like GET)")
+
+-- Branch B — non-browser UA. Wins even when protocol is also incompatible
+-- (curl POST → B, not C).
+cb("B", { user_agent = CURL_UA, method = "GET", accept = "text/html" },
+    "curl GET text/html → B (non-browser UA)")
+cb("B", { user_agent = PY_UA, method = "POST", accept = "application/json" },
+    "python-requests POST json → B (non-browser wins over unchallengeable)")
+cb("B", { user_agent = "", method = "GET", accept = "text/html" },
+    "empty UA → B (classify_ua returns 'other')")
+cb("B", { method = "GET", accept = "text/html" },
+    "missing UA → B")
+
+-- Branch C — browser UA but protocol incompatible.
+cb("C", { user_agent = CHROME_UA, method = "POST", accept = "text/html" },
+    "browser POST text/html → C (POST)")
+cb("C", { user_agent = CHROME_UA, method = "PUT", accept = "text/html" },
+    "browser PUT → C")
+cb("C", { user_agent = CHROME_UA, method = "GET", accept = "text/html", upgrade = "websocket" },
+    "browser GET text/html + Upgrade:websocket → C")
+cb("C", { user_agent = CHROME_UA, method = "GET", accept = "application/json" },
+    "browser GET application/json → C (no text/html in Accept)")
+cb("C", { user_agent = CHROME_UA, method = "GET", accept = "*/*" },
+    "browser GET */* → C (vision: */* is unchallengeable)")
+cb("C", { user_agent = CHROME_UA, method = "GET" },
+    "browser GET no Accept → C")
+cb("C", { user_agent = CHROME_UA, method = "GET", accept = "" },
+    "browser GET empty Accept → C")
+
+-- nil-safety
+cb("B", nil, "nil req → B (no UA → 'other')")
+cb("B", {}, "empty req → B")
+
 io.write(string.format("\nverification_test: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)

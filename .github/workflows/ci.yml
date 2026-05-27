@@ -47,7 +47,9 @@ jobs:
                    luajit tests/verified_bots_test.lua && \
                    luajit tests/policy_matchers_test.lua && \
                    luajit tests/challenge_secret_test.lua && \
-                   luajit tests/challenge_test.lua'
+                   luajit tests/challenge_test.lua && \
+                   luajit tests/clearance_test.lua && \
+                   luajit tests/verification_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)

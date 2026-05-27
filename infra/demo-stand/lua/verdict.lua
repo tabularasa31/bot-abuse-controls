@@ -230,6 +230,65 @@ rate_limit.run(fp)
 -- block / allow).
 if config.stage_enabled(config.defaults, "verification") then
     verification.run()
+
+    -- L5.2 — physical dispatch (C5). verification.run() выставил
+    -- verdict=challenge в bac_log; physically делаем разводку по веткам
+    -- здесь, чтобы policy.enforce был единой точкой mode-gating'a (то же
+    -- соглашение, что и у tls_fp_blocklist выше + rate_limit). decide()
+    -- chooses verdict; classify_branch() chooses ветку A/B/C; этот блок —
+    -- единственная точка physical issue/block в L5.
+    --
+    -- Mode-gating:
+    --   * Branch A в mode=active → render challenge page, ngx.exit(200).
+    --     В shadow — НЕ серверим страницу: would-be-verdict уже в логе
+    --     (`verdict=challenge`), запрос идёт к origin как обычно. Это
+    --     сохраняет observe-only контракт shadow-режима: edge не меняет
+    --     ответ пользователю, пока клиент не переключился в active.
+    --   * Branch B/C — пишем block в лог (вне зависимости от mode) и
+    --     зовём policy.enforce(403): active → 403, shadow → no-op,
+    --     запрос продолжает идти к origin. Та же схема, что у
+    --     tls_fp_blocklist.
+    local ctx = ngx.ctx.bac
+    if ctx and ctx.verdict == "challenge" then
+        local branch = verification.classify_branch({
+            user_agent = ngx.var.http_user_agent,
+            method     = ngx.var.request_method,
+            accept     = ngx.var.http_accept,
+            upgrade    = ngx.var.http_upgrade,
+        })
+        if branch == "B" then
+            bac_log.set_verdict("verification", "block", "non_browser_blocked")
+            ngx.shared.metrics:incr("challenge_branch_b_total", 1, 0)
+            policy.enforce(403)
+            return
+        elseif branch == "C" then
+            bac_log.set_verdict("verification", "block", "unchallengeable_request")
+            ngx.shared.metrics:incr("challenge_branch_c_total", 1, 0)
+            policy.enforce(403)
+            return
+        else
+            -- Branch A — JS challenge. Только в active mode, иначе
+            -- shadow ломает «edge не меняет ответ». В shadow verdict
+            -- challenge остаётся в логе, запрос идёт к origin.
+            --
+            -- ngx.exec в internal `@challenge_page` (а не ngx.print
+            -- здесь) — стандартный паттерн §A8 edge-lua-vs-sidecar:
+            -- access_by_lua переключает запрос на content_by_lua-
+            -- handler, который и пишет body. URL клиента сохраняется
+            -- (важно: после window.location.reload() браузер уходит на
+            -- исходный URL с новым cookie, не на «/_challenge»).
+            -- policy.get guarantees a non-nil POOL_DEFAULT fallback, но
+            -- хранение в локальной переменной убирает повторный
+            -- shared_dict lookup (policy.get кеширует в ngx.ctx, но
+            -- читать `.mode` дважды через две вложенные индексации —
+            -- читается хуже) + защищает от теоретической поломки
+            -- контракта policy.get (gemini review on PR #87).
+            local p = policy.get(ngx.var.host or "")
+            if p and p.mode == "active" then
+                return ngx.exec("@challenge_page")
+            end
+        end
+    end
 end
 
 -- Fall through. If no rate profile fired and L5 не дал challenge/permissive,

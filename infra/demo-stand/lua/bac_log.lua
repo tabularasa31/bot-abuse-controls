@@ -155,6 +155,21 @@ end
 --   <cipher_cnt> 2 digits  (%02d, GREASE-stripped, capped at 99)
 --   <alpn>       2 chars   (h2 / h1 / 00 = none)
 -- A malformed/absent fp leaves the sub-columns nil → null in the record.
+-- set_challenge_fp(table). [C5] Browser fingerprint, собранный JS solver'ом
+-- на challenge-странице (canvas/audio/screen/UA/etc.), приехавший в payload
+-- POST /__challenge/verify. Пишется в BAC_LOG отдельным полем
+-- `challenge_fp` для challenge-pass события (vision §5.2). НЕ участвует
+-- в верификации запроса (bearer cookie без fp-binding); это датасет под
+-- аналитику и будущие L6 ML-модели. Сохраняем как-есть, чтобы backend
+-- мог нормализовать поля по своему usage (поля типа `ua/languages/
+-- screen/timezone/hwc/platform` — см. challenge/page.html `fingerprint()`).
+function _M.set_challenge_fp(fp)
+    local ctx = ngx.ctx.bac
+    if ctx and type(fp) == "table" then
+        ctx.challenge_fp = fp
+    end
+end
+
 function _M.set_tls_fp(fp)
     local ctx = ngx.ctx.bac
     if not ctx then return end
@@ -238,6 +253,10 @@ function _M.emit()
         tags          = ctx.tags,
         flags         = ctx.flags,
         staging_match = ctx.staging_match,
+        -- [C5] challenge-pass browser fingerprint (set_challenge_fp); null
+        -- on every non-challenge-verify request — kept as a stable field
+        -- so the sink schema is uniform.
+        challenge_fp  = ctx.challenge_fp or cjson_base.null,
     }
 
     local line = cjson.encode(record)
