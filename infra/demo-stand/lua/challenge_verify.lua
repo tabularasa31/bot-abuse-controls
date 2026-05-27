@@ -184,11 +184,20 @@ function _M.verify_token(nonce, token)
     return ct_eq(hex:lower(), token:lower())
 end
 
--- consume_nonce(sig_b64, exp) → true on first use, false on replay.
+-- consume_nonce(sig_b64, exp) → true on first use, false otherwise.
 -- Ключом single-use берем HMAC-сегмент (а не весь nonce): он уникален
 -- by construction (HMAC по payload), короче чем payload+sig, и не
 -- утекает host'a в shared dict. TTL = exp - now + 5s slack — записи
 -- автоматически сметаются после истечения nonce'a, не накапливаются.
+--
+-- `dict:add` различает два класса отказа: `err == "exists"` — реальный
+-- replay (nonce уже потреблён в окне TTL), `err == "no memory"` —
+-- shared_dict переполнен и LRU не нашёл что вытеснить. Без отдельного
+-- ERR-лога OOM маскировался бы под replay (gemini review on PR #87) —
+-- метрика `challenge_invalid_total{reason="replay"}` росла бы при OOM,
+-- хотя проблема в `lua_shared_dict used_nonces` sizing'е. Логируем ERR
+-- и продолжаем fail-closed (тот же 403 для клиента — лучше отказать,
+-- чем выписать cookie на возможный replay).
 function _M.consume_nonce(sig_b64, exp)
     local dict = ngx.shared.used_nonces
     if not dict then
@@ -197,8 +206,13 @@ function _M.consume_nonce(sig_b64, exp)
     end
     local ttl = (exp - ngx.time()) + 5
     if ttl <= 0 then return false end
-    local ok = dict:add(sig_b64, 1, ttl)
-    return ok == true
+    local ok, err = dict:add(sig_b64, 1, ttl)
+    if ok then return true end
+    if err == "no memory" then
+        ngx.log(ngx.ERR, "challenge_verify: used_nonces shared_dict out of memory; ",
+            "bump lua_shared_dict used_nonces in nginx.conf")
+    end
+    return false
 end
 
 -- bump_counter — все challenge-метрики живут в ngx.shared.metrics.
@@ -302,20 +316,52 @@ function _M.handle()
 
     -- Set-Cookie атрибуты — vision §5.2: HttpOnly, Secure, SameSite=Lax,
     -- Domain=<host> (без leading dot), Path=/.
+    --
+    -- Domain attr опускаем для IPv4/IPv6/localhost: per RFC 6265 §5.2.3
+    -- «If the user agent receives a cookie with a Domain attribute that
+    -- contains an IP address, the user agent MUST silently ignore the
+    -- cookie», то же для `localhost`. Без атрибута браузер создаст
+    -- host-only cookie (отправляется только на этот же хост) — это и
+    -- ожидаемое поведение для демо-стенда / интеграционного харнесса,
+    -- который часто бьёт по IP/`localhost` (gemini review on PR #87).
     local cookie_name = clearance.cookie_name()
+    local domain_attr = ""
+    local is_ipv4    = host:match("^%d+%.%d+%.%d+%.%d+$") ~= nil
+    local is_ipv6    = host:find(":", 1, true) ~= nil  -- IPv6 literal: any ':'
+    local is_loopbk  = (host == "localhost")
+    if not (is_ipv4 or is_ipv6 or is_loopbk) then
+        domain_attr = "; Domain=" .. host
+    end
     local set_cookie = string.format(
-        "%s=%s; Max-Age=%d; Path=/; Domain=%s; HttpOnly; Secure; SameSite=Lax",
-        cookie_name, cookie_value, ttl, host)
+        "%s=%s; Max-Age=%d; Path=/%s; HttpOnly; Secure; SameSite=Lax",
+        cookie_name, cookie_value, ttl, domain_attr)
     ngx.header["Set-Cookie"] = set_cookie
     ngx.header.cache_control = "no-store"
 
     bump("challenge_solved_total")
 
+    -- BAC_LOG challenge-pass event (vision §5.2 «Сбор browser fingerprint
+    -- для аналитики ... Уезжает вместе с challenge-pass-событием по тому
+    -- же пути, что и обычные логи»). Endpoint вне verdict.lua, поэтому
+    -- bac_log.init() здесь явный; emit() пишет в stdout + enqueue'ит в
+    -- log_shipper (тот же канал, что у обычных запросов). Без этого
+    -- block браузерный fingerprint, собранный JS solver'ом, никогда не
+    -- доезжал бы до backend telemetry — а это явный contract из vision
+    -- (codex review on PR #87).
+    --
+    -- verdict=allow, rule=challenge_pass — отдельный rule-код, чтобы
+    -- аналитика отличала «прошел challenge» от других allow-веток
+    -- (cookie_valid / bot_verified / ip_whitelist). Соответствует
+    -- entities-reference Phase 4 категории challenge events.
+    local bac_log = require "bac_log"
+    bac_log.init()
+    bac_log.set_verdict("verification", "allow", "challenge_pass")
+    bac_log.set_challenge_fp(payload.fp)
+    bac_log.emit()
+
     -- 200 OK + пустое тело: JS на page.html делает window.location.reload(),
     -- браузер ушлёт новый GET с прикрепленным cookie, и каскад фастпасит
-    -- на L2.1 (clearance.verify → RESULT_VALID). Тело можно не отдавать,
-    -- но Content-Length=0 поможет фронту distinguish'ить «verify ok» от
-    -- неконкретного отказа без чтения статуса.
+    -- на L2.1 (clearance.verify → RESULT_VALID).
     ngx.status = 200
     ngx.header.content_type = "text/plain; charset=utf-8"
     ngx.print("ok")

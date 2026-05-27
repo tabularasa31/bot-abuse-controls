@@ -277,7 +277,14 @@ if config.stage_enabled(config.defaults, "verification") then
             -- handler, который и пишет body. URL клиента сохраняется
             -- (важно: после window.location.reload() браузер уходит на
             -- исходный URL с новым cookie, не на «/_challenge»).
-            if policy.get(ngx.var.host or "").mode == "active" then
+            -- policy.get guarantees a non-nil POOL_DEFAULT fallback, но
+            -- хранение в локальной переменной убирает повторный
+            -- shared_dict lookup (policy.get кеширует в ngx.ctx, но
+            -- читать `.mode` дважды через две вложенные индексации —
+            -- читается хуже) + защищает от теоретической поломки
+            -- контракта policy.get (gemini review on PR #87).
+            local p = policy.get(ngx.var.host or "")
+            if p and p.mode == "active" then
                 return ngx.exec("@challenge_page")
             end
         end
