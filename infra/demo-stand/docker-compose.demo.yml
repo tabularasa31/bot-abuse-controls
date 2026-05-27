@@ -56,6 +56,18 @@ services:
       # demo-backend on a side VM). Default unset → catalog_pull keeps
       # ssl_verify=true (production-path).
       ANTIBOT_BACKEND_SSL_VERIFY: ${ANTIBOT_BACKEND_SSL_VERIFY:-}
+      # Private IP of the dashboard backend (the platform-app behind Caddy).
+      # When set, nginx-demo's $origin_resolve substitutes this IP into
+      # the upstream URL for dashboard.example.com, bypassing the
+      # http-level `resolver` (which would otherwise hit public DNS,
+      # get the edge's own IP, and loop the cascade into itself). Host
+      # header + SNI sent to the upstream stay as the public hostname
+      # so Caddy serves the right vhost / cert. The earlier `extra_hosts:`
+      # approach was insufficient — /etc/hosts is consulted only by libc-
+      # style resolution; nginx's variable proxy_pass uses `resolver`,
+      # which bypasses /etc/hosts entirely. See nginx.demo.conf's
+      # $origin_resolve set_by_lua_block for the full rationale.
+      DASHBOARD_BACKEND_IP: ${DASHBOARD_BACKEND_IP:-<TENANT_ORIGIN_IP>}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's
@@ -63,22 +75,6 @@ services:
       # .env so the bind doesn't clash. .env is gitignored.
       - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
       - "${DEMO_BIND_IP:-0.0.0.0}:80:80"   # 80 reserved for ACME http-01 challenge
-
-    # Pin upstream resolution for hosts that the cascade itself is the
-    # public-facing entry-point for. Without this, when `dashboard.example.com`
-    # public DNS points at THIS edge VM, an `ORIGIN_URL=https://dashboard.example.com`
-    # would resolve back to the edge and proxy_pass loops nginx into itself.
-    # /etc/hosts inside the container forces the upstream lookup to the
-    # private dashboard-backend address (the VM where Caddy + the platform-app
-    # actually live), so the cascade still proxies to the real origin
-    # regardless of what public DNS does. Add more pairs here when new
-    # cascade-fronted hostnames go live.
-    #
-    # The backend IP is parameterised so a staging/local deploy can override
-    # it via .env without touching this committed file; the default matches
-    # the current production example backend.
-    extra_hosts:
-      - "dashboard.example.com:${DASHBOARD_BACKEND_IP:-<TENANT_ORIGIN_IP>}"
 
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
