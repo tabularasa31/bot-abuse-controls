@@ -232,7 +232,17 @@ function _M.emit()
         edge_id       = EDGE_ID,
         resource_id   = cjson_base.null,   -- backend-enriched on ingest; null on edge
         host          = ngx.var.host or cjson_base.null,
-        path          = ngx.var.uri or cjson_base.null,
+        -- $request_uri preserves the ORIGINAL request path through
+        -- internal rewrites (the catch-all-to-BAC model uses
+        -- `rewrite ^ /__landing last` for unknown Hosts; without this
+        -- $uri-vs-$request_uri swap, every unknown-Host record would
+        -- log path=/__landing and we'd lose visibility into what
+        -- scanners actually asked for). Query string is stripped so
+        -- the field stays comparable to its pre-change shape — the
+        -- sink already has separate observability for query patterns
+        -- if needed.
+        path          = (ngx.var.request_uri and ngx.var.request_uri:match("^([^?]*)"))
+                          or ngx.var.uri or cjson_base.null,
         method        = ngx.var.request_method or cjson_base.null,
         status        = tonumber(ngx.var.status) or cjson_base.null,
         ip            = ngx.var.remote_addr or cjson_base.null,
