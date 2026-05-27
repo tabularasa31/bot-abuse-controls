@@ -90,6 +90,36 @@ eq(origin_resolve.resolve("https://192.0.2.10:8443/x", "<TENANT_ORIGIN_IP>"),
    "IPv4 + port + path → host replaced, rest preserved")
 
 -- ====================================================================
+-- IPv6 — neither the resolver path nor the operator config currently use
+-- it (resolver.conf has `ipv6=off`, DASHBOARD_BACKEND_IP is IPv4), but
+-- the substitution shouldn't corrupt v6-shaped URLs if someone does
+-- point ORIGIN_URL or DASHBOARD_BACKEND_IP at an IPv6 literal. Two
+-- properties matter: (1) `[v6]` in the origin URL must be matched as a
+-- single host token (not split on the inner `:`s), and (2) an IPv6
+-- origin_ip must be bracketed in the output so the URL stays
+-- RFC 3986-shaped.
+-- ====================================================================
+eq(origin_resolve.resolve("https://[2001:db8::1]:8443/x", "<TENANT_ORIGIN_IP>"),
+   "https://<TENANT_ORIGIN_IP>:8443/x",
+   "IPv6 in origin → replaced by IPv4 (brackets dropped)")
+
+eq(origin_resolve.resolve("https://[2001:db8::1]", "<TENANT_ORIGIN_IP>"),
+   "https://<TENANT_ORIGIN_IP>",
+   "IPv6-only origin (no port, no path) → IPv4")
+
+eq(origin_resolve.resolve("https://dashboard.example.com:8443/x", "2001:db8::2"),
+   "https://[2001:db8::2]:8443/x",
+   "IPv6 origin_ip → wrapped in brackets")
+
+eq(origin_resolve.resolve("https://[2001:db8::1]:8443/x", "2001:db8::2"),
+   "https://[2001:db8::2]:8443/x",
+   "IPv6 origin replaced by IPv6 origin_ip (both bracketed)")
+
+eq(origin_resolve.resolve("https://dashboard.example.com", "[2001:db8::2]"),
+   "https://[2001:db8::2]",
+   "already-bracketed origin_ip not double-wrapped")
+
+-- ====================================================================
 -- Summary
 -- ====================================================================
 io.write(string.format("origin_resolve_test: %d passed, %d failed\n", passed, failed))

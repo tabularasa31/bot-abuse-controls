@@ -61,14 +61,30 @@ local _M = {}
 function _M.resolve(origin, origin_ip)
     if not origin or origin == "" then return origin end
     if not origin_ip or origin_ip == "" then return origin end
-    -- Match `scheme://host` and replace `host` with origin_ip.
-    -- `[^:/]+` stops at the first `:` (port) or `/` (path), so both are
-    -- preserved. gsub returns (new_string, count); we only want the string.
-    local rewritten, n = origin:gsub("^(https?://)[^:/]+", "%1" .. origin_ip)
+
+    -- If origin_ip is IPv6 (contains a colon and isn't already bracketed),
+    -- wrap it in brackets so the resulting URL is RFC 3986-shaped
+    -- (`scheme://[v6]:port/path`). IPv4 and already-bracketed values pass
+    -- through unchanged. The substitution itself is the same for both
+    -- families — only the way the literal sits inside the URL differs.
+    local formatted_ip = origin_ip
+    if origin_ip:find(":", 1, true) and not origin_ip:find("^%[") then
+        formatted_ip = "[" .. origin_ip .. "]"
+    end
+
+    -- Match `scheme://host` and replace `host` with formatted_ip.
+    -- Try the bracketed IPv6 form first (`[…]`), then fall back to the
+    -- IPv4/hostname form (`[^:/]+`). The IPv4 pattern would stop at the
+    -- first `:` inside `[2001:db8::1]` and corrupt the URL, hence the
+    -- two-step match. Both patterns preserve trailing `:port` and `/path`.
+    -- gsub returns (new_string, count); we use count to detect "no match"
+    -- so a bare hostname (no scheme) is returned as-is rather than
+    -- silently mangled.
+    local rewritten, n = origin:gsub("^(https?://)%[[^%]]+%]", "%1" .. formatted_ip)
     if n == 0 then
-        -- Origin didn't match scheme://host shape (e.g. someone set
-        -- ORIGIN_URL to a bare hostname). Return as-is rather than
-        -- silently mangling.
+        rewritten, n = origin:gsub("^(https?://)[^:/]+", "%1" .. formatted_ip)
+    end
+    if n == 0 then
         return origin
     end
     return rewritten
