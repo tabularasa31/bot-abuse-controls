@@ -56,6 +56,18 @@ services:
       # demo-backend on a side VM). Default unset → catalog_pull keeps
       # ssl_verify=true (production-path).
       ANTIBOT_BACKEND_SSL_VERIFY: ${ANTIBOT_BACKEND_SSL_VERIFY:-}
+      # [C6] Shared M2M secret for backend Policy API (B10). Recovery
+      # endpoint /__admin/recover_ip («Whitelist IP» button) reads this
+      # to authenticate against POST /antibot/v1/policy/<host>/ip_whitelist.
+      # Same secret the backend reads from its DASHBOARD_API_TOKEN env;
+      # set both on the demo host. Unset → recovery refuses with 502.
+      DASHBOARD_API_TOKEN: ${DASHBOARD_API_TOKEN:-}
+      # [C6 security gate] Operator IP allowlist for /__admin/recover_ip.
+      # CSV CIDR. Unset/empty → fail-closed (403 on every POST). Without
+      # this, /__admin being publicly reachable lets any client whitelist
+      # their IP on any protected host. Set to your public IP (or office
+      # /24) in .env. See recovery.lua.
+      ADMIN_ACL_CIDR: ${ADMIN_ACL_CIDR:-}
       # Private IP of the dashboard backend (the platform-app behind Caddy).
       # When set, nginx-demo's $origin_resolve substitutes this IP into
       # the upstream URL for dashboard.example.com, bypassing the

@@ -49,7 +49,8 @@ jobs:
                    luajit tests/challenge_secret_test.lua && \
                    luajit tests/challenge_test.lua && \
                    luajit tests/clearance_test.lua && \
-                   luajit tests/verification_test.lua'
+                   luajit tests/verification_test.lua && \
+                   luajit tests/recovery_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)

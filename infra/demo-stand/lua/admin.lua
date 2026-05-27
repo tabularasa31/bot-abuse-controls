@@ -1,7 +1,14 @@
--- /__admin status page. Read-only HTML view of what the stand is doing
--- right now: counters, the rules that have fired, a live ring buffer of
--- recent requests, and the blocklist contents. No mutation surface. Lets a
--- reviewer eyeball the pipeline without learning Prometheus query syntax.
+-- /__admin status page. HTML view of what the stand is doing right now:
+-- counters, the rules that have fired, a live ring buffer of recent
+-- requests, and the blocklist contents. Lets a reviewer eyeball the
+-- pipeline without learning Prometheus query syntax.
+--
+-- Mutation: ONE button per blocked-request row — «add IP to per-resource
+-- ip_whitelist» (C6, false-positive recovery loop, vision §5.2). On the
+-- real product the same operation is done from the client's dashboard;
+-- /__admin stands in as that dashboard for the demo. The button POSTs to
+-- /__admin/recover_ip (recovery.lua), which proxies into backend Policy
+-- API (B10). Nothing else here mutates.
 
 local recent   = require "recent"
 local fp_state = require "tls_fp_blocklist_state"
@@ -111,6 +118,117 @@ add('<div class="metric"><strong>' .. allows .. '</strong><br>allow</div>')
 add('<div class="metric"><strong>' .. fp_unique .. '</strong><br>unique fp</div>')
 add('<div class="metric"><strong>' .. hit_ratio .. '</strong><br>cache hit ratio</div>')
 add('<div class="metric"><strong>' .. esc(uptime_h) .. '</strong><br>uptime</div>')
+
+-- Blocked requests — C6 recovery widget. Filters the same recent-ring as
+-- the live view below, but only verdict=block and only rules where a
+-- per-resource IP whitelist actually fixes the FP (L5 Branch B/C, plus
+-- L2/L3 IP/fp blocks where whitelisting the source is the right escape).
+-- Rules like rate_* or ua_blacklist hit on UA — whitelisting the IP also
+-- unsticks them at L2.3 (per-resource ip_whitelist fastpasses before
+-- rate_limit/tls_fp run), so we show those too. The button is the only
+-- mutation surface on /__admin; everything else is read-only.
+local all_recs = recent.snapshot(50)
+local blocked_recs = {}
+for _, e in ipairs(all_recs) do
+    if e.verdict == "block" then blocked_recs[#blocked_recs + 1] = e end
+end
+add('<h2>Blocked requests — recovery (last ' .. #blocked_recs .. ')</h2>')
+add('<p class="note">Demo: this widget stands in for the client dashboard. ' ..
+    '«Whitelist IP» adds the client IP to the per-resource <code>ip_whitelist</code> ' ..
+    'via the same backend Policy API the real dashboard calls (B10). ' ..
+    'Propagation SLA ≤ 30s (vision §5.2): backend reloader ≤ 5s + edge ' ..
+    '<code>catalog_pull</code> ≤ 30s; next request from that IP fastpasses on ' ..
+    'L2.3 (<code>rule=ip_whitelist</code>) and never reaches L5.</p>')
+if #blocked_recs == 0 then
+    add('<p class="empty">No blocked requests in the buffer.</p>')
+else
+    add('<table id="recovery-table"><tr><th>time</th><th>host</th><th>rule</th>' ..
+        '<th>ip</th><th>ua</th><th>flags</th><th>action</th></tr>')
+    for i, e in ipairs(blocked_recs) do
+        local t = e.t and os.date("!%H:%M:%S", e.t) or "?"
+        local ua = e.ua or ""
+        if #ua > 40 then ua = ua:sub(1, 40) .. "…" end
+        local flags = ""
+        if type(e.flags) == "table" then
+            flags = table.concat(e.flags, ",")
+            if #flags > 64 then flags = flags:sub(1, 64) .. "…" end
+        end
+        local host = e.host or ""
+        local ip = e.ip or ""
+        local row_id = "rec-" .. tostring(i)
+        add('<tr id="' .. row_id .. '">' ..
+            '<td>' .. esc(t) .. '</td>' ..
+            '<td>' .. esc(host) .. '</td>' ..
+            '<td><code>' .. esc(e.rule or "") .. '</code></td>' ..
+            '<td><code>' .. esc(ip) .. '</code></td>' ..
+            '<td>' .. esc(ua) .. '</td>' ..
+            '<td><code>' .. esc(flags) .. '</code></td>' ..
+            '<td>')
+        if host ~= "" and ip ~= "" then
+            add('<button type="button" class="rcv-btn" ' ..
+                'data-host="' .. esc(host) .. '" ' ..
+                'data-ip="' .. esc(ip) .. '" ' ..
+                'data-row="' .. row_id .. '">Whitelist IP</button>')
+        else
+            add('<span class="empty">missing host/ip</span>')
+        end
+        add('</td></tr>')
+    end
+    add('</table>')
+    -- Inline JS: tiny fetch + status pill, no external deps. The endpoint
+    -- echoes {ok,host,cidr,changed,propagation_seconds}; we display it via
+    -- textContent / createElement (not innerHTML) so a malicious backend
+    -- payload can't inject HTML into /__admin — review on PR #88.
+    add([[
+<script>
+document.querySelectorAll('.rcv-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var host = btn.dataset.host, ip = btn.dataset.ip, rowId = btn.dataset.row;
+    var row  = document.getElementById(rowId);
+    btn.disabled = true; btn.textContent = '...';
+    function setCell(color, parts) {
+      var cell = row.querySelector('td:last-child');
+      while (cell.firstChild) cell.removeChild(cell.firstChild);
+      var span = document.createElement('span');
+      span.style.color = color;
+      parts.forEach(function(p) {
+        if (p.tag) {
+          var el = document.createElement(p.tag);
+          el.textContent = p.text;
+          span.appendChild(el);
+        } else {
+          span.appendChild(document.createTextNode(p.text));
+        }
+      });
+      cell.appendChild(span);
+    }
+    fetch('/__admin/recover_ip', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({host: host, ip: ip})
+    }).then(function(r) { return r.json().then(function(j){ return {s:r.status, j:j}; }); })
+      .then(function(res) {
+        if (res.s === 200 && res.j.ok) {
+          var verb = res.j.changed ? 'whitelisted' : 'already whitelisted';
+          setCell('#2e7d32', [
+            {text: '✓ ' + verb + ' ('},
+            {tag: 'code', text: String(res.j.cidr || '')},
+            {text: '); ≤ ' + Number(res.j.propagation_seconds || 30) +
+                   's to fastpass'},
+          ]);
+        } else {
+          var msg = res.j.error || ('HTTP ' + res.s);
+          setCell('#c62828', [{text: '✗ ' + String(msg)}]);
+        }
+      }).catch(function(e) {
+        btn.disabled = false; btn.textContent = 'Whitelist IP';
+        setCell('#c62828', [{text: '✗ ' + String(e)}]);
+      });
+  });
+});
+</script>
+]])
+end
 
 -- Rules fired
 add("<h2>Rules fired</h2>")

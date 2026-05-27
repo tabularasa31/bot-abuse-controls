@@ -15,10 +15,14 @@ local CAP  = 50
 local dict = ngx.shared.recent
 
 -- Record one pipeline request. `rec` is a small flat table; UA is capped so
--- a pathological User-Agent can't blow the shared_dict value limit.
+-- a pathological User-Agent can't blow the shared_dict value limit. host and
+-- flags (C6) are kept so the /__admin recovery widget can show enough context
+-- to recognise a false positive and dispatch the correct per-resource
+-- whitelist call (host → which policy, flags → why it blocked).
 function _M.record(rec)
     if not dict then return end
     if rec.ua and #rec.ua > 160 then rec.ua = rec.ua:sub(1, 160) end
+    if rec.host and #rec.host > 253 then rec.host = rec.host:sub(1, 253) end
     local line = cjson.encode(rec)
     if not line then return end
     local idx = dict:incr("head", 1, 0)        -- 1 on first call (init 0 + 1)
