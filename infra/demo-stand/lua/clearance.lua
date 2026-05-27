@@ -181,7 +181,12 @@ function _M.verify(host)
     -- отклонение → malformed (не доверяем содержимому без HMAC, но
     -- structural check без HMAC безопасен — данные были бы отвергнуты
     -- HMAC'ом тоже, просто экономим crypto-вычисление на garbage cookie).
-    local site_b64, iat_s, exp_s = body:match("^([%w%-_]+):(%d+):(%d+)$")
+    -- iat — намеренно не используется в C3 verify, но парсится строго,
+    -- чтобы (а) malformed body отсекался до HMAC compute, (б) C7 attack_mode
+    -- skip-fastpath читал готовое поле (сравнение `iat > attack_started_at`)
+    -- без изменения формата cookie. luacheck-маркер `_iat_s` подсказывает:
+    -- если когда-то понадобится — переименовать и снять подчёркивание.
+    local site_b64, _iat_s, exp_s = body:match("^([%w%-_]+):(%d+):(%d+)$")
     if not site_b64 then
         return _M.RESULT_MALFORMED
     end
