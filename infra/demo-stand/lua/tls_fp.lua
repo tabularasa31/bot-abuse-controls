@@ -482,7 +482,7 @@ end
 -- verdict=challenge напрямую, что нарушало rules-reference §"L3/L4 флаги
 -- ... сами на L3/L4 challenge не выдают — они только помечают запрос;
 -- единственная точка, где принимается решение — этот вызов на L5".
-local function fire_soft(bac_log, _ctx, rule)
+local function fire_soft(bac_log, rule)
     bac_log.add_flag(rule)
 end
 
@@ -534,10 +534,10 @@ function _M.run(fp)
     -- non-browser UAs anyway, so the common case skips the string.match.
     local hb = BROWSER_FAMILIES[ua_family] and _M.hash_b(fp) or nil
     if _M.is_impersonator(ua_family, hb, _M.catalog) then
-        fire_soft(bac_log, ctx, "tls_fp_impersonator")
+        fire_soft(bac_log, "tls_fp_impersonator")
     end
     if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles, true) then
-        fire_soft(bac_log, ctx, "tls_fp_suspicious_ciphers")
+        fire_soft(bac_log, "tls_fp_suspicious_ciphers")
     end
 
     -- Staged patterns (A11). A staged entry is matched with the SAME predicate
