@@ -36,6 +36,7 @@ local fp_state   = require "tls_fp_blocklist_state"
 local config     = require "config"
 local policy     = require "policy"
 local clearance  = require "clearance"
+local verification = require "verification"
 
 -- Global kill-switch (A12). When set, the whole cascade is a no-op: we return
 -- before bac_log.init so the request proxies straight to the origin and emits
@@ -213,5 +214,23 @@ end
 -- for this request).
 rate_limit.run(fp)
 
--- Fall through. If no rate profile fired the context keeps its defaults
--- (stage=egress, verdict=pass).
+-- L5 verification — should_challenge() (C4). Решение про challenge — ровно
+-- здесь. До C4 verdict=challenge выставлял сам tls_fp soft-блок, что
+-- нарушало rules-reference («L3/L4 flags only mark, decision happens at L5»)
+-- и игнорировало per-resource Strictness. Теперь tls_fp лишь копит flag'и,
+-- а verification.decide() читает (flags, policy.strictness, policy.attack_mode)
+-- и пишет verdict=challenge / verdict=permissive / ничего. Observe-only:
+-- physical challenge issuance (Branch A — JS challenge, Branch B/C — block)
+-- — отдельный ticket C5; сейчас вердикт идёт только в bac_log.
+--
+-- Гейтится per-stage kill-switch'ем `verification` (defaults.conf
+-- [kill_switch.per_stage]). При выключении системные soft-флаги остаются
+-- в `flags` (для аналитики), но не превращаются ни в challenge, ни в
+-- permissive — verdict остаётся таким, каким его оставил L4 (pass /
+-- block / allow).
+if config.stage_enabled(config.defaults, "verification") then
+    verification.run()
+end
+
+-- Fall through. If no rate profile fired and L5 не дал challenge/permissive,
+-- the context keeps its defaults (stage=egress, verdict=pass).
