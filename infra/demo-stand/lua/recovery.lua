@@ -34,8 +34,22 @@ local function load_env()
         -- nginx.demo.conf принимает URL без trailing slash; добавим путь сами.
         _M.backend_url = (url:gsub("/+$", ""))
     end
+    -- Strip control chars (CR/LF/tab) from token: `echo TOKEN >> .env`
+    -- leaves a trailing \n, which would land directly in the Bearer
+    -- header. Newer lua-resty-http rejects CRLF in header values
+    -- (opaque auth failure); older versions could split headers
+    -- (request-smuggling shape). Review on PR #88.
     local t = os.getenv("DASHBOARD_API_TOKEN")
-    _M.api_token = (t == nil or t == "") and nil or t
+    if t then t = (t:gsub("%c", "")) end
+    -- Не пишем как `(t == nil or t == "") and nil or t` — это Lua-trap:
+    -- `true and nil` = nil, и затем `nil or t` снова возвращает t (т.е. ""),
+    -- из-за чего токен после стрипа из «\n\n» приезжал бы пустой строкой,
+    -- а не nil. call_backend проверяет именно nil, так что критично.
+    if t == nil or t == "" then
+        _M.api_token = nil
+    else
+        _M.api_token = t
+    end
     local s = os.getenv("ANTIBOT_BACKEND_SSL_VERIFY")
     _M.ssl_verify = (s ~= "false")
     return _M
@@ -76,15 +90,41 @@ local function client_allowed(remote_addr)
 end
 _M.client_allowed = client_allowed
 
--- Валидация host (минимальная). Бэкенд per-resource policy keyed by host,
--- так что мусорный host создаст там пустую запись — нам это не надо.
-local HOST_RE = "^[%w][%w%-%.]*$"
+-- Валидация host. Бэкенд `siteRE` (antibotapi/validate.go) — строгий
+-- RFC 1123 LDH per-label валидатор; раньше HOST_RE здесь был куда laxer
+-- (`%w` в Lua включает `_`, плюс пропускал `a..b` / `a.` / `a-`), и
+-- backend заворачивал такие host'ы 400 → operator видел невнятное
+-- «backend returned 400» вместо чёткой локальной ошибки (review on PR
+-- #88). Каждый label = `[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?`,
+-- разделены ровно одной точкой, no leading/trailing hyphen, no trailing
+-- dot, no consecutive dots, no underscores.
+--
+-- NB: Lua patterns не поддерживают `?` после группы; делаем покомпонентно
+-- — single-char label = `^[%w]$`, multi-char = `^[%w][%w%-]*[%w]$`.
+-- `%w` включает `_`, поэтому отдельный find на `_` всё ещё нужен.
+local function valid_label(label)
+    local n = #label
+    if n == 0 or n > 63 then return false end
+    if n == 1 then return label:match("^[%w]$") ~= nil end
+    return label:match("^[%w][%w%-]*[%w]$") ~= nil
+end
+
 local function validate_host(h)
     if type(h) ~= "string" or #h == 0 or #h > 253 then
         return "host must be a non-empty hostname"
     end
-    if not h:match(HOST_RE) then
+    -- Lua `%w` matches `_` — RFC 1123 hostnames don't allow underscore.
+    if h:find("_", 1, true) then
         return "host has invalid characters"
+    end
+    -- Leading/trailing dot + consecutive dots отсекаем явно (gmatch скрыл бы их).
+    if h:sub(1, 1) == "." or h:sub(-1) == "." or h:find("..", 1, true) then
+        return "host has invalid characters"
+    end
+    for label in h:gmatch("[^.]+") do
+        if not valid_label(label) then
+            return "host has invalid characters"
+        end
     end
     return nil
 end
@@ -228,11 +268,41 @@ function _M.handle()
     local cidr = to_cidr(ip)
     local ok, info, err = call_backend(host, cidr)
     if not ok then
-        -- 502 — мы прокси к backend; backend недоступен/ответил не-200.
-        ngx.status = (info and info.status and info.status >= 400 and info.status < 500) and 400 or 502
+        -- Status mapping (review on PR #88): раньше любой 4xx коллапсился в
+        -- 400 — operator/monitor видели «bad request» при том, что причина
+        -- была серверная (401 stale token, 403 ACL, 404 unknown route). 401
+        -- /403/404/409/410 — это НЕ ошибка операторского ввода, это server
+        -- /config-side, мапим в 502 («плохой ответ от upstream»). 400/422
+        -- — настоящая ошибка ввода (backend ValidateCIDR/ValidateSite не
+        -- пропустил), мапим в 400.
+        local bs = info and info.status
+        if bs == 400 or bs == 422 then
+            ngx.status = 400
+        else
+            ngx.status = 502
+        end
         local cjson = require "cjson.safe"
         ngx.say(cjson.encode({
             error    = err,
+            host     = host,
+            cidr     = cidr,
+            backend  = info,
+        }))
+        return
+    end
+
+    -- Backend контракт: 200 с {"changed": bool}. Если поля нет (regression
+    -- /протокол-drift), не врём UI «already whitelisted» (JS трактует null
+    -- как false → ✗); сигналим явно 502 'protocol_error', чтобы оператор
+    -- увидел проблему, а не молча принял на веру (review on PR #88).
+    if type(info.changed) ~= "boolean" then
+        ngx.status = 502
+        ngx.log(ngx.ERR, "[C6] recovery: backend 200 without changed:bool ",
+            "for host=", host, " cidr=", cidr, " (contract drift)")
+        local cjson = require "cjson.safe"
+        ngx.say(cjson.encode({
+            error    = "backend_protocol_error",
+            detail   = "missing or non-boolean 'changed' in 200 response",
             host     = host,
             cidr     = cidr,
             backend  = info,

@@ -34,12 +34,52 @@ local function json_decode(s)
 end
 package.loaded["cjson.safe"] = { encode = json_encode, decode = json_decode }
 
--- ngx stub: только то, что recovery.call_backend трогает. handle() здесь не
--- тестируем (требует ngx.req / ngx.say мок — отдельный плюс минимум смысла).
+-- ngx stub: достаточно для call_backend (минимум) и handle() (req/say/header).
+local ngx_state = { status = nil, body_chunks = {}, headers = {}, req_body = "",
+                    req_method = "POST", remote_addr = "10.0.0.5" }
+local function ngx_reset()
+    ngx_state.status = nil
+    ngx_state.body_chunks = {}
+    ngx_state.headers = {}
+    ngx_state.req_body = ""
+    ngx_state.req_method = "POST"
+    ngx_state.remote_addr = "10.0.0.5"
+end
 _G.ngx = {
     log = function() end,
     NOTICE = "N", WARN = "W", ERR = "E",
+    status = nil,
+    header = setmetatable({}, {
+        __newindex = function(_, k, v) ngx_state.headers[k] = v end,
+        __index    = function(_, k) return ngx_state.headers[k] end,
+    }),
+    say = function(...)
+        local parts = { ... }
+        for i = 1, select("#", ...) do
+            ngx_state.body_chunks[#ngx_state.body_chunks + 1] = tostring(parts[i])
+        end
+    end,
+    req = {
+        read_body = function() end,
+        get_method = function() return ngx_state.req_method end,
+        get_body_data = function() return ngx_state.req_body end,
+    },
+    var = setmetatable({}, {
+        __index = function(_, k)
+            if k == "remote_addr" then return ngx_state.remote_addr end
+            return nil
+        end,
+    }),
 }
+-- ngx.status — обычная переменная, _G.ngx это table; чтобы рекавери писал
+-- через ngx.status = N, делаем proxy через __newindex на ngx целиком.
+setmetatable(_G.ngx, {
+    __newindex = function(t, k, v)
+        if k == "status" then ngx_state.status = v; return end
+        rawset(t, k, v)
+    end,
+})
+local function body_str() return table.concat(ngx_state.body_chunks) end
 
 -- httpc mock с контролем ответа.
 local httpc_response = {}
@@ -129,14 +169,29 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- validate_host
+-- validate_host. После tighten (review on PR #88) совпадает с backend
+-- siteRE: RFC 1123 LDH, no underscore, no leading/trailing dot/hyphen,
+-- no consecutive dots, label ≤ 63 chars.
 do
     reset(); local r = load_mod()
+    -- happy
+    ok(r.validate_host("a.example") == nil, "host happy")
+    ok(r.validate_host("dashboard.example.com") == nil, "host fqdn")
+    ok(r.validate_host("a") == nil, "host single label")
+    ok(r.validate_host("a-b.example") == nil, "host hyphen mid-label")
+    -- empties / length
     ok(r.validate_host("") ~= nil, "host empty")
     ok(r.validate_host(("a"):rep(254)) ~= nil, "host too long")
     ok(r.validate_host("bad space") ~= nil, "host with space")
-    ok(r.validate_host("a.example") == nil, "host happy")
-    ok(r.validate_host("dashboard.example.com") == nil, "host fqdn")
+    -- chars rejected by tightened regex (used to be accepted)
+    ok(r.validate_host("foo_bar.example") ~= nil, "host with underscore (Lua %w trap)")
+    ok(r.validate_host(".example") ~= nil, "host with leading dot")
+    ok(r.validate_host("example.") ~= nil, "host with trailing dot")
+    ok(r.validate_host("foo..bar") ~= nil, "host with consecutive dots")
+    ok(r.validate_host("-foo.bar") ~= nil, "host with leading hyphen")
+    ok(r.validate_host("foo-.bar") ~= nil, "host with trailing hyphen in label")
+    ok(r.validate_host("foo.-bar") ~= nil, "host with leading hyphen in next label")
+    ok(r.validate_host(("a"):rep(64) .. ".com") ~= nil, "host label > 63 chars")
 end
 
 -- ---------------------------------------------------------------------------
@@ -254,6 +309,28 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- load_env: token CRLF/whitespace strip (review on PR #88 — `echo TOKEN >
+-- .env` leaves trailing \n, which would land in Authorization header).
+do
+    reset()
+    env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
+    env_override["DASHBOARD_API_TOKEN"] = "s3cret\n"
+    local r = load_mod()
+    eq(r.api_token, "s3cret", "trailing \\n stripped from token")
+end
+do
+    reset()
+    env_override["DASHBOARD_API_TOKEN"] = "s3\rcret\n\t"
+    local r = load_mod()
+    eq(r.api_token, "s3cret", "all control chars stripped")
+end
+do
+    reset()
+    env_override["DASHBOARD_API_TOKEN"] = "\n\n"
+    local r = load_mod()
+    eq(r.api_token, nil, "token reduced to empty after strip → nil")
+end
+
 -- client_allowed: ADMIN_ACL_CIDR unset → fail-closed
 do
     reset()
@@ -284,6 +361,97 @@ do
     eq(r.client_allowed("8.8.8.8"), false, "non-allowlisted IP → deny")
     eq(r.client_allowed(nil), false, "nil IP → deny")
     eq(r.client_allowed(""), false, "empty IP → deny")
+end
+
+-- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- handle(): status mapping для не-200 backend response (review on PR #88).
+-- 400/422 → 400 (input invalid), 401/403/404/409/5xx → 502 (server-side).
+local function setup_handle_env()
+    reset(); ngx_reset()
+    env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
+    env_override["DASHBOARD_API_TOKEN"] = "s3cret"
+    env_override["ADMIN_ACL_CIDR"] = "10.0.0.0/8"
+    install_ipmatcher_stub("10.0.0.5")
+    local r = load_mod()
+    ngx_state.req_body = '{"host":"a.example","ip":"1.2.3.4"}'
+    return r
+end
+
+do
+    local r = setup_handle_env()
+    httpc_response.status = 400
+    httpc_response.body = '{"error":"bad_cidr"}'
+    r.handle()
+    eq(ngx_state.status, 400, "backend 400 → edge 400 (real input bug)")
+end
+do
+    local r = setup_handle_env()
+    httpc_response.status = 422
+    r.handle()
+    eq(ngx_state.status, 400, "backend 422 → edge 400")
+end
+do
+    local r = setup_handle_env()
+    httpc_response.status = 401
+    r.handle()
+    eq(ngx_state.status, 502, "backend 401 (stale token) → edge 502, NOT 400")
+end
+do
+    local r = setup_handle_env()
+    httpc_response.status = 403
+    r.handle()
+    eq(ngx_state.status, 502, "backend 403 → edge 502")
+end
+do
+    local r = setup_handle_env()
+    httpc_response.status = 404
+    r.handle()
+    eq(ngx_state.status, 502, "backend 404 → edge 502")
+end
+do
+    local r = setup_handle_env()
+    httpc_response.err = "connection refused"
+    r.handle()
+    eq(ngx_state.status, 502, "transport error → edge 502")
+end
+
+-- ---------------------------------------------------------------------------
+-- handle(): backend 200 without {changed:bool} → 502 protocol_error (don't
+-- silently lie 'already whitelisted' to the operator).
+do
+    local r = setup_handle_env()
+    httpc_response.status = 200
+    httpc_response.body = ""  -- decoded → {} (no `changed`)
+    r.handle()
+    eq(ngx_state.status, 502, "200 без changed → 502 protocol_error")
+    ok(body_str():find("backend_protocol_error"), "body содержит protocol_error")
+end
+do
+    local r = setup_handle_env()
+    httpc_response.status = 200
+    httpc_response.body = '{"changed":true}'
+    r.handle()
+    eq(ngx_state.status, nil, "200 с changed:true → нет явного ngx.status (default 200)")
+    -- json_encode-стаб сериализует все значения как строки (всё в "..."),
+    -- так что ищем поле `ok`, а не специфично `:true`.
+    ok(body_str():find('"ok":'), "happy body has ok field")
+end
+
+-- ---------------------------------------------------------------------------
+-- handle(): ACL deny — non-allowlisted IP → 403, no backend call.
+do
+    reset(); ngx_reset()
+    env_override["ANTIBOT_BACKEND_URL"] = "http://backend:8080"
+    env_override["DASHBOARD_API_TOKEN"] = "s3cret"
+    env_override["ADMIN_ACL_CIDR"] = "10.0.0.0/8"
+    install_ipmatcher_stub("10.0.0.5")
+    local r = load_mod()
+    ngx_state.remote_addr = "8.8.8.8"  -- not in allowlist
+    ngx_state.req_body = '{"host":"a.example","ip":"1.2.3.4"}'
+    r.handle()
+    eq(ngx_state.status, 403, "non-allowlisted IP → 403")
+    eq(last_request, nil, "ACL deny → no backend call")
 end
 
 -- ---------------------------------------------------------------------------
