@@ -118,10 +118,11 @@
       if (resp.ok) {
         setStatus("Verified. Reloading…");
         window.location.reload();
-      } else if (resp.status === 404) {
-        // Expected on a C2-only stand: verify endpoint lands with C5.
-        setStatus("Challenge solved (verifier not deployed yet).");
       } else {
+        // C5+ deploys both the page and /__challenge/verify together
+        // (CASCADE_VERSION pin). A 404 here means the route was renamed
+        // or a deploy is half-applied; surface it as an explicit failure
+        // rather than a misleading "solved" message that hides the bug.
         setStatus("Verification failed (HTTP " + resp.status + "). Try reloading.");
       }
     } catch (err) {

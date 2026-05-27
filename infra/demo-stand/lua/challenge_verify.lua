@@ -272,6 +272,16 @@ function _M.handle()
     end
 
     local host = ngx.var.host or ""
+    if host == "" then
+        -- Empty host обычно значит сломанный upstream/proxy (request без
+        -- Host header'a, HTTP/1.0 без него, разделено proxy_set_header).
+        -- Без host'a verify_nonce упадёт на host-binding, а clearance.issue
+        -- — на 'host required'. Возвращаем bad_body чтобы не пачкать
+        -- no_secret/bad_nonce метрики, которые сигналят разные операционные
+        -- проблемы (code-review on PR #87).
+        bump_invalid(_M.REASON_BAD_BODY)
+        return ngx.exit(400)
+    end
     local nonce_payload, sig_or_reason = _M.verify_nonce(payload.nonce, host)
     if not nonce_payload then
         bump_invalid(sig_or_reason)
@@ -296,13 +306,19 @@ function _M.handle()
         return ngx.exit(403)
     end
 
-    -- Cookie TTL. C7 заведёт attack_mode read из policy и переключение
-    -- 86400 → 3600 here. Сейчас всегда DEFAULT_COOKIE_TTL.
+    -- Cookie TTL. defaults.conf [allow.cookie_valid] держит две точки:
+    -- `ttl_seconds_normal` (vision §2.1 — 86400) и `ttl_seconds_under_attack`
+    -- (vision §2.1 / §5.3 — 3600 при attack_mode=on). Выбор делает caller-
+    -- ветка `attack_mode`: сейчас (C5 без C7) policy.attack_mode всегда
+    -- false → normal-TTL. Когда C7 заведёт чтение per-host policy здесь,
+    -- остаётся переключить ключ под p.attack_mode без изменения схемы
+    -- конфига (code-review on PR #87: предыдущая версия читала
+    -- несуществующий `ttl_seconds`, override был dead code).
     local ttl = DEFAULT_COOKIE_TTL
     if config and type(config.defaults) == "table" then
         local allow = config.defaults.allow
         if type(allow) == "table" and type(allow.cookie_valid) == "table" then
-            local t = tonumber(allow.cookie_valid.ttl_seconds)
+            local t = tonumber(allow.cookie_valid.ttl_seconds_normal)
             if t and t > 0 then ttl = t end
         end
     end
@@ -356,7 +372,28 @@ function _M.handle()
     local bac_log = require "bac_log"
     bac_log.init()
     bac_log.set_verdict("verification", "allow", "challenge_pass")
-    bac_log.set_challenge_fp(payload.fp)
+    -- payload.fp пришёл из attacker-controlled JSON (body уже капнут
+    -- MAX_BODY_BYTES, но fp как поддерево может занимать почти весь
+    -- лимит и при глубокой вложенности завалить cjson.encode в
+    -- bac_log.emit — emit вернётся раньше с ERR-логом, и challenge-pass
+    -- запись пропадёт целиком (атакующий молча получает cookie без
+    -- audit-trail; code-review on PR #87). Pre-validate: encode здесь
+    -- через cjson.safe, проверяем размер, и только тогда отдаём в
+    -- bac_log. На неудачу — fp=nil + WARN; cookie всё равно выписана,
+    -- но bac_log.emit точно не упадёт и запись challenge_pass дойдёт.
+    local FP_MAX_BYTES = 2048
+    local fp_to_log
+    if type(payload.fp) == "table" then
+        local enc, enc_err = cjson.encode(payload.fp)
+        if enc and #enc <= FP_MAX_BYTES then
+            fp_to_log = payload.fp
+        else
+            ngx.log(ngx.WARN, "challenge_verify: dropping payload.fp ",
+                "(encode err: ", tostring(enc_err),
+                ", len: ", enc and #enc or "nil", ")")
+        end
+    end
+    bac_log.set_challenge_fp(fp_to_log)
     bac_log.emit()
 
     -- 200 OK + пустое тело: JS на page.html делает window.location.reload(),
