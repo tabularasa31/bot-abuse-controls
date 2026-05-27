@@ -372,6 +372,28 @@ for _, key in ipairs({
     "clearance_verify_malformed_total",
     "clearance_verify_wrong_site_total",
     "clearance_verify_no_secret_total",
+    -- [C5] Phase 4 L5.2 challenge issuance + verify endpoint.
+    -- challenge_issued_total — render of Branch A challenge page;
+    -- challenge_solved_total — successful POST /__challenge/verify (cookie
+    -- issued); challenge_invalid_<reason>_total — fail reasons (bad_nonce,
+    -- expired, replay, bad_token, wrong_version, bad_body, bad_method,
+    -- no_secret); challenge_branch_b_total / challenge_branch_c_total —
+    -- Branch B/C dispatches at L5 dispatch (non_browser_blocked /
+    -- unchallengeable_request). Primed at zero so /metrics shows the
+    -- shape from the first scrape; dashboards distinguish «no challenge
+    -- traffic» from «metric missing».
+    "challenge_issued_total",
+    "challenge_solved_total",
+    "challenge_invalid_bad_nonce_total",
+    "challenge_invalid_expired_total",
+    "challenge_invalid_replay_total",
+    "challenge_invalid_bad_token_total",
+    "challenge_invalid_wrong_version_total",
+    "challenge_invalid_bad_body_total",
+    "challenge_invalid_bad_method_total",
+    "challenge_invalid_no_secret_total",
+    "challenge_branch_b_total",
+    "challenge_branch_c_total",
 }) do
     metrics:safe_add(key, 0)
 end

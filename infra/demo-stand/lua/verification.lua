@@ -133,10 +133,74 @@ function _M.decide(ctx, p)
     return nil, nil
 end
 
+-- Branch classification (C5, vision §5.2 «Этап 5.2»). Когда decide()
+-- вернул verdict=challenge, разводка по веткам A/B/C делается ЗДЕСЬ
+-- — чистая функция, без side-effects: вход `req` (UA / method / Accept
+-- / Upgrade), выход — "A" | "B" | "C". Caller (verdict.lua) интерпретирует:
+--   A — render challenge page (Ветка A);
+--   B — verdict=block, rule=non_browser_blocked (Ветка B);
+--   C — verdict=block, rule=unchallengeable_request (Ветка C).
+--
+-- Порядок проверок: vision §5.2 формулирует Branch B как «UA явно не
+-- браузер», Branch C как «протокольно не подходит под challenge (UA может
+-- быть браузерным)». Сначала отсекаем non-browser UA — Branch B
+-- специфичнее по клиенту (curl с POST → B, не C). Потом проверяем
+-- протокольную совместимость (Branch C). Иначе → A.
+--
+-- Browser-detection переиспользует `tls_fp.classify_ua` (та же таблица,
+-- что и для tls_fp_impersonator / suspicious_ciphers): "other" → не
+-- браузер. Расхождение этих двух классификаторов сделало бы возможной
+-- ситуацию «soft-rule на L3 не сработал, потому что UA=other, а на L5
+-- Branch A отдал ему challenge» — поэтому держим один источник истины.
+--
+-- Unchallengeable signals (vision §5.2 «Признак запроса»):
+--   * method не из {GET, HEAD} — POST/PUT/PATCH/DELETE ломаются на
+--     `window.location = url` (303 сбросит body);
+--   * `Upgrade: websocket` — клиент ждёт `101 Switching Protocols`,
+--     HTML-страница ломает upgrade;
+--   * Accept не содержит `text/html` (или отсутствует, или `*/*`) —
+--     не-браузерный клиент с JSON/binary, HTML отрендерит как мусор.
+local tls_fp = require "tls_fp"
+
+function _M.classify_branch(req)
+    req = req or {}
+
+    -- Branch B: non-browser UA. classify_ua возвращает {edge|chrome|
+    -- firefox|safari|other}; "other" — non-browser.
+    local family = tls_fp.classify_ua(req.user_agent or "")
+    if family == "other" then
+        return "B"
+    end
+
+    -- Branch C signals — любой из трёх включает.
+    local method = req.method or ""
+    if method ~= "GET" and method ~= "HEAD" then
+        return "C"
+    end
+
+    local upgrade = req.upgrade
+    if type(upgrade) == "string" and upgrade ~= "" then
+        if upgrade:lower():find("websocket", 1, true) then
+            return "C"
+        end
+    end
+
+    local accept = req.accept
+    -- vision §5.2: «Дефолт при отсутствии Accept — */* → unchallengeable».
+    -- Реальные браузеры всегда шлют Accept с text/html для top-level GET,
+    -- так что строгий чек не false-positive'ит на легитимных пользователях.
+    if type(accept) ~= "string" or accept == ""
+        or not accept:lower():find("text/html", 1, true) then
+        return "C"
+    end
+
+    return "A"
+end
+
 -- Per-request entry point. Читает ctx + policy, вызывает decide(), пишет
--- verdict через bac_log. Никакого physical exit: verdict=challenge на L5
--- (а не L1/L2/L4 block) в Phase 4 будет приводить к JS challenge через
--- challenge.lua — это отдельный ticket (C5). Сейчас observe-only.
+-- verdict через bac_log. Никакого physical exit: physical issuance
+-- (Branch A/B/C dispatch) делается в verdict.lua после возврата отсюда,
+-- чтобы политика mode-gating (policy.enforce) была в одной точке.
 function _M.run()
     local ctx = ngx.ctx.bac
     if not ctx then return end

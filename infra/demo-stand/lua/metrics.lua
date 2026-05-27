@@ -76,6 +76,30 @@ antibot_clearance_verify_total{result="missing"} %d
 antibot_clearance_verify_total{result="malformed"} %d
 antibot_clearance_verify_total{result="wrong_site"} %d
 antibot_clearance_verify_total{result="no_secret"} %d
+
+# HELP antibot_challenge_issued_total Branch A challenge pages rendered at L5 (C5). Counts the render of /__challenge HTML for browser-like clients that hit verdict=challenge under mode=active. Shadow mode does NOT serve the page (observe-only) so does not bump this counter.
+# TYPE antibot_challenge_issued_total counter
+antibot_challenge_issued_total %d
+
+# HELP antibot_challenge_solved_total Successful POST /__challenge/verify (C5). HMAC nonce ok + token matches sha256(nonce||JS_SECRET) + cascade_version matches + nonce was not previously consumed → clearance cookie issued.
+# TYPE antibot_challenge_solved_total counter
+antibot_challenge_solved_total %d
+
+# HELP antibot_challenge_invalid_total Failed POST /__challenge/verify by reason (C5). bad_nonce = HMAC mismatch / malformed; expired = HMAC ok but exp <= now; replay = nonce already consumed within TTL; bad_token = sha256(nonce||JS_SECRET) didn't match (client didn't execute JS or used a stale JS_SECRET); wrong_version = cascade_version disagrees (stale browser cache after CASCADE_VERSION bump); bad_body = empty / oversize / non-JSON body; bad_method = non-POST; no_secret = challenge_secret not loaded (C1 file missing/truncated).
+# TYPE antibot_challenge_invalid_total counter
+antibot_challenge_invalid_total{reason="bad_nonce"} %d
+antibot_challenge_invalid_total{reason="expired"} %d
+antibot_challenge_invalid_total{reason="replay"} %d
+antibot_challenge_invalid_total{reason="bad_token"} %d
+antibot_challenge_invalid_total{reason="wrong_version"} %d
+antibot_challenge_invalid_total{reason="bad_body"} %d
+antibot_challenge_invalid_total{reason="bad_method"} %d
+antibot_challenge_invalid_total{reason="no_secret"} %d
+
+# HELP antibot_challenge_branch_total L5.2 branch dispatch (C5). branch="B" = non_browser_blocked (UA не похож на браузер); branch="C" = unchallengeable_request (метод != GET, WebSocket-upgrade или Accept без text/html). Branch A не имеет своего счётчика — он эквивалентен antibot_challenge_issued_total (render is the action).
+# TYPE antibot_challenge_branch_total counter
+antibot_challenge_branch_total{branch="B"} %d
+antibot_challenge_branch_total{branch="C"} %d
 ]],
     requests,
     get("verdict_pass_total"),
@@ -97,7 +121,19 @@ antibot_clearance_verify_total{result="no_secret"} %d
     get("clearance_verify_missing_total"),
     get("clearance_verify_malformed_total"),
     get("clearance_verify_wrong_site_total"),
-    get("clearance_verify_no_secret_total")))
+    get("clearance_verify_no_secret_total"),
+    get("challenge_issued_total"),
+    get("challenge_solved_total"),
+    get("challenge_invalid_bad_nonce_total"),
+    get("challenge_invalid_expired_total"),
+    get("challenge_invalid_replay_total"),
+    get("challenge_invalid_bad_token_total"),
+    get("challenge_invalid_wrong_version_total"),
+    get("challenge_invalid_bad_body_total"),
+    get("challenge_invalid_bad_method_total"),
+    get("challenge_invalid_no_secret_total"),
+    get("challenge_branch_b_total"),
+    get("challenge_branch_c_total")))
 
 -- Per-rule / per-flag / per-tag counters live in the metrics dict under
 -- "rule:<stage>:<rule>", "flag:<flag>" and "tag:<tag>" keys (written by
