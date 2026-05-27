@@ -66,6 +66,16 @@ antibot_uptime_seconds %d
 # HELP antibot_fp_unique Distinct TLS fingerprints seen since worker start.
 # TYPE antibot_fp_unique gauge
 antibot_fp_unique %d
+
+# HELP antibot_clearance_verify_total L2.1 clearance cookie verify outcomes (C3). valid = HMAC ok + matching site + not expired (fastpath fired, L3/L5 skipped). invalid = HMAC mismatch or compute failure. expired = HMAC ok but exp <= now (checked before wrong_site so apex-Domain scoped cookies don't false-alarm as cross-tenant). missing = no cookie header. malformed = cookie structure unparseable. wrong_site = HMAC ok + not expired but cookie's bound site != request host (cross-tenant leak attempt). no_secret = operational — challenge_secret not loaded (C1 file missing/truncated after reload); kept distinct from invalid so a secret-outage spike is not masked by an attack-shaped invalid spike. NB the six (or seven, with no_secret) counters do NOT sum to requests_total under mode=active: hygiene/reputation policy.enforce(403) early-exits some requests BEFORE clearance.verify runs.
+# TYPE antibot_clearance_verify_total counter
+antibot_clearance_verify_total{result="valid"} %d
+antibot_clearance_verify_total{result="invalid"} %d
+antibot_clearance_verify_total{result="expired"} %d
+antibot_clearance_verify_total{result="missing"} %d
+antibot_clearance_verify_total{result="malformed"} %d
+antibot_clearance_verify_total{result="wrong_site"} %d
+antibot_clearance_verify_total{result="no_secret"} %d
 ]],
     requests,
     get("verdict_pass_total"),
@@ -80,7 +90,14 @@ antibot_fp_unique %d
     ngx.shared.meta:get("tls_fp_catalog_gen") or 0,
     ngx.shared.meta:get("tls_fp_browser_profiles_gen") or 0,
     uptime,
-    get("fp_unique")))
+    get("fp_unique"),
+    get("clearance_verify_valid_total"),
+    get("clearance_verify_invalid_total"),
+    get("clearance_verify_expired_total"),
+    get("clearance_verify_missing_total"),
+    get("clearance_verify_malformed_total"),
+    get("clearance_verify_wrong_site_total"),
+    get("clearance_verify_no_secret_total")))
 
 -- Per-rule / per-flag / per-tag counters live in the metrics dict under
 -- "rule:<stage>:<rule>", "flag:<flag>" and "tag:<tag>" keys (written by
