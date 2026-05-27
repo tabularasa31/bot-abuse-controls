@@ -16,7 +16,8 @@
 -- stage name `tls_fp` rather than `ua_fp_consistency` (which would not cover
 -- suspicious_ciphers or the tags).
 --
--- Soft rules (category soft → log verdict=challenge, accumulate into `flags`):
+-- Soft rules (category soft → накапливают флаг в `flags`; финальный verdict
+-- решает L5/verification.lua по Strictness + attack_mode, см. C4):
 --   * tls_fp_impersonator       — UA claims a browser family, but the fp's
 --                                 hash_b matches a known automation signature
 --                                 in tls_fp_catalog (UA Chrome + fp = curl/
@@ -38,13 +39,14 @@
 --                            profile) AND the IP is in a datacenter ASN (the
 --                            reputation:asn_dc tag set upstream this request).
 --
--- Observe-only (phase2-spec "Каскад в MVP только наблюдает"): run() records
--- the would-be verdict/flags/tags via bac_log but NEVER ngx.exit and NEVER
--- short-circuits. A soft challenge must NOT downgrade an already-recorded
--- block (e.g. an observe-only reputation ip_blocklist that did not exit on the
--- stand): vision.md's example keeps the terminal block as `rule` while the
--- soft flag persists in `flags`. run() therefore only writes verdict=challenge
--- when the current verdict is not already "block"; the flag is always added.
+-- Observe-only (phase2-spec "Каскад в MVP только наблюдает"): run() записывает
+-- флаги/теги через bac_log, никогда не делает ngx.exit и никогда не
+-- short-circuit'ит. До C4 здесь же ставился verdict=challenge для soft-
+-- сигналов; после C4 это убрано — L5/verification.lua принимает решение,
+-- уважая Strictness и attack_mode. Терминальный block по-прежнему
+-- не затирается soft-флагом (block остаётся `rule`, soft-флаг живёт в
+-- `flags`) — это гарантирует verification.decide(): при verdict=="block"
+-- он молча возвращает nil и оставляет терминал нетронутым.
 --
 -- Config model. After PR2 (ADR-006) tls_fp_catalog and tls_fp_browser_profiles
 -- live in git-репо `catalogs/` и приезжают через Channel C: backend читает
@@ -473,14 +475,15 @@ function _M.refresh()
 end
 
 -- Record a soft challenge flag. The flag is always accumulated (vision.md:
--- flags = every soft signal seen along the path). The terminal verdict is set
--- to challenge only when it is not already a block, so a soft signal never
--- downgrades a recorded block — the block stays the terminal `rule`.
-local function fire_soft(bac_log, ctx, rule)
+-- flags = every soft signal seen along the path). C4: терминальный verdict
+-- больше НЕ выставляется здесь — soft-сигналы только КОПЯТСЯ, а решение
+-- «выдавать challenge» принимает L5 (verification.lua) с учётом
+-- per-resource Strictness и attack_mode. До C4 эта функция писала
+-- verdict=challenge напрямую, что нарушало rules-reference §"L3/L4 флаги
+-- ... сами на L3/L4 challenge не выдают — они только помечают запрос;
+-- единственная точка, где принимается решение — этот вызов на L5".
+local function fire_soft(bac_log, rule)
     bac_log.add_flag(rule)
-    if ctx.verdict ~= "block" then
-        bac_log.set_verdict("tls_fp", "challenge", rule)
-    end
 end
 
 -- Called per request from verdict.lua, after the tls_fp_blocklist check (a
@@ -531,10 +534,10 @@ function _M.run(fp)
     -- non-browser UAs anyway, so the common case skips the string.match.
     local hb = BROWSER_FAMILIES[ua_family] and _M.hash_b(fp) or nil
     if _M.is_impersonator(ua_family, hb, _M.catalog) then
-        fire_soft(bac_log, ctx, "tls_fp_impersonator")
+        fire_soft(bac_log, "tls_fp_impersonator")
     end
     if _M.is_suspicious_ciphers(ua_family, cc, _M.profiles, true) then
-        fire_soft(bac_log, ctx, "tls_fp_suspicious_ciphers")
+        fire_soft(bac_log, "tls_fp_suspicious_ciphers")
     end
 
     -- Staged patterns (A11). A staged entry is matched with the SAME predicate
