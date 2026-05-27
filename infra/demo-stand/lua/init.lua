@@ -73,6 +73,16 @@ require("challenge_secret").load(
     os.getenv("CHALLENGE_HMAC_SECRET_FILE")
         or "/etc/nginx/certs/challenge_secret.key")
 
+-- [C2] Phase 4 challenge page asset (HTML+JS-шаблон, vision §5.2 «Ветка A»).
+-- Доставка на демо = file/mount (Channel A на демо), путь
+-- /etc/nginx/challenge/page.html. preload() читает шаблон + CASCADE_VERSION
+-- один раз и сверяет meta-тег шаблона с содержимым файла версии — mismatch
+-- валит init_by_lua, контейнер не стартует. Это и есть version-pin
+-- инвариант: каскад и шаблон могут разъехаться только осознанным
+-- одновременным bump'ом обоих. Сама выдача страницы (привязка к
+-- verdict=challenge) — в C5; здесь только preload + проверка.
+local cascade_version = require("challenge").preload()
+
 -- Seed the tls_fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
 -- active unless explicitly status=staging — staged fps match-but-don't-block
 -- and are held in tls_fp.blocklist_staging (recorded into staging_match by the
@@ -306,6 +316,8 @@ ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
 ngx.log(ngx.NOTICE, "[demo] tls_fp blocklist staged: ", tls_stg_bl_n,
     " (file-based; tls_fp_catalog / browser_profiles см. /metrics ",
     "*_gen после первого Channel C pull)")
+ngx.log(ngx.NOTICE, "[demo] challenge page template loaded, cascade_version=",
+    cascade_version, " (C2 — preload only; serving wires up in C5)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics
