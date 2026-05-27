@@ -66,14 +66,44 @@ _M.RESULT_EXPIRED    = "expired"     -- HMAC ok, exp <= now
 _M.RESULT_MISSING    = "missing"     -- no cookie header
 _M.RESULT_MALFORMED  = "malformed"   -- structure unparseable
 _M.RESULT_WRONG_SITE = "wrong_site"  -- HMAC ok but payload.site ~= request host
+-- no_secret — challenge_secret not loaded (operational failure: C1 file
+-- missing/empty after reload). Distinct from `invalid` so an attack-shaped
+-- spike in `invalid` is not masked by a secret-outage spike. Operator
+-- alerts can fire on `no_secret > 0` independently. Fail-closed for
+-- fastpath: cascade proceeds via the normal path (same effective behavior
+-- as `invalid`); the only difference is the metric attribution.
+_M.RESULT_NO_SECRET  = "no_secret"
 
+-- valid_var_suffix — nginx variables only allow [A-Za-z0-9_]; lookups via
+-- `ngx.var["cookie_" .. name]` with hyphen / dot / other chars silently
+-- return nil. Without this guard, an operator override like
+-- `cookie_name = cf-clearance` (such as the original ClickUp task spec
+-- proposed) would make EVERY request resolve to RESULT_MISSING with no
+-- error in logs. We log WARN once at first call and fall back to the
+-- pool-wide default — keeps the fastpath alive on a clearly-mis-typed
+-- config while leaving a loud trail for the operator.
+local function valid_var_suffix(name)
+    return name:match("^[%w_]+$") ~= nil
+end
+
+local warned_bad_name = false
 local function get_cookie_name()
     if config and type(config.defaults) == "table" then
         local allow = config.defaults.allow
         if type(allow) == "table" and type(allow.cookie_valid) == "table" then
             local name = allow.cookie_valid.cookie_name
             if type(name) == "string" and name ~= "" then
-                return name
+                if valid_var_suffix(name) then
+                    return name
+                end
+                if not warned_bad_name then
+                    ngx.log(ngx.WARN, "clearance: configured cookie_name '",
+                        name, "' contains chars outside [A-Za-z0-9_]; ",
+                        "nginx ngx.var lookup would always be nil. Falling ",
+                        "back to default '", DEFAULT_COOKIE_NAME,
+                        "'. Fix [allow.cookie_valid].cookie_name in defaults.conf.")
+                    warned_bad_name = true
+                end
             end
         end
     end
@@ -206,12 +236,12 @@ function _M.verify(host)
     if not key then
         -- Сервер-сайд проблема (C1 не загрузил секрет). Fail-closed для
         -- fastpath: cookie не доверяется, request идёт по полному каскаду.
-        -- Логируем WARN — admin поймёт по метрике `result="invalid"` + WARN
-        -- в логе. Отдельного result-кода не вводим, чтобы не плодить
-        -- enum: на стороне клиента это неотличимо от подделки.
+        -- Отдельный RESULT_NO_SECRET, чтобы spike при truncate/удалении
+        -- secret-файла не маскировался под attack-shaped «invalid»;
+        -- operator-алерт настраивается отдельно (review on PR #85).
         ngx.log(ngx.WARN, "clearance.verify: challenge_secret not loaded; ",
-            "cookie cannot be verified, treating as invalid")
-        return _M.RESULT_INVALID
+            "cookie cannot be verified (RESULT_NO_SECRET)")
+        return _M.RESULT_NO_SECRET
     end
 
     local sig_actual, err = compute_hmac(key, body)
@@ -224,19 +254,22 @@ function _M.verify(host)
         return _M.RESULT_INVALID
     end
 
-    -- С этого момента payload достоверен — HMAC прошёл. wrong_site ДО
-    -- expired: подделка домена — security-relevant сигнал (попытка
-    -- использовать cookie от другого tenant'а), expired — bookkeeping
-    -- (легитимный клиент с истекшим cookie). Порядок влияет только на
-    -- метрику (что увеличится при «expired И wrong_site одновременно»)
-    -- — выбираем более серьёзный сигнал.
-    if site ~= host then
-        return _M.RESULT_WRONG_SITE
-    end
-
+    -- С этого момента payload достоверен — HMAC прошёл. Expired раньше
+    -- wrong_site: легитимный клиент с истекшим cookie + apex-Domain
+    -- scoping (Domain=example.com, browser шлёт на api.example.com) иначе
+    -- получил бы security-окрашенный wrong_site вместо bookkeeping'ового
+    -- expired. wrong_site — реальный сигнал «cross-tenant попытка», его
+    -- хочется видеть только когда подпись и срок валидны (review on
+    -- PR #85). Trade-off: атакующий с украденным expired cookie теперь
+    -- проходит как expired, а не wrong_site, если ещё и site не совпал
+    -- — но cookie уже истёк, реального риска нет.
     local exp = tonumber(exp_s)
     if not exp or exp <= ngx.time() then
         return _M.RESULT_EXPIRED
+    end
+
+    if site ~= host then
+        return _M.RESULT_WRONG_SITE
     end
 
     return _M.RESULT_VALID

@@ -89,25 +89,46 @@ reputation.run()
 -- L4 rate_limit (тоже by design — vision §2.1 «если сработал rate-лимит
 -- → выигрывает правило L4»).
 --
--- Все исходы (valid/invalid/expired/missing/wrong_site/malformed) идут в
--- метрику `antibot_clearance_verify_total{result=...}` (metrics.lua).
+-- Все исходы (valid/invalid/expired/missing/wrong_site/malformed/no_secret)
+-- идут в метрику `antibot_clearance_verify_total{result=...}` (metrics.lua).
 -- Counter инкрементится здесь, а не в clearance.verify(), чтобы verify
 -- осталась чистой функцией для unit-тестов (та же логика, что у policy
 -- и rate_limit: модуль решает «что», caller — «что с этим сделать»).
-do
+--
+-- ASYMMETRY WARN — метрика отражает только запросы, дошедшие до этой
+-- точки в access_by_lua. В mode=active hygiene/reputation block через
+-- `policy.enforce(403)` делает `ngx.exit(403)` ВЫШЕ — clearance.run для
+-- них не выполняется. Поэтому сумма шести clearance_verify_* counter'ов
+-- НЕ равна requests_total для active-mode хостов; она равна
+-- (requests_total - active_mode_early_blocks). Дашборды, считающие
+-- «cookie funnel coverage», должны нормировать на post-L1/L2.2-blocks
+-- baseline, не на сырой requests_total (review on PR #85).
+--
+-- Per-stage kill-switch (A12). clearance — отдельная per-stage точка
+-- выключения, чтобы при regression в clearance.verify / lua-resty-openssl
+-- оператор мог потушить только L2.1 без обнуления всего каскада через
+-- global A12. Гейт чекается через config.stage_enabled — тот же протокол,
+-- что у hygiene/reputation/tls_fp/rate_limits/verification.
+if config.stage_enabled(config.defaults, "clearance") then
     local host = ngx.var.host or ""
     local result = clearance.verify(host)
     ngx.shared.metrics:incr("clearance_verify_" .. result .. "_total", 1, 0)
     if result == clearance.RESULT_VALID then
-        ngx.ctx.clearance_valid = true
         local ctx = ngx.ctx.bac
         -- Не затираем уже сработавший block (hygiene/reputation выше).
         -- Per rules-reference: cookie_valid пропускает L3 и L5, но L1 и
         -- L2.2/2.3 (включая ip_blocklist) всё равно применяются — их
-        -- блок > наш allow. Phase 4 L5 ничего не пишет ДО нас, так что
-        -- "block" здесь может прийти только из hygiene/reputation, что и
-        -- задумано.
+        -- блок > наш allow. Если block уже выставлен:
+        --   * verdict в логе НЕ перетираем;
+        --   * clearance_valid НЕ ставим — L3 soft rules (tls_fp:*-tags +
+        --     impersonator/suspicious_ciphers flags) должны прогнаться,
+        --     чтобы shadow-mode log сохранил полную «would-be»-картину
+        --     для блокированного-но-cookie-holding запроса (review on
+        --     PR #85). Без этого guard'а L3 observability silently
+        --     теряется для именно того профиля — украденный cookie + bad
+        --     fp — против которого soft rules и проектировались.
         if ctx and ctx.verdict ~= "block" then
+            ngx.ctx.clearance_valid = true
             bac_log.set_verdict("reputation", "allow", "cookie_valid")
         end
     end

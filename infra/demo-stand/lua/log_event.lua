@@ -16,9 +16,16 @@ if not ctx then return end
 local m = ngx.shared.metrics
 m:incr("requests_total", 1, 0)
 m:incr("verdict_" .. ctx.verdict .. "_total", 1, 0)
-if ngx.ctx.bac_cache_hit then
+-- Tri-state: bac_cache_hit is explicitly set to true/false in verdict.lua
+-- only when the verdict_cache was actually consulted (L3 tls_fp path). It
+-- stays `nil` when the cache lookup was skipped — currently that's the C3
+-- clearance fastpath (`ngx.ctx.clearance_valid` → tls_fp blocklist/cache
+-- block bypassed; fp itself is still computed for L4 rate_tls_fp). Counting
+-- nil as a miss would pollute antibot_cache_hit_ratio with cookie-fastpath
+-- traffic that never touched the cache.
+if ngx.ctx.bac_cache_hit == true then
     m:incr("cache_hit_total", 1, 0)
-else
+elseif ngx.ctx.bac_cache_hit == false then
     m:incr("cache_miss_total", 1, 0)
 end
 

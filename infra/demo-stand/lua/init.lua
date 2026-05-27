@@ -371,6 +371,7 @@ for _, key in ipairs({
     "clearance_verify_missing_total",
     "clearance_verify_malformed_total",
     "clearance_verify_wrong_site_total",
+    "clearance_verify_no_secret_total",
 }) do
     metrics:safe_add(key, 0)
 end

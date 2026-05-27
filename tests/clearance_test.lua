@@ -203,16 +203,17 @@ tests.malformed_bad_body = function()
     assert_eq(clearance.verify("example.com"), "malformed")
 end
 
--- 7. Guard: challenge_secret unloaded → verify treats cookie as invalid
---    (fail-closed for fastpath; cascade proceeds via normal path).
+-- 7. Guard: challenge_secret unloaded → RESULT_NO_SECRET (distinct from
+--    `invalid` so a secret-outage spike is not masked by attack-shaped
+--    invalid spike — review on PR #85). Fail-closed semantics for the
+--    fastpath are unchanged: cascade still proceeds via the normal path.
 tests.no_secret_loaded = function()
-    -- Mint while secret IS loaded, then unload BEFORE verify.
     set_cookie(mint("example.com", 3600))
     local saved = secret_state.key
     secret_state.key = nil
     local result = clearance.verify("example.com")
     secret_state.key = saved
-    assert_eq(result, "invalid")
+    assert_eq(result, "no_secret")
 end
 
 -- 8. Guard: ct_eq doesn't early-exit on first byte. Hard to test for true
@@ -227,6 +228,35 @@ tests.invalid_hmac_first_byte = function()
     local mutated_sig = (sig:sub(1, 1) == "A" and "B" or "A") .. sig:sub(2)
     set_cookie(body .. "." .. mutated_sig)
     assert_eq(clearance.verify("example.com"), "invalid")
+end
+
+-- 9. Order: expired BEFORE wrong_site. A cookie that is BOTH expired AND
+--    minted for the wrong site must return EXPIRED — wrong_site is
+--    documented as a security signal, expired is bookkeeping. Apex-Domain
+--    scoped cookies that legitimately get sent to a sibling subdomain
+--    after expiry would otherwise false-alarm in the wrong_site metric
+--    (review on PR #85). Mint past-dated for site-a, then verify against
+--    site-b: HMAC valid, exp <= now AND site != host. Expect expired.
+tests.expired_wins_over_wrong_site = function()
+    set_cookie(mint("site-a.example.com", 1, fixed_time - 60))
+    assert_eq(clearance.verify("site-b.example.com"), "expired")
+end
+
+-- 10. Configured cookie_name with hyphen → get_cookie_name falls back to
+--     default + warns once. nginx variable names disallow '-', so ngx.var
+--     ["cookie_cf-clearance"] would always return nil → MISSING. Validating
+--     in get_cookie_name() and falling back to `tf_clearance` keeps the
+--     fastpath alive on a clearly-mistyped config (review on PR #85).
+--     We assert via roundtrip: set `tf_clearance` cookie, force config to
+--     advertise `cf-clearance`, and confirm verify still reads from the
+--     `tf_clearance` slot (fallback path).
+tests.invalid_cookie_name_falls_back = function()
+    set_cookie(mint("example.com", 3600))
+    local prev = package.loaded["config"].defaults.allow.cookie_valid.cookie_name
+    package.loaded["config"].defaults.allow.cookie_valid.cookie_name = "cf-clearance"
+    local result = clearance.verify("example.com")
+    package.loaded["config"].defaults.allow.cookie_valid.cookie_name = prev
+    assert_eq(result, "valid", "fallback to tf_clearance should let valid cookie through")
 end
 
 local failed = 0
