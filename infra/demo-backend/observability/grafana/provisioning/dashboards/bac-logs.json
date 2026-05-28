@@ -190,6 +190,27 @@
             ]
           },
           {
+            "matcher": { "id": "byName", "options": "cascade_ms" },
+            "properties": [
+              { "id": "unit", "value": "ms" },
+              { "id": "custom.width", "value": 80 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "upstream_response_ms" },
+            "properties": [
+              { "id": "unit", "value": "ms" },
+              { "id": "custom.width", "value": 80 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "proxy_ms" },
+            "properties": [
+              { "id": "unit", "value": "ms" },
+              { "id": "custom.width", "value": 80 }
+            ]
+          },
+          {
             "matcher": { "id": "byName", "options": "status" },
             "properties": [ { "id": "custom.width", "value": 70 } ]
           },
@@ -283,15 +304,21 @@
               "asn":         10,
               "geo_country": 11,
               "latency_ms":  12,
-              "tls_fp":      13,
-              "ua":          14,
-              "tags":        15,
-              "flags":       16,
-              "request_id":  17
+              "cascade_ms":  13,
+              "upstream_response_ms": 14,
+              "proxy_ms":    15,
+              "tls_fp":      16,
+              "ua":          17,
+              "tags":        18,
+              "flags":       19,
+              "request_id":  20
             },
             "renameByName": {
               "Time": "time",
-              "latency_ms": "latency"
+              "latency_ms": "latency",
+              "cascade_ms": "cascade",
+              "upstream_response_ms": "origin",
+              "proxy_ms": "proxy"
             }
           }
         }
