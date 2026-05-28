@@ -438,7 +438,7 @@ local autossl_ok, autossl_err = pcall(function()
     require("tls_autossl").setup()
 end)
 if autossl_ok then
-    ngx.log(ngx.NOTICE, "[demo] on-demand TLS: lua-resty-auto-ssl active (staging=",
+    ngx.log(ngx.NOTICE, "[demo] on-demand TLS: lua-resty-acme active (staging=",
         tostring((os.getenv("AUTO_SSL_STAGING") or "") == "true"),
         ", base_domain=", os.getenv("STAND_BASE_DOMAIN") or "example.com", ")")
 else
