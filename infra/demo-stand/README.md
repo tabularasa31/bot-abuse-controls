@@ -52,7 +52,13 @@ Every request through the pipeline emits exactly one JSON record to docker stdou
 docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_LOG //' | jq -c .
 ```
 
-Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `strictness`, `latency_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
+Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO 8601 ms, UTC), `edge_id` (`stand-bac`, override via `EDGE_ID`), `host`, `path`, `method`, `status`, `ip`, `asn`, `geo_country`, `ua`, `stage`, `verdict`, `rule`, `action`, `mode`, `strictness`, `latency_ms`, `cascade_ms`, `upstream_response_ms`, `proxy_ms`, `tags`, `staging_match`, plus `resource_id` emitted as `null`.
+
+**Timing fields** (all milliseconds; reverse-proxy = both request and response transit the edge):
+- `latency_ms` — whole request lifetime (like nginx `$request_time`): cascade + origin round-trip + **delivery to the end user**. For a slow client / large body this is dominated by the download tail, so it is *not* a measure of our overhead.
+- `cascade_ms` — the access-phase antibot overhead only (intake + cascade check), i.e. our work before handing the request to the origin. Exact for `pass`; for `block`/`challenge` (no upstream) it ≈ `latency_ms`.
+- `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / landing).
+- `proxy_ms` — `cascade_ms + upstream_response_ms`: request arrival → we hold the full origin response ready to send. This is the request's path through the proxy that adds latency, **without** the slow-client delivery tail (which is `latency_ms − proxy_ms`).
 
 `action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` (B11) — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
 
