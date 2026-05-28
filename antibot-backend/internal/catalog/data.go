@@ -428,5 +428,26 @@ func ValidateOriginIP(s string) error {
 	if addr.Zone() != "" {
 		return fmt.Errorf("must not carry an IPv6 zone (got %q)", s)
 	}
+	// origin_ip is used verbatim as a proxy_pass destination, so reject
+	// addresses that can't be a real tenant backend and would instead point
+	// the edge at itself or at infrastructure:
+	//   - unspecified (0.0.0.0, ::) — silent connect failure, no real target
+	//   - loopback (127.0.0.0/8, ::1) — the edge proxying to itself
+	//   - link-local (169.254.0.0/16, fe80::/10) — incl. 169.254.169.254
+	//     cloud metadata (SSRF-style misroute)
+	//   - multicast — not a unicast backend
+	// Private/global unicast stay allowed: a tenant origin may legitimately
+	// be a private IP (gemini/codex review on PR #94). Operators set this via
+	// the authenticated dashboard, but validating here is cheap defence.
+	switch {
+	case addr.IsUnspecified():
+		return fmt.Errorf("must not be the unspecified address (got %q)", s)
+	case addr.IsLoopback():
+		return fmt.Errorf("must not be a loopback address (got %q)", s)
+	case addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast():
+		return fmt.Errorf("must not be a link-local address (got %q)", s)
+	case addr.IsMulticast() || addr.IsInterfaceLocalMulticast():
+		return fmt.Errorf("must not be a multicast address (got %q)", s)
+	}
 	return nil
 }
