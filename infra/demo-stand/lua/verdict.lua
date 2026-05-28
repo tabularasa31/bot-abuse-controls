@@ -312,5 +312,11 @@ if config.stage_enabled(config.defaults, "verification") then
     end
 end
 
+-- End of the access-phase cascade for the PASS path: stamp it so bac_log can
+-- split cascade_ms (our intake + check overhead) from the upstream/origin time
+-- and the client-delivery tail. block/challenge paths exit earlier via
+-- ngx.exit/ngx.exec and never reach here — fine, they have no upstream.
+bac_log.mark_cascade_end()
+
 -- Fall through. If no rate profile fired and L5 не дал challenge/permissive,
 -- the context keeps its defaults (stage=egress, verdict=pass).

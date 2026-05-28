@@ -86,6 +86,34 @@ function _M.init()
     return ctx
 end
 
+-- mark_cascade_end — stamp the end of the access-phase cascade. Called at the
+-- tail of verdict.lua (the pass path), i.e. the moment we've finished checking
+-- and hand the request to proxy_pass. Lets emit() split cascade_ms (our own
+-- intake+check overhead) from the upstream/origin time and the client-delivery
+-- tail. For block/challenge requests verdict.lua exits before this, so
+-- t_cascade_end stays nil and cascade_ms falls back to the full window (which
+-- is fine — those never reach an upstream).
+function _M.mark_cascade_end()
+    local ctx = ngx.ctx.bac
+    if ctx then ctx.t_cascade_end = ngx.now() end
+end
+
+-- sum_upstream_time — parse nginx $upstream_response_time into seconds.
+-- The var is nil/""/"-" when no upstream was contacted (blocked, landing), or
+-- one-or-more numbers separated by ", " (multiple upstream tries) / " : "
+-- (internal redirects); failed tries appear as "-". We sum every numeric
+-- component and ignore the rest. Returns nil when there's no numeric value.
+local function sum_upstream_time(v)
+    if not v or v == "" then return nil end
+    local total, found = 0, false
+    for num in v:gmatch("%d+%.?%d*") do
+        total = total + (tonumber(num) or 0)
+        found = true
+    end
+    if not found then return nil end
+    return total
+end
+
 -- Record a triggered rule. Stages call this in cascade order; the last
 -- call wins. Invalid enum values are logged and ignored rather than
 -- corrupting the record.
@@ -212,6 +240,26 @@ function _M.emit()
         sni_present = ctx.tls_sni_present
     end
 
+    -- Timing decomposition. latency_ms (below) is the WHOLE request lifetime
+    -- ($request_time-like): cascade + origin + delivery to the end user — so
+    -- for a slow client it's dominated by the download tail, not our work.
+    -- The fields here isolate the parts we care about:
+    --   cascade_ms  — our access-phase overhead (intake + cascade check),
+    --                 stamped by verdict.lua mark_cascade_end(). Exact for
+    --                 pass; for block/challenge (no upstream) ≈ latency_ms.
+    --   upstream_response_ms — $upstream_response_time: upstream connect → last
+    --                 byte of the origin response (origin round-trip incl. the
+    --                 origin's own think-time), EXCLUDING delivery to the user.
+    --                 null when no upstream was contacted (blocked / landing).
+    --   proxy_ms    — cascade_ms + upstream_response_ms: request arrival → we
+    --                 hold the full origin response ready to hand to the user.
+    --                 This is the proxy path that adds overhead, WITHOUT the
+    --                 slow-client delivery tail (what latency_ms − proxy_ms is).
+    local cascade_ms = ctx.t_start and ((ctx.t_cascade_end or now) - ctx.t_start) * 1000 or nil
+    local up_total = sum_upstream_time(ngx.var.upstream_response_time)
+    local upstream_response_ms = up_total and up_total * 1000 or nil
+    local proxy_ms = cascade_ms and (cascade_ms + (upstream_response_ms or 0)) or nil
+
     -- Cap the UA so a pathological multi-KB User-Agent can't push the log
     -- line past PIPE_BUF (4 KB on Linux) and break the atomicity of the
     -- single stdout write below. Legitimate UAs are well under this; the
@@ -260,6 +308,9 @@ function _M.emit()
         mode          = p.mode,
         strictness    = p.strictness,
         latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
+        cascade_ms           = cascade_ms or cjson_base.null,
+        upstream_response_ms = upstream_response_ms or cjson_base.null,
+        proxy_ms             = proxy_ms or cjson_base.null,
         tags          = ctx.tags,
         flags         = ctx.flags,
         staging_match = ctx.staging_match,
