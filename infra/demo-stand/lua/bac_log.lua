@@ -95,7 +95,15 @@ end
 -- is fine — those never reach an upstream).
 function _M.mark_cascade_end()
     local ctx = ngx.ctx.bac
-    if ctx then ctx.t_cascade_end = ngx.now() end
+    -- Only the first stamp wins (the real cascade end); later calls are no-ops.
+    if ctx and not ctx.t_cascade_end then
+        -- ngx.now() returns a CACHED time updated only at phase boundaries /
+        -- on yields. The cascade runs synchronously without yielding, so
+        -- without this the start (t_start) and end timestamps would be
+        -- identical and cascade_ms would always be 0 (gemini review on PR #97).
+        ngx.update_time()
+        ctx.t_cascade_end = ngx.now()
+    end
 end
 
 -- sum_upstream_time — parse nginx $upstream_response_time into seconds.
@@ -258,7 +266,11 @@ function _M.emit()
     local cascade_ms = ctx.t_start and ((ctx.t_cascade_end or now) - ctx.t_start) * 1000 or nil
     local up_total = sum_upstream_time(ngx.var.upstream_response_time)
     local upstream_response_ms = up_total and up_total * 1000 or nil
-    local proxy_ms = cascade_ms and (cascade_ms + (upstream_response_ms or 0)) or nil
+    -- proxy_ms is null unless an upstream was actually contacted — for
+    -- blocked/landing requests there's no origin response, so reporting
+    -- proxy_ms == cascade_ms would be misleading (gemini review on PR #97).
+    local proxy_ms = (cascade_ms and upstream_response_ms)
+        and (cascade_ms + upstream_response_ms) or nil
 
     -- Cap the UA so a pathological multi-KB User-Agent can't push the log
     -- line past PIPE_BUF (4 KB on Linux) and break the atomicity of the

@@ -211,6 +211,10 @@ if config.stage_enabled(config.defaults, "tls_fp") then
             -- reflects the same final state the active path would have
             -- emitted (verdict=block, rule=tls_fp_blocklist), the only
             -- difference being that the request still proxies to origin.
+            -- Stamp cascade end BEFORE enforce: in shadow this returns and the
+            -- request still proxies to origin, so cascade_ms must capture only
+            -- the cascade, not the upstream/client tail (gemini review #97).
+            bac_log.mark_cascade_end()
             policy.enforce(403)
             return
         end
@@ -280,11 +284,13 @@ if config.stage_enabled(config.defaults, "verification") then
         if branch == "B" then
             bac_log.set_verdict("verification", "block", "non_browser_blocked")
             ngx.shared.metrics:incr("challenge_branch_b_total", 1, 0)
+            bac_log.mark_cascade_end()   -- shadow proxies on; stamp before enforce (review #97)
             policy.enforce(403)
             return
         elseif branch == "C" then
             bac_log.set_verdict("verification", "block", "unchallengeable_request")
             ngx.shared.metrics:incr("challenge_branch_c_total", 1, 0)
+            bac_log.mark_cascade_end()   -- shadow proxies on; stamp before enforce (review #97)
             policy.enforce(403)
             return
         else
