@@ -18,11 +18,7 @@
 # baked in either: fetch them with scripts/fetch-geoip.sh and mount the geoip/
 # directory at runtime. Without them the stand still starts (geoip.lua is
 # fail-open) — geo is simply undetermined.
-# alpine-fat bundles luarocks + opm + build toolchain, needed to install
-# lua-resty-auto-ssl (on-demand TLS for tenant custom domains — 86exrefdz
-# follow-up). The slim `:alpine` has no luarocks. Same OpenResty/LuaJIT
-# underneath, so the cascade behaves identically.
-FROM openresty/openresty:alpine-fat
+FROM openresty/openresty:alpine
 
 # libmaxminddb-libs ships libmaxminddb.so.0 (the runtime). lua/resty/maxminddb.lua
 # loads it via ffi.load('libmaxminddb'), which dlopen()s the *unversioned*
@@ -78,23 +74,37 @@ RUN set -eux; \
     find /usr/local/openresty/site/lualib/resty -type f -name '*.lua' -exec chmod 0644 {} +; \
     apk del .build-deps
 
-# lua-resty-auto-ssl (B11 multi-tenant follow-up): on-demand Let's Encrypt
-# certs per tenant custom domain, chosen at TLS handshake via
-# ssl_certificate_by_lua (see lua/tls_autossl.lua + nginx.demo.conf). The edge
-# stays the TLS terminator (required for JA4/$ssl_* fingerprinting), so cert
-# selection must live here, not in a front proxy.
+# lua-resty-acme (B11 multi-tenant follow-up): on-demand Let's Encrypt certs
+# per tenant custom domain, chosen at TLS handshake via ssl_certificate_by_lua
+# (see lua/tls_autossl.lua + nginx.demo.conf). The edge stays the TLS
+# terminator (required for JA4/$ssl_* fingerprinting), so cert selection must
+# live here, not in a front proxy.
 #
-# Runtime deps for the bundled `dehydrated` ACME client: bash + openssl CLI +
-# coreutils/diffutils/grep/sed + curl (already present). The on-demand storage
-# dir must be writable by the worker user (nobody) and is mounted as a volume
-# in docker-compose so issued certs survive restarts (avoids re-hitting LE
-# rate limits).
-ARG LUA_RESTY_AUTO_SSL_VERSION=0.13.1
+# Chosen over lua-resty-auto-ssl: that one bundles a C helper (sockproc) +
+# dehydrated shell client — the C build fails under modern gcc/-Werror and the
+# project is unmaintained. lua-resty-acme is PURE LUA (no C, no shell-out),
+# actively maintained by the same author as lua-resty-openssl, and reuses the
+# resty.openssl + resty.http we already vendor above. Same vendoring pattern:
+# pull the github tag's lib/ subtree into site/lualib (resty/acme/**).
+#
+# The on-demand cert storage dir (file adapter) must be writable by the worker
+# user (nobody); it's mounted as a named volume in docker-compose so issued
+# certs + the ACME account key survive restarts (avoids LE rate limits).
+# lua5.1-filesystem (lfs) is the one native dep: the lua-resty-acme `file`
+# storage adapter require("lfs")'s it to list/persist certs on disk. OpenResty
+# doesn't bundle it. Alpine ships it at /usr/lib/lua/5.1/lfs.so (LuaJIT is
+# 5.1-ABI compatible); nginx.demo.conf adds that dir to lua_package_cpath.
+ARG LUA_RESTY_ACME_VERSION=0.16.0
 RUN set -eux; \
-    apk add --no-cache bash openssl coreutils diffutils grep sed; \
-    luarocks install lua-resty-auto-ssl ${LUA_RESTY_AUTO_SSL_VERSION}; \
+    apk add --no-cache lua5.1-filesystem; \
+    apk add --no-cache --virtual .acme-build curl; \
+    curl -fsSL "https://github.com/fffonion/lua-resty-acme/archive/refs/tags/${LUA_RESTY_ACME_VERSION}.tar.gz" \
+        | tar xzf - -C /usr/local/openresty/site/lualib \
+            --strip-components=2 \
+            "lua-resty-acme-${LUA_RESTY_ACME_VERSION}/lib/"; \
+    test -f /usr/local/openresty/site/lualib/resty/acme/autossl.lua; \
+    test -f /usr/lib/lua/5.1/lfs.so; \
+    find /usr/local/openresty/site/lualib/resty/acme -type f -name '*.lua' -exec chmod 0644 {} +; \
     mkdir -p /etc/resty-auto-ssl; \
     chown -R nobody /etc/resty-auto-ssl; \
-    # auto-ssl shells out to its bundled dehydrated/letsencrypt hooks; ensure
-    # they're executable (luarocks preserves mode, but be explicit).
-    test -d /usr/local/openresty/luajit/share/lua/5.1/resty/auto-ssl
+    apk del .acme-build

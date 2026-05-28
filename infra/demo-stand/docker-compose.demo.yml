@@ -79,6 +79,8 @@ services:
       STAND_BASE_DOMAIN: ${STAND_BASE_DOMAIN:-example.com}
       AUTO_SSL_DIR: /etc/resty-auto-ssl
       AUTO_SSL_STAGING: ${AUTO_SSL_STAGING:-}
+      # Email for the Let's Encrypt account (recommended; expiry notices).
+      ACME_ACCOUNT_EMAIL: ${ACME_ACCOUNT_EMAIL:-}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's

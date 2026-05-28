@@ -1,9 +1,13 @@
--- tls_autossl — on-demand TLS for tenant custom domains via lua-resty-auto-ssl
--- (Let's Encrypt http-01). Keeps the OpenResty edge as the TLS terminator —
--- required, because the cascade fingerprints the CLIENT's TLS handshake
--- ($ssl_* / JA4 in tls_fp.lua); a TLS-terminating proxy in front (Caddy etc.)
--- would hide the client handshake and break bot detection. So the cert must be
--- chosen here, per-SNI, at handshake time.
+-- tls_autossl — on-demand TLS for tenant custom domains via lua-resty-acme
+-- (pure-Lua Let's Encrypt, http-01). Keeps the OpenResty edge as the TLS
+-- terminator — required, because the cascade fingerprints the CLIENT's TLS
+-- handshake ($ssl_* / JA4 in tls_fp.lua); a TLS-terminating proxy in front
+-- (Caddy etc.) would hide the client handshake and break bot detection. So the
+-- cert must be chosen here, per-SNI, at handshake time.
+--
+-- (lua-resty-acme, not lua-resty-auto-ssl: the latter bundles a C helper that
+-- fails to build on modern toolchains and is unmaintained. lua-resty-acme is
+-- pure Lua and reuses resty.openssl + resty.http already in the image.)
 --
 -- Design (fallback-safe):
 --   * The static ssl_certificate in nginx.demo.conf stays the FALLBACK. Every
@@ -23,17 +27,17 @@
 -- never take HTTPS down for existing tenants.
 --
 -- Env:
---   AUTO_SSL_DIR        storage dir (default /etc/resty-auto-ssl), writable by
---                       the worker user; mount a volume so certs survive
---                       restarts (and to avoid re-issuing / rate limits).
+--   AUTO_SSL_DIR        file-storage dir (default /etc/resty-auto-ssl),
+--                       writable by the worker user; mount a volume so certs +
+--                       the ACME account key survive restarts (avoid re-issuing
+--                       / LE rate limits).
 --   AUTO_SSL_STAGING    "true" → Let's Encrypt staging CA (untrusted certs,
 --                       high rate limits) for bring-up; unset/"false" → prod.
+--   ACME_ACCOUNT_EMAIL  email for the Let's Encrypt account (recommended).
 --   STAND_BASE_DOMAIN   the stand's own apex (default example.com); hosts
 --                       at/under it are served by the static fallback cert,
 --                       never ACME.
 local _M = {}
-
-local LE_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 -- allow_domain(host, opts) — decide whether to obtain/serve an on-demand cert.
 -- opts (test-only): { base_domain = "...", origin_ip = function(host)->ip }.
@@ -66,37 +70,36 @@ function _M.allow_domain(host, opts)
     return type(ip) == "string" and ip ~= ""
 end
 
--- setup() — build + init the auto-ssl instance (call from init_by_lua, master).
--- Wrapped by the caller in pcall; on any failure auto_ssl stays nil and
--- ssl_certificate() no-ops → static fallback cert.
+-- setup() — configure lua-resty-acme autossl (call from init_by_lua, master).
+-- Wrapped by the caller in pcall; on any failure _M._ready stays false and
+-- ssl_certificate() no-ops → static fallback cert. require is done HERE (not at
+-- module load) so unit tests can require this module without resty.acme.
 function _M.setup()
-    local auto_ssl = (require "resty.auto-ssl").new()
-    auto_ssl:set("dir", os.getenv("AUTO_SSL_DIR") or "/etc/resty-auto-ssl")
-    auto_ssl:set("allow_domain", function(domain) return _M.allow_domain(domain) end)
-    if (os.getenv("AUTO_SSL_STAGING") or "") == "true" then
-        auto_ssl:set("ca", LE_STAGING)
-    end
-    auto_ssl:init()
-    _M._auto_ssl = auto_ssl
-    return auto_ssl
+    local autossl = require "resty.acme.autossl"
+    autossl.init({
+        tos_accepted              = true,
+        staging                   = (os.getenv("AUTO_SSL_STAGING") or "") == "true",
+        account_email             = os.getenv("ACME_ACCOUNT_EMAIL"),
+        domain_whitelist_callback = function(domain) return _M.allow_domain(domain) end,
+        storage_adapter           = "file",
+        storage_config            = { dir = os.getenv("AUTO_SSL_DIR") or "/etc/resty-auto-ssl" },
+    })
+    _M._ready = true
 end
 
 function _M.init_worker()
-    if _M._auto_ssl then _M._auto_ssl:init_worker() end
+    if _M._ready then require("resty.acme.autossl").init_worker() end
 end
 
 -- ssl_certificate() — per-handshake cert selection. No-op when auto-ssl isn't
 -- active → nginx serves the static fallback cert (current behaviour).
 function _M.ssl_certificate()
-    if _M._auto_ssl then _M._auto_ssl:ssl_certificate() end
+    if _M._ready then require("resty.acme.autossl").ssl_certificate() end
 end
 
-function _M.hook_server()
-    if _M._auto_ssl then _M._auto_ssl:hook_server() end
-end
-
-function _M.challenge_server()
-    if _M._auto_ssl then _M._auto_ssl:challenge_server() end
+-- serve_http_challenge() — answers /.well-known/acme-challenge/* during issuance.
+function _M.serve_http_challenge()
+    if _M._ready then require("resty.acme.autossl").serve_http_challenge() end
 end
 
 return _M
