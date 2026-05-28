@@ -39,16 +39,29 @@
 --                       never ACME.
 local _M = {}
 
+-- STAND_BASE_DOMAIN cached at module load (init_by_lua master): allow_domain
+-- runs in the ssl handshake path, and os.getenv is a syscall-flavoured C call
+-- that LuaJIT can't compile — don't pay it per handshake for a value that
+-- never changes in a worker's lifetime (gemini review on PR #95). A reload
+-- re-requires the module → fresh value. _reset_cache is the test hook to swap
+-- env between cases.
+local DEFAULT_BASE_DOMAIN
+function _M._reset_cache()
+    DEFAULT_BASE_DOMAIN = string.lower(os.getenv("STAND_BASE_DOMAIN") or "example.com")
+end
+_M._reset_cache()
+
 -- allow_domain(host, opts) — decide whether to obtain/serve an on-demand cert.
 -- opts (test-only): { base_domain = "...", origin_ip = function(host)->ip }.
--- In production opts is nil: base_domain from STAND_BASE_DOMAIN, origin_ip from
--- policy.origin_ip. Pure-ish (deps injectable) so it's unit-testable.
+-- In production opts is nil: base_domain from the cached STAND_BASE_DOMAIN,
+-- origin_ip from policy.origin_ip. Pure-ish (deps injectable) so it's
+-- unit-testable.
 function _M.allow_domain(host, opts)
     if not host or host == "" then return false end
     host = string.lower(host)
 
     local base = opts and opts.base_domain
-    if base == nil then base = string.lower(os.getenv("STAND_BASE_DOMAIN") or "example.com") end
+    if base == nil then base = DEFAULT_BASE_DOMAIN end
     -- Hosts at/under the stand base domain are covered by the static
     -- (wildcard/SAN) fallback cert — never ACME them.
     if base ~= "" then
@@ -91,15 +104,28 @@ function _M.init_worker()
     if _M._ready then require("resty.acme.autossl").init_worker() end
 end
 
--- ssl_certificate() — per-handshake cert selection. No-op when auto-ssl isn't
--- active → nginx serves the static fallback cert (current behaviour).
+-- ssl_certificate() — per-handshake cert selection. pcall-wrapped: if
+-- lua-resty-acme throws (storage error, lock failure, internal bug), DON'T
+-- abort the handshake — log and fall through. With no cert set by Lua,
+-- OpenResty serves the static fallback cert (fullchain.pem) → no HTTPS outage
+-- (gemini high review on PR #95). No-op when auto-ssl isn't active.
 function _M.ssl_certificate()
-    if _M._ready then require("resty.acme.autossl").ssl_certificate() end
+    if not _M._ready then return end
+    local ok, err = pcall(function() require("resty.acme.autossl").ssl_certificate() end)
+    if not ok then
+        ngx.log(ngx.ERR, "[demo] on-demand TLS: ssl_certificate() failed, ",
+            "falling back to static cert: ", tostring(err))
+    end
 end
 
 -- serve_http_challenge() — answers /.well-known/acme-challenge/* during issuance.
+-- pcall-wrapped so a challenge-handler error returns cleanly instead of 500.
 function _M.serve_http_challenge()
-    if _M._ready then require("resty.acme.autossl").serve_http_challenge() end
+    if not _M._ready then return end
+    local ok, err = pcall(function() require("resty.acme.autossl").serve_http_challenge() end)
+    if not ok then
+        ngx.log(ngx.ERR, "[demo] on-demand TLS: serve_http_challenge() failed: ", tostring(err))
+    end
 end
 
 return _M

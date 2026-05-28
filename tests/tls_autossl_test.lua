@@ -54,5 +54,27 @@ local opts_nobase = { base_domain = "", origin_ip = origin_ip }
 eq(autossl.allow_domain("dashboard.example.com", opts_nobase), true,
    "no base domain → tenant under it now ACME-eligible")
 
+-- Cached DEFAULT_BASE_DOMAIN path: when opts has no base_domain, allow_domain
+-- uses the module-level cache (loaded from STAND_BASE_DOMAIN at require / via
+-- _reset_cache). Default (env unset in test) is example.com.
+local opts_nobasekey = { origin_ip = origin_ip } -- no base_domain key → cached default
+eq(autossl.allow_domain("clientx.com", opts_nobasekey), true,
+   "cached default base: custom-domain tenant → allow")
+eq(autossl.allow_domain("dashboard.example.com", opts_nobasekey), false,
+   "cached default base: under example.com → deny")
+
+-- _reset_cache picks up a changed STAND_BASE_DOMAIN (stub os.getenv).
+do
+    local real_getenv = os.getenv
+    os.getenv = function(n) if n == "STAND_BASE_DOMAIN" then return "example.com" end return real_getenv(n) end
+    autossl._reset_cache()
+    eq(autossl.allow_domain("dashboard.example.com", opts_nobasekey), true,
+       "after _reset_cache to example.com: example host no longer base → tenant gate (allow)")
+    eq(autossl.allow_domain("foo.example.com", { origin_ip = function() return "203.0.113.99" end }), false,
+       "after _reset_cache to example.com: *.example.com is base → deny")
+    os.getenv = real_getenv
+    autossl._reset_cache() -- restore default for any later cases
+end
+
 io.write(string.format("tls_autossl_test: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
