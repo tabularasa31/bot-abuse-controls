@@ -42,6 +42,16 @@
 -- один раз за атаку»: его during-attack cookie фастпасит до конца атаки.
 -- Порог берётся из opts.max_under_attack_ttl (caller читает defaults.conf),
 -- чтобы verify оставалась чистой функцией без config-зависимости в решении.
+-- Если под атакой порог не пришёл — fail-closed (см. сам gate ниже).
+--
+-- ОГРАНИЧЕНИЕ TTL-механизма. Различаем по величине TTL, а не по
+-- «iat vs attack_started_at», поэтому короткий cookie, выписанный во время
+-- ПРЕДЫДУЩЕЙ атаки, в течение своего 1ч TTL будет принят как during-attack
+-- и в НОВОЙ атаке, начавшейся в это окно. Окно ограничено TTL (1ч), и
+-- держатель только что (≤1ч назад) проходил challenge, так что риск мал;
+-- vision §5.3 явно санкционирует TTL-механизм. Строгое «выписан именно в
+-- эту атаку» потребовало бы attack_started_at в policy + сравнения с iat —
+-- отдельный тикет, если эта дельта риска станет значимой.
 --
 -- Что НЕ покрывает этот модуль:
 --   * issue cookie на L5 после challenge — C5 (переиспользует `_M.issue`
@@ -107,6 +117,9 @@ local function valid_var_suffix(name)
 end
 
 local warned_bad_name = false
+-- Once-flag для WARN про отсутствующий max_under_attack_ttl под атакой
+-- (см. attack_mode pre-attack gate в verify). Per-worker, как warned_bad_name.
+local warned_missing_threshold = false
 local function get_cookie_name()
     if config and type(config.defaults) == "table" then
         local allow = config.defaults.allow
@@ -303,9 +316,29 @@ function _M.verify(host, opts)
     -- under_attack TTL) → не фастпасим. Используем `>` к порогу: ровно
     -- under_attack TTL и короче — during-attack, фастпас; длиннее (24ч
     -- normal) — pre-attack. iat/exp уже провалидированы как digits выше.
-    if opts and opts.attack_mode and opts.max_under_attack_ttl then
+    --
+    -- FAIL-CLOSED. Если под атакой порог не пришёл (config без
+    -- ttl_seconds_under_attack → opts.max_under_attack_ttl=nil) или iat не
+    -- распарсился — pre-attack от during-attack не различить. Под атакой
+    -- безопаснее НЕ доверять (RESULT_STALE_PRE_ATTACK → запрос на L5
+    -- challenge), чем распустить фастпас по нераспознанному cookie: cмысл C7
+    -- — сбросить доверие к накопленным cookie, fail-open это молча отменял
+    -- (code-review on PR #92). WARN однократно: это config-issue, не
+    -- нагрузка, а спамить лог на каждый запрос под атакой не нужно.
+    if opts and opts.attack_mode then
+        local max_ttl = opts.max_under_attack_ttl
+        if not max_ttl then
+            if not warned_missing_threshold then
+                ngx.log(ngx.WARN, "clearance.verify: attack_mode=on but ",
+                    "max_under_attack_ttl missing (check [allow.cookie_valid]",
+                    ".ttl_seconds_under_attack in defaults.conf); failing closed ",
+                    "— clearance cookies will not fastpath under attack.")
+                warned_missing_threshold = true
+            end
+            return _M.RESULT_STALE_PRE_ATTACK
+        end
         local iat = tonumber(iat_s)
-        if iat and (exp - iat) > opts.max_under_attack_ttl then
+        if not iat or (exp - iat) > max_ttl then
             return _M.RESULT_STALE_PRE_ATTACK
         end
     end

@@ -288,14 +288,14 @@ tests.no_attack_long_ttl_valid = function()
         { attack_mode = false, max_under_attack_ttl = 3600 }), "valid")
 end
 
--- 14. attack_mode без порога (max_under_attack_ttl nil) — gate не срабатывает,
---     fail-open к valid: лучше пропустить, чем зарубить всех держателей cookie
---     из-за отсутствующего конфига (vision §"protection must never take the
---     site down"). Порог обязан прийти из defaults.conf; его отсутствие —
---     это config-issue, а не повод ломать фастпас.
-tests.attack_no_threshold_valid = function()
+-- 14. attack_mode без порога (max_under_attack_ttl nil) — FAIL-CLOSED:
+--     pre-attack от during-attack не различить, под атакой безопаснее не
+--     доверять cookie → stale_pre_attack (запрос идёт на L5 challenge). Смысл
+--     C7 — сброс доверия к накопленным cookie; fail-open молча отменял бы его
+--     при отсутствии config-ключа (code-review on PR #92).
+tests.attack_no_threshold_fails_closed = function()
     set_cookie(mint("example.com", 86400))
-    assert_eq(clearance.verify("example.com", { attack_mode = true }), "valid")
+    assert_eq(clearance.verify("example.com", { attack_mode = true }), "stale_pre_attack")
 end
 
 local failed = 0
