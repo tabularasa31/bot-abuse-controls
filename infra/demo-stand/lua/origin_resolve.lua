@@ -82,6 +82,14 @@ function _M.resolve(origin, origin_ip, loop_host)
         formatted_ip = "[" .. origin_ip .. "]"
     end
 
+    -- Escape `%` for use as a gsub REPLACEMENT string: in the replacement,
+    -- `%` introduces a capture reference (%0-%9) or `%%`. The backend
+    -- validator rejects zone-scoped IPv6 (`fe80::1%eth0`), but a value
+    -- written straight to the DB (legacy / manual SQL) could still carry a
+    -- `%`; without this escape gsub would error or corrupt the URL at
+    -- request time. Defense-in-depth alongside ValidateOriginIP (codex P2).
+    local repl = formatted_ip:gsub("%%", "%%%%")
+
     -- Match `scheme://host` and replace `host` with formatted_ip.
     -- Try the bracketed IPv6 form first (`[…]`), then fall back to the
     -- IPv4/hostname form (`[^:/]+`). The IPv4 pattern would stop at the
@@ -90,9 +98,9 @@ function _M.resolve(origin, origin_ip, loop_host)
     -- gsub returns (new_string, count); we use count to detect "no match"
     -- so a bare hostname (no scheme) is returned as-is rather than
     -- silently mangled.
-    local rewritten, n = origin:gsub("^(https?://)%[[^%]]+%]", "%1" .. formatted_ip)
+    local rewritten, n = origin:gsub("^(https?://)%[[^%]]+%]", "%1" .. repl)
     if n == 0 then
-        rewritten, n = origin:gsub("^(https?://)[^:/]+", "%1" .. formatted_ip)
+        rewritten, n = origin:gsub("^(https?://)[^:/]+", "%1" .. repl)
     end
     if n == 0 then
         return origin

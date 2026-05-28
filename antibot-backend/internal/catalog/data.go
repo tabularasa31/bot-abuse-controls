@@ -417,8 +417,16 @@ func ValidateOriginIP(s string) error {
 	if s == "" {
 		return nil
 	}
-	if _, err := netip.ParseAddr(s); err != nil {
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
 		return fmt.Errorf("must be a bare IPv4/IPv6 address (no prefix)")
+	}
+	// Reject a zone-scoped address (`fe80::1%eth0`): netip.ParseAddr accepts
+	// it, but the `%` is a non-routable scope id AND it would be treated as a
+	// Lua gsub replacement escape when origin_resolve.resolve() builds the
+	// proxy URL, corrupting the upstream for that tenant (codex P2 on PR #94).
+	if addr.Zone() != "" {
+		return fmt.Errorf("must not carry an IPv6 zone (got %q)", s)
 	}
 	return nil
 }

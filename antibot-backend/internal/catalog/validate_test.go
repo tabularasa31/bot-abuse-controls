@@ -47,7 +47,7 @@ func TestValidate_PolicyOriginIP(t *testing.T) {
 			t.Errorf("Validate rejected valid origin_ip %q: %v", ip, err)
 		}
 	}
-	for _, ip := range []string{"203.0.113.0/24", "not-an-ip", "host.example"} {
+	for _, ip := range []string{"203.0.113.0/24", "not-an-ip", "host.example", "fe80::1%eth0"} {
 		d := &Data{Policy: map[string]Policy{"clientx.com": {
 			Mode: "shadow", Strictness: "standard", OriginIP: ip,
 		}}}

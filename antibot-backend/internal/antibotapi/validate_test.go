@@ -100,7 +100,7 @@ func TestValidateOriginIP(t *testing.T) {
 			t.Errorf("origin_ip %q rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"10.0.0.0/8", "2001:db8::/64", "not-an-ip", "999.999.999.999", "host.example"} {
+	for _, bad := range []string{"10.0.0.0/8", "2001:db8::/64", "not-an-ip", "999.999.999.999", "host.example", "fe80::1%eth0"} {
 		if err := antibotapi.ValidateOriginIP(bad); err == nil {
 			t.Errorf("origin_ip %q accepted", bad)
 		}
