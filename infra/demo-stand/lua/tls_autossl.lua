@@ -100,8 +100,17 @@ function _M.setup()
     _M._ready = true
 end
 
+-- init_worker() — pcall-wrapped: a throw here (e.g. renewal-timer registration
+-- failure) must NOT abort the init_worker_by_lua block, otherwise the steps
+-- after it (catalog_pull.start) would never run and the worker would silently
+-- stop pulling Channel C. Same fallback-safety contract as ssl_certificate().
 function _M.init_worker()
-    if _M._ready then require("resty.acme.autossl").init_worker() end
+    if not _M._ready then return end
+    local ok, err = pcall(function() require("resty.acme.autossl").init_worker() end)
+    if not ok then
+        ngx.log(ngx.ERR, "[demo] on-demand TLS: init_worker() failed, ",
+            "renewal disabled (issuance/serving unaffected): ", tostring(err))
+    end
 end
 
 -- ssl_certificate() — per-handshake cert selection. pcall-wrapped: if

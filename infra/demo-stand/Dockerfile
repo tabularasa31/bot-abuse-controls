@@ -108,3 +108,17 @@ RUN set -eux; \
     mkdir -p /etc/resty-auto-ssl; \
     chown -R nobody /etc/resty-auto-ssl; \
     apk del .acme-build
+
+# Entrypoint: chown the on-demand cert storage to the worker user (nobody) at
+# START, then exec the normal CMD. The image-build chown above only sticks if
+# Docker replicates image ownership into the named volume — which it does ONLY
+# when the volume is first created empty. On a pre-existing / recreated /
+# root-owned `auto-ssl-storage` volume the mount would shadow it and the worker
+# (nobody) would get EACCES persisting certs → re-issue every restart → LE
+# rate-limit. The runtime chown (master runs as root) makes it robust
+# regardless of volume state. Harmless when the dir is already nobody-owned.
+RUN printf '#!/bin/sh\nset -e\nchown -R nobody /etc/resty-auto-ssl 2>/dev/null || true\nexec "$@"\n' \
+        > /usr/local/bin/bac-entrypoint.sh; \
+    chmod +x /usr/local/bin/bac-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/bac-entrypoint.sh"]
+CMD ["/usr/local/openresty/bin/openresty", "-g", "daemon off;"]
