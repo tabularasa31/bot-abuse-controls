@@ -67,7 +67,7 @@ antibot_uptime_seconds %d
 # TYPE antibot_fp_unique gauge
 antibot_fp_unique %d
 
-# HELP antibot_clearance_verify_total L2.1 clearance cookie verify outcomes (C3). valid = HMAC ok + matching site + not expired (fastpath fired, L3/L5 skipped). invalid = HMAC mismatch or compute failure. expired = HMAC ok but exp <= now (checked before wrong_site so apex-Domain scoped cookies don't false-alarm as cross-tenant). missing = no cookie header. malformed = cookie structure unparseable. wrong_site = HMAC ok + not expired but cookie's bound site != request host (cross-tenant leak attempt). no_secret = operational — challenge_secret not loaded (C1 file missing/truncated after reload); kept distinct from invalid so a secret-outage spike is not masked by an attack-shaped invalid spike. NB the six (or seven, with no_secret) counters do NOT sum to requests_total under mode=active: hygiene/reputation policy.enforce(403) early-exits some requests BEFORE clearance.verify runs.
+# HELP antibot_clearance_verify_total L2.1 clearance cookie verify outcomes (C3/C7). valid = HMAC ok + matching site + not expired (fastpath fired, L3/L5 skipped). invalid = HMAC mismatch or compute failure. expired = HMAC ok but exp <= now (checked before wrong_site so apex-Domain scoped cookies don't false-alarm as cross-tenant). missing = no cookie header. malformed = cookie structure unparseable. wrong_site = HMAC ok + not expired but cookie's bound site != request host (cross-tenant leak attempt). no_secret = operational — challenge_secret not loaded (C1 file missing/truncated after reload); kept distinct from invalid so a secret-outage spike is not masked by an attack-shaped invalid spike. stale_pre_attack = C7 — fully valid cookie but attack_mode=on for the host AND the cookie carries the long (normal) TTL, i.e. it was issued before the attack started; it does NOT fastpath (request goes through to L5 challenge), counted separately so the attack-mode trust reset is visible apart from crypto failures. NB the counters do NOT sum to requests_total under mode=active: hygiene/reputation policy.enforce(403) early-exits some requests BEFORE clearance.verify runs.
 # TYPE antibot_clearance_verify_total counter
 antibot_clearance_verify_total{result="valid"} %d
 antibot_clearance_verify_total{result="invalid"} %d
@@ -76,6 +76,7 @@ antibot_clearance_verify_total{result="missing"} %d
 antibot_clearance_verify_total{result="malformed"} %d
 antibot_clearance_verify_total{result="wrong_site"} %d
 antibot_clearance_verify_total{result="no_secret"} %d
+antibot_clearance_verify_total{result="stale_pre_attack"} %d
 
 # HELP antibot_challenge_issued_total Branch A challenge pages rendered at L5 (C5). Counts the render of /__challenge HTML for browser-like clients that hit verdict=challenge under mode=active. Shadow mode does NOT serve the page (observe-only) so does not bump this counter.
 # TYPE antibot_challenge_issued_total counter
@@ -122,6 +123,7 @@ antibot_challenge_branch_total{branch="C"} %d
     get("clearance_verify_malformed_total"),
     get("clearance_verify_wrong_site_total"),
     get("clearance_verify_no_secret_total"),
+    get("clearance_verify_stale_pre_attack_total"),
     get("challenge_issued_total"),
     get("challenge_solved_total"),
     get("challenge_invalid_bad_nonce_total"),

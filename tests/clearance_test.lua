@@ -259,6 +259,45 @@ tests.invalid_cookie_name_falls_back = function()
     assert_eq(result, "valid", "fallback to tf_clearance should let valid cookie through")
 end
 
+-- 11. attack_mode pre-attack gate (C7). Cookie валиден во всём остальном,
+--     но под attack_mode=on с длинным (normal, 24ч) TTL → выдан ДО атаки →
+--     RESULT_STALE_PRE_ATTACK (не фастпасит). Порог = max_under_attack_ttl.
+tests.attack_pre_attack_long_ttl = function()
+    set_cookie(mint("example.com", 86400))   -- normal TTL = выдан до атаки
+    local result = clearance.verify("example.com",
+        { attack_mode = true, max_under_attack_ttl = 3600 })
+    assert_eq(result, "stale_pre_attack")
+end
+
+-- 12. attack_mode during-attack cookie (короткий under_attack TTL) фастпасит
+--     как обычно — это и даёт «юзер проходит challenge один раз за атаку».
+tests.attack_during_attack_short_ttl = function()
+    set_cookie(mint("example.com", 3600))    -- under_attack TTL = выдан во время атаки
+    local result = clearance.verify("example.com",
+        { attack_mode = true, max_under_attack_ttl = 3600 })
+    assert_eq(result, "valid")
+end
+
+-- 13. Без attack_mode длинный TTL фастпасит как обычно (gate не трогает
+--     нормальный режим; backward-compat одноаргументного вызова).
+tests.no_attack_long_ttl_valid = function()
+    set_cookie(mint("example.com", 86400))
+    assert_eq(clearance.verify("example.com"), "valid")
+    -- даже с opts, но attack_mode=false — gate выключен.
+    assert_eq(clearance.verify("example.com",
+        { attack_mode = false, max_under_attack_ttl = 3600 }), "valid")
+end
+
+-- 14. attack_mode без порога (max_under_attack_ttl nil) — FAIL-CLOSED:
+--     pre-attack от during-attack не различить, под атакой безопаснее не
+--     доверять cookie → stale_pre_attack (запрос идёт на L5 challenge). Смысл
+--     C7 — сброс доверия к накопленным cookie; fail-open молча отменял бы его
+--     при отсутствии config-ключа (code-review on PR #92).
+tests.attack_no_threshold_fails_closed = function()
+    set_cookie(mint("example.com", 86400))
+    assert_eq(clearance.verify("example.com", { attack_mode = true }), "stale_pre_attack")
+end
+
 local failed = 0
 for name, fn in pairs(tests) do
     local ok, err = pcall(fn)
