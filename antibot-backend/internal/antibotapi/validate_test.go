@@ -93,6 +93,20 @@ func TestValidateCIDR(t *testing.T) {
 	}
 }
 
+func TestValidateOriginIP(t *testing.T) {
+	// Empty = unset/clear; bare IPv4/IPv6 accepted; prefixes & garbage rejected.
+	for _, ok := range []string{"", "203.0.113.9", "2001:db8::1"} {
+		if err := antibotapi.ValidateOriginIP(ok); err != nil {
+			t.Errorf("origin_ip %q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"10.0.0.0/8", "2001:db8::/64", "not-an-ip", "999.999.999.999", "host.example"} {
+		if err := antibotapi.ValidateOriginIP(bad); err == nil {
+			t.Errorf("origin_ip %q accepted", bad)
+		}
+	}
+}
+
 func TestValidateASN(t *testing.T) {
 	for _, ok := range []int64{0, 1, 65535, 4_294_967_295} {
 		if err := antibotapi.ValidateASN(ok); err != nil {

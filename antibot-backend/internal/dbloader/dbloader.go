@@ -176,7 +176,7 @@ func loadKVString(ctx context.Context, tx pgx.Tx, dst *map[string]string, sql st
 // optional и иметь дефолт).
 func loadPolicy(ctx context.Context, tx pgx.Tx, r *catalog.RuntimeData) error {
 	rows, err := tx.Query(ctx, `
-		SELECT host, mode, strictness, attack_mode,
+		SELECT host, mode, strictness, attack_mode, origin_ip,
 		       ua_blacklist, ip_whitelist, ip_blocklist,
 		       asn_block, geo_whitelist, rate_rules
 		FROM policy
@@ -192,7 +192,7 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, r *catalog.RuntimeData) error {
 			uaJSON, ipWLJSON, ipBLJSON, asnJSON, geoJSON, rateRulesJSON []byte
 		)
 		if err := rows.Scan(
-			&host, &p.Mode, &p.Strictness, &p.AttackMode,
+			&host, &p.Mode, &p.Strictness, &p.AttackMode, &p.OriginIP,
 			&uaJSON, &ipWLJSON, &ipBLJSON, &asnJSON, &geoJSON, &rateRulesJSON,
 		); err != nil {
 			return fmt.Errorf("scan policy: %w", err)

@@ -15,6 +15,12 @@
 -- /__policy showing one mode for an unregistered host and BAC_LOG
 -- showing another — keep them in sync.
 --
+-- Policy fields are passed through verbatim from the Channel C payload, so
+-- get(host).origin_ip (multi-tenant routing, 86exrefdz) is available without
+-- a dedicated reader: proxy_target.lua treats a non-empty origin_ip as the
+-- marker of a proxied tenant. POOL_DEFAULT deliberately omits origin_ip
+-- (nil → unregistered host is not a tenant → BAC landing).
+--
 -- enforce(status) is the single mode-gate for the cascade. Stages that
 -- want to physically affect the response (status, body) MUST go through
 -- it instead of calling ngx.exit() directly — otherwise `mode=shadow`

@@ -33,9 +33,11 @@ services:
       REVISION: ${REVISION:-dev}
       # edge_id stamped into every BAC log record (see bac_log.lua).
       EDGE_ID: ${EDGE_ID:-stand-bac}
-      # Upstream the cascade fronts (scheme+host, no trailing slash). Set in
-      # the gitignored .env on the VM; when unset the proxied locations 503.
-      ORIGIN_URL: ${ORIGIN_URL:-}
+      # Upstream selection is fully Policy-driven (ClickUp 86exrefdz): a tenant
+      # is a host whose Policy (Channel C) has a non-empty origin_ip; the edge
+      # proxies the incoming Host to that IP, everything else to the BAC
+      # landing. No ORIGIN_URL / DASHBOARD_* env — add a tenant with one
+      # PATCH /antibot/v1/policy/<host> {"origin_ip": ...}.
       # When "on", reputation.lua honours an X-Demo-IP request header to
       # simulate a public client IP for GeoIP lookups (stand testing). Default
       # off → real remote_addr is always used (organic traffic resolves for
@@ -68,25 +70,6 @@ services:
       # their IP on any protected host. Set to your public IP (or office
       # /24) in .env. See recovery.lua.
       ADMIN_ACL_CIDR: ${ADMIN_ACL_CIDR:-}
-      # Private IP of the dashboard backend (the platform-app behind Caddy).
-      # When set, nginx-demo's $origin_resolve substitutes this IP into
-      # the upstream URL for DASHBOARD_PUBLIC_HOST, bypassing the
-      # http-level `resolver` (which would otherwise hit public DNS,
-      # get the edge's own IP, and loop the cascade into itself). Host
-      # header + SNI sent to the upstream stay as the public hostname
-      # so Caddy serves the right vhost / cert. The earlier `extra_hosts:`
-      # approach was insufficient — /etc/hosts is consulted only by libc-
-      # style resolution; nginx's variable proxy_pass uses `resolver`,
-      # which bypasses /etc/hosts entirely. See nginx.demo.conf's
-      # $origin_resolve set_by_lua_block for the full rationale.
-      DASHBOARD_BACKEND_IP: ${DASHBOARD_BACKEND_IP:-<TENANT_ORIGIN_IP>}
-      # Public hostname the loop-fix substitution targets. Only
-      # ORIGIN_URLs whose host equals this value get rewritten to
-      # DASHBOARD_BACKEND_IP — other ORIGIN_URLs (custom-origin
-      # deployments per the README quickstart) pass through unchanged.
-      # See origin_resolve.resolve() and Codex review feedback on
-      # PR #89.
-      DASHBOARD_PUBLIC_HOST: ${DASHBOARD_PUBLIC_HOST:-dashboard.example.com}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's

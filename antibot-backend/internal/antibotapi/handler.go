@@ -137,13 +137,14 @@ func (s *Server) handleGetPolicy(action, site string, w http.ResponseWriter, r *
 	s.mutations.WithLabelValues(action, "ok").Inc()
 }
 
-// patchBody принимает только три скалярных поля; unknown ключи валятся
+// patchBody принимает только скалярные поля; unknown ключи валятся
 // strict-декодером (DisallowUnknownFields), чтобы опечатки от dashboard'а не
 // тихо игнорировались.
 type patchBody struct {
 	Mode       *string `json:"mode,omitempty"`
 	Strictness *string `json:"strictness,omitempty"`
 	AttackMode *bool   `json:"attack_mode,omitempty"`
+	OriginIP   *string `json:"origin_ip,omitempty"`
 }
 
 func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r *http.Request) {
@@ -152,9 +153,9 @@ func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r
 		s.handleDecodeErr(w, action, err)
 		return
 	}
-	patch := PolicyPatch{Mode: pb.Mode, Strictness: pb.Strictness, AttackMode: pb.AttackMode}
+	patch := PolicyPatch{Mode: pb.Mode, Strictness: pb.Strictness, AttackMode: pb.AttackMode, OriginIP: pb.OriginIP}
 	if patch.IsEmpty() {
-		s.bad(w, action, "empty_patch", "PATCH body must include at least one of mode, strictness, attack_mode")
+		s.bad(w, action, "empty_patch", "PATCH body must include at least one of mode, strictness, attack_mode, origin_ip")
 		return
 	}
 	if patch.Mode != nil {
@@ -166,6 +167,12 @@ func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r
 	if patch.Strictness != nil {
 		if err := ValidateStrictness(*patch.Strictness); err != nil {
 			s.bad(w, action, "bad_strictness", err.Error())
+			return
+		}
+	}
+	if patch.OriginIP != nil {
+		if err := ValidateOriginIP(*patch.OriginIP); err != nil {
+			s.bad(w, action, "bad_origin_ip", err.Error())
 			return
 		}
 	}

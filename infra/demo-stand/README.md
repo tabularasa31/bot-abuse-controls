@@ -8,8 +8,8 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
-| `/` (and any path) | a real browser | 200, origin page | Cascade passes → request proxied to `ORIGIN_URL`. The stand is a real edge in front of the origin. |
-| `/` | `curl -k https://<host>/` | 200 (pool default Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | The cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether the verdict actually 403's the request or only logs. Confirm the fp via `/__fp`. |
+| `/` (and any path) | a real browser | 200, origin page | Cascade passes → request proxied to the tenant's origin. The stand is a real edge in front of the origin. |
+| `/` | `curl -k https://<host>/` | 200 (tenant Host) / landing (non-tenant Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | The cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether the verdict actually 403's the request or only logs. A Host that is not a registered tenant gets the bundled landing page. Confirm the fp via `/__fp`. |
 | `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, then proxied. |
 | `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in `/__fp` and the logs. |
 | `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
@@ -19,7 +19,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 | `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`, `antibot_fp_unique`, `antibot_rule_total{stage,rule}`. **Channel C health (B5/B6):** `antibot_edge_catalog_staleness_seconds{catalog="…"}` — seconds since the last successful **contact** with antibot-backend (200 or 304, both healthy answers), `-1` if no contact has succeeded since worker start. This is a **liveness** signal (alert on dead channel), not a freshness one — see [demo-backend README §Channel C staleness SLA](../demo-backend/README.md#channel-c-staleness-sla). No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
 | `/baseline/` | anything | same origin, **no** antibot | Proxies to the same origin but bypasses `access_by_lua`. Hit `/` vs `/baseline/` with `wrk` — the delta is the cascade overhead. |
 
-**Origin.** The stand is a real reverse proxy: the cascade runs, then (on allow) the request is proxied to an origin (vision Step 6 — antibot in front of origin). The origin is `ORIGIN_URL` (scheme+host, no trailing slash) set in the gitignored `infra/demo-stand/.env` on the VM; it is not committed. When `ORIGIN_URL` is **unset**, `/` falls back to the bundled landing page (the cascade still runs, so the demo works out-of-box without an upstream); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally.
+**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — falls back to the bundled landing page (the cascade still runs); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally. Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (ClickUp 86exrefdz). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
 
 The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` (B11) — see the section above and `policy.lua`.
 
@@ -53,9 +53,9 @@ mkdir -p infra/demo-stand/certs
 cp /your/fullchain.pem infra/demo-stand/certs/fullchain.pem
 cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 
-# Point the cascade at the origin it fronts (gitignored, not committed).
-# Same .env also holds DEMO_BIND_IP / REPORT_* on a real deploy.
-echo 'ORIGIN_URL=https://your-origin.example' > infra/demo-stand/.env
+# No origin env var — tenants are registered in Policy (see below). The
+# gitignored .env holds DEMO_BIND_IP / EDGE_ID / Channel C settings.
+touch infra/demo-stand/.env
 
 # (Optional, B6) Connect to antibot-backend for live Channel C catalog pulls.
 # Without these the stand runs on the static tls_fp_blocklist seed only.
@@ -80,9 +80,14 @@ EOF
 REVISION=$(git rev-parse --short HEAD) \
   docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
 
+# Register a tenant so its Host proxies to its backend (Channel C delivers
+# it to the edge in ≤30s). Without a tenant row the Host gets the landing page.
+#   PATCH /antibot/v1/policy/<host> {"mode":"active","origin_ip":"203.0.113.9"}
+
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # 200, proxied to ORIGIN_URL (pool default Host: shadow)
+curl -k https://localhost/                   # landing page (localhost is not a tenant; cascade still runs)
+curl -k --resolve <tenant>:443:127.0.0.1 https://<tenant>/   # 200, proxied to the tenant origin_ip
 curl -k https://localhost/__fp               # see your fp
 curl -k https://localhost/metrics            # prometheus text
 ```
@@ -327,9 +332,8 @@ location, so it tracks `main` like everything else:
 ```
 
 Report addresses live in their **own** gitignored file
-`infra/demo-stand/.env.report` — deliberately separate from `.env` so the
-quickstart's `> .env` (which rewrites `.env` from scratch on redeploy)
-can't drop them. Set `REPORT_FROM=<sender>` (must match the authenticated
+`infra/demo-stand/.env.report` — deliberately separate from `.env` so a
+`> .env` rewrite on redeploy can't drop them. Set `REPORT_FROM=<sender>` (must match the authenticated
 msmtp account) and `REPORT_TO=<routine mailbox>` there:
 
 ```sh

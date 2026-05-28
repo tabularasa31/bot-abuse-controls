@@ -77,6 +77,7 @@ type Policy struct {
 	GeoWhitelist []string   `yaml:"geo_whitelist" json:"geo_whitelist"` // если задан — все остальные блокируются
 	RateRules    []RateRule `yaml:"rate_rules" json:"rate_rules"`       // клиентские per-path rate-rules
 	AttackMode   bool       `yaml:"attack_mode" json:"attack_mode"`     // единственный источник; map'а сверху больше нет
+	OriginIP     string     `yaml:"origin_ip" json:"origin_ip"`         // bare IPv4/IPv6 бэкенда для multi-tenant routing; "" = не проксируемый тенант (86exrefdz)
 }
 
 // RateRule — одна клиентская rate-rule из docs/product/config-templates.md
@@ -338,6 +339,9 @@ func Validate(d *Data) error {
 				return fmt.Errorf("policy[%s].ip_whitelist[%d] %q: %w", host, i, cidr, err)
 			}
 		}
+		if err := ValidateOriginIP(pol.OriginIP); err != nil {
+			return fmt.Errorf("policy[%s].origin_ip %q: %w", host, pol.OriginIP, err)
+		}
 	}
 	// tls_fp_catalog (Phase 2+, ADR-006): hash_b → {family, status}. Family
 	// должен быть непустым (на эдже идёт в attrs.family для is_impersonator);
@@ -399,4 +403,22 @@ func ValidateCIDR(s string) error {
 		return nil
 	}
 	return fmt.Errorf("invalid IP/CIDR")
+}
+
+// ValidateOriginIP принимает пустую строку (тенант не проксируется / поле
+// снято) либо ОДИНОЧНЫЙ bare-адрес (IPv4 или IPv6) — в отличие от
+// ValidateCIDR, префиксы здесь запрещены: origin_ip — это сетевой
+// destination одного бэкенда, не подсеть. Edge подставляет это значение
+// в proxy_pass-URL (origin_resolve), CIDR там бессмыслен. Экспортирована
+// для переиспользования в [internal/antibotapi]: admin-мутация валидирует
+// тем же предикатом, что и reloader через Validate, иначе запись от
+// дашборда уронила бы следующий тик reloader'a.
+func ValidateOriginIP(s string) error {
+	if s == "" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(s); err != nil {
+		return fmt.Errorf("must be a bare IPv4/IPv6 address (no prefix)")
+	}
+	return nil
 }

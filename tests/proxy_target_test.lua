@@ -1,5 +1,8 @@
 -- Unit tests for infra/demo-stand/lua/proxy_target.lua.
--- Pure function — no ngx, no shared_dict, no I/O.
+-- Policy-driven routing (ClickUp 86exrefdz). Pure function — no ngx, no
+-- shared_dict, no I/O: the tenant set is injected via the test-only
+-- policy_override argument ({host -> origin_ip}), so we never touch the
+-- real policy module / Channel C harness.
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 
@@ -16,123 +19,115 @@ local function eq(actual, want, name)
     end
 end
 
-local function env(proxied_host, origin_url)
-    return { proxied_host = proxied_host, origin_url = origin_url }
+-- backend(host, override) returns two values (origin_ip, loop_host); call it
+-- through this helper so the multi-return isn't truncated by being mid-arglist.
+local function eq_backend(host, override, want_ip, want_host, name)
+    local ip, lh = proxy_target.backend(host, override)
+    if ip == want_ip and lh == want_host then
+        passed = passed + 1
+    else
+        failed = failed + 1
+        io.write(string.format("FAIL %s: got (%q,%q), want (%q,%q)\n",
+            name, tostring(ip), tostring(lh), tostring(want_ip), tostring(want_host)))
+    end
 end
 
-local DASH = "dashboard.example.com"
-local URL  = "https://dashboard.example.com"
+-- Tenant set: host -> origin_ip (mirrors policy.get(host).origin_ip).
+-- A v4 tenant, a v6 tenant, and a host present-but-not-a-tenant (policy
+-- row with empty origin_ip).
+local TENANTS = {
+    ["clientx.com"]              = "203.0.113.9",
+    ["dashboard.example.com"] = "<TENANT_ORIGIN_IP>",
+    ["v6.example"]               = "2001:db8::1",
+    ["observed.example"]         = "",          -- policy row, no origin_ip
+}
 
 -- ====================================================================
--- Happy path: registered proxied client → ORIGIN_URL.
+-- Tenant → https://<host>; backend() → (origin_ip, host).
 -- ====================================================================
-eq(proxy_target.origin(DASH, env(DASH, URL)),
-   URL,
-   "registered host → ORIGIN_URL")
+eq(proxy_target.origin("clientx.com", TENANTS),
+   "https://clientx.com",
+   "v4 tenant → https://<host>")
+eq_backend("clientx.com", TENANTS,
+    "203.0.113.9", "clientx.com",
+    "v4 tenant backend() → (origin_ip, host)")
+
+eq(proxy_target.origin("dashboard.example.com", TENANTS),
+   "https://dashboard.example.com",
+   "dashboard tenant (seeded) → https://<host>")
+eq_backend("dashboard.example.com", TENANTS,
+    "<TENANT_ORIGIN_IP>", "dashboard.example.com",
+    "dashboard tenant backend()")
+
+-- IPv6 origin_ip passes through verbatim; origin_resolve.resolve() does the
+-- bracketing when it builds the proxy URL (covered in origin_resolve_test).
+eq_backend("v6.example", TENANTS,
+    "2001:db8::1", "v6.example",
+    "IPv6 tenant backend() → (v6 ip, host)")
 
 -- ====================================================================
--- Catch-all to BAC: everything else returns "" so location / falls
--- through to /__landing.
+-- Case-insensitivity: nginx lowercases ngx.var.host, but origin()/backend()
+-- normalise defensively so a mixed-case Host still matches a lowercase
+-- tenant key.
 -- ====================================================================
-eq(proxy_target.origin("bac.example.com", env(DASH, URL)),
+eq(proxy_target.origin("ClientX.COM", TENANTS),
+   "https://clientx.com",
+   "mixed-case Host → matches lowercase tenant, lowercased in output")
+
+-- ====================================================================
+-- Non-tenant → BAC (""). backend() → ("", "").
+-- ====================================================================
+eq(proxy_target.origin("observed.example", TENANTS),
    "",
-   "bac.example.com → BAC ('')")
+   "policy row with empty origin_ip → not a tenant → BAC")
+eq_backend("observed.example", TENANTS,
+    "", "",
+    "empty origin_ip backend() → ('','')")
 
-eq(proxy_target.origin("example.com", env(DASH, URL)),
+eq(proxy_target.origin("bac.example.com", TENANTS),
    "",
-   "random Host: example.com → BAC")
-
-eq(proxy_target.origin("<EDGE_VM_IP>", env(DASH, URL)),
+   "bac.example.com (no policy row) → BAC")
+eq(proxy_target.origin("example.com", TENANTS),
    "",
-   "IP literal in Host → BAC")
-
-eq(proxy_target.origin("localhost", env(DASH, URL)),
+   "random Host → BAC")
+eq(proxy_target.origin("<EDGE_VM_IP>", TENANTS),
    "",
-   "Host: localhost (README quickstart) → BAC")
-
-eq(proxy_target.origin("dashboard.example.com", env(DASH, URL)),
+   "IP-literal Host (scanner) → BAC (loop-safe)")
+eq(proxy_target.origin("localhost", TENANTS),
    "",
-   "uppercase incoming host (shouldn't happen — ngx.var.host is lowercased\
-    by nginx — but if it does, comparison must fail safe to BAC)")
-
-eq(proxy_target.origin("dashboard.example.com", env("Dashboard.example.com", URL)),
-   URL,
-   "operator's DASHBOARD_PUBLIC_HOST in mixed case → still matches\
-    nginx-lowercased Host (origin() normalises the configured value)")
-
-eq(proxy_target.origin("subdomain.dashboard.example.com", env(DASH, URL)),
-   "",
-   "subdomain of dashboard not auto-included → BAC")
-
-eq(proxy_target.origin("dashboard.example.com.evil.com", env(DASH, URL)),
+   "Host: localhost → BAC")
+eq(proxy_target.origin("clientx.com.evil.com", TENANTS),
    "",
    "suffix-attack hostname → BAC")
+eq(proxy_target.origin("sub.clientx.com", TENANTS),
+   "",
+   "subdomain of a tenant not auto-included → BAC")
 
 -- ====================================================================
--- Empty / nil inputs — fail safe to BAC ("").
+-- Empty / nil host — fail safe to BAC.
 -- ====================================================================
-eq(proxy_target.origin(nil, env(DASH, URL)),
-   "",
-   "nil host → BAC")
-
-eq(proxy_target.origin("", env(DASH, URL)),
-   "",
-   "empty host (HTTP/1.0 without Host header) → BAC")
-
-eq(proxy_target.origin(DASH, env("", URL)),
-   "",
-   "no proxied_host configured → BAC")
-
-eq(proxy_target.origin(DASH, env(DASH, "")),
-   "",
-   "no ORIGIN_URL configured → BAC (operator hasn't set upstream)")
-
-eq(proxy_target.origin(DASH, env(nil, URL)),
-   "",
-   "nil proxied_host → BAC")
-
-eq(proxy_target.origin(DASH, env(DASH, nil)),
-   "",
-   "nil origin_url → BAC")
-
-eq(proxy_target.origin(DASH, nil),
-   "",
-   "nil env → BAC")
-
-eq(proxy_target.origin(DASH, {}),
-   "",
-   "empty cfg_override → BAC")
+eq(proxy_target.origin(nil, TENANTS), "", "nil host → BAC")
+eq(proxy_target.origin("", TENANTS), "", "empty host (HTTP/1.0 no Host) → BAC")
+eq_backend(nil, TENANTS, "", "", "nil host backend() → ('','')")
+eq_backend("", TENANTS, "", "", "empty host backend() → ('','')")
 
 -- ====================================================================
--- Module-level env caching path — when cfg_override is NOT passed,
--- origin() reads env via os.getenv once and caches. Exercised here by
--- temporarily stubbing os.getenv and using the _reset_cache test hook.
+-- policy_override as a function (host -> origin_ip) — same contract as the
+-- table form, exercising the function branch of origin_ip_for().
 -- ====================================================================
-do
-    local stubbed = {
-        DASHBOARD_PUBLIC_HOST = "Dashboard.example.com",  -- mixed case on purpose
-        ORIGIN_URL            = "https://upstream.test",
-    }
-    local real_getenv = os.getenv
-    -- luacheck: push ignore os
-    os.getenv = function(name) return stubbed[name] or real_getenv(name) end
-    -- luacheck: pop
-    proxy_target._reset_cache()
-
-    eq(proxy_target.origin("dashboard.example.com"),
-       "https://upstream.test",
-       "env-load path: mixed-case DASHBOARD_PUBLIC_HOST matches lowercase Host")
-
-    eq(proxy_target.origin("other.example"),
-       "",
-       "env-load path: non-matching Host → BAC")
-
-    -- restore + reset so subsequent suites get a clean module
-    -- luacheck: push ignore os
-    os.getenv = real_getenv
-    -- luacheck: pop
-    proxy_target._reset_cache()
+local fn = function(host)
+    if host == "fn.example" then return "198.51.100.7" end
+    return nil
 end
+eq(proxy_target.origin("fn.example", fn),
+   "https://fn.example",
+   "function policy_override: tenant → https://<host>")
+eq_backend("fn.example", fn,
+    "198.51.100.7", "fn.example",
+    "function policy_override: backend()")
+eq(proxy_target.origin("nope.example", fn),
+   "",
+   "function policy_override: non-tenant → BAC")
 
 -- ====================================================================
 -- Summary
