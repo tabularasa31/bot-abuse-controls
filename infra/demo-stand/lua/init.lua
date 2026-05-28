@@ -429,3 +429,19 @@ if n == 0 then
 else
     ngx.log(ngx.NOTICE, "[demo] mode: ACTIVE blocking on ", n, " fp(s) (ngx.exit(403) on block)")
 end
+
+-- On-demand TLS for tenant custom domains (lua-resty-auto-ssl, 86exrefdz
+-- follow-up). pcall-guarded: a missing module or init error must NEVER brick
+-- nginx start — ssl_certificate() then no-ops and the static fallback cert is
+-- served (current behaviour). Logs loud so a broken setup is visible.
+local autossl_ok, autossl_err = pcall(function()
+    require("tls_autossl").setup()
+end)
+if autossl_ok then
+    ngx.log(ngx.NOTICE, "[demo] on-demand TLS: lua-resty-auto-ssl active (staging=",
+        tostring((os.getenv("AUTO_SSL_STAGING") or "") == "true"),
+        ", base_domain=", os.getenv("STAND_BASE_DOMAIN") or "example.com", ")")
+else
+    ngx.log(ngx.ERR, "[demo] on-demand TLS: setup failed — serving static fallback ",
+        "cert only (custom-domain tenants won't get a cert): ", tostring(autossl_err))
+end

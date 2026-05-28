@@ -18,7 +18,11 @@
 # baked in either: fetch them with scripts/fetch-geoip.sh and mount the geoip/
 # directory at runtime. Without them the stand still starts (geoip.lua is
 # fail-open) — geo is simply undetermined.
-FROM openresty/openresty:alpine
+# alpine-fat bundles luarocks + opm + build toolchain, needed to install
+# lua-resty-auto-ssl (on-demand TLS for tenant custom domains — 86exrefdz
+# follow-up). The slim `:alpine` has no luarocks. Same OpenResty/LuaJIT
+# underneath, so the cascade behaves identically.
+FROM openresty/openresty:alpine-fat
 
 # libmaxminddb-libs ships libmaxminddb.so.0 (the runtime). lua/resty/maxminddb.lua
 # loads it via ffi.load('libmaxminddb'), which dlopen()s the *unversioned*
@@ -73,3 +77,24 @@ RUN set -eux; \
     # missed it.
     find /usr/local/openresty/site/lualib/resty -type f -name '*.lua' -exec chmod 0644 {} +; \
     apk del .build-deps
+
+# lua-resty-auto-ssl (B11 multi-tenant follow-up): on-demand Let's Encrypt
+# certs per tenant custom domain, chosen at TLS handshake via
+# ssl_certificate_by_lua (see lua/tls_autossl.lua + nginx.demo.conf). The edge
+# stays the TLS terminator (required for JA4/$ssl_* fingerprinting), so cert
+# selection must live here, not in a front proxy.
+#
+# Runtime deps for the bundled `dehydrated` ACME client: bash + openssl CLI +
+# coreutils/diffutils/grep/sed + curl (already present). The on-demand storage
+# dir must be writable by the worker user (nobody) and is mounted as a volume
+# in docker-compose so issued certs survive restarts (avoids re-hitting LE
+# rate limits).
+ARG LUA_RESTY_AUTO_SSL_VERSION=0.13.1
+RUN set -eux; \
+    apk add --no-cache bash openssl coreutils diffutils grep sed; \
+    luarocks install lua-resty-auto-ssl ${LUA_RESTY_AUTO_SSL_VERSION}; \
+    mkdir -p /etc/resty-auto-ssl; \
+    chown -R nobody /etc/resty-auto-ssl; \
+    # auto-ssl shells out to its bundled dehydrated/letsencrypt hooks; ensure
+    # they're executable (luarocks preserves mode, but be explicit).
+    test -d /usr/local/openresty/luajit/share/lua/5.1/resty/auto-ssl
