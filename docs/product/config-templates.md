@@ -403,6 +403,14 @@ example.com:
   strictness: standard               # standard | permissive
   attack_mode: false                 # тоггл "Under Attack mode"
 
+  # origin_ip — bare IPv4/IPv6 бэкенда клиента. Маркер проксируемого тенанта
+  # (multi-tenant routing, 86exrefdz): эдж матчит входящий Host с записью
+  # policy и проксирует на этот IP (хостнейм в upstream подменяется на IP,
+  # loop-safe; Host/SNI наверх остаются example.com). Пусто = хост не
+  # проксируется (уходит на BAC landing). Без CIDR — это destination одного
+  # бэкенда. Схема апстрима — https/443 (per-host scheme/port — отдельный тикет).
+  origin_ip: 203.0.113.9
+
   # IP-whitelist легитимных серверных интеграций клиента
   ip_whitelist:
     - 203.0.113.10/32                # бэкенд клиента

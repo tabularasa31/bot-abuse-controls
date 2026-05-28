@@ -321,6 +321,70 @@ func TestGetPolicy_AfterPatch(t *testing.T) {
 	}
 }
 
+func TestPatchOriginIP_RoundTrip(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	// Set a tenant origin_ip on a fresh site → row created, diff carries it.
+	status, body := do(t, ts, http.MethodPatch, "/antibot/v1/policy/clientx.com", tok,
+		`{"mode":"active","origin_ip":"203.0.113.9"}`)
+	if status != http.StatusOK {
+		t.Fatalf("patch: status=%d body=%s", status, body)
+	}
+	var r struct {
+		Changed bool     `json:"changed"`
+		Diff    []string `json:"diff"`
+	}
+	_ = json.Unmarshal(body, &r)
+	if !r.Changed {
+		t.Errorf("expected changed=true, body=%s", body)
+	}
+	var originIP string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT origin_ip FROM policy WHERE host='clientx.com'`,
+	).Scan(&originIP); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if originIP != "203.0.113.9" {
+		t.Errorf("origin_ip = %q, want 203.0.113.9", originIP)
+	}
+
+	// GET surfaces it; clearing with "" works and is reflected.
+	_, getBody := do(t, ts, http.MethodGet, "/antibot/v1/policy/clientx.com", tok, "")
+	if !strings.Contains(string(getBody), `"origin_ip":"203.0.113.9"`) {
+		t.Errorf("GET missing origin_ip: %s", getBody)
+	}
+	if status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/clientx.com", tok,
+		`{"origin_ip":""}`); status != http.StatusOK {
+		t.Fatalf("clear patch failed: %d", status)
+	}
+	if err := pool.QueryRow(context.Background(),
+		`SELECT origin_ip FROM policy WHERE host='clientx.com'`,
+	).Scan(&originIP); err != nil {
+		t.Fatalf("select after clear: %v", err)
+	}
+	if originIP != "" {
+		t.Errorf("origin_ip after clear = %q, want empty", originIP)
+	}
+}
+
+func TestPatchOriginIP_Invalid_NotWritten(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	// A CIDR is not a bare address → 400, no row written.
+	status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/clientx.com", tok,
+		`{"origin_ip":"203.0.113.0/24"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", status)
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM policy WHERE host='clientx.com'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("row written despite invalid origin_ip (count=%d)", count)
+	}
+}
+
 func TestASNBlock_MissingAsnField_400(t *testing.T) {
 	// PR-58 review #4: пустой body `{}` → asn=0 без явного required-check
 	// молча мутировал ASN 0. Теперь *int64-указатель + nil-check.

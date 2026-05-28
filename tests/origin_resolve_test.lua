@@ -137,6 +137,18 @@ eq(origin_resolve.resolve("https://[2001:db8::3]:8443/x", IP, "2001:db8::1"),
    "IPv6 origin but different from loop_host → unchanged")
 
 -- ====================================================================
+-- Defense-in-depth: an origin_ip containing `%` (e.g. a zone-scoped IPv6
+-- literal `fe80::1%eth0` that slipped past the backend validator via manual
+-- SQL) must NOT be interpreted as a gsub replacement escape. The `%` is
+-- escaped to `%%` before substitution, so it lands literally in the URL
+-- instead of erroring or corrupting it (codex P2 on PR #94). The value is
+-- nonsensical as a destination, but resolve() must fail safe (literal),
+-- not throw, and the validator is the real gate.
+eq(origin_resolve.resolve("https://" .. D, "fe80::1%eth0", D),
+   "https://[fe80::1%eth0]",
+   "origin_ip with `%` (zone) → `%` survives literally, no gsub corruption")
+
+-- ====================================================================
 -- Summary
 -- ====================================================================
 io.write(string.format("origin_resolve_test: %d passed, %d failed\n", passed, failed))

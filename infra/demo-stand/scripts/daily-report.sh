@@ -14,9 +14,9 @@ ANALYZE="${HERE}/analyze.py"
 ROOT="${ABUSE_CONTROLS_ROOT:-$(cd "${HERE}/../../.." && pwd)}"
 
 # Local, gitignored env. Two files, sourced in order:
-#   .env         — deploy vars (DEMO_BIND_IP, ORIGIN_URL). The README
-#                  quickstart recreates this with `> .env`, so anything
-#                  written here is liable to be clobbered on redeploy.
+#   .env         — deploy vars (DEMO_BIND_IP, EDGE_ID, Channel C). A
+#                  `> .env` rewrite on redeploy can clobber anything
+#                  written here.
 #   .env.report  — report addresses (REPORT_FROM/REPORT_TO). Kept SEPARATE
 #                  precisely so a clobbering `> .env` can't drop them; no
 #                  doc or deploy step ever rewrites this file. Sourced last

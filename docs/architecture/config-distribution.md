@@ -33,7 +33,7 @@ How configuration and runtime data get from where they are authored to the edge 
    GET /catalog/ip_blocklist        ◄── all edges of edge-pool pull from one backend
    GET /catalog/asn_datacenters
    GET /catalog/verified_bot_ips
-   GET /catalog/policy        (host → mode/strictness/rate_rules/...)
+   GET /catalog/policy        (host → mode/strictness/origin_ip/rate_rules/...)
    GET /catalog/attack_mode
         │
         ▼

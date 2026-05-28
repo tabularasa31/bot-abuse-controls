@@ -77,6 +77,7 @@ type Policy struct {
 	GeoWhitelist []string   `yaml:"geo_whitelist" json:"geo_whitelist"` // если задан — все остальные блокируются
 	RateRules    []RateRule `yaml:"rate_rules" json:"rate_rules"`       // клиентские per-path rate-rules
 	AttackMode   bool       `yaml:"attack_mode" json:"attack_mode"`     // единственный источник; map'а сверху больше нет
+	OriginIP     string     `yaml:"origin_ip" json:"origin_ip"`         // bare IPv4/IPv6 бэкенда для multi-tenant routing; "" = не проксируемый тенант (86exrefdz)
 }
 
 // RateRule — одна клиентская rate-rule из docs/product/config-templates.md
@@ -338,6 +339,9 @@ func Validate(d *Data) error {
 				return fmt.Errorf("policy[%s].ip_whitelist[%d] %q: %w", host, i, cidr, err)
 			}
 		}
+		if err := ValidateOriginIP(pol.OriginIP); err != nil {
+			return fmt.Errorf("policy[%s].origin_ip %q: %w", host, pol.OriginIP, err)
+		}
 	}
 	// tls_fp_catalog (Phase 2+, ADR-006): hash_b → {family, status}. Family
 	// должен быть непустым (на эдже идёт в attrs.family для is_impersonator);
@@ -399,4 +403,51 @@ func ValidateCIDR(s string) error {
 		return nil
 	}
 	return fmt.Errorf("invalid IP/CIDR")
+}
+
+// ValidateOriginIP принимает пустую строку (тенант не проксируется / поле
+// снято) либо ОДИНОЧНЫЙ bare-адрес (IPv4 или IPv6) — в отличие от
+// ValidateCIDR, префиксы здесь запрещены: origin_ip — это сетевой
+// destination одного бэкенда, не подсеть. Edge подставляет это значение
+// в proxy_pass-URL (origin_resolve), CIDR там бессмыслен. Экспортирована
+// для переиспользования в [internal/antibotapi]: admin-мутация валидирует
+// тем же предикатом, что и reloader через Validate, иначе запись от
+// дашборда уронила бы следующий тик reloader'a.
+func ValidateOriginIP(s string) error {
+	if s == "" {
+		return nil
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return fmt.Errorf("must be a bare IPv4/IPv6 address (no prefix)")
+	}
+	// Reject a zone-scoped address (`fe80::1%eth0`): netip.ParseAddr accepts
+	// it, but the `%` is a non-routable scope id AND it would be treated as a
+	// Lua gsub replacement escape when origin_resolve.resolve() builds the
+	// proxy URL, corrupting the upstream for that tenant (codex P2 on PR #94).
+	if addr.Zone() != "" {
+		return fmt.Errorf("must not carry an IPv6 zone (got %q)", s)
+	}
+	// origin_ip is used verbatim as a proxy_pass destination, so reject
+	// addresses that can't be a real tenant backend and would instead point
+	// the edge at itself or at infrastructure:
+	//   - unspecified (0.0.0.0, ::) — silent connect failure, no real target
+	//   - loopback (127.0.0.0/8, ::1) — the edge proxying to itself
+	//   - link-local (169.254.0.0/16, fe80::/10) — incl. 169.254.169.254
+	//     cloud metadata (SSRF-style misroute)
+	//   - multicast — not a unicast backend
+	// Private/global unicast stay allowed: a tenant origin may legitimately
+	// be a private IP (gemini/codex review on PR #94). Operators set this via
+	// the authenticated dashboard, but validating here is cheap defence.
+	switch {
+	case addr.IsUnspecified():
+		return fmt.Errorf("must not be the unspecified address (got %q)", s)
+	case addr.IsLoopback():
+		return fmt.Errorf("must not be a loopback address (got %q)", s)
+	case addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast():
+		return fmt.Errorf("must not be a link-local address (got %q)", s)
+	case addr.IsMulticast() || addr.IsInterfaceLocalMulticast():
+		return fmt.Errorf("must not be a multicast address (got %q)", s)
+	}
+	return nil
 }

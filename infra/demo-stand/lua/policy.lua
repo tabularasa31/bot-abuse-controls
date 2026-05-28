@@ -15,6 +15,12 @@
 -- /__policy showing one mode for an unregistered host and BAC_LOG
 -- showing another — keep them in sync.
 --
+-- Policy fields are passed through verbatim from the Channel C payload, so
+-- get(host).origin_ip (multi-tenant routing, 86exrefdz) is available without
+-- a dedicated reader: proxy_target.lua treats a non-empty origin_ip as the
+-- marker of a proxied tenant. POOL_DEFAULT deliberately omits origin_ip
+-- (nil → unregistered host is not a tenant → BAC landing).
+--
 -- enforce(status) is the single mode-gate for the cascade. Stages that
 -- want to physically affect the response (status, body) MUST go through
 -- it instead of calling ngx.exit() directly — otherwise `mode=shadow`
@@ -111,15 +117,31 @@ local function lookup(host)
     -- value outside the known set would otherwise silently degrade an
     -- active client to shadow (`nil == "active"` is false). Fail to pool
     -- default + ERR so the misconfiguration is visible.
+    --
+    -- origin_ip is preserved through this fallback: routing (proxy_target,
+    -- 86exrefdz) must NOT depend on mode/strictness validity. Without this,
+    -- a forward-compat schema change (backend adds a 3rd mode the edge
+    -- doesn't know yet) would make lookup() drop origin_ip → the tenant's
+    -- traffic silently routes to the BAC landing instead of its backend —
+    -- a routing outage, not just an enforcement fail-stale. So we keep a
+    -- valid origin_ip on the pool-default fallback (enforcement still
+    -- safely degrades to shadow/standard).
+    local function fallback()
+        local d = new_pool_default()
+        if type(p) == "table" and type(p.origin_ip) == "string" and p.origin_ip ~= "" then
+            d.origin_ip = p.origin_ip
+        end
+        return d
+    end
     if type(p.mode) ~= "string" or not VALID_MODES[p.mode] then
         ngx.log(ngx.ERR, "policy: invalid mode for ", host, ": ",
             tostring(p.mode), " — falling back to pool default")
-        return new_pool_default()
+        return fallback()
     end
     if type(p.strictness) ~= "string" or not VALID_STRICTNESSES[p.strictness] then
         ngx.log(ngx.ERR, "policy: invalid strictness for ", host, ": ",
             tostring(p.strictness), " — falling back to pool default")
-        return new_pool_default()
+        return fallback()
     end
     return p
 end

@@ -70,11 +70,12 @@ type PolicyPatch struct {
 	Mode       *string
 	Strictness *string
 	AttackMode *bool
+	OriginIP   *string
 }
 
-// IsEmpty — все три nil. Handler 400-ит на пустой PATCH (бессмысленный запрос).
+// IsEmpty — все указатели nil. Handler 400-ит на пустой PATCH (бессмысленный запрос).
 func (p PolicyPatch) IsEmpty() bool {
-	return p.Mode == nil && p.Strictness == nil && p.AttackMode == nil
+	return p.Mode == nil && p.Strictness == nil && p.AttackMode == nil && p.OriginIP == nil
 }
 
 // PatchScalars применяет patch. Возвращает (changed, changedFields, err).
@@ -129,6 +130,7 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 		inserted        bool
 		curMode, curStr string
 		curAttack       bool
+		curOrigin       string
 	)
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO policy (host, mode, strictness, attack_mode,
@@ -136,15 +138,15 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 			asn_block, geo_whitelist, rate_rules)
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
 		ON CONFLICT (host) DO UPDATE SET host = EXCLUDED.host
-		RETURNING (xmax = 0) AS inserted, mode, strictness, attack_mode`,
+		RETURNING (xmax = 0) AS inserted, mode, strictness, attack_mode, origin_ip`,
 		site, def.Mode, def.Strictness, def.AttackMode,
 		poolDefaultUAJSON, poolDefaultIPWLJSON, poolDefaultIPBLJSON,
 		poolDefaultASNJSON, poolDefaultGeoJSON, poolDefaultRateJSON,
-	).Scan(&inserted, &curMode, &curStr, &curAttack); err != nil {
+	).Scan(&inserted, &curMode, &curStr, &curAttack, &curOrigin); err != nil {
 		return false, nil, fmt.Errorf("upsert-lock: %w", err)
 	}
 
-	targetMode, targetStr, targetAttack := curMode, curStr, curAttack
+	targetMode, targetStr, targetAttack, targetOrigin := curMode, curStr, curAttack, curOrigin
 	var changed []string
 	if p.Mode != nil && *p.Mode != targetMode {
 		changed = append(changed, "mode")
@@ -158,6 +160,10 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 		changed = append(changed, "attack_mode")
 		targetAttack = *p.AttackMode
 	}
+	if p.OriginIP != nil && *p.OriginIP != targetOrigin {
+		changed = append(changed, "origin_ip")
+		targetOrigin = *p.OriginIP
+	}
 
 	// UPDATE только если хоть одно поле отличается. Под row lock'ом из UPSERT
 	// выше — concurrent PATCH ждёт на нашем lock'е, потом видит уже-новое
@@ -165,9 +171,9 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 	if len(changed) > 0 {
 		if _, err := tx.Exec(ctx, `
 			UPDATE policy
-			SET mode = $2, strictness = $3, attack_mode = $4, updated_at = NOW()
+			SET mode = $2, strictness = $3, attack_mode = $4, origin_ip = $5, updated_at = NOW()
 			WHERE host = $1`,
-			site, targetMode, targetStr, targetAttack,
+			site, targetMode, targetStr, targetAttack, targetOrigin,
 		); err != nil {
 			return false, nil, fmt.Errorf("update: %w", err)
 		}
@@ -204,6 +210,9 @@ func patchFields(p PolicyPatch) []string {
 	}
 	if p.AttackMode != nil {
 		out = append(out, "attack_mode")
+	}
+	if p.OriginIP != nil {
+		out = append(out, "origin_ip")
 	}
 	return out
 }
@@ -364,11 +373,11 @@ func (s *Store) GetPolicy(ctx context.Context, site string) (catalog.Policy, err
 		uaJSON, ipWLJSON, ipBLJSON, asnJSON, geoJSON, rateJSON []byte
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT mode, strictness, attack_mode,
+		SELECT mode, strictness, attack_mode, origin_ip,
 		       ua_blacklist, ip_whitelist, ip_blocklist,
 		       asn_block, geo_whitelist, rate_rules
 		FROM policy WHERE host = $1`, site,
-	).Scan(&p.Mode, &p.Strictness, &p.AttackMode,
+	).Scan(&p.Mode, &p.Strictness, &p.AttackMode, &p.OriginIP,
 		&uaJSON, &ipWLJSON, &ipBLJSON, &asnJSON, &geoJSON, &rateJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return catalog.Policy{}, ErrNotFound

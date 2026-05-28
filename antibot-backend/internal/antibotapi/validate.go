@@ -82,6 +82,14 @@ func ValidateCIDR(s string) error {
 	return catalog.ValidateCIDR(s)
 }
 
+// ValidateOriginIP делегирует catalog.ValidateOriginIP — тот же предикат,
+// что reloader применяет в catalog.Validate. Пустая строка допустима
+// (снять origin_ip / тенант не проксируется); иначе одиночный bare-адрес
+// IPv4/IPv6, без префикса.
+func ValidateOriginIP(s string) error {
+	return catalog.ValidateOriginIP(s)
+}
+
 // ValidateASN — RFC 6793 32-bit ASN. Допускаем диапазон uint32 (≤4_294_967_295).
 // 0 — зарезервирован, но не блокируем (operator-discretion); ловим в БД при
 // необходимости.

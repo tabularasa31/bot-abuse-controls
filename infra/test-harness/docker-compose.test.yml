@@ -81,9 +81,9 @@ services:
     environment:
       EDGE_ID: stand-test
       # Origin not exercised — tests target admin endpoints (/__policy,
-      # /__health, /metrics). Set to localhost so proxy_pass locations
-      # don't 503 if a test scenario accidentally hits one.
-      ORIGIN_URL: "http://127.0.0.1:80"
+      # /__health, /metrics). Upstream selection is Policy-driven now (no
+      # ORIGIN_URL env); a non-tenant Host serves the bundled landing page,
+      # so an accidental `/` hit no longer 503s.
       ANTIBOT_BACKEND_URL: "http://backend:8080"
       ANTIBOT_BACKEND_SSL_VERIFY: "false"
       # B11 / D8: override the 30s pull cadence so a PATCH → edge-visible

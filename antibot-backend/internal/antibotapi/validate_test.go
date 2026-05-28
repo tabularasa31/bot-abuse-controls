@@ -93,6 +93,34 @@ func TestValidateCIDR(t *testing.T) {
 	}
 }
 
+func TestValidateOriginIP(t *testing.T) {
+	// Empty = unset/clear; bare IPv4/IPv6 accepted; prefixes & garbage rejected.
+	for _, ok := range []string{"", "203.0.113.9", "2001:db8::1"} {
+		if err := antibotapi.ValidateOriginIP(ok); err != nil {
+			t.Errorf("origin_ip %q rejected: %v", ok, err)
+		}
+	}
+	// Private/global unicast are valid tenant backends.
+	for _, ok := range []string{"10.0.0.5", "192.168.1.10", "172.16.0.1", "fd00::1"} {
+		if err := antibotapi.ValidateOriginIP(ok); err != nil {
+			t.Errorf("origin_ip %q (private unicast) rejected: %v", ok, err)
+		}
+	}
+	// Prefixes, garbage, zoned IPv6, and non-routable / metadata addresses rejected.
+	for _, bad := range []string{
+		"10.0.0.0/8", "2001:db8::/64", "not-an-ip", "999.999.999.999", "host.example",
+		"fe80::1%eth0",  // zoned
+		"0.0.0.0", "::", // unspecified
+		"127.0.0.1", "::1", // loopback
+		"169.254.169.254", "fe80::1", // link-local incl. cloud metadata
+		"224.0.0.1", "ff02::1", // multicast
+	} {
+		if err := antibotapi.ValidateOriginIP(bad); err == nil {
+			t.Errorf("origin_ip %q accepted", bad)
+		}
+	}
+}
+
 func TestValidateASN(t *testing.T) {
 	for _, ok := range []int64{0, 1, 65535, 4_294_967_295} {
 		if err := antibotapi.ValidateASN(ok); err != nil {

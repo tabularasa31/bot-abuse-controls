@@ -34,6 +34,29 @@ func TestValidate_CIDRAcceptsSameSetAsIpmatcher(t *testing.T) {
 	}
 }
 
+// 86exrefdz: Policy.OriginIP — пусто (тенант не проксируется) или одиночный
+// bare-адрес. Префиксы/мусор должны валиться до Store.Replace, иначе
+// reloader fail-stale на следующем тике (симметрия с ValidateOriginIP в
+// antibotapi).
+func TestValidate_PolicyOriginIP(t *testing.T) {
+	for _, ip := range []string{"", "203.0.113.9", "2001:db8::1"} {
+		d := &Data{Policy: map[string]Policy{"clientx.com": {
+			Mode: "shadow", Strictness: "standard", OriginIP: ip,
+		}}}
+		if err := Validate(d); err != nil {
+			t.Errorf("Validate rejected valid origin_ip %q: %v", ip, err)
+		}
+	}
+	for _, ip := range []string{"203.0.113.0/24", "not-an-ip", "host.example", "fe80::1%eth0"} {
+		d := &Data{Policy: map[string]Policy{"clientx.com": {
+			Mode: "shadow", Strictness: "standard", OriginIP: ip,
+		}}}
+		if err := Validate(d); err == nil {
+			t.Errorf("Validate accepted bad origin_ip %q", ip)
+		}
+	}
+}
+
 // PR #43 review (Angle A): normalize должен coerce-нить системные срезы
 // nil → []T{}, не только per-host policy. Иначе json.Marshal эмитит
 // `null` на пустой БД, ETag дрейфит.
