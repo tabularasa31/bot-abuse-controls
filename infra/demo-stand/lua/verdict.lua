@@ -121,8 +121,11 @@ if config.stage_enabled(config.defaults, "clearance") then
     -- §5.3, см. clearance.lua header. ip_whitelist/verified_bot фастпас при
     -- атаке не трогаем — он на L2 (reputation выше), не здесь.
     local opts
+    -- policy.get контрактно non-nil (POOL_DEFAULT fallback), но guard'имся
+    -- `p and` для консистентности с challenge_verify.lua / verification.lua —
+    -- единый паттерн чтения policy на эдже (gemini review on PR #92).
     local p = policy.get(host)
-    if p.attack_mode then
+    if p and p.attack_mode then
         local max_ttl
         local allow = config.defaults and config.defaults.allow
         if type(allow) == "table" and type(allow.cookie_valid) == "table" then
