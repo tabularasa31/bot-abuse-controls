@@ -70,6 +70,17 @@ services:
       # their IP on any protected host. Set to your public IP (or office
       # /24) in .env. See recovery.lua.
       ADMIN_ACL_CIDR: ${ADMIN_ACL_CIDR:-}
+      # On-demand TLS (lua-resty-auto-ssl) for tenant custom domains.
+      #   STAND_BASE_DOMAIN — names at/under it use the static fallback cert,
+      #     never ACME (default example.com).
+      #   AUTO_SSL_STAGING — "true" while bringing it up (LE staging CA, certs
+      #     are UNTRUSTED but rate limits are high). Flip to unset/false for
+      #     real browser-trusted certs once the http-01 path is verified.
+      STAND_BASE_DOMAIN: ${STAND_BASE_DOMAIN:-example.com}
+      AUTO_SSL_DIR: /etc/resty-auto-ssl
+      AUTO_SSL_STAGING: ${AUTO_SSL_STAGING:-}
+      # Email for the Let's Encrypt account (recommended; expiry notices).
+      ACME_ACCOUNT_EMAIL: ${ACME_ACCOUNT_EMAIL:-}
     ports:
       # Bind host. Default 0.0.0.0 (all interfaces). On a VM that already
       # runs another service on :80/:443, set DEMO_BIND_IP to the demo's
@@ -108,6 +119,11 @@ services:
       # committed — populate with scripts/fetch-geoip.sh. If empty the stand
       # still starts (geoip.lua fail-open); geo is just undetermined.
       - ./geoip:/etc/nginx/geoip:ro
+      # On-demand TLS cert storage (lua-resty-auto-ssl). Named volume so
+      # issued Let's Encrypt certs survive restarts — re-issuing on every
+      # restart would quickly hit LE rate limits. Writable by the worker
+      # user (nobody); the image chowns it at build.
+      - auto-ssl-storage:/etc/resty-auto-ssl
     # Log via the default json-file driver — fine for the demo. Real
     # production would point to a log aggregator (Loki / fluentd / etc.).
     # Promtail below ships the BAC_LOG stream off to the backend Loki when
@@ -197,3 +213,6 @@ services:
 
 volumes:
   promtail-data:
+  # lua-resty-auto-ssl issued-cert storage (on-demand TLS for tenant custom
+  # domains). Persisted so certs + the ACME account key survive restarts.
+  auto-ssl-storage:

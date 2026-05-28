@@ -188,6 +188,17 @@ end
 -- the two would resurface the case-sensitivity bug this guards against.
 _M.canonical_host = canonical_host
 
+-- origin_ip(host) — ctx-free read of a host's origin_ip (or nil). Used by
+-- tls_autossl.allow_domain in the ssl_certificate_by_lua phase, where
+-- ngx.ctx is not reliably a per-request table (it can leak across the
+-- handshake), so the ctx-memoized get() is unsafe there. This calls lookup()
+-- directly — one shared_dict read + decode per TLS handshake, which is fine
+-- (handshakes are far rarer than requests, and on-demand issuance only
+-- happens once per domain). Returns the string origin_ip or nil.
+function _M.origin_ip(host)
+    return lookup(host).origin_ip
+end
+
 -- enforce(status, headers) — physically exit with `status` iff the
 -- current Host's policy is mode=active. mode=shadow returns nil so the
 -- caller falls through to its next instruction (typically continuing

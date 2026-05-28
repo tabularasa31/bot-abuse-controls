@@ -73,3 +73,52 @@ RUN set -eux; \
     # missed it.
     find /usr/local/openresty/site/lualib/resty -type f -name '*.lua' -exec chmod 0644 {} +; \
     apk del .build-deps
+
+# lua-resty-acme (B11 multi-tenant follow-up): on-demand Let's Encrypt certs
+# per tenant custom domain, chosen at TLS handshake via ssl_certificate_by_lua
+# (see lua/tls_autossl.lua + nginx.demo.conf). The edge stays the TLS
+# terminator (required for JA4/$ssl_* fingerprinting), so cert selection must
+# live here, not in a front proxy.
+#
+# Chosen over lua-resty-auto-ssl: that one bundles a C helper (sockproc) +
+# dehydrated shell client — the C build fails under modern gcc/-Werror and the
+# project is unmaintained. lua-resty-acme is PURE LUA (no C, no shell-out),
+# actively maintained by the same author as lua-resty-openssl, and reuses the
+# resty.openssl + resty.http we already vendor above. Same vendoring pattern:
+# pull the github tag's lib/ subtree into site/lualib (resty/acme/**).
+#
+# The on-demand cert storage dir (file adapter) must be writable by the worker
+# user (nobody); it's mounted as a named volume in docker-compose so issued
+# certs + the ACME account key survive restarts (avoids LE rate limits).
+# lua5.1-filesystem (lfs) is the one native dep: the lua-resty-acme `file`
+# storage adapter require("lfs")'s it to list/persist certs on disk. OpenResty
+# doesn't bundle it. Alpine ships it at /usr/lib/lua/5.1/lfs.so (LuaJIT is
+# 5.1-ABI compatible); nginx.demo.conf adds that dir to lua_package_cpath.
+ARG LUA_RESTY_ACME_VERSION=0.16.0
+RUN set -eux; \
+    apk add --no-cache lua5.1-filesystem; \
+    apk add --no-cache --virtual .acme-build curl; \
+    curl -fsSL "https://github.com/fffonion/lua-resty-acme/archive/refs/tags/${LUA_RESTY_ACME_VERSION}.tar.gz" \
+        | tar xzf - -C /usr/local/openresty/site/lualib \
+            --strip-components=2 \
+            "lua-resty-acme-${LUA_RESTY_ACME_VERSION}/lib/"; \
+    test -f /usr/local/openresty/site/lualib/resty/acme/autossl.lua; \
+    test -f /usr/lib/lua/5.1/lfs.so; \
+    find /usr/local/openresty/site/lualib/resty/acme -type f -name '*.lua' -exec chmod 0644 {} +; \
+    mkdir -p /etc/resty-auto-ssl; \
+    chown -R nobody /etc/resty-auto-ssl; \
+    apk del .acme-build
+
+# Entrypoint: chown the on-demand cert storage to the worker user (nobody) at
+# START, then exec the normal CMD. The image-build chown above only sticks if
+# Docker replicates image ownership into the named volume — which it does ONLY
+# when the volume is first created empty. On a pre-existing / recreated /
+# root-owned `auto-ssl-storage` volume the mount would shadow it and the worker
+# (nobody) would get EACCES persisting certs → re-issue every restart → LE
+# rate-limit. The runtime chown (master runs as root) makes it robust
+# regardless of volume state. Harmless when the dir is already nobody-owned.
+RUN printf '#!/bin/sh\nset -e\nchown -R nobody /etc/resty-auto-ssl 2>/dev/null || true\nexec "$@"\n' \
+        > /usr/local/bin/bac-entrypoint.sh; \
+    chmod +x /usr/local/bin/bac-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/bac-entrypoint.sh"]
+CMD ["/usr/local/openresty/bin/openresty", "-g", "daemon off;"]

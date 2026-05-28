@@ -21,6 +21,27 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 
 **Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — falls back to the bundled landing page (the cascade still runs); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally. Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (ClickUp 86exrefdz). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
 
+**TLS for tenant custom domains (on-demand certs).** The edge terminates client TLS itself (required — the cascade fingerprints the client handshake, `$ssl_*`/JA4 in `tls_fp.lua`; a TLS-terminating proxy in front would hide it and break bot detection). So when a tenant brings its **own** domain, the edge needs a browser-trusted cert for it. This is handled by `lua-resty-acme` (pure-Lua Let's Encrypt, http-01), wired in `lua/tls_autossl.lua` + `nginx.demo.conf`:
+
+- The static `certs/fullchain.pem` stays the **fallback** — every name it already covers (the stand base domain `*.example.com`, the edge IP, `bac`) keeps working with zero ACME.
+- A Let's Encrypt cert is issued **only** for a custom tenant domain: `allow_domain(host)` returns true iff `host` is a registered tenant (`policy.origin_ip` non-empty) **and** not under `STAND_BASE_DOMAIN`. This gating is the anti-abuse / anti-rate-limit guard — only deliberately-onboarded hosts get a cert.
+- If auto-ssl fails for any reason, the static fallback cert is served (no HTTPS outage for existing tenants).
+
+**Prerequisite:** public inbound `:80` must reach the edge (NAT-forward `:80` → edge), because LE validates via `http://<tenant>/.well-known/acme-challenge/…`. The tenant's DNS must already point at the edge before the first HTTPS hit.
+
+**Onboarding a custom-domain tenant** (end to end):
+1. `PATCH /antibot/v1/policy/<host> {"mode":"shadow","origin_ip":"<ip>"}` (routing + makes `allow_domain` pass).
+2. Tenant sets DNS: `<host> A → <edge public IP>`.
+3. First `https://<host>` hit → auto-ssl issues the cert (≈ a few seconds), then serves normally.
+
+**Bring-up / verify (staging first to avoid burning LE prod rate limits):**
+1. Deploy with `AUTO_SSL_STAGING=true` and `ACME_ACCOUNT_EMAIL=<you>` (certs are untrusted but issuance is exercised). Rebuild the image (`--build`) — the Dockerfile vendors `lua-resty-acme` + `lua5.1-filesystem`.
+2. `curl http://<edge-ip>/.well-known/acme-challenge/ping` → reachable (not refused) confirms public `:80`.
+3. Hit `https://<tenant>/` and watch issuance: `docker logs nginx-demo 2>&1 | grep -i acme` and the storage volume `auto-ssl-storage`; `openssl s_client -connect <tenant>:443 -servername <tenant>` shows the issuer (STAGING on bring-up).
+4. When staging issuance works, redeploy with `AUTO_SSL_STAGING` unset (prod CA) → real trusted certs.
+
+Rollback: unset/remove the auto-ssl wiring → the static fallback cert path is exactly the pre-change behaviour.
+
 The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` (B11) — see the section above and `policy.lua`.
 
 ## Structured log (Phase 1 schema)

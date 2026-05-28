@@ -53,7 +53,8 @@ jobs:
                    luajit tests/recovery_test.lua && \
                    luajit tests/origin_resolve_test.lua && \
                    luajit tests/proxy_target_test.lua && \
-                   luajit tests/policy_test.lua'
+                   luajit tests/policy_test.lua && \
+                   luajit tests/tls_autossl_test.lua'
 
   lint-lua:
     name: Lint Lua (luacheck)
