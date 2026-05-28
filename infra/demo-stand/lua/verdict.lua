@@ -112,7 +112,25 @@ reputation.run()
 -- что у hygiene/reputation/tls_fp/rate_limits/verification.
 if config.stage_enabled(config.defaults, "clearance") then
     local host = ngx.var.host or ""
-    local result = clearance.verify(host)
+    -- attack_mode pre-attack gate (C7). Под attack_mode=on для host'a
+    -- передаём в verify порог under_attack TTL: cookie с длинным (normal)
+    -- TTL = выдан ДО начала атаки → verify вернёт RESULT_STALE_PRE_ATTACK,
+    -- мы его НЕ фастпасим (clearance_valid не ставим, verdict не трогаем) —
+    -- запрос идёт по каскаду до L5 на challenge. During-attack cookie
+    -- (короткий TTL) фастпасит как обычно. Различение по типу TTL — vision
+    -- §5.3, см. clearance.lua header. ip_whitelist/verified_bot фастпас при
+    -- атаке не трогаем — он на L2 (reputation выше), не здесь.
+    local opts
+    local p = policy.get(host)
+    if p.attack_mode then
+        local max_ttl
+        local allow = config.defaults and config.defaults.allow
+        if type(allow) == "table" and type(allow.cookie_valid) == "table" then
+            max_ttl = tonumber(allow.cookie_valid.ttl_seconds_under_attack)
+        end
+        opts = { attack_mode = true, max_under_attack_ttl = max_ttl }
+    end
+    local result = clearance.verify(host, opts)
     ngx.shared.metrics:incr("clearance_verify_" .. result .. "_total", 1, 0)
     if result == clearance.RESULT_VALID then
         local ctx = ngx.ctx.bac

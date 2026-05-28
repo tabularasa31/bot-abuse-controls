@@ -24,15 +24,28 @@
 --     body = b64url(<site-host>) .. ":" .. <iat> .. ":" .. <exp>
 --     sig  = b64url( HMAC-SHA256(secret, body) )
 --     cookie value = body .. "." .. sig
--- iat (issued_at unix seconds) кладётся «вперёд» под C7 attack_mode:
--- L2.1 под атакой не доверяет cookie, выписанным ДО начала атаки
--- (vision §«Исключение: attack_mode=on»). Сейчас iat читается только в
--- логику issue/verify не уходит — C7 добавит сравнение `iat > attack_started_at`.
+-- iat (issued_at unix seconds) и exp дают TTL = exp-iat, по которому C7
+-- attack_mode различает «выдан до атаки» vs «выдан во время атаки» (см.
+-- ниже про RESULT_STALE_PRE_ATTACK и `verify(host, opts)`).
+--
+-- attack_mode pre-attack gate (C7, vision §2.1 «Исключение: attack_mode=on»
+-- / §5.3). Под `attack_mode=on` для host'a L2.1 не доверяет clearance
+-- cookie, выписанным ДО начала атаки (атакующий мог накопить их заранее).
+-- Различение — по ТИПУ TTL самого cookie (vision §5.3 «механизм на стороне
+-- реализации; время выписки и/или тип TTL»): cookie, выписанный в
+-- нормальном режиме, несёт длинный TTL (`ttl_seconds_normal`, 24ч), а
+-- cookie, выписанный уже во время атаки (после перепрохождения challenge),
+-- — короткий `ttl_seconds_under_attack` (1ч). Под атакой verify фастпасит
+-- только короткие (during-attack) cookie; длинные (pre-attack) → отдельный
+-- RESULT_STALE_PRE_ATTACK, который caller НЕ фастпасит — запрос идёт по
+-- каскаду до L5 на challenge. Это и даёт «реальный юзер проходит challenge
+-- один раз за атаку»: его during-attack cookie фастпасит до конца атаки.
+-- Порог берётся из opts.max_under_attack_ttl (caller читает defaults.conf),
+-- чтобы verify оставалась чистой функцией без config-зависимости в решении.
 --
 -- Что НЕ покрывает этот модуль:
---   * issue cookie на L5 после challenge — C5 (будет переиспользовать
---     `_M.issue` отсюда же, чтобы формат жил в одном месте).
---   * attack_mode skip-fastpath — C7 (планируется как ветка в `verify`).
+--   * issue cookie на L5 после challenge — C5 (переиспользует `_M.issue`
+--     отсюда же; выбор TTL normal/under_attack — в challenge_verify.lua).
 --   * SECRET rotation runbook — C8.
 
 local hmac   = require "resty.openssl.hmac"
@@ -66,6 +79,13 @@ _M.RESULT_EXPIRED    = "expired"     -- HMAC ok, exp <= now
 _M.RESULT_MISSING    = "missing"     -- no cookie header
 _M.RESULT_MALFORMED  = "malformed"   -- structure unparseable
 _M.RESULT_WRONG_SITE = "wrong_site"  -- HMAC ok but payload.site ~= request host
+-- stale_pre_attack — cookie полностью валиден (HMAC ok, не истёк, site
+-- совпал), но под attack_mode=on несёт длинный (normal) TTL → выписан ДО
+-- начала атаки (vision §2.1/§5.3). НЕ фастпасит: caller не ставит
+-- clearance_valid, запрос идёт по каскаду до L5 на challenge. Отдельный
+-- код (а не invalid/expired), чтобы attack-mode «сброс доверия» был виден
+-- в метрике отдельно от криптопровалов и обычных протуханий.
+_M.RESULT_STALE_PRE_ATTACK = "stale_pre_attack"
 -- no_secret — challenge_secret not loaded (operational failure: C1 file
 -- missing/empty after reload). Distinct from `invalid` so an attack-shaped
 -- spike in `invalid` is not masked by a secret-outage spike. Operator
@@ -191,7 +211,14 @@ end
 --   2. считаем HMAC, ct_eq;
 --   3. ПОСЛЕ verify проверяем site и exp.
 -- Если HMAC битый, exp/site вообще не смотрим — payload недостоверен.
-function _M.verify(host)
+-- opts (optional) — attack_mode context из caller'а (verdict.lua). Поля:
+--   * attack_mode          — bool, attack_mode[host]=on для этого запроса;
+--   * max_under_attack_ttl — number, верхняя граница TTL «выдан во время
+--                            атаки» (= ttl_seconds_under_attack из конфига).
+-- Когда attack_mode=on и cookie несёт TTL больше порога → pre-attack →
+-- RESULT_STALE_PRE_ATTACK (см. модульный заголовок). Чистоту функции
+-- сохраняем: порог приходит аргументом, config здесь не читается.
+function _M.verify(host, opts)
     local name = get_cookie_name()
     local raw  = ngx.var["cookie_" .. name]
     if not raw or raw == "" then
@@ -211,13 +238,11 @@ function _M.verify(host)
     -- отклонение → malformed (не доверяем содержимому без HMAC, но
     -- structural check без HMAC безопасен — данные были бы отвергнуты
     -- HMAC'ом тоже, просто экономим crypto-вычисление на garbage cookie).
-    -- iat — намеренно не используется в C3 verify, но парсится строго,
-    -- чтобы (а) malformed body отсекался до HMAC compute, (б) C7
-    -- attack_mode skip-fastpath читал готовое поле (сравнение
-    -- `iat > attack_started_at`) без изменения формата cookie. Капчу
-    -- сбрасываем в `_` чтобы luacheck не ругался на unused (см. .luacheckrc:
-    -- ignore=211 не включён глобально, только для tests/).
-    local site_b64, _, exp_s = body:match("^([%w%-_]+):(%d+):(%d+)$")
+    -- iat нужен под C7 attack_mode для вычисления TTL (exp-iat) — по типу
+    -- TTL различаем pre-attack vs during-attack cookie (см. модульный
+    -- заголовок). Парсим строго, как и раньше, чтобы malformed body
+    -- отсекался до HMAC compute.
+    local site_b64, iat_s, exp_s = body:match("^([%w%-_]+):(%d+):(%d+)$")
     if not site_b64 then
         return _M.RESULT_MALFORMED
     end
@@ -270,6 +295,19 @@ function _M.verify(host)
 
     if site ~= host then
         return _M.RESULT_WRONG_SITE
+    end
+
+    -- attack_mode pre-attack gate (C7). Cookie прошёл все проверки валидности
+    -- — без атаки это RESULT_VALID. Но под attack_mode=on длинный (normal)
+    -- TTL означает «выдан до атаки» (during-attack cookie несут короткий
+    -- under_attack TTL) → не фастпасим. Используем `>` к порогу: ровно
+    -- under_attack TTL и короче — during-attack, фастпас; длиннее (24ч
+    -- normal) — pre-attack. iat/exp уже провалидированы как digits выше.
+    if opts and opts.attack_mode and opts.max_under_attack_ttl then
+        local iat = tonumber(iat_s)
+        if iat and (exp - iat) > opts.max_under_attack_ttl then
+            return _M.RESULT_STALE_PRE_ATTACK
+        end
     end
 
     return _M.RESULT_VALID

@@ -39,10 +39,15 @@
 -- системного flag'a (он бы и так дал challenge, attack_mode лишь
 -- гарантирует это поверх Strictness). Клиентский flag, если был —
 -- предпочтительнее, но при attack_mode=on путь через client уже отрабатывает
--- выше. Точный формат поля rule под attack_mode уточняется в C7
--- (там же добавится сам polulation attack_mode из per-host policy и
--- iat-проверка cookie); для C4 важно лишь то, что attack_mode=on
--- однозначно → verdict=challenge.
+-- выше.
+--
+-- C7 (cookie под атакой). cookie_valid, доживший до L5 при attack_mode=on,
+-- — это during-attack cookie (короткий under_attack TTL): pre-attack cookie
+-- L2.1 уже отбросил как RESULT_STALE_PRE_ATTACK (clearance.verify), не
+-- выставив verdict=allow. Поэтому здесь attack_mode НЕ переписывает
+-- verdict=allow — все три allow-исхода (cookie_valid during-attack /
+-- ip_whitelist / bot_verified) фастпасят, а challenge форсится только для
+-- не-allow. Это даёт «реальный юзер проходит challenge один раз за атаку».
 
 local _M = {}
 
@@ -92,29 +97,27 @@ function _M.decide(ctx, p)
         last_client = client[#client]
     end
 
-    -- attack_mode (C7) — override Strictness и cookie_valid allow.
-    -- ip_whitelist / verified_bot fastpath остаются (rules-reference
-    -- §attack_mode: «verified-bot и IP-whitelist продолжают фастпасить»).
-    -- cookie_valid под атакой → challenge (rule 3: cookie_valid действует
-    -- ТОЛЬКО при attack_mode=off; пре-атакные cookie не должны фастпасить).
-    -- Различаем по `rule`: cookie_valid override'им, остальные allow — нет.
-    -- Carve-out для cookie, выданных ВО ВРЕМЯ атаки (rules-reference §145:
-    -- «выданные во время атаки — фастпасят»), живёт в clearance.lua + C7
-    -- (iat vs attack_started_at) — там cookie_valid просто не выставится для
-    -- пре-атакных cookie, и эта ветка переписывания не сработает. До C7
-    -- здесь чрезмерно строго: ВСЕ cookie_valid под attack_mode идут в
-    -- challenge — это безопасно (false-positive на cookie issued during
-    -- attack), и C7 это сузит. Если verdict=allow с другим rule (ip_whitelist,
-    -- bot_verified, …) — отдаём fastpass (codex PR #86 review).
-    if p.attack_mode then
-        local cookie_allow = (ctx.verdict == "allow" and ctx.rule == "cookie_valid")
-        if ctx.verdict ~= "allow" or cookie_allow then
-            return "challenge", last_client or last_system or "attack_mode"
-        end
+    -- attack_mode (C7) — override Strictness. Всё, что дошло до L5 без
+    -- verdict=allow, форсится на challenge (rules-reference §attack_mode:
+    -- «всё, что дошло до L5 → ветки A/B/C»). verdict=allow при атаке
+    -- фастпасит — но семантика разная по rule, и вся фильтрация уже
+    -- сделана НА L2, до нас:
+    --   * ip_whitelist / bot_verified — фастпасят при атаке by design
+    --     (SEO/доверенные интеграции не страдают, vision §5.3);
+    --   * cookie_valid — на L5 он ОЗНАЧАЕТ during-attack cookie. Pre-attack
+    --     cookie L2.1 (clearance.verify под attack_mode) уже отбросил как
+    --     RESULT_STALE_PRE_ATTACK — он не выставил verdict=allow,rule=
+    --     cookie_valid, такой запрос дошёл сюда без allow и пойдёт на
+    --     challenge ниже. Значит любой cookie_valid, доживший до L5 при
+    --     атаке, выписан во время атаки и обязан фастпасить (vision §2.1:
+    --     «юзер проходит challenge один раз за атаку»).
+    -- Поэтому здесь НЕ различаем allow по rule — fastpass для всех трёх.
+    if p.attack_mode and ctx.verdict ~= "allow" then
+        return "challenge", last_client or last_system or "attack_mode"
     end
 
-    -- Без attack_mode: любой verdict=allow (cookie_valid / ip_whitelist /
-    -- bot_verified) — fastpass, L5 не трогает.
+    -- verdict=allow (cookie_valid / ip_whitelist / bot_verified) — fastpass,
+    -- L5 не трогает (и при attack_mode=on тоже, см. выше).
     if ctx.verdict == "allow" then return nil, nil end
 
     -- Client rate-rule challenge — всегда честим, даже при Permissive.

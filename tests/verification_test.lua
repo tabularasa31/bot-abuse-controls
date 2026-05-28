@@ -128,19 +128,22 @@ v, r = verification.decide(
     pol("standard", true))
 check(v, r, nil, nil, "verdict=block + attack_mode → block wins, no override")
 
--- allow guards — по rule различаем кто его поставил.
--- cookie_valid под attack_mode → override → challenge (codex PR #86 review).
+-- allow под attack_mode (C7) — все три allow-исхода фастпасят, L5 не трогает.
+-- cookie_valid, доживший до L5 при атаке, — это during-attack cookie:
+-- pre-attack cookie L2.1 уже отбросил (clearance.RESULT_STALE_PRE_ATTACK),
+-- он не выставил verdict=allow,cookie_valid. Поэтому верный исход здесь —
+-- fastpass, а НЕ challenge (раньше тут стоял stopgap-override до C7).
 v, r = verification.decide(
     ctx("allow", {}, nil, "cookie_valid"),
     pol("standard", true))
-check(v, r, "challenge", "attack_mode",
-    "attack_mode + verdict=allow,cookie_valid → challenge (pre-attack cookie)")
+check(v, r, nil, nil,
+    "attack_mode + verdict=allow,cookie_valid → fastpass (during-attack cookie, C7)")
 
 v, r = verification.decide(
     ctx("allow", { "tls_fp_impersonator" }, nil, "cookie_valid"),
     pol("permissive", true))
-check(v, r, "challenge", "tls_fp_impersonator",
-    "attack_mode + cookie_valid allow + system flag → challenge (rule = last flag)")
+check(v, r, nil, nil,
+    "attack_mode + cookie_valid allow + system flag → fastpass (during-attack cookie)")
 
 -- ip_whitelist / bot_verified allow остаются fastpass даже под attack_mode
 -- (rules-reference §attack_mode: verified-bot и IP-whitelist продолжают фастпасить).

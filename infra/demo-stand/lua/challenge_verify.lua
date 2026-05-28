@@ -30,6 +30,7 @@ local str    = require "resty.string"
 local bit    = require "bit"
 local secret = require "challenge_secret"
 local clearance = require "clearance"
+local policy = require "policy"
 
 local ok_config, config = pcall(require, "config")
 if not ok_config then config = nil end
@@ -45,10 +46,15 @@ local _M = {}
 -- от старого pepper'a, и verify будет давать `bad_token` (false-positive).
 local JS_SECRET = "tf_challenge_v1_proof_of_execution"
 
--- Cookie TTL — vision §2.1 «86400 в нормальном режиме / 3600 при attack_mode».
--- attack_mode выбор делается в caller'е (C7); сейчас (C5 без C7) всегда
--- 86400. Когда C7 заведёт `policy.attack_mode`, переключение сделаем здесь
--- через clearance.issue(host, ttl).
+-- Cookie TTL — vision §2.1/§5.3 «86400 в нормальном режиме / 3600 при
+-- attack_mode=on». Выбор per-request по `policy.get(host).attack_mode`
+-- ИМЕННО для того host'a, на который пришёл запрос (vision §2.1: включение
+-- attack_mode у одного клиента не трогает TTL чужих cookie — cookie
+-- скоупится Domain=<host>). Короткий under_attack TTL — это и есть метка
+-- «during-attack» для L2.1 verify (C7): такой cookie фастпасит до конца
+-- атаки, а длинные pre-attack cookie под атакой не фастпасят (clearance.lua
+-- RESULT_STALE_PRE_ATTACK). DEFAULT_COOKIE_TTL — fallback, если конфиг не
+-- загружен.
 local DEFAULT_COOKIE_TTL = 86400
 
 -- Max request body — JSON-payload (~500B типично c fp). 4KiB запас на
@@ -306,19 +312,21 @@ function _M.handle()
         return ngx.exit(403)
     end
 
-    -- Cookie TTL. defaults.conf [allow.cookie_valid] держит две точки:
+    -- Cookie TTL (C7). defaults.conf [allow.cookie_valid] держит две точки:
     -- `ttl_seconds_normal` (vision §2.1 — 86400) и `ttl_seconds_under_attack`
-    -- (vision §2.1 / §5.3 — 3600 при attack_mode=on). Выбор делает caller-
-    -- ветка `attack_mode`: сейчас (C5 без C7) policy.attack_mode всегда
-    -- false → normal-TTL. Когда C7 заведёт чтение per-host policy здесь,
-    -- остаётся переключить ключ под p.attack_mode без изменения схемы
-    -- конфига (code-review on PR #87: предыдущая версия читала
-    -- несуществующий `ttl_seconds`, override был dead code).
+    -- (vision §2.1/§5.3 — 3600 при attack_mode=on). Ключ выбираем по
+    -- attack_mode ИМЕННО этого host'a: под атакой выписываем короткий
+    -- under_attack TTL — это during-attack-метка, по которой L2.1 verify
+    -- продолжает фастпасить cookie до конца атаки (см. clearance.lua).
     local ttl = DEFAULT_COOKIE_TTL
     if config and type(config.defaults) == "table" then
         local allow = config.defaults.allow
         if type(allow) == "table" and type(allow.cookie_valid) == "table" then
-            local t = tonumber(allow.cookie_valid.ttl_seconds_normal)
+            local cv = allow.cookie_valid
+            local p = policy.get(host)
+            local ttl_key = (p and p.attack_mode)
+                and "ttl_seconds_under_attack" or "ttl_seconds_normal"
+            local t = tonumber(cv[ttl_key])
             if t and t > 0 then ttl = t end
         end
     end

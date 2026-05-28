@@ -360,7 +360,7 @@ for _, key in ipairs({
     -- успешного start(). Дашборд алертит на `bac_log_shipper_loaded == 0`
     -- — иначе silent-failure при regression в log_shipper.lua.
     "bac_log_shipper_loaded",
-    -- [C3] L2.1 clearance cookie verify. Six outcomes from clearance.verify
+    -- [C3/C7] L2.1 clearance cookie verify. Outcomes from clearance.verify
     -- (metric labels match clearance.RESULT_*; metrics.lua emits the labelled
     -- antibot_clearance_verify_total counter). Primed so /metrics shows them
     -- at zero from the first scrape — dashboards distinguish «no fastpath
@@ -372,6 +372,9 @@ for _, key in ipairs({
     "clearance_verify_malformed_total",
     "clearance_verify_wrong_site_total",
     "clearance_verify_no_secret_total",
+    -- [C7] attack_mode=on + cookie выписан до начала атаки (длинный TTL) →
+    -- не фастпасит, идёт на L5 challenge.
+    "clearance_verify_stale_pre_attack_total",
     -- [C5] Phase 4 L5.2 challenge issuance + verify endpoint.
     -- challenge_issued_total — render of Branch A challenge page;
     -- challenge_solved_total — successful POST /__challenge/verify (cookie
