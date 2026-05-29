@@ -602,6 +602,62 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 	}
 }
 
+// TestDeletePolicy_ConcurrentAppendNotSilentlyLost покрывает PR-99 review:
+// DELETE целого host'а, гоняющийся с POST-append к тому же host'у, не должен
+// оставлять строку БЕЗ запрошенного значения. До фикса append делал ensureRow
+// (DO NOTHING, без lock'а) → concurrent DELETE коммитился → UPDATE ловил
+// RowsAffected=0 и тихо терял append. После фикса ensureRowTx берёт row lock
+// (DO UPDATE SET host=EXCLUDED.host), сериализуя операции: финал — либо host
+// удалён (delete победил), либо host есть И содержит значение (append победил).
+// Инвариант «строка есть ⟹ значение записано» не должен нарушаться никогда.
+func TestDeletePolicy_ConcurrentAppendNotSilentlyLost(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	const site = "del-append-race.example"
+	const pattern = "curl/[0-9]"
+
+	// Засеваем строку первой мутацией, чтобы append попал в ensure-конфликт.
+	if status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/"+site, tok,
+		`{"attack_mode":true}`); status != http.StatusOK {
+		t.Fatalf("seed: %d", status)
+	}
+
+	errCh := make(chan error, 2)
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		if err := doNoFatal(ts, http.MethodDelete, "/antibot/v1/policy/"+site, tok, ""); err != nil {
+			errCh <- err
+		}
+	}()
+	go func() {
+		defer func() { done <- struct{}{} }()
+		if err := doNoFatal(ts, http.MethodPost, "/antibot/v1/policy/"+site+"/ua_blacklist", tok,
+			`{"pattern":"`+pattern+`"}`); err != nil {
+			errCh <- err
+		}
+	}()
+	<-done
+	<-done
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent request transport error: %v", err)
+	}
+
+	// Инвариант: если строка существует — она ДОЛЖНA содержать append'нутый
+	// паттерн. «Строка есть, но значения нет» = silent-loss регрессия.
+	var raw []byte
+	err := pool.QueryRow(context.Background(),
+		`SELECT ua_blacklist::text FROM policy WHERE host=$1`, site,
+	).Scan(&raw)
+	if err != nil {
+		// Строки нет — DELETE победил. Допустимый исход.
+		return
+	}
+	if !strings.Contains(string(raw), pattern) {
+		t.Errorf("row present but appended pattern lost: ua_blacklist=%s (silent-loss regression)", raw)
+	}
+}
+
 func TestASNBlock_AppendDeleteRoundtrip(t *testing.T) {
 	ts, _, tok := newTestServer(t)
 	status, _ := do(t, ts, http.MethodPost, "/antibot/v1/policy/foo.example/asn_block", tok,
