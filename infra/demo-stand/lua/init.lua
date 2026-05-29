@@ -284,17 +284,38 @@ for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser
 end
 
 -- ua_blacklist / ip_blocklist (A11, 86exrtjpc): file-seeded Channel C catalogs,
--- same model as tls_fp_blocklist. Cold-start seeds generation 0 from the local
--- conf (so the cascade matches from the first request even before the first
--- pull); Channel C then lands gen 1+ from catalogs/*.yaml and the per-worker
--- hygiene.refresh() / reputation.refresh() swap to it. reload-survive via
--- meta_add_gen (don't clobber a surviving Channel C gen on `nginx -s reload`).
+-- same model as tls_fp_blocklist. Generation 0 is the STATIC FALLBACK seeded
+-- from the local conf (so the cascade matches from the first request, even with
+-- no backend / before the first pull); Channel C then lands gen 1+ from
+-- catalogs/*.yaml and the per-worker hygiene.refresh() / reputation.refresh()
+-- swap to it.
+--
+-- Reload semantics (codex P2): the `meta` shared_dict survives `nginx -s
+-- reload`, so meta_add_gen returns "reload". We must distinguish two cases by
+-- the CURRENT gen, not just "reload":
+--   * gen == 0 — still on the static fallback (no Channel C yet). Re-seed from
+--     conf so an operator's `edit conf → nginx -s reload` actually takes effect
+--     (otherwise the new workers' first refresh() rebuilds from the stale `:0`
+--     entries and the edit is silently ignored until a full restart).
+--   * gen  > 0 — real Channel C state survived; DON'T clobber it, just run the
+--     divergence check.
 local ua_dict = ngx.shared.antibot_ua_blacklist
 local ip_dict = ngx.shared.antibot_ip_blocklist
 
+-- Delete all `:0` keys in a dict (the static-fallback generation) so a re-seed
+-- drops entries removed from the conf. gen > 0 keys are Channel C state and are
+-- left untouched.
+local function clear_gen0(dict)
+    if not dict then return end
+    for _, k in ipairs(dict:get_keys(0)) do
+        if k:sub(-2) == ":0" then dict:delete(k) end
+    end
+end
+
 -- ua_blacklist seed: two keys under gen 0 — `active:0` (combined regex) and
 -- `staging:0` (cjson array of staged patterns) — matching the Channel C layout
--- that hygiene.refresh() reads.
+-- that hygiene.refresh() reads. The two keys are fixed, so a plain overwrite is
+-- a complete re-seed (no stale entries possible).
 local function seed_ua_blacklist_cold()
     if not ua_dict then return 0, 0 end
     local active = hygiene.build_combined(config.ua_blacklist) or ""
@@ -306,9 +327,11 @@ local function seed_ua_blacklist_cold()
 end
 
 -- ip_blocklist seed: `<cidr>:0` → "<status>:block" for every conf entry
--- (active and staging), matching the Channel C per-key layout.
+-- (active and staging), matching the Channel C per-key layout. Clears prior
+-- gen-0 keys first so a re-seed on reload drops CIDRs removed from the conf.
 local function seed_ip_blocklist_cold()
     if not ip_dict then return 0, 0 end
+    clear_gen0(ip_dict)
     local act, stg = 0, 0
     for _, e in ipairs(config.blocklist_ip) do
         if e.value and e.value ~= "" then
@@ -329,11 +352,16 @@ for _, spec in ipairs({
     if not cat then
         ngx.log(ngx.ERR, "[demo] catalog_pull.catalogs[", spec.name,
             "] missing — Channel C seed/divergence skipped")
-    elseif meta_add_gen(cat.gen_key) == "reload" then
-        -- Channel C state survived the reload; don't re-seed, just verify.
-        check_data_dict_divergence(cat)
     else
-        spec.seed()
+        local status = meta_add_gen(cat.gen_key)
+        local cur_gen = meta:get(cat.gen_key) or 0
+        if status ~= "reload" or cur_gen == 0 then
+            -- cold_start / err / reload-still-on-static-fallback → (re)seed gen 0.
+            spec.seed()
+        else
+            -- gen > 0: Channel C state survived the reload; preserve + verify.
+            check_data_dict_divergence(cat)
+        end
     end
 end
 
