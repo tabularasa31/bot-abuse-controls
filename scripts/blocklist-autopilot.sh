@@ -31,6 +31,28 @@ while [ $# -gt 0 ]; do
 done
 bl_resolve "$HERE"
 
+# Freshness guard: if the analytics artifacts are stale (the analytics container
+# is down, or the catalog was unreadable so emit() left yesterday's files in
+# place), do NOT act on old data. Each artifact carries generated_utc.
+MAX_AGE_H="${BAC_ARTIFACT_MAX_AGE_HOURS:-26}"
+_artifact_age_h() {  # <file> → whole hours since generated_utc; 99999 if absent/unparseable
+  [ -f "$1" ] || { echo 99999; return; }
+  python3 - "$1" <<'PY'
+import json, sys, datetime
+try:
+    g = json.load(open(sys.argv[1]))["generated_utc"]
+    t = datetime.datetime.fromisoformat(g.replace("Z", "+00:00"))
+    print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 3600))
+except Exception:
+    print(99999)
+PY
+}
+AGE="$(_artifact_age_h "$CANDIDATES")"
+if [ "$AGE" -gt "$MAX_AGE_H" ]; then
+  echo "autopilot: candidates.json missing or ${AGE}h old (> ${MAX_AGE_H}h) — analytics may be down; skipping to avoid acting on stale data"
+  exit 0
+fi
+
 _fps() {  # <json-file> <python expr returning list of fps from dict d>
   [ -f "$1" ] || return 0
   python3 - "$1" "$2" <<'PY'
@@ -78,7 +100,7 @@ echo "--- auto-demote (silent > ttl, confirmed only) ---"
 # Two-stage demote: an active entry softens to staging; a STAGING entry that is
 # still silent is removed (demote-fp.sh requires --remove to drop a staging
 # entry — without it it would abort, so the second lifecycle stage must pass it).
-_pairs "$STALE_JSON" "[[s['fp'], s['status']] for s in d.get('stale',[]) if s.get('stale')]" | while read -r fp st; do
+_pairs "$STALE_JSON" "[[s['fp'], s.get('status','active')] for s in d.get('stale',[]) if s.get('stale') and s.get('fp')]" | while read -r fp st; do
   if [ "$st" = "staging" ]; then
     run "$HERE/demote-fp.sh" "$fp" --remove --reason "auto: staging silent > ttl, removing" --auto --base "$BASE" $DRY_FLAG
   else

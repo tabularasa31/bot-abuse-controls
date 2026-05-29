@@ -646,10 +646,17 @@ def _reconcile_staging_since(now_utc):
     except Exception:
         raw = {}
     now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    out = {fp: raw.get(fp, now_iso) for fp in staging}  # add new, drop departed
-    if out != raw:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        STAGING_SINCE_FILE.write_text(json.dumps(out, indent=2, sort_keys=True))
+    if not staging and raw:
+        # Degenerate read: catalog parsed to zero staging fps but we have prior
+        # history. This is far more likely a transient empty/truncated catalog
+        # than every staging entry vanishing at once — do NOT wipe the accrued
+        # dwell stamps (wiping would reset every fp's clock on the next run).
+        out = raw
+    else:
+        out = {fp: raw.get(fp, now_iso) for fp in staging}  # add new, drop departed
+        if out != raw:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            STAGING_SINCE_FILE.write_text(json.dumps(out, indent=2, sort_keys=True))
     since_map = {}
     for fp, iso in out.items():
         try:
