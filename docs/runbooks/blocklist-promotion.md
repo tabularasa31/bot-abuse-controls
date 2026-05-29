@@ -78,14 +78,20 @@ activate staging-записей с verdict=activate; auto-demote молчащи�
 
 Аналитика — **cron-driven one-shot** (контейнер не крутит loop): host-cron в 08:00
 делает один прогон `analyze.py` (артефакты + отчёт), затем autopilot читает свежие
-артефакты. На `ubuntu@<BACKEND_VM_IP>`:
+артефакты. На `ubuntu@<BACKEND_VM_IP>` (`-T` — cron не выделяет TTY; `PATH` — чтобы
+cron нашёл `git`/`gh` для autopilot):
 
 ```cron
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 08:00 — прогон аналитики (Loki → state/*.json + email)
-0 8 * * * cd /home/ubuntu/abuse-controls/infra/demo-backend && /usr/bin/docker compose -f docker-compose.backend.yml --profile observability run --rm --entrypoint /opt/analytics/run.sh analytics >> /home/ubuntu/analytics-cron.log 2>&1
+0 8 * * * cd /home/ubuntu/abuse-controls/infra/demo-backend && /usr/bin/docker compose -f docker-compose.backend.yml --profile observability run -T --rm analytics >> /home/ubuntu/analytics-cron.log 2>&1
 # 08:30 — autopilot (опц.): draft-PR по свежим артефактам
 # 30 8 * * * cd /home/ubuntu/abuse-controls && scripts/blocklist-autopilot.sh >> /home/ubuntu/autopilot.log 2>&1
 ```
+
+`run.sh` — дефолтный entrypoint образа (см. #108). Пока образ на VM не пересобран
+на one-shot, добавьте `--entrypoint /opt/analytics/run.sh`, чтобы форсировать один
+проход (иначе старый loop-образ не завершится).
 
 Edge-cron старого `daily-report.sh` отключён (аналитика переехала на backend).
 
