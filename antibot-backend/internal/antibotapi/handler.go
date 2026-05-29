@@ -68,6 +68,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /antibot/v1/policy/{site}", s.timed("get_policy", s.handleGetPolicy))
 	api.HandleFunc("PATCH /antibot/v1/policy/{site}", s.timed("patch_policy", s.handlePatchPolicy))
+	api.HandleFunc("DELETE /antibot/v1/policy/{site}", s.timed("delete_policy", s.handleDeletePolicy))
 
 	for field := range allowedStringArrayFields {
 		f := field
@@ -190,6 +191,28 @@ func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r
 		s.mutations.WithLabelValues(action, "noop").Inc()
 	}
 	s.writeJSON(w, map[string]any{"changed": changed, "diff": orEmpty(fields)})
+}
+
+// handleDeletePolicy удаляет policy-запись host'а целиком. Тела нет (DELETE
+// идентифицирует ресурс через path). Отсутствие записи → 404, идемпотентно
+// как у array DELETE. После удаления эдж через Channel C ≤30с возвращается к
+// pool default (mode=shadow, observe-only).
+func (s *Server) handleDeletePolicy(action, site string, w http.ResponseWriter, r *http.Request) {
+	existed, err := s.store.DeletePolicy(r.Context(), site)
+	if err != nil {
+		s.dbErr(w, action, err)
+		return
+	}
+	if !existed {
+		s.writeErr(w, http.StatusNotFound, "not_found", "")
+		s.mutations.WithLabelValues(action, "not_found").Inc()
+		return
+	}
+	s.log.Info("policy mutation",
+		append([]any{"actor", "dashboard", "action", action, "site", site, "was_noop", false},
+			requestAttrs(r)...)...)
+	s.mutations.WithLabelValues(action, "ok").Inc()
+	s.writeJSON(w, map[string]any{"changed": true})
 }
 
 // --- string-array handlers (ua/ip/geo) ------------------------------------

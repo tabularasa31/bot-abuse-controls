@@ -419,6 +419,49 @@ func TestASNBlock_MissingAsnField_400(t *testing.T) {
 	}
 }
 
+func TestDeletePolicy_RoundTrip(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	const site = "del-me.example"
+
+	// Создаём host первой мутацией.
+	if status, body := do(t, ts, http.MethodPatch, "/antibot/v1/policy/"+site, tok,
+		`{"attack_mode":true}`); status != http.StatusOK {
+		t.Fatalf("seed patch: status=%d body=%s", status, body)
+	}
+	// GET видит его.
+	if status, _ := do(t, ts, http.MethodGet, "/antibot/v1/policy/"+site, tok, ""); status != http.StatusOK {
+		t.Fatalf("get before delete: status=%d, want 200", status)
+	}
+
+	// DELETE целого host'а.
+	status, body := do(t, ts, http.MethodDelete, "/antibot/v1/policy/"+site, tok, "")
+	if status != http.StatusOK || !strings.Contains(string(body), `"changed":true`) {
+		t.Fatalf("delete: status=%d body=%s", status, body)
+	}
+	// Строка физически исчезла из БД.
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM policy WHERE host=$1`, site,
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("row still present after delete: count=%d", count)
+	}
+	// GET теперь 404.
+	if status, _ := do(t, ts, http.MethodGet, "/antibot/v1/policy/"+site, tok, ""); status != http.StatusNotFound {
+		t.Errorf("get after delete: status=%d, want 404", status)
+	}
+}
+
+func TestDeletePolicy_Absent_404(t *testing.T) {
+	ts, _, tok := newTestServer(t)
+	status, _ := do(t, ts, http.MethodDelete, "/antibot/v1/policy/never-existed.example", tok, "")
+	if status != http.StatusNotFound {
+		t.Errorf("delete absent host: status=%d, want 404", status)
+	}
+}
+
 // doNoFatal — concurrency-safe HTTP-хелпер: НЕ вызывает t.Fatalf
 // (testing.T.FailNow семейство — UB вне test goroutine, см. Go testing docs).
 // Возвращает только err; status в concurrency-тестах нас не интересует —
@@ -556,6 +599,70 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 	}
 	if !strings.Contains(got, "300") {
 		t.Errorf("asn_block=%s, lost concurrent append of 300 (lost-update regression)", got)
+	}
+}
+
+// TestDeletePolicy_ConcurrentAppend — smoke-тест: DELETE целого host'а и
+// POST-append к тому же host'у бегут параллельно и не должны паниковать /
+// рвать транзакции / оставлять строку с записанным, но «дырявым» состоянием.
+// Проверяемый инвариант: «строка есть ⟹ значение записано».
+//
+// ВНИМАНИЕ — это НЕ регрессионный сторож на silent-loss баг из PR-99 review.
+// Настоящая гарантия — row lock в ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`,
+// см. store.go), а не этот тест. Тот баг проявлялся как «append вернул 200
+// changed:false, а строка в итоге удалена»; под багованным кодом КАЖДЫЙ
+// возможный interleaving давал либо «строки нет», либо «строка есть И с
+// паттерном» — никогда «строка есть, паттерна нет». Финальный SELECT-инвариант
+// этого теста зелёный и на багованном коде тоже (исход «строки нет» тут
+// трактуется как проход), поэтому регрессию он не отличает. Детерминированно
+// поймать silent-loss через состояние БД после гонки нельзя — это про вранье
+// HTTP-ответа, а не про конечное состояние. Оставляем как защиту от грубых
+// поломок конкурентного пути.
+func TestDeletePolicy_ConcurrentAppend(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	const site = "del-append-race.example"
+	const pattern = "curl/[0-9]"
+
+	// Засеваем строку первой мутацией, чтобы append попал в ensure-конфликт.
+	if status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/"+site, tok,
+		`{"attack_mode":true}`); status != http.StatusOK {
+		t.Fatalf("seed: %d", status)
+	}
+
+	errCh := make(chan error, 2)
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		if err := doNoFatal(ts, http.MethodDelete, "/antibot/v1/policy/"+site, tok, ""); err != nil {
+			errCh <- err
+		}
+	}()
+	go func() {
+		defer func() { done <- struct{}{} }()
+		if err := doNoFatal(ts, http.MethodPost, "/antibot/v1/policy/"+site+"/ua_blacklist", tok,
+			`{"pattern":"`+pattern+`"}`); err != nil {
+			errCh <- err
+		}
+	}()
+	<-done
+	<-done
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent request transport error: %v", err)
+	}
+
+	// Инвариант: если строка существует — она ДОЛЖНA содержать append'нутый
+	// паттерн. «Строка есть, но значения нет» = silent-loss регрессия.
+	var raw []byte
+	err := pool.QueryRow(context.Background(),
+		`SELECT ua_blacklist::text FROM policy WHERE host=$1`, site,
+	).Scan(&raw)
+	if err != nil {
+		// Строки нет — DELETE победил. Допустимый исход.
+		return
+	}
+	if !strings.Contains(string(raw), pattern) {
+		t.Errorf("row present but appended pattern lost: ua_blacklist=%s (silent-loss regression)", raw)
 	}
 }
 

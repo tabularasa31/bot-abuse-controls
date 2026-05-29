@@ -225,10 +225,11 @@ func patchFields(p PolicyPatch) []string {
 // (null @> ...) даёт null → false → silent no-op (PR-58 review #5).
 //
 // Tx: ensureRow + UPDATE в одной транзакции (PR-58 security audit #6).
-// Раньше две отдельные pool.Exec — если бы появился DELETE site endpoint,
-// concurrent site-DELETE между ensureRow и UPDATE дал бы silent no-op
-// (RowsAffected=0 → changed=false без error). Сейчас такого endpoint'a нет,
-// но фикс закрывает латентную дыру.
+// DELETE site endpoint теперь существует (PR-99), поэтому concurrent
+// site-DELETE между ensureRow и UPDATE — реальная гонка, а не теоретическая.
+// Закрывает её row lock в ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`),
+// который сериализует append с DELETE; без него UPDATE ловил бы RowsAffected=0
+// и тихо терял append. См. ensureRowTx.
 func (s *Store) AppendStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -338,12 +339,23 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 	return tag.RowsAffected() == 1, nil
 }
 
-// ensureRowTx создаёт row с PoolDefault если site нет, под переданной tx.
-// Идемпотентно через ON CONFLICT DO NOTHING — не перетирает существующие
-// значения. Tx-аргумент обязателен: AppendStringArray/AppendASN обвязывают
-// ensureRow + UPDATE одной транзакцией (PR-58 audit #6), чтобы concurrent
-// site-DELETE (если когда-нибудь появится endpoint) не дал silent no-op
-// между двумя отдельными Exec'ами.
+// ensureRowTx создаёт row с PoolDefault если site нет, под переданной tx,
+// И берёт row lock на конфликтующую строку через `DO UPDATE SET
+// host = EXCLUDED.host` (self-assignment, как в PatchScalars).
+//
+// Lock обязателен, а не косметика (PR-99 review): `DO NOTHING` НЕ блокирует
+// существующую строку при конфликте, поэтому concurrent DeletePolicy мог
+// закоммитить DELETE между ensureRow (no-op) и последующим UPDATE в
+// AppendStringArray/AppendASN — тот UPDATE видел RowsAffected=0 и возвращал
+// 200 changed:false, тихо теряя append (строка удалена, значение не записано).
+// Обёртка ensure+UPDATE в одну tx (PR-58 audit #6) сама по себе это НЕ
+// закрывала — нужен именно lock. `DO UPDATE` берёт ROW SHARE+EXCLUSIVE lock,
+// так что concurrent DELETE ждёт на нём; append коммитит реальную запись
+// (changed:true), и только потом DELETE удаляет host — без silent-noop.
+//
+// Trade-off: каждый append теперь пишет dead-tuple на ensure-ветке даже когда
+// строка уже есть (нет SET-to-same-value short-circuit) — тот же churn, что
+// задокументирован в PatchScalars; для частоты append'ов приемлемо.
 //
 // PatchScalars свою UPSERT-with-lock делает сам (xmax=0 трюк), поэтому
 // ensureRowTx сюда не подключается.
@@ -354,7 +366,7 @@ func (s *Store) ensureRowTx(ctx context.Context, tx pgx.Tx, site string) error {
 			ua_blacklist, ip_whitelist, ip_blocklist,
 			asn_block, geo_whitelist, rate_rules)
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
-		ON CONFLICT (host) DO NOTHING`,
+		ON CONFLICT (host) DO UPDATE SET host = EXCLUDED.host`,
 		site, def.Mode, def.Strictness, def.AttackMode,
 		poolDefaultUAJSON, poolDefaultIPWLJSON, poolDefaultIPBLJSON,
 		poolDefaultASNJSON, poolDefaultGeoJSON, poolDefaultRateJSON,
@@ -423,6 +435,22 @@ func (s *Store) GetPolicy(ctx context.Context, site string) (catalog.Policy, err
 		p.RateRules = []catalog.RateRule{}
 	}
 	return p, nil
+}
+
+// DeletePolicy удаляет policy-строку host'а целиком. existed=false → строки
+// не было, handler возвращает 404 (как у array DELETE — отделяем «не было»
+// от «было и удалили»). Single-statement DELETE атомарен; ensureRow не нужен.
+//
+// После COMMIT host исчезает из таблицы. Reloader делает полный LoadRuntime +
+// Store.Replace, поэтому удалённый host просто не попадёт в следующий snapshot,
+// и buildPolicy отдаст PoolDefault() (mode=shadow, observe-only) — deletion
+// через Channel C обрабатывается семантикой полной перезагрузки, не upsert'ом.
+func (s *Store) DeletePolicy(ctx context.Context, site string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM policy WHERE host = $1`, site)
+	if err != nil {
+		return false, fmt.Errorf("delete policy: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // GetStringArray возвращает один JSONB-массив-поле. Отсутствие row = []
