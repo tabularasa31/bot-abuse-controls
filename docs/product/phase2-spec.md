@@ -158,7 +158,13 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 
 `pattern_id` стабилен между релизами каталога (один и тот же паттерн → один и тот же ID).
 
-**Доставка staging на эдж.** `tls_fp_blocklist` едет по Channel C композитом `<status>:block` (backend `store.buildTLSFPBlocklist`), эдж строит staging-набор из pulled-snapshot в `tls_fp.refresh()`. `ua_blacklist` и `ip_blocklist` на стенде матчатся из локальных конфигов эджа (`hygiene` строит отдельный staging combined-regex, `reputation` — staging-matcher); их Channel C wire-формат тоже несёт статус (`store.buildUABlacklist` отдаёт `{active, staging}`, `store.buildIPBlocklist` — `<status>:block`) для будущей миграции consumer'а на эдже. Во всех случаях источник истины — `catalogs/<catalog>.yaml` с полем `status` (A11, задача 86exrtjpc).
+**Доставка staging на эдж.** Все три каталога едут по Channel C из `catalogs/<catalog>.yaml` (A11, задача 86exrtjpc):
+
+- `tls_fp_blocklist` — композит `<status>:block` (backend `store.buildTLSFPBlocklist`); эдж строит staging-набор из pulled-snapshot в `tls_fp.refresh()`.
+- `ip_blocklist` — мапа `{cidr: "<status>:block"}` (`store.buildIPBlocklist`); `reputation.refresh()` пересобирает active + staging matcher'ы из snapshot.
+- `ua_blacklist` — объект `{"active": "<combined-regex>", "staging": ["<pattern>", …]}` (`store.buildUABlacklist`); `hygiene.refresh()` берёт combined regex для active и список паттернов для staging (по-паттернно — чтобы pattern_id в `staging_match` был конкретным).
+
+На эдже у `ua_blacklist` / `ip_blocklist` остаётся cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее источник истины — Channel C (gen 1+). `ip_whitelist` / `asn_datacenters` пока остаются edge-local conf (их миграция на Channel C — отдельный follow-up).
 
 **Новое поле в логах: `staging_match`** — массив строк `<catalog>:<pattern_id>`. Пустой если ничего не сматчилось в staging. Не влияет на `verdict`/`rule` — отдельный слот для аналитики promotion'а.
 

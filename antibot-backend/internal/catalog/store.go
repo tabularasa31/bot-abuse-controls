@@ -152,22 +152,23 @@ func (e errUnknownCatalog) Error() string { return "unknown catalog: " + e.name 
 // Каждый builder обязан быть детерминированным по содержимому Data+site —
 // иначе ETag будет «дёргаться» на каждом запросе и If-None-Match сломается.
 
-// buildUABlacklist собирает combined regex по статусам и отдаёт JSON-объект
-// `{"active": "<combined>", "staging": "<combined>"}` (A11). Раньше форма
-// была одной combined-regex строкой (config-distribution.md §"The 'catalog'
-// concept"); чтобы доставлять staging-паттерны (эдж матчит их отдельным
-// combined regex, пишет staging_match, НЕ блокирует), payload стал объектом
-// с двумя строками. Изменение wire-схемы — минорное (X-Catalog-Version
-// 1.2.0), edge-парсер обновляется в том же изменении.
+// buildUABlacklist отдаёт JSON-объект `{"active": "<combined-regex>",
+// "staging": ["<pattern>", …]}` (A11). Раньше форма была одной combined-regex
+// строкой (config-distribution.md §"The 'catalog' concept"); чтобы доставлять
+// staging, payload стал объектом. Изменение wire-схемы — минорное
+// (X-Catalog-Version 1.2.0), edge-парсер обновляется в том же изменении.
 //
-//   - active  — глобальные UABlacklist + (если site задан) per-resource
-//     policy[site].UABlacklist. Эдж компилирует и при матче → verdict=block.
-//   - staging — только системные staging-паттерны (per-resource policy —
-//     runtime state, staged rollout к нему не применяется). Эдж пишет
-//     staging_match: ["ua_blacklist:<pattern>"], без verdict.
+//   - active  — combined regex (глобальные UABlacklist + при site —
+//     per-resource policy[site].UABlacklist). Эдж компилирует один раз на swap
+//     и при матче эмитит verdict=block.
+//   - staging — СПИСОК отдельных системных staging-паттернов (не combined):
+//     эдж матчит каждый отдельно, чтобы записать staging_match с конкретным
+//     pattern_id (`ua_blacklist:<pattern>`); combined-строка потеряла бы, какой
+//     именно паттерн сработал. Per-resource policy — runtime state, staged
+//     rollout к нему не применяется, поэтому в staging только системные.
 //
 // Каждый паттерн валидируется в Validate через regexp.Compile, так что в
-// combined regex попадает только синтаксически корректный RE2.
+// payload попадает только синтаксически корректный RE2.
 func buildUABlacklist(d *Data, site string) ([]byte, error) {
 	// Срезы уже отсортированы normalize(). Просто конкатенируем — порядок
 	// "system, потом per-resource" фиксирован: если поменяем, не забыть про
@@ -179,9 +180,16 @@ func buildUABlacklist(d *Data, site string) ([]byte, error) {
 			active = append(active, p.UABlacklist...)
 		}
 	}
-	out := map[string]string{
-		"active":  combineRegex(active),
-		"staging": combineRegex(d.UABlacklistStaging),
+	staging := d.UABlacklistStaging
+	if staging == nil {
+		staging = []string{}
+	}
+	out := struct {
+		Active  string   `json:"active"`
+		Staging []string `json:"staging"`
+	}{
+		Active:  combineRegex(active),
+		Staging: staging,
 	}
 	return jsonBytes(out)
 }

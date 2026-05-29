@@ -218,48 +218,49 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 func TestMultiTenantUABlacklistCombinesRegex(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// Контракт shape (A11) — JSON-объект {"active": <combined>, "staging":
-	// <combined>}. active — системные паттерны (+ per-resource при site);
-	// staging — только системные staging-паттерны.
+	// Контракт shape (A11) — JSON-объект {"active": "<combined>", "staging":
+	// ["<pattern>", …]}. active — combined regex системных паттернов
+	// (+ per-resource при site); staging — СПИСОК системных staging-паттернов.
+	type uaPayload struct {
+		Active  string   `json:"active"`
+		Staging []string `json:"staging"`
+	}
 	r1 := httpGet(t, ts.URL+"/catalog/ua_blacklist")
-	obj1, err := readJSON[map[string]string](r1)
+	obj1, err := readJSON[uaPayload](r1)
 	etag1 := r1.Header.Get("ETag")
 	r1.Body.Close()
 	if err != nil {
 		t.Fatalf("без site: body не JSON-объект: %v", err)
 	}
-	if !strings.Contains(obj1["active"], "curl/.*") || !strings.Contains(obj1["active"], "python-requests/.*") {
-		t.Errorf("без site: active не содержит системных regex'ов: %q", obj1["active"])
+	if !strings.Contains(obj1.Active, "curl/.*") || !strings.Contains(obj1.Active, "python-requests/.*") {
+		t.Errorf("без site: active не содержит системных regex'ов: %q", obj1.Active)
 	}
-	if strings.Contains(obj1["active"], "evil-scraper/.*") {
-		t.Errorf("без site: active содержит per-resource паттерн: %q", obj1["active"])
+	if strings.Contains(obj1.Active, "evil-scraper/.*") {
+		t.Errorf("без site: active содержит per-resource паттерн: %q", obj1.Active)
 	}
-	// staging-паттерн (scrapy) — в отдельной combined-строке, не в active.
-	if !strings.Contains(obj1["staging"], "scrapy/[0-9.]+") {
-		t.Errorf("staging не содержит staging-паттерна: %q", obj1["staging"])
+	// staging-паттерн (scrapy) — отдельной записью списка, не в active.
+	if len(obj1.Staging) != 1 || obj1.Staging[0] != "scrapy/[0-9.]+" {
+		t.Errorf("staging список не содержит staging-паттерна: %v", obj1.Staging)
 	}
-	if strings.Contains(obj1["active"], "scrapy/[0-9.]+") {
-		t.Errorf("active содержит staging-паттерн (должен быть только в staging): %q", obj1["active"])
+	if strings.Contains(obj1.Active, "scrapy/[0-9.]+") {
+		t.Errorf("active содержит staging-паттерн (должен быть только в staging): %q", obj1.Active)
 	}
 
 	// С site=shop — в active добавляется кастомный; staging не зависит от site.
 	r2 := httpGet(t, ts.URL+"/catalog/ua_blacklist?site=shop.example.com")
-	obj2, err := readJSON[map[string]string](r2)
+	obj2, err := readJSON[uaPayload](r2)
 	etag2 := r2.Header.Get("ETag")
 	r2.Body.Close()
 	if err != nil {
 		t.Fatalf("site=shop: body не JSON-объект: %v", err)
 	}
-	if !strings.Contains(obj2["active"], "evil-scraper/.*") {
-		t.Errorf("site=shop: active не содержит кастомного regex'a: %q", obj2["active"])
+	if !strings.Contains(obj2.Active, "evil-scraper/.*") {
+		t.Errorf("site=shop: active не содержит кастомного regex'a: %q", obj2.Active)
 	}
 
-	// Обе combined-строки должны быть компилируемыми regex.
-	if _, err := regexp.Compile(obj2["active"]); err != nil {
-		t.Errorf("active combined regex не компилируется: %v (pattern=%q)", err, obj2["active"])
-	}
-	if _, err := regexp.Compile(obj2["staging"]); err != nil {
-		t.Errorf("staging combined regex не компилируется: %v (pattern=%q)", err, obj2["staging"])
+	// active combined regex должен компилироваться.
+	if _, err := regexp.Compile(obj2.Active); err != nil {
+		t.Errorf("active combined regex не компилируется: %v (pattern=%q)", err, obj2.Active)
 	}
 
 	if etag1 == etag2 {
@@ -590,10 +591,13 @@ func TestNormalizeDedupStrings(t *testing.T) {
 	}
 
 	r = httpGet(t, ts.URL+"/catalog/ua_blacklist")
-	obj, _ := readJSON[map[string]string](r)
+	obj, _ := readJSON[struct {
+		Active  string   `json:"active"`
+		Staging []string `json:"staging"`
+	}](r)
 	r.Body.Close()
-	if strings.Count(obj["active"], "curl/") != 1 {
-		t.Errorf("ua_blacklist active содержит дубликат curl/: %q", obj["active"])
+	if strings.Count(obj.Active, "curl/") != 1 {
+		t.Errorf("ua_blacklist active содержит дубликат curl/: %q", obj.Active)
 	}
 
 	r = httpGet(t, ts.URL+"/catalog/ip_blocklist?site=shop.example.com")

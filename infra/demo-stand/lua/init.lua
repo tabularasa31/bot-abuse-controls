@@ -283,6 +283,60 @@ for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser
     end
 end
 
+-- ua_blacklist / ip_blocklist (A11, 86exrtjpc): file-seeded Channel C catalogs,
+-- same model as tls_fp_blocklist. Cold-start seeds generation 0 from the local
+-- conf (so the cascade matches from the first request even before the first
+-- pull); Channel C then lands gen 1+ from catalogs/*.yaml and the per-worker
+-- hygiene.refresh() / reputation.refresh() swap to it. reload-survive via
+-- meta_add_gen (don't clobber a surviving Channel C gen on `nginx -s reload`).
+local ua_dict = ngx.shared.antibot_ua_blacklist
+local ip_dict = ngx.shared.antibot_ip_blocklist
+
+-- ua_blacklist seed: two keys under gen 0 — `active:0` (combined regex) and
+-- `staging:0` (cjson array of staged patterns) — matching the Channel C layout
+-- that hygiene.refresh() reads.
+local function seed_ua_blacklist_cold()
+    if not ua_dict then return 0, 0 end
+    local active = hygiene.build_combined(config.ua_blacklist) or ""
+    ua_dict:set("active:0", active)
+    local _, staging_pats = hygiene.build_staging(config.ua_blacklist)
+    staging_pats = staging_pats or {}
+    ua_dict:set("staging:0", require("cjson.safe").encode(staging_pats))
+    return (active ~= "" and 1 or 0), #staging_pats
+end
+
+-- ip_blocklist seed: `<cidr>:0` → "<status>:block" for every conf entry
+-- (active and staging), matching the Channel C per-key layout.
+local function seed_ip_blocklist_cold()
+    if not ip_dict then return 0, 0 end
+    local act, stg = 0, 0
+    for _, e in ipairs(config.blocklist_ip) do
+        if e.value and e.value ~= "" then
+            local status = (e.attrs and e.attrs.status == "staging") and "staging" or "active"
+            if ip_dict:set(e.value .. ":0", status .. ":block") then
+                if status == "active" then act = act + 1 else stg = stg + 1 end
+            end
+        end
+    end
+    return act, stg
+end
+
+for _, spec in ipairs({
+    { name = "ua_blacklist", seed = seed_ua_blacklist_cold },
+    { name = "ip_blocklist", seed = seed_ip_blocklist_cold },
+}) do
+    local cat = catalog_pull.catalogs[spec.name]
+    if not cat then
+        ngx.log(ngx.ERR, "[demo] catalog_pull.catalogs[", spec.name,
+            "] missing — Channel C seed/divergence skipped")
+    elseif meta_add_gen(cat.gen_key) == "reload" then
+        -- Channel C state survived the reload; don't re-seed, just verify.
+        check_data_dict_divergence(cat)
+    else
+        spec.seed()
+    end
+end
+
 -- One line per catalog so a reviewer can confirm at start that every config
 -- loaded (acceptance: "Lua успешно подгружает все конфиги").
 ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",

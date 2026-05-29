@@ -28,14 +28,16 @@
 -- Switching the allow-side to a real fastpass is a separate task (paired
 -- with per-host policy.ip_whitelist application, 86exr05xt).
 --
--- Data. Phase 1: static whitelist_ip.conf / blocklist_ip.conf, parsed once in
--- init_by_lua (config.lua) and compiled into ipmatcher objects by build()
--- below — done in the master before workers fork, so every worker inherits the
--- matchers for free (no shared dict; hot-reload is out of scope). Phase 3: the
--- same data arrives as the ip_whitelist / ip_blocklist catalogs over Channel C
--- into shared dicts antibot_ip_whitelist / antibot_ip_blocklist
--- (config-distribution.md); the rule names, stage, category and log contract
--- are unchanged across the phase boundary — only the data source changes.
+-- Data. ip_whitelist: static whitelist_ip.conf, parsed once in init_by_lua
+-- (config.lua) and compiled into an ipmatcher by build() (master pre-fork; no
+-- shared dict yet — its Channel C migration is a follow-up). ip_blocklist
+-- follows the production Channel C model (A11, 86exrtjpc): build() seeds the
+-- cold-start matcher from blocklist_ip.conf, init.lua seeds gen 0 into the
+-- antibot_ip_blocklist shared_dict, and refresh() (per request, gen-cached)
+-- swaps to the Channel C snapshot (gen 1+, sourced from catalogs/
+-- ip_blocklist.yaml). The rule names, stage, category and log contract are
+-- unchanged — only the data source changes. The per-host policy.ip_blocklist
+-- is a separate catalog applied via policy_matchers and is unaffected.
 --
 -- Staging (A11, 86exrtjpc): blocklist entries with status=staging are excluded
 -- from the active matcher and compiled into a parallel staging matcher
@@ -248,7 +250,112 @@ function _M.build(config)
     -- kill_switch; defaults.conf [kill_switch.*]).
     _M.enabled = require("config").stage_enabled(defaults, "reputation")
 
+    -- Per-worker gen cache for the Channel C ip_blocklist refresh (A11,
+    -- 86exrtjpc). nil = "first refresh rebuilds from current gen". The matchers
+    -- above (from the local conf) are the cold-start state; refresh() takes over
+    -- once init.lua seeds gen 0 (conf) and Channel C lands gen 1+ (yaml).
+    _M._cached_gen_ip = nil
+
     return _M, wl_n, bl_n
+end
+
+-- reconcile_ip_staging_metrics — on each ip_blocklist gen flip, prime a zero
+-- counter for every new staged CIDR (so /metrics shows it before the first
+-- match) and drop stale counters for CIDRs that left staging (promoted or
+-- removed) but only if still zero — preserves accumulated match history.
+-- Mirrors hygiene / tls_fp; missing metrics dict is a noop.
+local function reconcile_ip_staging_metrics(prev, new)
+    local m = ngx.shared.metrics
+    if not m then return end
+    local prefix = "staging:ip_blocklist:"
+    local newset = {}
+    for _, c in ipairs(new) do
+        newset[c] = true
+        m:safe_add(prefix .. c, 0)
+    end
+    for _, c in ipairs(prev or {}) do
+        if not newset[c] then
+            local key = prefix .. c
+            if (m:get(key) or 0) == 0 then m:delete(key) end
+        end
+    end
+end
+
+-- refresh — gen-cached rebuild of the active + staging ip_blocklist matchers
+-- from the Channel C snapshot (A11, 86exrtjpc). antibot_ip_blocklist holds
+-- `<cidr>:<gen>` → "<status>:block"; on a gen flip we scan the current gen,
+-- split active vs staging, and rebuild the two ipmatcher objects. Cheap in
+-- steady state (one meta:get + int compare). Honours the ip_blocklist
+-- kill-switch. Fail-soft: a matcher that fails to rebuild keeps the previous
+-- one (backend validates CIDRs, so this is defence-in-depth). When the gen key
+-- is absent (catalog never seeded/pulled) it keeps the build()-time conf state.
+function _M.refresh()
+    if not ngx or not ngx.shared then return end
+    local meta = ngx.shared.meta
+    if not meta then return end
+    local gen = meta:get("ip_blocklist_gen")
+    if gen == nil or gen == _M._cached_gen_ip then return end
+    local dict = ngx.shared.antibot_ip_blocklist
+    if not dict then return end
+
+    if not _M.ip_blocklist_enabled then
+        local prev = _M.blocklist_staging_values
+        _M.blocklist                = nil
+        _M.blocklist_staging        = nil
+        _M.blocklist_staging_values = {}
+        _M._cached_gen_ip           = gen
+        reconcile_ip_staging_metrics(prev, {})
+        return
+    end
+
+    local ipmatcher = package.loaded["resty.ipmatcher"] or require "resty.ipmatcher"
+    local suffix = ":" .. gen
+    local active, staging_vmap, staging_list = {}, {}, {}
+    for _, k in ipairs(dict:get_keys(0)) do
+        if k:sub(-#suffix) == suffix then
+            local cidr = k:sub(1, -#suffix - 1)
+            local val  = dict:get(k)
+            local status = (type(val) == "string") and val:match("^([^:]+):") or nil
+            if status == "active" then
+                active[#active + 1] = cidr
+            elseif status == "staging" then
+                staging_vmap[cidr] = cidr
+                staging_list[#staging_list + 1] = cidr
+            end
+        end
+    end
+
+    -- Active matcher: empty → nil (rule is a no-op); build error → keep previous.
+    if #active == 0 then
+        _M.blocklist = nil
+    else
+        local m, err = ipmatcher.new(active)
+        if m then
+            _M.blocklist = m
+        else
+            ngx.log(ngx.ERR, "reputation: ip_blocklist active matcher rebuild ",
+                "failed, keeping previous: ", tostring(err))
+        end
+    end
+
+    -- Staging matcher (value-map so match() returns the CIDR for pattern_id).
+    local prev = _M.blocklist_staging_values
+    if next(staging_vmap) == nil then
+        _M.blocklist_staging        = nil
+        _M.blocklist_staging_values = {}
+    else
+        local m, err = ipmatcher.new_with_value(staging_vmap)
+        if m then
+            _M.blocklist_staging        = m
+            _M.blocklist_staging_values = staging_list
+        else
+            ngx.log(ngx.ERR, "reputation: ip_blocklist staging matcher rebuild ",
+                "failed, keeping previous: ", tostring(err))
+        end
+    end
+
+    _M._cached_gen_ip = gen
+    reconcile_ip_staging_metrics(prev, _M.blocklist_staging_values)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the
@@ -261,6 +368,10 @@ end
 -- informational only; verdict.lua does not branch on it.
 function _M.run()
     if not _M.enabled then return false end
+
+    -- Pull the latest Channel C ip_blocklist snapshot (A11). Cheap in steady
+    -- state (gen compare); rebuilds the matchers only on a gen flip.
+    _M.refresh()
 
     local ip = ngx.var.remote_addr
     if not ip then return false end
