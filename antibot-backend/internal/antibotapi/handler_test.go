@@ -602,15 +602,23 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 	}
 }
 
-// TestDeletePolicy_ConcurrentAppendNotSilentlyLost покрывает PR-99 review:
-// DELETE целого host'а, гоняющийся с POST-append к тому же host'у, не должен
-// оставлять строку БЕЗ запрошенного значения. До фикса append делал ensureRow
-// (DO NOTHING, без lock'а) → concurrent DELETE коммитился → UPDATE ловил
-// RowsAffected=0 и тихо терял append. После фикса ensureRowTx берёт row lock
-// (DO UPDATE SET host=EXCLUDED.host), сериализуя операции: финал — либо host
-// удалён (delete победил), либо host есть И содержит значение (append победил).
-// Инвариант «строка есть ⟹ значение записано» не должен нарушаться никогда.
-func TestDeletePolicy_ConcurrentAppendNotSilentlyLost(t *testing.T) {
+// TestDeletePolicy_ConcurrentAppend — smoke-тест: DELETE целого host'а и
+// POST-append к тому же host'у бегут параллельно и не должны паниковать /
+// рвать транзакции / оставлять строку с записанным, но «дырявым» состоянием.
+// Проверяемый инвариант: «строка есть ⟹ значение записано».
+//
+// ВНИМАНИЕ — это НЕ регрессионный сторож на silent-loss баг из PR-99 review.
+// Настоящая гарантия — row lock в ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`,
+// см. store.go), а не этот тест. Тот баг проявлялся как «append вернул 200
+// changed:false, а строка в итоге удалена»; под багованным кодом КАЖДЫЙ
+// возможный interleaving давал либо «строки нет», либо «строка есть И с
+// паттерном» — никогда «строка есть, паттерна нет». Финальный SELECT-инвариант
+// этого теста зелёный и на багованном коде тоже (исход «строки нет» тут
+// трактуется как проход), поэтому регрессию он не отличает. Детерминированно
+// поймать silent-loss через состояние БД после гонки нельзя — это про вранье
+// HTTP-ответа, а не про конечное состояние. Оставляем как защиту от грубых
+// поломок конкурентного пути.
+func TestDeletePolicy_ConcurrentAppend(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
 	const site = "del-append-race.example"
 	const pattern = "curl/[0-9]"
