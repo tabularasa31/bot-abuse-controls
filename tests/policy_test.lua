@@ -89,5 +89,37 @@ fresh_request()
 eq(policy.get("unknown.example").mode, "shadow", "unregistered → pool default shadow")
 eq(policy.get("unknown.example").origin_ip, nil, "unregistered → no origin_ip")
 
+-- Parent-domain fallback (walk-up): registering the apex covers subdomains.
+seed("svinnar.example", { mode = "active", strictness = "permissive", origin_ip = "198.51.100.7" })
+seed("api.svinnar.example", { mode = "shadow", strictness = "standard", origin_ip = "198.51.100.8" })
+
+-- www.<apex> has no own row → inherits the apex policy (mode + origin_ip).
+fresh_request()
+eq(policy.get("www.svinnar.example").mode, "active", "www → inherits apex mode")
+eq(policy.get("www.svinnar.example").origin_ip, "198.51.100.7", "www → inherits apex origin_ip")
+eq(policy.get("www.svinnar.example").strictness, "permissive", "www → inherits apex strictness")
+
+-- Deep subdomain also walks up to the apex.
+fresh_request()
+eq(policy.get("a.b.svinnar.example").origin_ip, "198.51.100.7", "deep subdomain → inherits apex")
+
+-- The apex itself still resolves to its own row.
+fresh_request()
+eq(policy.get("svinnar.example").origin_ip, "198.51.100.7", "apex → own row")
+
+-- An explicit subdomain row OVERRIDES the apex (most specific wins).
+fresh_request()
+eq(policy.get("api.svinnar.example").origin_ip, "198.51.100.8", "explicit subdomain row overrides apex")
+-- ...and a subdomain UNDER that explicit row still walks up to the nearest one.
+fresh_request()
+eq(policy.get("v2.api.svinnar.example").origin_ip, "198.51.100.8", "sub-subdomain → nearest (api) row")
+
+-- Unrelated domain doesn't match — and the walk never climbs into a public
+-- suffix (no row for it → pool default), so no cross-domain leakage.
+fresh_request()
+eq(policy.get("evil.example.org").origin_ip, nil, "unrelated domain → pool default (no walk-up match)")
+fresh_request()
+eq(policy.get("www.example").origin_ip, nil, "single-label parent not a registered row → pool default")
+
 io.write(string.format("policy_test: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
