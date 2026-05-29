@@ -59,12 +59,15 @@ ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
   "docker exec nginx-demo curl -ks https://127.0.0.1/__admin -H 'Host: bac.example.com' | grep -oE 'Blocklist \([0-9]+ entries\)'"
 
 # 1. Добавить HIGH-fp как active (формат <fp>: <status>).
-printf '\n"<HIGH-fp>": active\n' >> catalogs/tls_fp_blocklist.yaml
+#    FP=… — подставить РЕАЛЬНЫЙ fp из дневного анализа (валидный L-префикс
+#    JA4-токен); литерал <HIGH-fp> backend отвергнет на валидации.
+FP='L13d3000_bcf826a2cd28_430ec2476535'    # пример из отчёта 2026-05-28
+printf '\n"%s": active\n' "$FP" >> catalogs/tls_fp_blocklist.yaml
 
 # 2. Backend подхватит ≤5с; эдж — ≤30с. Проверить, что fp доехал.
 sleep 38
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
-  "docker exec nginx-demo curl -ks https://127.0.0.1/__admin -H 'Host: bac.example.com' | grep -oE 'Blocklist \([0-9]+ entries\)|<HIGH-fp>'"
+  "docker exec nginx-demo curl -ks https://127.0.0.1/__admin -H 'Host: bac.example.com' | grep -oE \"Blocklist \([0-9]+ entries\)|$FP\""
 #    → N+1 entries, fp в списке. Запрос с этим fp → verdict=block,rule=tls_fp_blocklist
 #      (403 на active-хосте, would-be block + 200 на shadow).
 

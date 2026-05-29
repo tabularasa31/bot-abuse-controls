@@ -62,7 +62,7 @@ docker exec nginx-demo curl -ks https://127.0.0.1/__version -H 'Host: bac.exampl
 SECRET=$(cat certs/challenge_secret.key)        # ДО ротации
 HOST=bac.example.com                          # shadow-хост, без реальных юзеров
 NOW=$(date +%s); EXP=$((NOW+86400))
-b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+b64url() { openssl base64 -A | tr -d '\n\r' | tr '+/' '-_' | tr -d '='; }
 BODY="$(printf '%s' "$HOST" | b64url):$NOW:$EXP"
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
 COOKIE="$BODY.$SIG"

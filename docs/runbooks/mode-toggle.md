@@ -19,7 +19,7 @@ policy через Policy API (B10/B11); Channel C доставляет на эд
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<BACKEND_VM_IP>
 cd ~/abuse-controls
-TOKEN=$(grep -E '^DASHBOARD_API_TOKEN=' infra/demo-backend/.env | cut -d= -f2-)
+TOKEN=$(grep -E '^DASHBOARD_API_TOKEN=' infra/demo-backend/.env | cut -d= -f2- | tr -d '"'\''')  # strip optional quotes
 API='https://127.0.0.1:443'; H='Host: antibot.internal'
 HOSTQ=c8-test.example.com     # throwaway-ресурс, не трогаем реальных клиентов
 
