@@ -20,6 +20,13 @@ reverse proxy на VM). Это не прод prod-edge: Channel A на стен�
 - [ ] **Rollback каталога** обратим в обе стороны ≤15м →
   [catalog-rollback.md](catalog-rollback.md)
 
+## Операционные workflow
+
+- **Blocklist promotion (D1)** — провести fp из утреннего отчета в enforcement
+  (staging → наблюдение → active) и снять устаревший, через PR с аудит-следом →
+  [blocklist-promotion.md](blocklist-promotion.md). Логика решений —
+  [`docs/blocklist-scoring.md`](../blocklist-scoring.md).
+
 ## Контракт (источник правды)
 
 [`docs/product/vision.md`](../product/vision.md): §«Аварийные рычаги»,
@@ -31,7 +38,7 @@ reverse proxy на VM). Это не прод prod-edge: Channel A на стен�
 | Узел | SSH | Что крутится |
 |---|---|---|
 | edge | `ubuntu@<EDGE_VM_IP>` | контейнер `nginx-demo` (весь каскад), `promtail` |
-| backend+obs | `ubuntu@<BACKEND_VM_IP>` | `antibot-backend-1/2` + `antibot-lb` + postgres + loki + grafana |
+| backend+obs | `ubuntu@<BACKEND_VM_IP>` | `antibot-backend-1/2` + `antibot-lb` + postgres + loki + grafana + `antibot-analytics` (daily report + blocklist-candidate producer, читает Loki) |
 
 IP-адреса — **текущие VM стенда** (если VM пересоздаются/меняют IP — обнови эту
 таблицу; это единственное место с адресами). Ключ — `~/.ssh/gpu-key`. Контейнер

@@ -217,6 +217,50 @@ services:
       - grafana-data:/var/lib/grafana
     restart: unless-stopped
 
+  # ─── BAC analytics / blocklist-candidate producer ───────────────────────
+  # Daily traffic analyzer (analyze.py), MOVED off the edge onto the backend so
+  # it reads Loki (7d, all edges) instead of the edge's ~24h docker logs. Runs
+  # in-network (Loki's read API is in-network only). Writes JSON artifacts to
+  # the repo's state/ — consumed host-side by scripts/blocklist-autopilot.sh —
+  # and emails the daily report. Producer only: it never opens PRs (that needs
+  # the checkout + gh creds, kept on the host). See docs/blocklist-promotion.md.
+  analytics:
+    build:
+      context: ./analytics
+    image: antibot-analytics:demo
+    container_name: antibot-analytics
+    profiles: ["observability"]
+    depends_on:
+      loki:
+        condition: service_healthy
+    environment:
+      ABUSE_CONTROLS_ROOT: "/data"
+      CATALOGS_DIR: "/data/catalogs"
+      BAC_SOURCE: "loki"
+      LOKI_URL: "http://loki:3100"
+      ANALYTICS_INTERVAL: "${ANALYTICS_INTERVAL:-86400}"
+      BAC_TTL_DAYS: "${BAC_TTL_DAYS:-14}"
+      BAC_MIN_STAGING_HOURS: "${BAC_MIN_STAGING_HOURS:-48}"
+      TZ: "${TZ:-Europe/Moscow}"
+      # Daily report email (Gmail SMTP). All optional: unset → artifacts still
+      # written, email simply skipped. Secrets live in .env, never in the image.
+      REPORT_FROM: "${REPORT_FROM:-}"
+      REPORT_TO: "${REPORT_TO:-}"
+      MSMTP_HOST: "${MSMTP_HOST:-}"
+      MSMTP_PORT: "${MSMTP_PORT:-587}"
+      MSMTP_USER: "${MSMTP_USER:-}"
+      MSMTP_PASS: "${MSMTP_PASS:-}"
+    volumes:
+      # catalogs read-only; analyze.py only reads them for the promotion gates.
+      - ../../catalogs:/data/catalogs:ro
+      # analyzer + helpers (read-only).
+      - ../../infra/demo-stand/scripts:/data/infra/demo-stand/scripts:ro
+      # state/ + reports/ writable — artifacts land here and the host autopilot
+      # (same checkout) reads state/. Both are gitignored.
+      - ../../state:/data/state
+      - ../../reports:/data/reports
+    restart: unless-stopped
+
 volumes:
   pgdata:
   log-spool-1:
