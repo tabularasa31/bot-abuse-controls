@@ -475,7 +475,7 @@ infra/demo-stand/
 | "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен). |
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). Per-Host rollback to observe-only is one PATCH against `/antibot/v1/policy/<host>` flipping `mode` back to `shadow` — Channel C delivers the change to the edge in ≤30s without redeploy. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
-| "What do I monitor?" | `/metrics` for Prometheus scrape. [`docs/runbook.md`](../../docs/runbook.md) (when written) covers on-call patterns. |
+| "What do I monitor?" | `/metrics` for Prometheus scrape. Operational procedures (secret rotation, mode toggle, catalog rollback, challenge version pinning) are in [`docs/runbooks/`](../../docs/runbooks/). |
 
 ## Divergence WARN triage
 

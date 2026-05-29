@@ -50,7 +50,7 @@ There is **no prod-edge-salt-pillars extension**. Per-resource antibot policy li
 
 **Purpose:** ship the static framework that doesn't change per request: Lua source files, nginx config snippets declaring `lua_shared_dict` and registering Lua hooks, kill-switch config.
 
-**Source of truth:** our repo (`infra/demo-stand/lua/*.lua` — каскад целиком, включая `ja4_compute.lua` / `ja4_helpers.lua` — и antibot-секции `infra/demo-stand/nginx.demo.conf`, которые puppet берёт как образец `50_lua.conf`-snippet'а), mirrored into edge-puppet's `modules/nginx/files/lua/nginx2/`. Конкретный file-by-file маппинг — в [`docs/CDN operator-rollout/overview.md`](../CDN operator-rollout/overview.md).
+**Source of truth:** our repo (`infra/demo-stand/lua/*.lua` — каскад целиком, включая `ja4_compute.lua` / `ja4_helpers.lua` — и antibot-секции `infra/demo-stand/nginx.demo.conf`, которые puppet берёт как образец `50_lua.conf`-snippet'а), mirrored into edge-puppet's `modules/nginx/files/lua/nginx2/`. Конкретный file-by-file маппинг — в [`docs/archive/CDN operator-rollout/overview.md`](../archive/CDN operator-rollout/overview.md) (заморожено, прод-фаза).
 
 **Distribution:** standard CDN operator Puppet pipeline. PR to edge-puppet → review → agent run on edge-* via their existing cadence.
 
