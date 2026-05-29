@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import urllib.request
+import urllib.parse
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,10 @@ ROOT = Path(os.environ.get("ABUSE_CONTROLS_ROOT")
             or Path(__file__).resolve().parents[3])
 STATE_DIR = ROOT / "state"
 REPORTS_DIR = ROOT / "reports"
+# Slow catalogs (ADR-006) — git source of truth. The promotion gates read
+# ip_whitelist / tls_fp_browser_profiles / tls_fp_catalog from here, and the
+# blocklist itself (tls_fp_blocklist.yaml) for the staleness/dedup views.
+CATALOGS_DIR = Path(os.environ.get("CATALOGS_DIR") or (ROOT / "catalogs"))
 SEEN_FPS = STATE_DIR / "seen-fps.json"
 IP_CACHE = STATE_DIR / "ip-cache.json"
 # Pre-recreate log snapshots. update.sh dumps `docker logs` here before
@@ -49,6 +54,24 @@ ARCHIVE_DIR = STATE_DIR / "bac-archive"
 # The stand's container. It emits one Phase 1 `BAC_LOG {json}` record per
 # request to docker stdout.
 CONTAINER = os.environ.get("BAC_CONTAINER", "nginx-demo")
+
+# Event source. The analytics has moved off the edge onto the backend+obs VM,
+# where Loki holds 7d of all edges' BAC_LOG centrally (docs/architecture/
+# config-distribution.md, loki-config.yaml). `loki` is the default; `docker`
+# (read the local nginx-demo container) stays for edge-side debugging.
+#   - loki:  GET {LOKI_URL}/loki/api/v1/query_range {job="bac-edge"} over the
+#            window. Promtail's `output` stage stores the bare BAC_LOG JSON as
+#            the line body (no "BAC_LOG " prefix), so the fetch re-adds it for
+#            _event_from_bac_line. Loki is in-network only (read API not exposed
+#            externally) — run from inside the antibot-backend compose network.
+#   - docker: `docker logs --since` on CONTAINER (original edge behaviour).
+SOURCE = os.environ.get("BAC_SOURCE", "loki")
+LOKI_URL = os.environ.get("LOKI_URL", "http://loki:3100")
+# Default fetch window (hours). Overridden per-view in main() (the staging
+# observation needs ≥ --min-staging-hours).
+FETCH_HOURS_DEFAULT = int(os.environ.get("BAC_FETCH_HOURS", "25"))
+# Loki query_range page size; we paginate forward past this.
+LOKI_PAGE_LIMIT = int(os.environ.get("BAC_LOKI_PAGE_LIMIT", "5000"))
 
 # Resty's init marker (nginx error_log) carries the loaded blocklist size;
 # 0 == shadow. Captured opportunistically — defaults to 0 if outside the
@@ -64,6 +87,20 @@ ARCHIVE_MAX_AGE_HOURS = WINDOW_HOURS + 1
 BROWSER_CIPHER_COUNTS = {15, 16, 20}
 BOT_UA_FAMILIES = {"curl", "python", "go", "okhttp", "bot", "scanner"}
 BROWSER_UA_FAMILIES = {"chrome", "firefox", "safari"}
+
+# Promotion-gate thresholds (docs/blocklist-scoring.md). Env-overridable so the
+# analytics container and the promote scripts share one source of truth; CLI
+# flags in main() override these in turn.
+MAX_HUMAN_SHARE = float(os.environ.get("BAC_MAX_HUMAN_SHARE", "0.05"))
+MIN_EVENTS = int(os.environ.get("BAC_MIN_EVENTS", "20"))
+MIN_DAYS_PROMOTE = int(os.environ.get("BAC_MIN_DAYS_PROMOTE", "3"))
+# Inactivity threshold (days) after which a blocklist entry is an auto-demote
+# candidate. > Loki's 7d retention, so the >7d tail leans on the seen-fps
+# accumulator's last_seen, not the log window.
+TTL_DAYS = int(os.environ.get("BAC_TTL_DAYS", "14"))
+# staging→active observation gates (§D).
+MIN_STAGING_HOURS = int(os.environ.get("BAC_MIN_STAGING_HOURS", "48"))
+MIN_STAGING_MATCHES = int(os.environ.get("BAC_MIN_STAGING_MATCHES", "10"))
 
 KNOWN_TOOL_HASH_TAILS = {
     "2d5fbeed7632": "curl",
@@ -171,13 +208,19 @@ def _event_from_bac_line(line):
     if not fp or fp == "-":
         return None  # no fingerprint — skip (bypass endpoints never emit BAC_LOG)
     status = rec.get("status")
+    sm = rec.get("staging_match")
     d = {
         "fp": fp,
         "verdict": rec.get("verdict") or "pass",
+        "rule": rec.get("rule") or "-",
         "status": str(status) if status is not None else "-",
         "uri": rec.get("path") or "-",
         "remote": rec.get("ip") or "-",
         "ua": rec.get("ua") or "-",
+        # A11 staged rollout: array of "<catalog>:<pattern_id>" the request
+        # matched in staging (matched but not enforced). Drives the
+        # staging→active observation (§D). Empty/absent when nothing matched.
+        "staging_match": sm if isinstance(sm, list) else [],
     }
     ts_iso = rec.get("timestamp") or ""
     try:
@@ -257,16 +300,70 @@ def _read_archive_events(now_utc):
     return events
 
 
-def fetch_events():
-    """Pull events from the stand's container, merged with any pre-recreate
-    archives so a rebuild deploy leaves no gap. A missing/dead container yields
-    an empty (archive-only) report rather than an error. The 4th return value
-    (per_source) is kept None so the renderers' optional comparison block stays
-    inert — this stand has a single source."""
-    try:
-        events, blocklist_size, init_ts = _fetch_one(CONTAINER)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        events, blocklist_size, init_ts = [], 0, None
+def _fetch_loki(hours):
+    """Pull BAC_LOG events from Loki over the last `hours`, paginating forward.
+
+    Loki stores the bare JSON payload as the line body (promtail `output`
+    stage), so we re-prefix `BAC_LOG ` before reusing _event_from_bac_line. Any
+    connectivity/parse error degrades to an empty list (the report still
+    renders, archives still fold). blocklist_size/init_ts are not derivable from
+    Loki (it carries only BAC_LOG, not the resty init marker) → (events, 0, None);
+    the report's mode line shows SHADOW under the Loki source."""
+    base = LOKI_URL.rstrip("/") + "/loki/api/v1/query_range"
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    step_start = now_ns - int(hours * 3600 * 1_000_000_000)
+    events = []
+    for _ in range(200):  # pagination safety cap
+        qs = urllib.parse.urlencode({
+            "query": '{job="bac-edge"}',
+            "start": str(step_start), "end": str(now_ns),
+            "limit": str(LOKI_PAGE_LIMIT), "direction": "forward",
+        })
+        req = urllib.request.Request(
+            base + "?" + qs,
+            headers={"User-Agent": "abuse-controls-analytics/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read())
+        except Exception:
+            break
+        results = (payload.get("data") or {}).get("result") or []
+        n = 0
+        last_ns = step_start
+        for stream in results:
+            for ts_str, line in stream.get("values", []):
+                n += 1
+                try:
+                    ts_ns = int(ts_str)
+                except (ValueError, TypeError):
+                    ts_ns = step_start
+                if ts_ns > last_ns:
+                    last_ns = ts_ns
+                d = _event_from_bac_line("BAC_LOG " + line)
+                if d is not None:
+                    events.append(d)
+        if n < LOKI_PAGE_LIMIT:
+            break
+        step_start = last_ns + 1
+    return events, 0, None
+
+
+def fetch_events(source=None, hours=None):
+    """Pull events from the configured source (Loki by default, or the edge
+    container), merged with any pre-recreate archives so a rebuild deploy leaves
+    no gap. A dead source yields an empty (archive-only) report, not an error.
+    The 4th return value (per_source) is kept None so the renderers' optional
+    comparison block stays inert — this stand has a single source."""
+    source = source or SOURCE
+    hours = hours or FETCH_HOURS_DEFAULT
+    if source == "loki":
+        events, blocklist_size, init_ts = _fetch_loki(hours)
+    else:
+        try:
+            events, blocklist_size, init_ts = _fetch_one(CONTAINER)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            events, blocklist_size, init_ts = [], 0, None
     # Fold in archived pre-recreate events, deduped against the live stream
     # (sources are disjoint in time, but a dedup keeps repeated runs safe).
     archived = _read_archive_events(datetime.now(timezone.utc))
@@ -408,6 +505,108 @@ def is_bot_like(ev, ip_cache):
     return False
 
 
+def is_genuine_browser(ev):
+    """True if the event looks like a REAL browser, not a tool masking as one.
+
+    Within one fp the cipher_count and hashes are fixed (they are part of the
+    fp token), so "genuine browser" turns on the per-event UA plus those fixed
+    properties: a real browser family AND a browser-consistent cipher count AND
+    a fp whose hashes are not in our tool dictionaries. This is deliberately
+    conservative — it errs toward calling something human, because it gates the
+    purity veto (we would rather not block than block a real browser)."""
+    return (
+        ev["ua_family"] in BROWSER_UA_FAMILIES
+        and ev["cipher_count"] in BROWSER_CIPHER_COUNTS
+        and ev["hash_tail"] not in KNOWN_TOOL_HASH_TAILS
+        and ev["cipher_hash"] not in KNOWN_TOOL_CIPHER_HASHES
+    )
+
+
+def human_share(events_for_fp):
+    """Fraction of a fp's events that look like a genuine browser. The purity
+    veto blocks promotion when this exceeds --max-human-share."""
+    if not events_for_fp:
+        return 0.0
+    genuine = sum(1 for e in events_for_fp if is_genuine_browser(e))
+    return genuine / len(events_for_fp)
+
+
+# ---------------------------------------------------------------------------
+# Auxiliary catalogs for promotion gates (allowlist / verified / legit-browser)
+# ---------------------------------------------------------------------------
+
+def _load_ip_whitelist():
+    """catalogs/ip_whitelist.yaml — flat sequence of CIDR strings. Hand-parsed
+    (no yaml dep): lines like `- 198.51.100.5/32  # comment`. Returns a list of
+    ipaddress networks; unparseable entries are skipped."""
+    import ipaddress
+    nets = []
+    path = CATALOGS_DIR / "ip_whitelist.yaml"
+    try:
+        text = path.read_text()
+    except OSError:
+        return nets
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("-"):
+            continue
+        s = s[1:].strip()
+        s = s.split("#", 1)[0].strip().strip('"').strip("'")
+        if not s:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(s, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _ip_in_whitelist(ip, nets):
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in n for n in nets)
+
+
+# A request the cascade let through on a positive-identity rule (not just an
+# absence of bot signal). If a fp ever rode in on one of these, blocking it is
+# unsafe — used as the verified/allow leg of the allowlist gate. Log-based
+# approximation of the verified_bot DB lookup (which analyze.py cannot reach).
+IDENTITY_ALLOW_RULES = {"verified_bot", "ip_whitelist", "cookie_valid"}
+
+
+def _fp_has_identity_allow(events_for_fp):
+    return any(
+        e.get("verdict") == "allow" and e.get("rule") in IDENTITY_ALLOW_RULES
+        for e in events_for_fp
+    )
+
+
+def _parse_blocklist_yaml():
+    """catalogs/tls_fp_blocklist.yaml — flat map `"<fp>": <status>`. Hand-parsed
+    (no yaml dep): returns {fp: status}. Comment/blank lines ignored."""
+    out = {}
+    path = CATALOGS_DIR / "tls_fp_blocklist.yaml"
+    try:
+        text = path.read_text()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if ":" not in s:
+            continue
+        key, _, val = s.partition(":")
+        fp = key.strip().strip('"').strip("'")
+        status = val.split("#", 1)[0].strip().strip('"').strip("'")
+        if fp and status:
+            out[fp] = status
+    return out
+
+
 def split_24h(events, now_utc):
     cutoff = now_utc - timedelta(hours=WINDOW_HOURS)
     return [e for e in events if e.get("ts_dt") and e["ts_dt"] >= cutoff]
@@ -493,8 +692,8 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
         score += 3
         reasons.append("impersonator-маскировка (UA браузер, fp автоматизатор) +3")
     if has_suspicious:
-        score += 2
-        reasons.append("suspicious cipher count vs UA +2")
+        score += 1
+        reasons.append("suspicious cipher count vs UA +1")
     if has_automation:
         score += 1
         reasons.append("automation UA (curl/python/go/...) +1")
@@ -525,7 +724,18 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
 
 
 def find_blocklist_candidates(events, ip_cache, seen):
-    """Return three lists: high, medium, low confidence candidates."""
+    """Return three lists: high, medium, low confidence candidates.
+
+    The `score`/`tier` only RANK candidates for the report. Whether a candidate
+    is safe to (auto-)promote is a separate decision carried in `gates` and
+    `auto_eligible` (docs/blocklist-scoring.md §B/§C): score never blocks on its
+    own. Two distinct false-positive risks are handled separately —
+      • purity gate (human_share) — "an unknown real browser misread as a bot";
+      • intent rule (impersonator OR recon) — "a shared tool fp (honest curl)
+        whose block would hit legitimate automation".
+    """
+    whitelist_nets = _load_ip_whitelist()
+    in_catalog = _parse_blocklist_yaml()
     by_fp = defaultdict(list)
     for e in events:
         by_fp[e["fp"]].append(e)
@@ -536,24 +746,80 @@ def find_blocklist_candidates(events, ip_cache, seen):
             continue
         ips = {e["remote"] for e in evs}
         sample = evs[0]
-        suggested_action = "не блокировать"
+        days = sorted(set((seen.get(fp) or {}).get("days_seen", [])))
+        n_lifetime = (seen.get(fp) or {}).get("count", len(evs))
+        hs = human_share(evs)
+        has_impersonator = any(t.startswith("impersonator:") for t in tags)
+        has_recon = any(SUSPICIOUS_URI_RE.search(e["uri"]) for e in evs)
+        # fp token is fixed per fp, so any event's hashes identify the tool.
+        known_tool = (sample["hash_tail"] in KNOWN_TOOL_HASH_TAILS
+                      or sample["cipher_hash"] in KNOWN_TOOL_CIPHER_HASHES)
+        # A generic shared tool fp (curl-as-curl): blocking it punishes every
+        # legitimate user of that tool. recon by one actor does NOT make the
+        # shared fp safe to auto-block — that belongs in ua_blacklist/ip_blocklist.
+        # Only impersonation (browser UA on a tool fp) or recon on a non-generic
+        # fp counts as auto-promote intent.
+        generic_honest_tool = known_tool and not has_impersonator
+        intent = has_impersonator or (has_recon and not generic_honest_tool)
+
+        gates = {
+            "purity": hs <= MAX_HUMAN_SHARE,
+            "volume": n_lifetime >= MIN_EVENTS and len(ips) >= 1,
+            "allowlist": not any(_ip_in_whitelist(ip, whitelist_nets) for ip in ips)
+                          and not _fp_has_identity_allow(evs),
+            "dedup": fp not in in_catalog,
+        }
         if score >= 5:
-            suggested_action = "hard block fp в blocklist.lua (HIGH confidence)"
             tier = "HIGH"
         elif score >= 3:
-            suggested_action = "watch-list, не блокировать пока без 2-го дня данных"
             tier = "MEDIUM"
         else:
             tier = "LOW"
-            suggested_action = "не блокировать — слабые сигналы"
+        auto_eligible = (
+            tier == "HIGH"
+            and len(days) >= MIN_DAYS_PROMOTE
+            and all(gates.values())
+            and intent
+        )
+
+        # Operator-facing one-liner that explains the gate outcome, not just the
+        # tier — so the report says WHY a HIGH was/ wasn't auto-promoted.
+        if auto_eligible:
+            suggested_action = "auto-promote eligible → PR (staging), наблюдение → active"
+        elif tier == "HIGH" and not intent:
+            suggested_action = ("HIGH без impersonator/recon: общий tool-fp, hard-block "
+                                "заденет легит-автоматизацию → кейс для ua_blacklist/ip_blocklist, "
+                                "решение за человеком")
+        elif tier == "HIGH" and not gates["purity"]:
+            suggested_action = (f"HIGH, но purity-вето: human_share {hs:.2f} > "
+                                f"{MAX_HUMAN_SHARE} (под fp есть живые браузеры) — не блокировать")
+        elif tier == "HIGH" and not gates["volume"]:
+            suggested_action = (f"HIGH, но мало данных: lifetime {n_lifetime} < {MIN_EVENTS} "
+                                f"или дней {len(days)} < {MIN_DAYS_PROMOTE} — наблюдать")
+        elif tier == "HIGH" and not gates["allowlist"]:
+            suggested_action = "HIGH, но в allowlist/verified — не блокировать (жесткое вето)"
+        elif tier == "HIGH" and not gates["dedup"]:
+            suggested_action = "уже в blocklist-каталоге"
+        elif tier == "MEDIUM":
+            suggested_action = "watch-list, нужен 2-й день данных + intent"
+        else:
+            suggested_action = "слабые сигналы — не блокировать"
+
         candidates.append({
             "fp": fp, "score": score, "tier": tier,
             "reasons": reasons, "tags": sorted(tags),
-            "ips": sorted(ips), "n_events_24h": len(evs),
-            "n_lifetime": (seen.get(fp) or {}).get("count", len(evs)),
-            "days_seen": sorted(set((seen.get(fp) or {}).get("days_seen", []))),
+            "ips": sorted(ips), "n_ips": len(ips), "n_events_24h": len(evs),
+            "n_lifetime": n_lifetime,
+            "days_seen": days,
             "uris": sorted({e["uri"] for e in evs}),
             "sample_ua": sample["ua"][:120],
+            "human_share": round(hs, 4),
+            "has_impersonator": has_impersonator,
+            "has_recon": has_recon,
+            "generic_honest_tool": generic_honest_tool,
+            "intent": intent,
+            "gates": gates,
+            "auto_eligible": auto_eligible,
             "suggested_action": suggested_action,
         })
     candidates.sort(key=lambda c: -c["score"])
@@ -591,6 +857,79 @@ def find_asn_watch_candidates(events, ip_cache):
         })
     candidates.sort(key=lambda c: -c["n_events"])
     return candidates
+
+
+# ============================================================================
+# Auto-demote (staleness) and staging→active observation views
+# ============================================================================
+
+def _parse_day(day_str):
+    try:
+        return datetime.strptime(day_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def find_stale_blocklist_entries(seen, now_utc, ttl_days):
+    """Blocklist entries that have gone silent > ttl_days → auto-demote
+    candidates. "last seen" = max(days_seen) from the seen-fps accumulator
+    (persists beyond Loki's 7d window). An entry with no observations in state
+    is reported as a candidate too, flagged `unknown` so the autopilot can be
+    cautious."""
+    today = now_utc.astimezone().date()
+    out = []
+    for fp, status in sorted(_parse_blocklist_yaml().items()):
+        entry = seen.get(fp) or {}
+        days = [d for d in (_parse_day(x) for x in entry.get("days_seen", [])) if d]
+        last_seen = max(days) if days else None
+        if last_seen is None:
+            out.append({"fp": fp, "status": status, "last_seen": None,
+                        "days_silent": None, "lifetime": entry.get("count", 0),
+                        "unknown": True, "stale": True,
+                        "reason": "нет наблюдений в state"})
+            continue
+        days_silent = (today - last_seen).days
+        if days_silent > ttl_days:
+            out.append({"fp": fp, "status": status,
+                        "last_seen": last_seen.isoformat(),
+                        "days_silent": days_silent, "lifetime": entry.get("count", 0),
+                        "unknown": False, "stale": True,
+                        "reason": f"молчит {days_silent}д > {ttl_days}д"})
+    return out
+
+
+def find_staging_observation(events, now_utc, min_staging_hours):
+    """For each staging entry in the catalog, summarise what it actually matched
+    (staging_match) over the fetched window and return the activation verdict
+    (§D). Needs a window ≥ min_staging_hours — the caller fetches accordingly."""
+    whitelist_nets = _load_ip_whitelist()
+    catalog = _parse_blocklist_yaml()
+    staging_fps = [fp for fp, st in catalog.items() if st == "staging"]
+    out = []
+    for fp in sorted(staging_fps):
+        token = "tls_fp_blocklist:" + fp
+        matched = [e for e in events if token in (e.get("staging_match") or [])]
+        n = len(matched)
+        hs = human_share(matched)
+        allowlist_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
+            or _fp_has_identity_allow(matched)
+        ts = [e["ts_dt"] for e in matched if e.get("ts_dt")]
+        observed_hours = round((now_utc - min(ts)).total_seconds() / 3600, 1) if ts else 0.0
+
+        if n == 0:
+            verdict = "observe"  # silent — the stale path will pick it up
+        elif hs > 0 or allowlist_hit:
+            verdict = "fp_caught"  # caught a real browser / allowlisted client
+        elif observed_hours >= min_staging_hours and n >= MIN_STAGING_MATCHES:
+            verdict = "activate"
+        else:
+            verdict = "observe"
+        out.append({
+            "fp": fp, "n_matches": n, "human_share": round(hs, 4),
+            "observed_hours": observed_hours, "allowlist_hit": allowlist_hit,
+            "verdict": verdict,
+        })
+    return out
 
 
 # ============================================================================
@@ -645,7 +984,7 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc
     L.append("")
     L.append("_Метод подсчёта: каждому fp начисляются очки по сигналам:_")
     L.append("- impersonator-маскировка: +3")
-    L.append("- suspicious cipher count: +2")
+    L.append("- suspicious cipher count: +1")
     L.append("- automation UA: +1")
     L.append("- multi-IP (≥2): +1")
     L.append("- DC ASN: +1")
@@ -939,7 +1278,7 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc):
     parts.append("<div class='section-divider candidates'>Кандидаты на blocklist</div>")
     parts.append(
         "<div class='legend'>"
-        "<strong>Скоринг:</strong> impersonator +3 · suspicious cipher +2 · automation UA +1 · "
+        "<strong>Скоринг:</strong> impersonator +3 · suspicious cipher +1 · automation UA +1 · "
         "multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 дней +1 · recon URI +1.<br>"
         "<strong>Тиры:</strong> <span style='color:#c62828; font-weight:700'>HIGH ≥5</span> · "
         "<span style='color:#e65100; font-weight:700'>MEDIUM 3-4</span> · "
@@ -1085,21 +1424,83 @@ def render_subject(events_24h, seen, sLT, ip_cache, now_utc):
 
 
 def main() -> int:
+    global MAX_HUMAN_SHARE, MIN_EVENTS, MIN_DAYS_PROMOTE, MIN_STAGING_MATCHES
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--html", action="store_true")
     g.add_argument("--subject", action="store_true")
+    # Machine-readable views consumed by the promotion tooling (read-only: they
+    # never enrich-and-save or advance the watermark).
+    g.add_argument("--candidates-json", action="store_true",
+                   help="blocklist candidates + gates + auto_eligible as JSON")
+    g.add_argument("--stale-blocklist-json", action="store_true",
+                   help="catalog entries silent > --ttl-days as JSON (auto-demote)")
+    g.add_argument("--staging-observation-json", action="store_true",
+                   help="per staging-fp match summary + activate verdict as JSON")
+    # Gate thresholds (override env/defaults; docs/blocklist-scoring.md).
+    ap.add_argument("--ttl-days", type=int, default=TTL_DAYS)
+    ap.add_argument("--min-staging-hours", type=int, default=MIN_STAGING_HOURS)
+    ap.add_argument("--min-staging-matches", type=int, default=MIN_STAGING_MATCHES)
+    ap.add_argument("--max-human-share", type=float, default=MAX_HUMAN_SHARE)
+    ap.add_argument("--min-events", type=int, default=MIN_EVENTS)
+    ap.add_argument("--min-days-promote", type=int, default=MIN_DAYS_PROMOTE)
+    ap.add_argument("--source", choices=("loki", "docker"), default=SOURCE,
+                    help="event source (default loki; docker = edge container)")
+    ap.add_argument("--hours", type=int, default=None,
+                    help="fetch window in hours (default 25, or ≥min-staging-hours)")
     args = ap.parse_args()
+
+    MAX_HUMAN_SHARE = args.max_human_share
+    MIN_EVENTS = args.min_events
+    MIN_DAYS_PROMOTE = args.min_days_promote
+    MIN_STAGING_MATCHES = args.min_staging_matches
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    events_all, blocklist_size, init_ts, per_source = fetch_events()
+    # The staging-observation view needs a window ≥ min-staging-hours; other
+    # views default to ~25h (the report window + margin).
+    fetch_hours = args.hours
+    if fetch_hours is None:
+        fetch_hours = (max(args.min_staging_hours + 2, FETCH_HOURS_DEFAULT)
+                       if args.staging_observation_json else FETCH_HOURS_DEFAULT)
+    events_all, blocklist_size, init_ts, per_source = fetch_events(args.source, fetch_hours)
     seen = load_seen()
     ip_cache = load_ip_cache()
     now_utc = datetime.now(timezone.utc)
     today_str = now_utc.astimezone().strftime("%Y-%m-%d")
     events_24h = split_24h(events_all, now_utc)
+    gen = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if args.candidates_json:
+        enrich_ips({e["remote"] for e in events_24h}, ip_cache)
+        high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
+        sys.stdout.write(json.dumps({
+            "generated_utc": gen,
+            "thresholds": {"max_human_share": MAX_HUMAN_SHARE,
+                           "min_events": MIN_EVENTS,
+                           "min_days_promote": MIN_DAYS_PROMOTE},
+            "high": high, "medium": medium, "low": low,
+        }, ensure_ascii=False, indent=2) + "\n")
+        return 0
+
+    if args.stale_blocklist_json:
+        sys.stdout.write(json.dumps({
+            "generated_utc": gen, "ttl_days": args.ttl_days,
+            "stale": find_stale_blocklist_entries(seen, now_utc, args.ttl_days),
+        }, ensure_ascii=False, indent=2) + "\n")
+        return 0
+
+    if args.staging_observation_json:
+        # Observation needs a window ≥ min_staging_hours; events_all is the full
+        # fetched window (~24h on docker source, widened on the Loki source).
+        sys.stdout.write(json.dumps({
+            "generated_utc": gen, "min_staging_hours": args.min_staging_hours,
+            "min_matches": MIN_STAGING_MATCHES,
+            "observations": find_staging_observation(events_all, now_utc,
+                                                     args.min_staging_hours),
+        }, ensure_ascii=False, indent=2) + "\n")
+        return 0
 
     if args.subject:
         sLT = collect_lifetime_stats(seen, ip_cache)

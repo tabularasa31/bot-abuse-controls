@@ -5,6 +5,14 @@
 # Generates a Russian-language HTML report from the stand's BAC_LOG json,
 # archives a markdown copy under <repo>/reports/, emails the HTML via
 # msmtp + Gmail SMTP. State/reports live under the repo root.
+#
+# DEPRECATED (edge cron): the daily analytics + report has MOVED to the backend
+# `antibot-analytics` container, which reads Loki (7d, all edges) instead of this
+# host's ~24h docker logs and also writes the blocklist-promotion artifacts (see
+# infra/demo-backend/docker-compose.backend.yml, docs/blocklist-promotion.md).
+# analyze.py now defaults to --source loki; this script passes no --source, so on
+# the edge run it with `BAC_SOURCE=docker` (or add --source docker) for local
+# debugging. Retire this from edge cron once the backend service is live.
 
 set -euo pipefail
 
@@ -36,7 +44,9 @@ trap 'rm -f "${HTML}"' EXIT
 
 # One invocation: the full --html run also caches the subject line to
 # state/last-subject.txt, so we don't re-fetch docker logs for it.
-python3 "${ANALYZE}" --html > "${HTML}"
+# --source docker: analyze.py now defaults to Loki (backend), but this legacy
+# edge path reads the local nginx-demo container.
+python3 "${ANALYZE}" --source docker --html > "${HTML}"
 SUBJECT=$(cat "${ROOT}/state/last-subject.txt" 2>/dev/null || echo "[abuse-controls] daily report")
 
 # Addresses come from infra/demo-stand/.env.report (gitignored) — neither
