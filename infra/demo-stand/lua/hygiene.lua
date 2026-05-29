@@ -36,12 +36,11 @@
 -- hygiene rule is recorded — it does not stop the wider cascade):
 --   1.  method_not_allowed     — method outside the configured whitelist
 --   2.  ua_blacklist           — UA matches the combined regex of ACTIVE
---                                system patterns. Staged patterns are dropped
---                                (build_combined skips status=staging) and not
---                                yet recorded into staging_match: A11 implemented
---                                staging_match for the three tls_fp catalogs
---                                (tls_fp.lua); extending it to ua_blacklist /
---                                ip_blocklist is the "и далее" follow-up.
+--                                system patterns. Staged patterns (status=
+--                                staging) are kept out of active_re and matched
+--                                separately via staging_re (step 3): they record
+--                                staging_match: ["ua_blacklist:<pattern>"] and
+--                                never block (A11 staged rollout, 86exrtjpc).
 --   2b. policy.ua_blacklist    — UA matches the per-host pattern list pulled
 --                                from policy[host].ua_blacklist (86exr05xt).
 --                                Compiled once per (host, gen) in
@@ -84,6 +83,25 @@ function _M.build_combined(ua_list)
     return "(" .. table.concat(active, ")|(") .. ")"
 end
 
+-- pure: STAGING ua_blacklist branch (A11, 86exrtjpc). Returns (combined_re,
+-- patterns): a combined regex over status=staging patterns (cheap "any match"
+-- gate) plus the flat pattern list (for per-pattern attribution into
+-- staging_match — a combined match alone can't say which alternative fired).
+-- (nil, {}) when there are no staged patterns. Staged patterns NEVER block:
+-- run() records staging_match: ["ua_blacklist:<pattern>"] and falls through.
+function _M.build_staging(ua_list)
+    local staging = {}
+    for _, e in ipairs(ua_list or {}) do
+        local pat = e.value
+        local status = e.attrs and e.attrs.status
+        if pat and pat ~= "" and status == "staging" then
+            staging[#staging + 1] = pat
+        end
+    end
+    if #staging == 0 then return nil, {} end
+    return "(" .. table.concat(staging, ")|(") .. ")", staging
+end
+
 -- pure: header anomaly heuristic. Base case (RFC §A2 / vision.md T0): an
 -- HTTP/2 request with no Accept header — real browsers always send Accept on
 -- HTTP/2. Returns true when the request looks anomalous.
@@ -122,8 +140,14 @@ function _M.build(config)
     _M.ua_blacklist_enabled = ua_rule.enabled ~= false
     if not _M.ua_blacklist_enabled then
         _M.active_re = nil
+        -- Staging observation honours the same kill-switch: an operator
+        -- disabling ua_blacklist for incident rollback expects no UA matching
+        -- anywhere, including observe-only staging.
+        _M.staging_re = nil
+        _M.staging_patterns = {}
     else
         _M.active_re = _M.build_combined(config.ua_blacklist)
+        _M.staging_re, _M.staging_patterns = _M.build_staging(config.ua_blacklist)
     end
 
     -- Stage off via the shared kill-switch helper (config-templates.md kill_switch).
@@ -197,6 +221,27 @@ function _M.run()
                 bac_log.set_verdict("hygiene", "block", "policy.ua_blacklist")
                 policy.enforce(403)
                 return true
+            end
+        end
+    end
+
+    -- 3. Staged ua_blacklist patterns (A11, 86exrtjpc). Observe-only: matched
+    -- with the same predicate as the active list but writes only staging_match
+    -- (["ua_blacklist:<pattern>"]) — never a verdict, never a 403, never a
+    -- short-circuit. Reached only when no active rule matched above (those
+    -- return), so this records what WOULD fire after promotion to active.
+    -- Gated on the same ua_blacklist_enabled kill-switch (staging_re is nil
+    -- when disabled). The combined regex is the cheap gate; on a hit we loop
+    -- the small staged list to attribute the specific pattern(s).
+    if _M.staging_re then
+        local from, _, err = ngx.re.find(ua, _M.staging_re, "jo")
+        if err then
+            ngx.log(ngx.ERR, "ua_blacklist staging regex error, fail-open: ", err)
+        elseif from then
+            for _, pat in ipairs(_M.staging_patterns) do
+                if ngx.re.find(ua, pat, "jo") then
+                    bac_log.add_staging_match("ua_blacklist:" .. pat)
+                end
             end
         end
     end

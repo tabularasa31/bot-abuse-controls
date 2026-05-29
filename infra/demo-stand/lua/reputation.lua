@@ -37,10 +37,12 @@
 -- (config-distribution.md); the rule names, stage, category and log contract
 -- are unchanged across the phase boundary — only the data source changes.
 --
--- Staging: blocklist entries with status=staging are excluded from the active
--- matcher (mirrors hygiene's ua_blacklist and init.lua's fp seeding). A11
--- implemented staging_match for the three tls_fp catalogs (tls_fp.lua);
--- recording staged ip_blocklist matches is the "и далее" follow-up to that task.
+-- Staging (A11, 86exrtjpc): blocklist entries with status=staging are excluded
+-- from the active matcher and compiled into a parallel staging matcher
+-- (blocklist_staging, value-map so match returns the CIDR). run() records
+-- staging_match: ["ip_blocklist:<cidr>"] for them and NEVER blocks — pure
+-- observation for the staging→active promotion workflow, symmetric with
+-- hygiene's ua_blacklist staging and tls_fp's blocklist staging.
 --
 -- A6 additions (geo/ASN, rules-reference L2 #9 + tag T1):
 --   * geo_country / asn log fields — filled every request from a GeoLite2
@@ -78,6 +80,7 @@ local _M = {
     enabled        = true,
     whitelist      = nil,   -- ipmatcher or nil when no active entries
     blocklist      = nil,   -- ipmatcher or nil when no active entries
+    blocklist_staging = nil, -- ipmatcher (new_with_value: match→cidr) or nil; A11 observe-only
     asn_dc_set     = {},    -- { ["24940"] = true, ... } from asn_datacenters.conf
     geo_enabled    = true,  -- [blocking.geo_blocklist].enabled (dormant: no source yet)
     demo_geo_header = false, -- honour X-Demo-IP override (stand testing); env-gated
@@ -94,6 +97,21 @@ function _M.active_values(list)
         local v = e.value
         local status = e.attrs and e.attrs.status
         if v and v ~= "" and status ~= "staging" then
+            out[#out + 1] = v
+        end
+    end
+    return out
+end
+
+-- pure: array of `value` strings with status=staging (A11). The staging
+-- counterpart of active_values — used to build the observe-only staging
+-- matcher. No ngx / ipmatcher dependency (unit-tested in reputation_test.lua).
+function _M.staging_values(list)
+    local out = {}
+    for _, e in ipairs(list or {}) do
+        local v = e.value
+        local status = e.attrs and e.attrs.status
+        if v and v ~= "" and status == "staging" then
             out[#out + 1] = v
         end
     end
@@ -185,11 +203,33 @@ function _M.build(config)
     _M.ip_whitelist_enabled = rule_enabled("allow", "ip_whitelist")
     _M.ip_blocklist_enabled = rule_enabled("blocking", "ip_blocklist")
 
+    -- Staging matcher (A11): value-map (cidr → cidr) so match() returns the
+    -- matched CIDR, needed for the staging_match pattern_id
+    -- (["ip_blocklist:<cidr>"]). Gated on the same ip_blocklist_enabled
+    -- kill-switch as the active matcher — disabling the rule for rollback
+    -- silences observe-only staging too. A malformed staged CIDR is FATAL
+    -- (same load-or-die contract as the active matcher).
+    local function staging_matcher(list, label, enabled)
+        if not enabled then return nil, {} end
+        local values = _M.staging_values(list)
+        if #values == 0 then return nil, {} end
+        local vmap = {}
+        for _, c in ipairs(values) do vmap[c] = c end
+        local m, err = ipmatcher.new_with_value(vmap)
+        if not m then
+            error("reputation: invalid staging IP/CIDR in " .. label .. ": " .. tostring(err))
+        end
+        return m, values
+    end
+
     local wl_n, bl_n
     _M.whitelist, wl_n = matcher(config.whitelist_ip, "whitelist_ip.conf",
                                  _M.ip_whitelist_enabled)
     _M.blocklist, bl_n = matcher(config.blocklist_ip, "blocklist_ip.conf",
                                  _M.ip_blocklist_enabled)
+    _M.blocklist_staging, _M.blocklist_staging_values =
+        staging_matcher(config.blocklist_ip, "blocklist_ip.conf (staging)",
+                        _M.ip_blocklist_enabled)
 
     -- asn_datacenters.conf -> membership set for the reputation:asn_dc tag.
     -- Reuses active_values (drops blanks/staging). The tag has no enable flag
@@ -321,6 +361,19 @@ function _M.run()
             bac_log.set_verdict("reputation", "block", "policy.geo_blocklist")
             policy.enforce(403)
             return true
+        end
+    end
+
+    -- Staged ip_blocklist CIDRs (A11, 86exrtjpc). Observe-only: matched with
+    -- the same predicate as the active matcher but records only staging_match
+    -- (["ip_blocklist:<cidr>"]) — never a verdict, never a 403, never a
+    -- short-circuit. Reached only when no allow/block rule matched above
+    -- (those return), so it records what WOULD fire after promotion to active.
+    -- new_with_value returns the matched CIDR, which is the pattern_id.
+    if _M.blocklist_staging then
+        local cidr = _M.blocklist_staging:match(ip)
+        if cidr then
+            bac_log.add_staging_match("ip_blocklist:" .. cidr)
         end
     end
 

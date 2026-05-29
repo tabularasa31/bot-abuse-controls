@@ -81,6 +81,34 @@ check(
     "build_combined only-staging -> nil")
 
 -- ===========================================================================
+-- hygiene.build_staging() — combined regex + pattern list of STAGING patterns
+-- (A11, 86exrtjpc). Mirror image of build_combined: keeps only status=staging.
+-- ===========================================================================
+
+do
+    local re, pats = hygiene.build_staging(nil)
+    check(re, nil, "build_staging nil -> nil re")
+    check(#pats, 0, "build_staging nil -> empty patterns")
+end
+do
+    -- active patterns are dropped; only staging kept (in input order).
+    local re, pats = hygiene.build_staging({
+        { value = "curl",      attrs = { status = "active" } },
+        { value = "AhrefsBot", attrs = { status = "staging" } },
+        { value = "scrapy",    attrs = { status = "staging" } },
+    })
+    check(re, "(AhrefsBot)|(scrapy)", "build_staging combined keeps only staging")
+    check(table.concat(pats, "|"), "AhrefsBot|scrapy", "build_staging patterns list")
+end
+do
+    local re, pats = hygiene.build_staging({
+        { value = "curl", attrs = { status = "active" } },
+    })
+    check(re, nil, "build_staging only-active -> nil re")
+    check(#pats, 0, "build_staging only-active -> empty patterns")
+end
+
+-- ===========================================================================
 -- hygiene.method_lookup()
 -- ===========================================================================
 

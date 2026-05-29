@@ -195,7 +195,14 @@ if config.stage_enabled(config.defaults, "tls_fp") then
         if cached == "block" or cached == "allow" then
             verdict = cached
         else
-            verdict = ngx.shared.tls_fp_blocklist:get(key) or "allow"
+            -- §A1 + A11: the Channel C value carries status ("<status>:block").
+            -- Only an ACTIVE entry blocks here; a staged fp resolves to "allow"
+            -- so the request falls through to tls_fp.run(), which records
+            -- staging_match from tls_fp.blocklist_staging (built from the same
+            -- snapshot in refresh()). parse_value tolerates the legacy bare
+            -- "block" seed (treated as active).
+            local status = fp_state.parse_value(ngx.shared.tls_fp_blocklist:get(key))
+            verdict = (status == "active") and "block" or "allow"
             cache:set(key, verdict, 60)
         end
 

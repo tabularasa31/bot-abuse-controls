@@ -15,7 +15,7 @@ config.load()
 -- Compile the L1 hygiene stage (method whitelist + ua_blacklist combined
 -- regex) from the loaded config. Done here in the master so every worker
 -- inherits the compiled state on fork — see hygiene.lua.
-require("hygiene").build(config)
+local hygiene = require("hygiene").build(config)
 
 -- Compile the L2 reputation stage (ip_whitelist / ip_blocklist CIDR matchers)
 -- from the loaded config — also in the master so workers inherit the matchers
@@ -39,12 +39,11 @@ local _, vb_alts_n = require("verified_bots").build(config)
 local _, rate_n = require("rate_limit").build(config)
 
 -- Compile the L3 tls_fp soft-rule stage. После PR2 (ADR-006)
--- tls_fp_catalog / tls_fp_browser_profiles приезжают через Channel C, так
--- что build() заводит только cold-start state + kill-switch flag; staging
--- counts для них всегда 0 на init (заполнятся после первого pull). Только
--- tls_fp_blocklist staging остаётся file-based — его counter `tls_stg_bl_n`
--- идёт в startup-log и в metrics:safe_add ниже.
-local tls_fp, _, _, _, _, tls_stg_bl_n = require("tls_fp").build(config)
+-- Все три staged-каталога (tls_fp_blocklist / tls_fp_catalog /
+-- tls_fp_browser_profiles) приезжают через Channel C (86exrtjpc), так что
+-- build() заводит только cold-start state + kill-switch flag; staging-таблицы
+-- пусты на init и наполняются в tls_fp.refresh() после первого pull.
+local tls_fp = require("tls_fp").build(config)
 
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
@@ -111,11 +110,16 @@ local meta    = ngx.shared.meta
 -- пути data dict гарантированно пуст или содержит только ghost-keys от
 -- предыдущей worker-генерации, которые верно reader'ятся (gen=0); очищать
 -- ghosts не нужно — мы их сейчас перепишем под тем же `:0` suffix.
+-- Wire-формат записи (A11, store.buildTLSFPBlocklist): "<status>:block".
+-- Cold-start seed несёт active-записи как "active:block" (verdict.lua блокирует
+-- только active). Staged fps в seed НЕ кладём: staging-наблюдение доставляется
+-- live по Channel C (tls_fp.refresh строит blocklist_staging из pulled snapshot),
+-- симметрично tls_fp_catalog / tls_fp_browser_profiles staging.
 local function seed_blocklist_cold()
     local seeded = 0
     for _, entry in ipairs(config.tls_fp_blocklist) do
         if entry.attrs.status ~= "staging" then
-            local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "block")
+            local ok, err = fp_dict:set(fp_state.key(entry.value, 0), "active:block")
             if ok then
                 seeded = seeded + 1
             else
@@ -181,9 +185,17 @@ else
     -- bare suffix-string — симметрично catalog_pull.sweep (PR-55 review #5
     -- guard от sharing dict с другим writer'ом).
     local cur_gen = meta:get(fp_state.META_GEN_KEY) or 0
+    -- `n` — только ACTIVE записи (для "loaded: N active entries" + gauge);
+    -- `total` — все (active+staging) для divergence-детекции (gen=N но dict
+    -- пуст). A11: dict теперь содержит и staging-записи ("staging:block"),
+    -- поэтому считаем по статусу, чтобы staged fps не раздували active-счёт.
+    local total = 0
     for _, k in ipairs(fp_dict:get_keys(0)) do
         if fp_state.match(k, cur_gen) then
-            n = n + 1
+            total = total + 1
+            if fp_state.parse_value(fp_dict:get(k)) == "active" then
+                n = n + 1
+            end
         end
     end
     -- Detect divergence: meta:gen=N>0 + data dict empty. PR-62 round-8 audit:
@@ -195,7 +207,7 @@ else
     -- если был resize/wipe — backend re-доставит entries. Окно «между reload
     -- и next pull» (≤30 сек) — каталог пуст; для тех редких ситуаций,
     -- когда backend ALSO down — operator увидит WARN и решит вручную.
-    if cur_gen > 0 and n == 0 then
+    if cur_gen > 0 and total == 0 then
         ngx.log(ngx.WARN, "[demo] tls_fp_blocklist: meta says gen=", cur_gen,
             " but data dict has no matching entries — possibly zone wipe or ",
             "intentionally-empty Channel C payload. Dropping etag to force next ",
@@ -204,7 +216,7 @@ else
             "reachable; see infra/demo-stand/README.md «Divergence WARN triage».")
         meta:delete(fp_state.META_ETAG_KEY)
     else
-        ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", n, ")")
+        ngx.log(ngx.NOTICE, "[demo] tls_fp_blocklist: reload detected, preserving Channel C state (gen=", cur_gen, ", entries=", total, " incl. ", n, " active)")
     end
 end
 
@@ -313,9 +325,10 @@ ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
 -- здесь не печатается специально, чтобы дашборды не путали «нулевая
 -- gen на старте» с «catalog не landed». Для tls_fp_blocklist staging
 -- (всё ещё file-based) сохраняем традиционную stand-line.
-ngx.log(ngx.NOTICE, "[demo] tls_fp blocklist staged: ", tls_stg_bl_n,
-    " (file-based; tls_fp_catalog / browser_profiles см. /metrics ",
-    "*_gen после первого Channel C pull)")
+ngx.log(ngx.NOTICE, "[demo] tls_fp staged catalogs: all three (blocklist / ",
+    "catalog / browser_profiles) — Channel C-based; staging-таблицы пусты на ",
+    "init, наполняются в tls_fp.refresh() после первого pull (см. /metrics ",
+    "antibot_staging_match_total и *_gen)")
 ngx.log(ngx.NOTICE, "[demo] challenge page template loaded, cascade_version=",
     cascade_version, " (C2 — preload only; serving wires up in C5)")
 
@@ -408,18 +421,20 @@ end
 -- patterns are staged), so unlike the fixed flag/tag list above they are
 -- primed from the compiled staging tables rather than hard-coded.
 --
--- PR-62 round-6: для двух Channel C-каталогов (tls_fp_catalog,
--- tls_fp_browser_profiles) на init соответствующие staging-таблицы пусты —
--- данные приедут только после первого pull. Priming для них делает
+-- 86exrtjpc: все три tls_fp staged-каталога (blocklist / catalog /
+-- browser_profiles) теперь Channel C-based — их staging-таблицы пусты на init
+-- и наполняются после первого pull. Priming staging-counter'ов делает
 -- `reconcile_staging_metrics` в tls_fp.refresh() на каждом gen flip
--- (одновременно с удалением stale counters). Здесь оставляем только
--- file-based tls_fp_blocklist staging (его данные есть на init из
--- локального conf-файла).
-for fp_tok in pairs(tls_fp.blocklist_staging) do
-    metrics:safe_add("staging:tls_fp_blocklist:" .. fp_tok, 0)
+-- (одновременно с удалением stale counters), поэтому здесь priming-loop'ов
+-- для tls_fp_* больше нет. ua_blacklist / ip_blocklist staging — file-based
+-- (hygiene / reputation), их counters праймятся здесь из compiled staging-веток,
+-- чтобы /metrics показывал staged-паттерны at-zero с первого scrape'a.
+for _, pat in ipairs(hygiene.staging_patterns or {}) do
+    metrics:safe_add("staging:ua_blacklist:" .. pat, 0)
 end
--- Удалены no-op loops для tls_fp.catalog_staging / profiles_staging (после
--- PR2 они всегда пустые на init; priming живёт в tls_fp.refresh()).
+for _, cidr in ipairs(reputation.blocklist_staging_values or {}) do
+    metrics:safe_add("staging:ip_blocklist:" .. cidr, 0)
+end
 
 metrics:set("start_time", ngx.time())
 metrics:set("blocklist_entries", n)
