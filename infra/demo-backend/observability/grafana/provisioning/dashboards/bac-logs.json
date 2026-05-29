@@ -57,7 +57,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["sum"],
+          "calcs": ["last"],
           "fields": "",
           "values": false
         },
@@ -69,7 +69,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum by (verdict) (count_over_time({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [$__interval]))",
+          "expr": "sum by (verdict) (count_over_time({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [$__range]))",
           "legendFormat": "{{verdict}}",
           "queryType": "range",
           "refId": "A"
