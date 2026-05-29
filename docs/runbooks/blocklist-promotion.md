@@ -20,8 +20,9 @@ A11-доставки staging по Channel C (задача 86exrtjpc) — staging
 ssh -i ~/.ssh/gpu-key ubuntu@<BACKEND_VM_IP>
 cd ~/abuse-controls
 
-# Аналитика поднята (observability-профиль), артефакты свежие:
-docker compose -f infra/demo-backend/docker-compose.backend.yml --profile observability up -d analytics
+# Свежий прогон аналитики (one-shot — пишет артефакты + шлёт отчёт; по
+# расписанию это делает host-cron в 08:00, см. §Расписание):
+docker compose -f infra/demo-backend/docker-compose.backend.yml --profile observability run --rm analytics
 ls -l state/candidates.json state/staging-observation.json state/stale.json
 
 # gh авторизован (для PR); git remote доступен:
@@ -72,6 +73,21 @@ scripts/blocklist-autopilot.sh --dry-run
 Автомат: auto-promote стабильного HIGH (≥3 дня, gates+intent) → draft staging-PR;
 activate staging-записей с verdict=activate; auto-demote молчащих >14д (active→staging→remove).
 Дубликаты PR отсекаются по имени ветки.
+
+## Расписание (cron на backend-VM)
+
+Аналитика — **cron-driven one-shot** (контейнер не крутит loop): host-cron в 08:00
+делает один прогон `analyze.py` (артефакты + отчёт), затем autopilot читает свежие
+артефакты. На `ubuntu@<BACKEND_VM_IP>`:
+
+```cron
+# 08:00 — прогон аналитики (Loki → state/*.json + email)
+0 8 * * * cd /home/ubuntu/abuse-controls/infra/demo-backend && /usr/bin/docker compose -f docker-compose.backend.yml --profile observability run --rm --entrypoint /opt/analytics/run.sh analytics >> /home/ubuntu/analytics-cron.log 2>&1
+# 08:30 — autopilot (опц.): draft-PR по свежим артефактам
+# 30 8 * * * cd /home/ubuntu/abuse-controls && scripts/blocklist-autopilot.sh >> /home/ubuntu/autopilot.log 2>&1
+```
+
+Edge-cron старого `daily-report.sh` отключён (аналитика переехала на backend).
 
 ## Что наблюдать
 
