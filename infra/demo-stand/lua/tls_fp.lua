@@ -344,10 +344,11 @@ function _M.build(config)
     _M._cached_gen_profiles  = nil
     _M._cached_gen_blocklist = nil
 
-    -- На init возвращаем нули — pull ещё не запускался. Точные счётчики
-    -- staged-таблиц видны в /metrics и в bac_log staging_match после первого
-    -- тика catalog_pull (≤ 30 сек после старта).
-    return _M, 0, 0, 0, 0, 0
+    -- Staged-таблицы пусты на init (pull ещё не запускался); их счётчики
+    -- видны в /metrics и в bac_log staging_match после первого тика
+    -- catalog_pull (≤ 30 сек). build() ничего не возвращает кроме модуля —
+    -- init.lua вызывает его только ради side-effects.
+    return _M
 end
 
 -- refresh — читает текущий gen из meta:get(gen_key) и, если он отличается

@@ -64,6 +64,7 @@
 
 local policy          = require "policy"
 local policy_matchers = require "policy_matchers"
+local staging_metrics = require "staging_metrics"
 
 local _M = {
     enabled    = true,
@@ -173,28 +174,6 @@ function _M.build(config)
     return _M
 end
 
--- reconcile_staging_metrics — on each ua_blacklist gen flip, prime a zero
--- counter for every new staged pattern (so /metrics shows it before the first
--- match) and drop stale counters for patterns that left staging (promoted or
--- removed) but only if still zero — preserves accumulated match history.
--- Mirrors tls_fp.reconcile_staging_metrics; missing metrics dict is a noop.
-local function reconcile_ua_staging_metrics(prev, new)
-    local m = ngx.shared.metrics
-    if not m then return end
-    local prefix = "staging:ua_blacklist:"
-    local newset = {}
-    for _, p in ipairs(new) do
-        newset[p] = true
-        m:safe_add(prefix .. p, 0)
-    end
-    for _, p in ipairs(prev or {}) do
-        if not newset[p] then
-            local key = prefix .. p
-            if (m:get(key) or 0) == 0 then m:delete(key) end
-        end
-    end
-end
-
 -- refresh — gen-cached rebuild of active_re / staging from the Channel C
 -- ua_blacklist snapshot (A11, 86exrtjpc). The catalog arrives as two keys per
 -- generation in antibot_ua_blacklist: `active:<gen>` (combined regex string)
@@ -218,7 +197,7 @@ function _M.refresh()
         _M.staging_re       = nil
         _M.staging_patterns = {}
         _M._cached_gen_ua   = gen
-        reconcile_ua_staging_metrics(prev, {})
+        staging_metrics.reconcile("ua_blacklist", prev, {})
         return
     end
 
@@ -240,7 +219,7 @@ function _M.refresh()
     _M.staging_patterns = pats
     _M.staging_re       = _M.combine_patterns(pats)
     _M._cached_gen_ua   = gen
-    reconcile_ua_staging_metrics(prev, pats)
+    staging_metrics.reconcile("ua_blacklist", prev, pats)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the

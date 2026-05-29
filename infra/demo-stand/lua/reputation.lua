@@ -77,6 +77,7 @@
 
 local policy          = require "policy"
 local policy_matchers = require "policy_matchers"
+local staging_metrics = require "staging_metrics"
 
 local _M = {
     enabled        = true,
@@ -259,28 +260,6 @@ function _M.build(config)
     return _M, wl_n, bl_n
 end
 
--- reconcile_ip_staging_metrics — on each ip_blocklist gen flip, prime a zero
--- counter for every new staged CIDR (so /metrics shows it before the first
--- match) and drop stale counters for CIDRs that left staging (promoted or
--- removed) but only if still zero — preserves accumulated match history.
--- Mirrors hygiene / tls_fp; missing metrics dict is a noop.
-local function reconcile_ip_staging_metrics(prev, new)
-    local m = ngx.shared.metrics
-    if not m then return end
-    local prefix = "staging:ip_blocklist:"
-    local newset = {}
-    for _, c in ipairs(new) do
-        newset[c] = true
-        m:safe_add(prefix .. c, 0)
-    end
-    for _, c in ipairs(prev or {}) do
-        if not newset[c] then
-            local key = prefix .. c
-            if (m:get(key) or 0) == 0 then m:delete(key) end
-        end
-    end
-end
-
 -- refresh — gen-cached rebuild of the active + staging ip_blocklist matchers
 -- from the Channel C snapshot (A11, 86exrtjpc). antibot_ip_blocklist holds
 -- `<cidr>:<gen>` → "<status>:block"; on a gen flip we scan the current gen,
@@ -304,7 +283,7 @@ function _M.refresh()
         _M.blocklist_staging        = nil
         _M.blocklist_staging_values = {}
         _M._cached_gen_ip           = gen
-        reconcile_ip_staging_metrics(prev, {})
+        staging_metrics.reconcile("ip_blocklist", prev, {})
         return
     end
 
@@ -355,7 +334,7 @@ function _M.refresh()
     end
 
     _M._cached_gen_ip = gen
-    reconcile_ip_staging_metrics(prev, _M.blocklist_staging_values)
+    staging_metrics.reconcile("ip_blocklist", prev, _M.blocklist_staging_values)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the

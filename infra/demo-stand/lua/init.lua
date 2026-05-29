@@ -318,11 +318,22 @@ end
 -- a complete re-seed (no stale entries possible).
 local function seed_ua_blacklist_cold()
     if not ua_dict then return 0, 0 end
+    -- Log set() failures loudly: refresh() rebuilds active_re from this gen-0
+    -- dict on the first request, so a silently-dropped seed would disable the
+    -- ua_blacklist rule below what build() compiled from conf (matches the
+    -- load-or-die ethos of seed_blocklist_cold).
     local active = hygiene.build_combined(config.ua_blacklist) or ""
-    ua_dict:set("active:0", active)
+    local ok1, e1 = ua_dict:set("active:0", active)
+    if not ok1 then
+        ngx.log(ngx.ERR, "[demo] ua_blacklist seed active:0 failed: ", tostring(e1),
+            " — edge may under-block until the first Channel C pull")
+    end
     local _, staging_pats = hygiene.build_staging(config.ua_blacklist)
     staging_pats = staging_pats or {}
-    ua_dict:set("staging:0", require("cjson.safe").encode(staging_pats))
+    local ok2, e2 = ua_dict:set("staging:0", require("cjson.safe").encode(staging_pats))
+    if not ok2 then
+        ngx.log(ngx.ERR, "[demo] ua_blacklist seed staging:0 failed: ", tostring(e2))
+    end
     return (active ~= "" and 1 or 0), #staging_pats
 end
 
@@ -336,8 +347,16 @@ local function seed_ip_blocklist_cold()
     for _, e in ipairs(config.blocklist_ip) do
         if e.value and e.value ~= "" then
             local status = (e.attrs and e.attrs.status == "staging") and "staging" or "active"
-            if ip_dict:set(e.value .. ":0", status .. ":block") then
+            local ok, err = ip_dict:set(e.value .. ":0", status .. ":block")
+            if ok then
                 if status == "active" then act = act + 1 else stg = stg + 1 end
+            else
+                -- Loud: refresh() rebuilds the matcher from this gen-0 dict on
+                -- the first request; a dropped CIDR would silently narrow the
+                -- ip_blocklist rule until the first Channel C pull.
+                ngx.log(ngx.ERR, "[demo] ip_blocklist seed ", e.value,
+                    ":0 failed: ", tostring(err),
+                    " — edge may under-block until the first Channel C pull")
             end
         end
     end
