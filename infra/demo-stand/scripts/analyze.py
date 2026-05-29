@@ -46,6 +46,9 @@ REPORTS_DIR = ROOT / "reports"
 CATALOGS_DIR = Path(os.environ.get("CATALOGS_DIR") or (ROOT / "catalogs"))
 SEEN_FPS = STATE_DIR / "seen-fps.json"
 IP_CACHE = STATE_DIR / "ip-cache.json"
+# When each fp first appeared in the catalog as staging — the true dwell clock
+# for the staging→active gate (§D), independent of the Loki window span.
+STAGING_SINCE_FILE = STATE_DIR / "staging-since.json"
 # Pre-recreate log snapshots. update.sh dumps `docker logs` here before
 # rebuilding the container (a recreate drops the container's docker-json log
 # history). We fold these back in so a rebuild deploy leaves no gap.
@@ -583,18 +586,16 @@ def _ip_in_whitelist(ip, nets):
     return any(addr in n for n in nets)
 
 
-# A request the cascade let through on a positive-identity rule (not just an
-# absence of bot signal). If a fp ever rode in on one of these, blocking it is
-# unsafe — used as the verified/allow leg of the allowlist gate. Log-based
-# approximation of the verified_bot DB lookup (which analyze.py cannot reach).
-IDENTITY_ALLOW_RULES = {"verified_bot", "ip_whitelist", "cookie_valid"}
-
-
 def _fp_has_identity_allow(events_for_fp):
-    return any(
-        e.get("verdict") == "allow" and e.get("rule") in IDENTITY_ALLOW_RULES
-        for e in events_for_fp
-    )
+    """True if the cascade ever let this fp through on a positive-identity rule.
+
+    verdict=="allow" is emitted only by clearance/identity rules — ip_whitelist,
+    policy.ip_whitelist (reputation.lua), cookie_valid (verdict.lua), challenge_pass
+    (challenge_verify.lua) — never by a mere absence of bot signal (that is "pass").
+    We match on the verdict, NOT a hardcoded rule-name list: the rule names drift
+    (e.g. policy.ip_whitelist) and a missed name silently weakens the allowlist veto.
+    If a fp rode in on any of these, auto-blocking it is unsafe."""
+    return any(e.get("verdict") == "allow" for e in events_for_fp)
 
 
 def _parse_blocklist_yaml():
@@ -618,6 +619,44 @@ def _parse_blocklist_yaml():
         if fp and status:
             out[fp] = status
     return out
+
+
+def _require_catalog():
+    """Abort loudly if the blocklist catalog file is missing. Otherwise the
+    promotion gates (dedup/allowlist) and the stale/staging views would silently
+    degrade to pass-all / empty (a missing catalogs mount must NOT read as 'no
+    bad fps', else the autopilot auto-promotes unvetoed)."""
+    p = CATALOGS_DIR / "tls_fp_blocklist.yaml"
+    if not p.exists():
+        sys.stderr.write(
+            f"analyze: blocklist catalog not found at {p} — refusing to emit gate "
+            f"data that would silently pass-all. Check the catalogs mount / CATALOGS_DIR.\n")
+        sys.exit(3)
+
+
+def _reconcile_staging_since(now_utc):
+    """Maintain state/staging-since.json: stamp when each fp first appears in the
+    catalog as staging (≈ when it entered staging), and drop entries that are no
+    longer staging. Returns {fp: datetime} for the dwell calculation. The stamp
+    can lag entry by up to one analytics interval — close enough for a 48h gate,
+    and far more correct than the Loki-window span it replaces."""
+    staging = {fp for fp, st in _parse_blocklist_yaml().items() if st == "staging"}
+    try:
+        raw = json.loads(STAGING_SINCE_FILE.read_text())
+    except Exception:
+        raw = {}
+    now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = {fp: raw.get(fp, now_iso) for fp in staging}  # add new, drop departed
+    if out != raw:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STAGING_SINCE_FILE.write_text(json.dumps(out, indent=2, sort_keys=True))
+    since_map = {}
+    for fp, iso in out.items():
+        try:
+            since_map[fp] = _parse_iso(iso)
+        except Exception:
+            since_map[fp] = now_utc
+    return since_map
 
 
 def split_24h(events, now_utc):
@@ -896,10 +935,14 @@ def find_stale_blocklist_entries(seen, now_utc, ttl_days):
         days = [d for d in (_parse_day(x) for x in entry.get("days_seen", [])) if d]
         last_seen = max(days) if days else None
         if last_seen is None:
+            # No observation history — we CANNOT confirm this entry is stale (it
+            # may have been promoted moments ago, or state was reset). Mark it
+            # unknown with stale=False so the autopilot never auto-demotes it;
+            # it is surfaced for a human to look at, not acted on automatically.
             out.append({"fp": fp, "status": status, "last_seen": None,
                         "days_silent": None, "lifetime": entry.get("count", 0),
-                        "unknown": True, "stale": True,
-                        "reason": "нет наблюдений в state"})
+                        "unknown": True, "stale": False,
+                        "reason": "нет наблюдений в state — нужен человек, не авто-демоут"})
             continue
         days_silent = (today - last_seen).days
         if days_silent > ttl_days:
@@ -911,10 +954,18 @@ def find_stale_blocklist_entries(seen, now_utc, ttl_days):
     return out
 
 
-def find_staging_observation(events, now_utc, min_staging_hours):
+def find_staging_observation(events, now_utc, min_staging_hours, since_map=None):
     """For each staging entry in the catalog, summarise what it actually matched
     (staging_match) over the fetched window and return the activation verdict
-    (§D). Needs a window ≥ min_staging_hours — the caller fetches accordingly."""
+    (§D). Needs a window ≥ min_staging_hours — the caller fetches accordingly.
+
+    `since_map` (fp → datetime the entry was first seen in staging) gives the TRUE
+    staging dwell time. Without it observed_hours degrades to the span of matched
+    events in the fetched window, which is NOT dwell — a fp matched near the start
+    of the window could look "observed 48h" minutes after promotion, and a
+    long-staged fp whose traffic is all recent would never reach the threshold.
+    The caller (main) maintains the since_map in staging-since.json."""
+    since_map = since_map or {}
     whitelist_nets = _load_ip_whitelist()
     catalog = _parse_blocklist_yaml()
     staging_fps = [fp for fp, st in catalog.items() if st == "staging"]
@@ -926,8 +977,11 @@ def find_staging_observation(events, now_utc, min_staging_hours):
         hs = human_share(matched)
         allowlist_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
             or _fp_has_identity_allow(matched)
-        ts = [e["ts_dt"] for e in matched if e.get("ts_dt")]
-        observed_hours = round((now_utc - min(ts)).total_seconds() / 3600, 1) if ts else 0.0
+        if fp in since_map:
+            observed_hours = round((now_utc - since_map[fp]).total_seconds() / 3600, 1)
+        else:
+            ts = [e["ts_dt"] for e in matched if e.get("ts_dt")]
+            observed_hours = round((now_utc - min(ts)).total_seconds() / 3600, 1) if ts else 0.0
 
         if n == 0:
             verdict = "observe"  # silent — the stale path will pick it up
@@ -1485,7 +1539,14 @@ def main() -> int:
     events_24h = split_24h(events_all, now_utc)
     gen = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Loki carries no resty init marker, so _fetch_loki can't report the enforced
+    # blocklist size — derive it from the catalog's active entries instead, else
+    # the report's mode line would falsely read SHADOW under the Loki source.
+    if args.source == "loki":
+        blocklist_size = sum(1 for s in _parse_blocklist_yaml().values() if s == "active")
+
     if args.candidates_json:
+        _require_catalog()
         enrich_ips({e["remote"] for e in events_24h}, ip_cache)
         high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
         sys.stdout.write(json.dumps({
@@ -1498,6 +1559,7 @@ def main() -> int:
         return 0
 
     if args.stale_blocklist_json:
+        _require_catalog()
         sys.stdout.write(json.dumps({
             "generated_utc": gen, "ttl_days": args.ttl_days,
             "stale": find_stale_blocklist_entries(seen, now_utc, args.ttl_days),
@@ -1505,13 +1567,16 @@ def main() -> int:
         return 0
 
     if args.staging_observation_json:
+        _require_catalog()
         # Observation needs a window ≥ min_staging_hours; events_all is the full
         # fetched window (~24h on docker source, widened on the Loki source).
+        # since_map gives true staging dwell, independent of the window span.
+        since_map = _reconcile_staging_since(now_utc)
         sys.stdout.write(json.dumps({
             "generated_utc": gen, "min_staging_hours": args.min_staging_hours,
             "min_matches": MIN_STAGING_MATCHES,
             "observations": find_staging_observation(events_all, now_utc,
-                                                     args.min_staging_hours),
+                                                     args.min_staging_hours, since_map),
         }, ensure_ascii=False, indent=2) + "\n")
         return 0
 

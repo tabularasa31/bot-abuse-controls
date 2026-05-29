@@ -15,7 +15,9 @@
 #   --activate          flip an existing staging entry to active (uses §D observation)
 #   --ttl-days N        advisory review-by = today+N in the passport (default 14)
 #   --force-low-volume  promote despite the volume gate (operator override)
-#   --force             skip the staging-observation verdict guard on --activate
+#   --force             override safety guards: the staging-observation verdict
+#                       guard on --activate, and the "fp absent from candidates.json
+#                       → gates unverifiable" refusal on a fresh promote
 #   --auto              open the PR as a draft (autopilot mode; never auto-merge)
 #   --dry-run           show the catalog diff + PR body, change nothing
 #   --base BRANCH       PR base branch (default main)
@@ -139,7 +141,11 @@ if [ -n "$SCORE" ]; then
   fi
   [ "$INTENT" = "false" ] && bl_warn "no impersonator/recon intent — общий tool-fp может зацепить легит-автоматизацию; рассмотри ua_blacklist/ip_blocklist"
 else
-  bl_warn "fp not in candidates.json — promoting on operator judgement (evidence: manual)"
+  # No candidate evidence → we cannot verify the purity/allowlist/volume vetoes.
+  # Refuse by default so a real-browser fp can't be promoted unchecked; --force
+  # is the explicit operator override.
+  [ "$FORCE" = 1 ] || bl_die "fp not in candidates.json — cannot verify safety gates (purity/allowlist/volume). Re-run analytics so it appears, or pass --force to promote on operator judgement."
+  bl_warn "fp not in candidates.json — promoting WITHOUT gate verification (--force, evidence: manual)"
 fi
 
 REVIEW_BY="$(python3 - "$TODAY" "$TTL_DAYS" <<'PY'
