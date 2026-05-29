@@ -87,4 +87,29 @@ activate staging-записей с verdict=activate; auto-demote молчащи�
 
 ## Verified on stand
 
-_(заполняется после e2e: дата, commit, fp, наблюдаемые числа staging_match / activate / demote)_
+2026-05-29 (D1 на main `2506c03`, A11 staging-доставка `f984716` уже в main).
+
+- **Producer (backend/Loki).** Контейнер `antibot-analytics` поднят на backend-VM
+  (observability-профиль), прочитал **живой Loki** и записал `state/candidates.json`
+  (**14 HIGH / 11 MEDIUM / 31 LOW**) + `stale.json` + `staging-observation.json`.
+  `analyze.py --source loki` работает end-to-end.
+- **Promote → PR.** `promote-fp.sh L13d1300_69e852b66fc7_10d89aa70559 --reason "..."`
+  открыл чистый staging-PR (#106) от main с evidence-паспортом (score 6 HIGH:
+  impersonator go-http-client + leakix recon, multi-IP 13, DC, `human_share 0.0`,
+  gates ✓); CI зелёный.
+- **Channel C staging-доставка.** После мержа #106 эдж (`/__admin` → Blocklist)
+  показывает `L13d1300_69e852b66fc7_10d89aa70559 → staging:block` — запись доехала
+  и загружена как match-but-observe (НЕ 403, в отличие от `active:block`-записей,
+  которыми эдж в тот момент блокировал live jitsi-scanner). Подтверждает, что
+  staging реально доходит до эджа (разрыв, закрытый 86exrtjpc).
+- **`staging_match`.** Метрика `antibot_staging_match_total` (observe-only) заведена
+  на эдже; инкрементируется при следующем запросе этого fp (зависит от тайминга
+  live-трафика конкретного fp — на момент проверки этот fp ещё не делал запрос
+  после загрузки).
+- **Активация.** Гейтится §D dwell-часами (`staging-since.json`, дефолт 48ч) +
+  чистым наблюдением (`human_share=0`): выполняется после окна через
+  `promote-fp.sh <fp> --activate` (или `--force` для демо) → второй PR в `active`.
+
+> Acceptance «≥1 HIGH-кандидат проведён через flow» закрыт по доставке: живой
+> HIGH из Loki → promote-PR → merge → загружен на эдж как staging. Реальный
+> `verdict=block` наступает после активации (48ч dwell / `--force`).
