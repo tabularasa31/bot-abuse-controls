@@ -31,9 +31,10 @@ type Data struct {
 	// (parser нужно обновлять). За свежесть контента отвечает ETag, не Version.
 	Version string `yaml:"version"`
 
-	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → "block"
-	UABlacklist          []string                  `yaml:"ua_blacklist"`            // глобальные regex-паттерны
-	IPBlocklist          map[string]string         `yaml:"ip_blocklist"`            // CIDR → "block"
+	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → status (active|staging); wire-формат "<status>:block" (A11)
+	UABlacklist          []string                  `yaml:"ua_blacklist"`            // активные глобальные regex-паттерны
+	UABlacklistStaging   []string                  `yaml:"-"`                       // staging-паттерны (A11): отдельный combined regex, эдж пишет staging_match, не блокирует
+	IPBlocklist          map[string]string         `yaml:"ip_blocklist"`            // CIDR → status (active|staging); wire-формат "<status>:block" (A11)
 	IPWhitelist          []string                  `yaml:"ip_whitelist"`            // CIDR (системный)
 	ASNDatacenters       []uint32                  `yaml:"asn_datacenters"`         // ASN-номера
 	TLSFPCatalog         map[string]TLSFPCatalog   `yaml:"tls_fp_catalog"`          // hash_b → { family, status }; правило tls_fp_impersonator
@@ -100,9 +101,10 @@ type RateRule struct {
 // и кладётся сюда: это часть «конфига», а не runtime state.
 type SlowData struct {
 	Version              string
-	TLSFPBlocklist       map[string]string
-	UABlacklist          []string
-	IPBlocklist          map[string]string
+	TLSFPBlocklist       map[string]string // fp → status (active|staging)
+	UABlacklist          []string          // активные паттерны
+	UABlacklistStaging   []string          // staging-паттерны (A11)
+	IPBlocklist          map[string]string // CIDR → status (active|staging)
 	IPWhitelist          []string
 	ASNDatacenters       []uint32
 	TLSFPCatalog         map[string]TLSFPCatalog
@@ -145,6 +147,7 @@ func Merge(s *SlowData, r *RuntimeData) *Data {
 			d.TLSFPBlocklist = s.TLSFPBlocklist
 		}
 		d.UABlacklist = s.UABlacklist
+		d.UABlacklistStaging = s.UABlacklistStaging
 		if s.IPBlocklist != nil {
 			d.IPBlocklist = s.IPBlocklist
 		}
@@ -219,6 +222,7 @@ func normalize(d *Data) {
 	// срезы — append-loop пуст), и ETag дрейфил бы между «никогда не было
 	// записей» и «была одна, удалили». PR #43 review (follow-up).
 	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
+	d.UABlacklistStaging = ensureStringSlice(dedupSortStrings(d.UABlacklistStaging))
 	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
 	d.ASNDatacenters = ensureUint32Slice(dedupSortUint32(d.ASNDatacenters))
 	for h, p := range d.Policy {
@@ -311,6 +315,14 @@ func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("ua_blacklist[%d]: invalid regex %q: %w", i, p, err)
+		}
+	}
+	// Staging-паттерны валидируем тем же предикатом, что и active (A11): они
+	// едут в отдельный combined regex и компилируются на эдже так же, поэтому
+	// битый staging-regex должен валить Load до публикации, а не позже.
+	for i, p := range d.UABlacklistStaging {
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("ua_blacklist(staging)[%d]: invalid regex %q: %w", i, p, err)
 		}
 	}
 	for cidr := range d.IPBlocklist {

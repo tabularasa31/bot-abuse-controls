@@ -19,6 +19,23 @@ function _M.key(fp, gen)
     return fp .. ":" .. gen
 end
 
+-- parse_value: разбирает значение записи tls_fp_blocklist (значение в
+-- shared_dict, НЕ ключ) в (status, verdict). Wire-формат A11 (Channel C,
+-- store.buildTLSFPBlocklist): "<status>:<verdict>", напр. "active:block" /
+-- "staging:block". status разводит блокировку (active → verdict=block) от
+-- наблюдения (staging → staging_match, без блокировки).
+--
+-- Legacy bare "block" (старый init-seed / pre-A11 backend payload) трактуем
+-- как active — backward-compat, чтобы смена wire-формата не требовала
+-- X-Catalog-Version major bump (catalog_pull принимает major=1). nil /
+-- не-строка → nil (читатель трактует как «нет записи» = allow).
+function _M.parse_value(v)
+    if type(v) ~= "string" then return nil end
+    local status, verdict = v:match("^([^:]+):(.+)$")
+    if status then return status, verdict end
+    return "active", v
+end
+
 -- Inverse of key(): if `key` belongs to generation `gen` return the bare fp,
 -- else nil. Used by the /__admin view and the §В1 pull's old-generation sweep.
 function _M.match(key, gen)

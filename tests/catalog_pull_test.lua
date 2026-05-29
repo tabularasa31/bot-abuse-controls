@@ -35,6 +35,14 @@ package.loaded["cjson.safe"] = {
         if v == nil then return nil, "no decode stub registered for " .. tostring(s) end
         return v
     end,
+    -- Minimal encode for the ua_blacklist apply test: arrays → a stable
+    -- "[a,b]" string. Sufficient to assert the staging key was written.
+    encode = function(v)
+        if type(v) == "table" then
+            return "[" .. table.concat(v, ",") .. "]"
+        end
+        return tostring(v)
+    end,
 }
 
 local logged = {}
@@ -77,6 +85,8 @@ ngx.shared = {
     tls_fp_blocklist = new_dict(),
     meta         = new_dict(),
     metrics      = new_dict(),
+    antibot_ua_blacklist = new_dict(),
+    antibot_ip_blocklist = new_dict(),
 }
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
@@ -718,6 +728,53 @@ do
 
     os.getenv = real_getenv
     cp.http_module = nil
+end
+
+-- ===========================================================================
+-- A11 (86exrtjpc): ua_blacklist + ip_blocklist descriptors.
+-- ===========================================================================
+
+-- ua_blacklist: object payload {active=string, staging=array}. apply writes
+-- two keys per gen; sweep deletes the old gen's two keys.
+do
+    local uacat = cp.catalogs.ua_blacklist
+    check_true(uacat ~= nil, "ua_blacklist descriptor registered")
+    local d = ngx.shared.antibot_ua_blacklist
+    d._store = {}
+    local ok, n = uacat.apply(d, { active = "(curl)|(wget)", staging = { "scrapy", "ahrefs" } }, 3)
+    check_true(ok, "ua_blacklist apply ok")
+    check(n, 2, "ua_blacklist apply wrote 2 keys")
+    check(d:get("active:3"), "(curl)|(wget)", "ua_blacklist active:3 stored combined regex")
+    check(d:get("staging:3"), "[scrapy,ahrefs]", "ua_blacklist staging:3 stored encoded list")
+    -- seed an old gen to prove sweep removes exactly the old gen's two keys.
+    d:set("active:2", "(old)"); d:set("staging:2", "[old]")
+    local swept = uacat.sweep(d, 2)
+    check(swept, 2, "ua_blacklist sweep removed 2 old-gen keys")
+    check(d:get("active:2"), nil, "ua_blacklist sweep deleted active:2")
+    check(d:get("active:3"), "(curl)|(wget)", "ua_blacklist sweep kept current gen")
+end
+
+-- ip_blocklist: per-key map payload {cidr → "<status>:block"}. apply writes
+-- `<cidr>:<gen>`; sweep removes the old gen by suffix.
+do
+    local ipcat = cp.catalogs.ip_blocklist
+    check_true(ipcat ~= nil, "ip_blocklist descriptor registered")
+    local d = ngx.shared.antibot_ip_blocklist
+    d._store = {}
+    local ok, n = ipcat.apply(d, {
+        ["203.0.113.0/24"] = "active:block",
+        ["2001:db8::/48"]  = "staging:block",
+    }, 5)
+    check_true(ok, "ip_blocklist apply ok")
+    check(n, 2, "ip_blocklist apply wrote 2 keys")
+    check(d:get("203.0.113.0/24:5"), "active:block", "ip_blocklist active cidr stored")
+    check(d:get("2001:db8::/48:5"), "staging:block", "ip_blocklist staging ipv6 cidr stored")
+    -- old-gen ghost + current; sweep(4) removes only the `:4` key.
+    d:set("198.51.100.0/24:4", "active:block")
+    local swept = ipcat.sweep(d, 4)
+    check(swept, 1, "ip_blocklist sweep removed 1 old-gen key")
+    check(d:get("198.51.100.0/24:4"), nil, "ip_blocklist sweep deleted old gen")
+    check(d:get("203.0.113.0/24:5"), "active:block", "ip_blocklist sweep kept current gen")
 end
 
 -- ===========================================================================

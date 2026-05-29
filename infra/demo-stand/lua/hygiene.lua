@@ -36,12 +36,11 @@
 -- hygiene rule is recorded — it does not stop the wider cascade):
 --   1.  method_not_allowed     — method outside the configured whitelist
 --   2.  ua_blacklist           — UA matches the combined regex of ACTIVE
---                                system patterns. Staged patterns are dropped
---                                (build_combined skips status=staging) and not
---                                yet recorded into staging_match: A11 implemented
---                                staging_match for the three tls_fp catalogs
---                                (tls_fp.lua); extending it to ua_blacklist /
---                                ip_blocklist is the "и далее" follow-up.
+--                                system patterns. Staged patterns (status=
+--                                staging) are kept out of active_re and matched
+--                                separately via staging_re (step 3): they record
+--                                staging_match: ["ua_blacklist:<pattern>"] and
+--                                never block (A11 staged rollout, 86exrtjpc).
 --   2b. policy.ua_blacklist    — UA matches the per-host pattern list pulled
 --                                from policy[host].ua_blacklist (86exr05xt).
 --                                Compiled once per (host, gen) in
@@ -52,16 +51,20 @@
 -- config-distribution.md). bac_log already records host and emits
 -- resource_id as null.
 --
--- Config model. Unlike the production edge (RFC §A2/§В1: a backend-built
--- combined regex pushed via Channel C with a generation counter and a
--- per-worker shared-dict cache), the demo stand loads ua_blacklist.conf from
--- disk once in init_by_lua (config.lua). build() runs there — in the master
--- before workers fork — so the method set and combined regex are inherited by
--- every worker for free; no shared dict, no generation handshake (hot-reload
--- is out of scope).
+-- Config model. The method whitelist + the kill-switch flags are compiled once
+-- in init_by_lua (build(), master pre-fork) from defaults.conf. The ua_blacklist
+-- patterns follow the production RFC §A2/§В1 model (A11, 86exrtjpc): a
+-- backend-built combined regex (+ a staging pattern list) pushed via Channel C
+-- with a generation counter and a per-worker cache. build() seeds the
+-- cold-start matchers from the local ua_blacklist.conf and init.lua seeds gen 0
+-- into the antibot_ua_blacklist shared_dict; refresh() (per request, gen-cached)
+-- then swaps to the Channel C snapshot (gen 1+, sourced from catalogs/
+-- ua_blacklist.yaml). The per-host policy.ua_blacklist (step 2b) is a separate
+-- catalog applied via policy_matchers and is unaffected.
 
 local policy          = require "policy"
 local policy_matchers = require "policy_matchers"
+local staging_metrics = require "staging_metrics"
 
 local _M = {
     enabled    = true,
@@ -82,6 +85,33 @@ function _M.build_combined(ua_list)
     end
     if #active == 0 then return nil end
     return "(" .. table.concat(active, ")|(") .. ")"
+end
+
+-- pure: STAGING ua_blacklist branch (A11, 86exrtjpc). Returns (combined_re,
+-- patterns): a combined regex over status=staging patterns (cheap "any match"
+-- gate) plus the flat pattern list (for per-pattern attribution into
+-- staging_match — a combined match alone can't say which alternative fired).
+-- (nil, {}) when there are no staged patterns. Staged patterns NEVER block:
+-- run() records staging_match: ["ua_blacklist:<pattern>"] and falls through.
+function _M.build_staging(ua_list)
+    local staging = {}
+    for _, e in ipairs(ua_list or {}) do
+        local pat = e.value
+        local status = e.attrs and e.attrs.status
+        if pat and pat ~= "" and status == "staging" then
+            staging[#staging + 1] = pat
+        end
+    end
+    if #staging == 0 then return nil, {} end
+    return "(" .. table.concat(staging, ")|(") .. ")", staging
+end
+
+-- pure: wrap a plain array of patterns into a combined alternation, or nil for
+-- an empty list. Used by refresh() to build staging_re from the Channel C
+-- pattern list (build_staging does the same for the parse_list shape).
+function _M.combine_patterns(patterns)
+    if not patterns or #patterns == 0 then return nil end
+    return "(" .. table.concat(patterns, ")|(") .. ")"
 end
 
 -- pure: header anomaly heuristic. Base case (RFC §A2 / vision.md T0): an
@@ -122,14 +152,74 @@ function _M.build(config)
     _M.ua_blacklist_enabled = ua_rule.enabled ~= false
     if not _M.ua_blacklist_enabled then
         _M.active_re = nil
+        -- Staging observation honours the same kill-switch: an operator
+        -- disabling ua_blacklist for incident rollback expects no UA matching
+        -- anywhere, including observe-only staging.
+        _M.staging_re = nil
+        _M.staging_patterns = {}
     else
         _M.active_re = _M.build_combined(config.ua_blacklist)
+        _M.staging_re, _M.staging_patterns = _M.build_staging(config.ua_blacklist)
     end
 
     -- Stage off via the shared kill-switch helper (config-templates.md kill_switch).
     _M.enabled = require("config").stage_enabled(defaults, "hygiene")
 
+    -- Per-worker gen cache for the Channel C ua_blacklist refresh (A11,
+    -- 86exrtjpc). nil = "first refresh rebuilds from current gen". The matchers
+    -- set above from the local conf are the cold-start state; refresh() takes
+    -- over once init.lua seeds gen 0 (conf) and Channel C lands gen 1+ (yaml).
+    _M._cached_gen_ua = nil
+
     return _M
+end
+
+-- refresh — gen-cached rebuild of active_re / staging from the Channel C
+-- ua_blacklist snapshot (A11, 86exrtjpc). The catalog arrives as two keys per
+-- generation in antibot_ua_blacklist: `active:<gen>` (combined regex string)
+-- and `staging:<gen>` (cjson array of staged patterns). Cheap in steady state
+-- (one meta:get + int compare); rebuilds only on a gen flip. Honours the
+-- ua_blacklist kill-switch (active/staging stay nil when disabled). When the
+-- gen key is absent (catalog never seeded/pulled) it keeps the build()-time
+-- conf state — safe fallback identical to pre-Channel-C behaviour.
+function _M.refresh()
+    if not ngx or not ngx.shared then return end
+    local meta = ngx.shared.meta
+    if not meta then return end
+    local gen = meta:get("ua_blacklist_gen")
+    if gen == nil or gen == _M._cached_gen_ua then return end
+    local dict = ngx.shared.antibot_ua_blacklist
+    if not dict then return end
+
+    if not _M.ua_blacklist_enabled then
+        local prev = _M.staging_patterns
+        _M.active_re        = nil
+        _M.staging_re       = nil
+        _M.staging_patterns = {}
+        _M._cached_gen_ua   = gen
+        staging_metrics.reconcile("ua_blacklist", prev, {})
+        return
+    end
+
+    local active = dict:get("active:" .. gen)
+    _M.active_re = (type(active) == "string" and active ~= "") and active or nil
+
+    local cjson = package.loaded["cjson.safe"] or require "cjson.safe"
+    local raw = dict:get("staging:" .. gen)
+    local pats = {}
+    if type(raw) == "string" and raw ~= "" then
+        local decoded = cjson.decode(raw)
+        if type(decoded) == "table" then
+            for _, p in ipairs(decoded) do
+                if type(p) == "string" and p ~= "" then pats[#pats + 1] = p end
+            end
+        end
+    end
+    local prev = _M.staging_patterns
+    _M.staging_patterns = pats
+    _M.staging_re       = _M.combine_patterns(pats)
+    _M._cached_gen_ua   = gen
+    staging_metrics.reconcile("ua_blacklist", prev, pats)
 end
 
 -- Called per request from verdict.lua, after bac_log.init(). Records the
@@ -142,6 +232,10 @@ end
 -- last-writer-wins on the verdict is intentional).
 function _M.run()
     if not _M.enabled then return false end
+
+    -- Pull the latest Channel C ua_blacklist snapshot (A11). Cheap in steady
+    -- state (gen compare); rebuilds active_re / staging only on a gen flip.
+    _M.refresh()
 
     local bac_log = require "bac_log"
 
@@ -197,6 +291,27 @@ function _M.run()
                 bac_log.set_verdict("hygiene", "block", "policy.ua_blacklist")
                 policy.enforce(403)
                 return true
+            end
+        end
+    end
+
+    -- 3. Staged ua_blacklist patterns (A11, 86exrtjpc). Observe-only: matched
+    -- with the same predicate as the active list but writes only staging_match
+    -- (["ua_blacklist:<pattern>"]) — never a verdict, never a 403, never a
+    -- short-circuit. Reached only when no active rule matched above (those
+    -- return), so this records what WOULD fire after promotion to active.
+    -- Gated on the same ua_blacklist_enabled kill-switch (staging_re is nil
+    -- when disabled). The combined regex is the cheap gate; on a hit we loop
+    -- the small staged list to attribute the specific pattern(s).
+    if _M.staging_re then
+        local from, _, err = ngx.re.find(ua, _M.staging_re, "jo")
+        if err then
+            ngx.log(ngx.ERR, "ua_blacklist staging regex error, fail-open: ", err)
+        elseif from then
+            for _, pat in ipairs(_M.staging_patterns) do
+                if ngx.re.find(ua, pat, "jo") then
+                    bac_log.add_staging_match("ua_blacklist:" .. pat)
+                end
             end
         end
     end

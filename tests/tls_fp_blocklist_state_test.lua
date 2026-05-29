@@ -55,6 +55,25 @@ check(fp_state.match("abc:10", 1), nil,
 check(fp_state.META_GEN_KEY, "tls_fp_blocklist_gen", "META_GEN_KEY is stable")
 
 -- ===========================================================================
+-- parse_value() — split a stored value "<status>:<verdict>" (A11). status
+-- decides block (active) vs observe (staging); legacy bare "block" → active.
+-- ===========================================================================
+
+local function pv(v)
+    local s, verd = fp_state.parse_value(v)
+    return (s or "nil") .. "/" .. (verd or "nil")
+end
+
+check(pv("active:block"),  "active/block",  "parse_value active:block")
+check(pv("staging:block"), "staging/block", "parse_value staging:block")
+check(pv("block"),         "active/block",  "parse_value bare 'block' -> active (legacy)")
+check(pv(nil),             "nil/nil",       "parse_value nil -> nil")
+check(pv(123),             "nil/nil",       "parse_value non-string -> nil")
+-- Only the FIRST colon splits status from verdict (verdict may carry colons).
+check((fp_state.parse_value("staging:a:b")), "staging",
+    "parse_value splits on first colon only")
+
+-- ===========================================================================
 
 if failed > 0 then
     io.stderr:write(string.format("\n%d passed, %d FAILED\n", passed, failed))
