@@ -57,7 +57,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": ["last"],
           "fields": "",
           "values": false
         },
@@ -71,7 +71,7 @@
           "editorMode": "code",
           "expr": "sum by (verdict) (count_over_time({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [$__range]))",
           "legendFormat": "{{verdict}}",
-          "queryType": "instant",
+          "queryType": "range",
           "refId": "A"
         }
       ],
