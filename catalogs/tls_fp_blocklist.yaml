@@ -39,3 +39,8 @@
 
 # curl as Chrome+Firefox (dual UA), 3 IP
 "L13i19h2_f3fd9e8f6e2b_2d5fbeed7632": active
+
+# promoted 2026-05-29 — reason: go-http-client impersonator + leakix-scanner recon (multi-IP, DC ASN, 142 lifetime events)
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 13 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
+# human_share 0.0 · events 142 · review-by 2026-06-12
+"L13d1300_69e852b66fc7_10d89aa70559": staging
