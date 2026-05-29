@@ -43,7 +43,7 @@ local _, rate_n = require("rate_limit").build(config)
 -- tls_fp_browser_profiles) приезжают через Channel C (86exrtjpc), так что
 -- build() заводит только cold-start state + kill-switch flag; staging-таблицы
 -- пусты на init и наполняются в tls_fp.refresh() после первого pull.
-local tls_fp = require("tls_fp").build(config)
+require("tls_fp").build(config)
 
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
 -- inherit the handles on fork. Fail-open: if the license-gated .mmdb files (or
