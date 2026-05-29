@@ -17,25 +17,13 @@ mkdir -p "$STATE"
 
 echo "[analytics] $(date -u +%FT%TZ) source=${BAC_SOURCE:-loki} loki=${LOKI_URL:-http://loki:3100}"
 
-# Machine-readable views for the promotion tooling. Written to temp then moved
-# so the host autopilot never reads a half-written file.
-emit() {  # <artifact-name> <analyze-args...>
-  local name="$1"; shift
-  if python3 "$ANALYZE" "$@" > "$STATE/.$name.tmp" 2>/dev/null; then
-    mv "$STATE/.$name.tmp" "$STATE/$name"
-    echo "[analytics] wrote state/$name"
-  else
-    rm -f "$STATE/.$name.tmp"
-    echo "[analytics] WARN failed to write state/$name"
-  fi
-}
-emit candidates.json          --candidates-json
-emit stale.json               --stale-blocklist-json --ttl-days "${BAC_TTL_DAYS:-14}"
-emit staging-observation.json --staging-observation-json --min-staging-hours "${BAC_MIN_STAGING_HOURS:-48}"
-
-# Daily HTML report + email (msmtp), mirroring the old edge daily-report.sh.
+# 1) Daily HTML report + email FIRST. This --html run is the one that updates the
+# lifetime state (seen-fps.json / watermark / last-subject); the JSON views below
+# must read that FRESH state, otherwise stale.json could flag a fp as silent that
+# the current window just saw again, and the autopilot would open a bogus demote
+# PR (codex P1). stderr is NOT silenced so tracebacks land in the container log.
 HTML="$(mktemp)"; trap 'rm -f "$HTML"' EXIT
-if python3 "$ANALYZE" --html > "$HTML" 2>/dev/null; then
+if python3 "$ANALYZE" --html > "$HTML"; then
   SUBJECT="$(cat "$STATE/last-subject.txt" 2>/dev/null || echo '[abuse-controls] daily report')"
   REPORT_FROM="${REPORT_FROM:-}"; REPORT_TO="${REPORT_TO:-$REPORT_FROM}"
   # Build the msmtp config from env (secrets stay in .env, never in the image).
@@ -72,4 +60,22 @@ EOF
 else
   echo "[analytics] WARN report render failed"
 fi
+
+# 2) Machine-readable views for the promotion tooling, AFTER the state update
+# above. Written to temp then moved so the host autopilot never reads a
+# half-written file. stderr left visible for troubleshooting.
+emit() {  # <artifact-name> <analyze-args...>
+  local name="$1"; shift
+  if python3 "$ANALYZE" "$@" > "$STATE/.$name.tmp"; then
+    mv "$STATE/.$name.tmp" "$STATE/$name"
+    echo "[analytics] wrote state/$name"
+  else
+    rm -f "$STATE/.$name.tmp"
+    echo "[analytics] WARN failed to write state/$name"
+  fi
+}
+emit candidates.json          --candidates-json
+emit stale.json               --stale-blocklist-json --ttl-days "${BAC_TTL_DAYS:-14}"
+emit staging-observation.json --staging-observation-json --min-staging-hours "${BAC_MIN_STAGING_HOURS:-48}"
+
 echo "[analytics] pass done"

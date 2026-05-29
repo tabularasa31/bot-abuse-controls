@@ -13,7 +13,8 @@
 #
 # Cron (backend VM), after the analytics run writes the artifacts:
 #   30 8 * * * /home/ubuntu/abuse-controls/scripts/blocklist-autopilot.sh >> ~/autopilot.log 2>&1
-set -uo pipefail   # NOT -e: a single skipped/failed fp must not abort the sweep
+set -euo pipefail   # -e guards init (source/resolve); run() OR-lists keep a single
+                    # skipped/failed fp from aborting the sweep.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/blocklist_common.sh
 source "$HERE/lib/blocklist_common.sh"
@@ -53,12 +54,12 @@ echo "=== blocklist-autopilot $(date -u +%FT%TZ) ${DRY_FLAG:+[dry-run]} ==="
 echo "--- auto-promote (HIGH, intent ✓, gates ✓) ---"
 _fps "$CANDIDATES" "[c['fp'] for c in d.get('high',[]) if c.get('auto_eligible')]" | while read -r fp; do
   run "$HERE/promote-fp.sh" "$fp" --reason "auto: stable HIGH, gates+intent passed" --auto --base "$BASE" $DRY_FLAG
-done
+done || true
 
 echo "--- auto-activate (staging observation verdict=activate) ---"
 _fps "$STAGING_OBS" "[o['fp'] for o in d.get('observations',[]) if o.get('verdict')=='activate']" | while read -r fp; do
   run "$HERE/promote-fp.sh" "$fp" --activate --reason "auto: staging clean, observation confirms" --auto --base "$BASE" $DRY_FLAG
-done
+done || true
 
 echo "--- auto-demote (silent > ttl) ---"
 if [ "$INCLUDE_UNKNOWN" = 1 ]; then
@@ -68,10 +69,11 @@ else
 fi
 _fps "$STALE_JSON" "$STALE_EXPR" | while read -r fp; do
   run "$HERE/demote-fp.sh" "$fp" --reason "auto: silent > ttl, threat appears gone" --auto --base "$BASE" $DRY_FLAG
-done
+done || true
 
 # Surface what we deliberately skipped, so silent caps aren't invisible.
 SKIPPED="$(_fps "$STALE_JSON" "[s['fp'] for s in d.get('stale',[]) if s.get('unknown')]" | wc -l | tr -d ' ')"
-[ "${SKIPPED:-0}" != 0 ] && [ "$INCLUDE_UNKNOWN" != 1 ] \
-  && echo "note: $SKIPPED stale entr(y/ies) with no observations skipped (pass --include-unknown to demote them)"
+if [ "${SKIPPED:-0}" != 0 ] && [ "$INCLUDE_UNKNOWN" != 1 ]; then
+  echo "note: $SKIPPED stale entr(y/ies) with no observations skipped (pass --include-unknown to demote them)"
+fi
 echo "=== autopilot done ==="

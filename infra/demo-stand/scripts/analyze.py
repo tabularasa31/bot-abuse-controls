@@ -313,6 +313,7 @@ def _fetch_loki(hours):
     now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
     step_start = now_ns - int(hours * 3600 * 1_000_000_000)
     events = []
+    seen = set()  # (ts_str, line) — dedup across overlapping pages
     for _ in range(200):  # pagination safety cap
         qs = urllib.parse.urlencode({
             "query": '{job="bac-edge"}',
@@ -329,23 +330,35 @@ def _fetch_loki(hours):
         except Exception:
             break
         results = (payload.get("data") or {}).get("result") or []
+        if not results:
+            break
         n = 0
-        last_ns = step_start
+        stream_maxes = []
         for stream in results:
+            smax = step_start
             for ts_str, line in stream.get("values", []):
                 n += 1
                 try:
                     ts_ns = int(ts_str)
                 except (ValueError, TypeError):
                     ts_ns = step_start
-                if ts_ns > last_ns:
-                    last_ns = ts_ns
+                if ts_ns > smax:
+                    smax = ts_ns
+                key = (ts_str, line)
+                if key in seen:
+                    continue
+                seen.add(key)
                 d = _event_from_bac_line("BAC_LOG " + line)
                 if d is not None:
                     events.append(d)
+            stream_maxes.append(smax)
         if n < LOKI_PAGE_LIMIT:
             break
-        step_start = last_ns + 1
+        # Page hit the limit → may be truncated. Advance to the MINIMUM of the
+        # per-stream maxima so a stream cut earlier than others is not skipped;
+        # the `seen` dedup drops the re-fetched overlap above that boundary.
+        nxt = min(stream_maxes) if stream_maxes else step_start
+        step_start = nxt if nxt > step_start else step_start + 1
     return events, 0, None
 
 

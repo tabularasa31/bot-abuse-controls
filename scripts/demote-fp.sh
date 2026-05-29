@@ -28,7 +28,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1; shift;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
     -*) bl_die "unknown option: $1";;
-    *) [ -z "$FP" ] && FP="$1" || bl_die "unexpected arg: $1"; shift;;
+    *) if [ -z "$FP" ]; then FP="$1"; else bl_die "unexpected arg: $1"; fi; shift;;
   esac
 done
 [ -n "$FP" ] || bl_die "usage: demote-fp.sh <fp> --reason \"X\" [--remove]"
@@ -77,7 +77,9 @@ if [ "$DRY" = 1 ]; then
 fi
 BRANCH="demote/fp-$SHORT-$TODAY"
 bl_branch_exists "$BRANCH" && bl_die "branch $BRANCH already exists — PR likely open already"
+bl_start_branch "$BRANCH" "$BASE"           # fork clean off origin/$BASE
 python3 "$EDITOR_PY" --file "$CATALOG" "${EDITOR_ARGS[@]}"
 bl_validate_catalog
-bl_commit "$BRANCH" "$SUBJECT" "$(cat "$BODY")"
+bl_commit_catalog "$SUBJECT" "$(cat "$BODY")"
 bl_open_pr "$BRANCH" "$BASE" "$TITLE" "$BODY" "$DRAFT"
+bl_restore_base "$BASE"

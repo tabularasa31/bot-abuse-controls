@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
     --base) BASE="$2"; shift 2;;
     -h|--help) sed -n '2,30p' "$0"; exit 0;;
     -*) bl_die "unknown option: $1";;
-    *) [ -z "$FP" ] && FP="$1" || bl_die "unexpected arg: $1"; shift;;
+    *) if [ -z "$FP" ]; then FP="$1"; else bl_die "unexpected arg: $1"; fi; shift;;
   esac
 done
 [ -n "$FP" ] || bl_die "usage: promote-fp.sh <fp> --reason \"X\" [opts]"
@@ -62,10 +62,12 @@ apply_and_open() {  # branch subject title passport_comment editor_cmd...
     return 0
   fi
   bl_branch_exists "$branch" && bl_die "branch $branch already exists — PR likely open already"
+  bl_start_branch "$branch" "$BASE"           # fork clean off origin/$BASE
   python3 "$EDITOR_PY" --file "$CATALOG" "${editor_args[@]}"
   bl_validate_catalog
-  bl_commit "$branch" "$subject" "$(cat "$BODY")"
+  bl_commit_catalog "$subject" "$(cat "$BODY")"
   bl_open_pr "$branch" "$BASE" "$title" "$BODY" "$DRAFT"
+  bl_restore_base "$BASE"
 }
 
 # ---------------------------------------------------------------------------

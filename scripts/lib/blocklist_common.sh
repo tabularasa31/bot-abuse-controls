@@ -104,13 +104,28 @@ bl_branch_exists() {
   return 1
 }
 
-# Create branch, stage the catalog, commit. Args: branch, commit-subject, body.
-bl_commit() {
-  local branch="$1" subject="$2" body="$3"
-  git -C "$REPO" checkout -b "$branch" >/dev/null
+# Start a clean PR branch off origin/<base> (fallback local <base> if offline),
+# NOT off the current HEAD — so a promotion PR never carries whatever happens to
+# be on the working branch, and sequential autopilot runs each fork cleanly. The
+# caller applies the catalog edit AFTER this (on the fresh base). Args: branch, base.
+bl_start_branch() {
+  local branch="$1" base="${2:-main}"
+  git -C "$REPO" fetch origin "$base" --quiet 2>/dev/null || true
+  git -C "$REPO" checkout -b "$branch" "origin/$base" >/dev/null 2>&1 \
+    || git -C "$REPO" checkout -b "$branch" "$base" >/dev/null
+}
+
+# Stage the catalog + commit. Args: commit-subject, body.
+bl_commit_catalog() {
   git -C "$REPO" add "$CATALOG"
-  git -C "$REPO" commit -q -m "$subject" -m "$body" \
+  git -C "$REPO" commit -q -m "$1" -m "$2" \
     -m "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+}
+
+# Return the working tree to <base> after a PR is pushed (keeps sequential
+# autopilot runs starting from a clean base). Args: base.
+bl_restore_base() {
+  git -C "$REPO" checkout "${1:-main}" --quiet 2>/dev/null || true
 }
 
 # Push + open PR. Args: branch, base, title, body-file, draft(bool).
