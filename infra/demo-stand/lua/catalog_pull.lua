@@ -18,16 +18,21 @@
 --                     init_worker_by_lua_block. Guarded to worker 0 so a
 --                     pool with N workers does N× fewer pulls, not N×.
 --
--- Two catalogs are wired today:
---   * tls_fp_blocklist     — consumed by verdict.lua (§A1 `fp:gen` lookup).
---   * verified_bot_ips — consumed by verified_bots.lua (B8) for the L2.2
---                        bot_verified / bot_verified_pending fastpath
---                        (same `<key>:<gen>` shape as tls_fp_blocklist so the
---                        atomic-swap pattern is symmetric).
--- The remaining catalogs from docs/architecture/config-distribution.md
--- §"The 'catalog' concept" migrate to Channel C in [B12] (hot-reload of
--- static configs) — adding them here without a consumer would write to a
--- dict nobody reads.
+-- Catalogs wired today (each has an edge consumer):
+--   * tls_fp_blocklist        — verdict.lua (§A1 `fp:gen` lookup) + tls_fp
+--                               staging (tls_fp.refresh, A11).
+--   * verified_bot_ips        — verified_bots.lua (B8) bot_verified / pending.
+--   * tls_fp_catalog          — tls_fp.lua tls_fp_impersonator (+ staging).
+--   * tls_fp_browser_profiles — tls_fp.lua tls_fp_suspicious_ciphers (+ staging).
+--   * ua_blacklist            — hygiene.lua (active + staging, A11 86exrtjpc).
+--                               Object payload {active:<combined>, staging:[…]},
+--                               stored as `active:<gen>` / `staging:<gen>`.
+--   * ip_blocklist            — reputation.lua (active + staging, A11 86exrtjpc).
+--                               Per-key `<cidr>:<gen>` → "<status>:block".
+--   * policy                  — policy.lua / policy_matchers (B11).
+-- ip_whitelist / asn_datacenters remain edge-local conf for now (their Channel C
+-- migration is a follow-up — adding a descriptor without a consumer would write
+-- to a dict nobody reads).
 
 local cjson        = require "cjson.safe"
 local fp_state     = require "tls_fp_blocklist_state"
@@ -251,6 +256,111 @@ _M.catalogs = {
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "tls_fp_browser_profiles.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
+
+    -- ua_blacklist (A11, 86exrtjpc) — Channel C catalog of system UA patterns.
+    -- Wire-payload is an OBJECT, not a per-key map: { "active": "<combined
+    -- regex>", "staging": ["<pattern>", …] } (store.buildUABlacklist). We stash
+    -- two keys per generation: `active:<gen>` (the combined string, used by
+    -- hygiene with ngx.re "jo") and `staging:<gen>` (cjson array, matched
+    -- per-pattern for staging_match attribution). hygiene.refresh() reads both
+    -- on a gen flip. Reader builds nothing per-request beyond a gen compare.
+    ua_blacklist = {
+        name        = "ua_blacklist",
+        endpoint    = "/catalog/ua_blacklist",
+        dict_name   = "antibot_ua_blacklist",
+        gen_key     = "ua_blacklist_gen",
+        etag_key    = "ua_blacklist_etag",
+        version_key = "ua_blacklist_version",
+        apply = function(dict, entries, new_gen)
+            -- entries = { active = "<combined>", staging = { ... } }. A missing
+            -- field is tolerated (treated as empty) so a partial payload can't
+            -- crash the pull — handle_response already type-checked `entries`
+            -- is a table.
+            local active = entries.active
+            if type(active) ~= "string" then active = "" end
+            local ok1, err1 = dict:set("active:" .. new_gen, active)
+            if not ok1 then
+                ngx.log(ngx.ERR, "ua_blacklist:set active failed: ", err1,
+                    " (gen=", new_gen, ")")
+                return false, 0
+            end
+            local staging = entries.staging
+            if type(staging) ~= "table" then staging = {} end
+            local encoded, eerr = cjson.encode(staging)
+            if not encoded then
+                ngx.log(ngx.ERR, "ua_blacklist:encode staging failed: ",
+                    tostring(eerr), " (gen=", new_gen, ")")
+                return false, 1
+            end
+            local ok2, err2 = dict:set("staging:" .. new_gen, encoded)
+            if not ok2 then
+                ngx.log(ngx.ERR, "ua_blacklist:set staging failed: ", err2,
+                    " (gen=", new_gen, ")")
+                return false, 1
+            end
+            return true, 2
+        end,
+        -- Fixed two-key layout per gen, so sweep just deletes the old gen's
+        -- `active:` and `staging:` keys (no get_keys scan needed).
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "ua_blacklist.sweep: old_gen must be a number, got " ..
+                type(old_gen))
+            if old_gen < 0 then return 0 end
+            local n = 0
+            if dict:get("active:" .. old_gen) ~= nil then
+                dict:delete("active:" .. old_gen); n = n + 1
+            end
+            if dict:get("staging:" .. old_gen) ~= nil then
+                dict:delete("staging:" .. old_gen); n = n + 1
+            end
+            return n
+        end,
+    },
+
+    -- ip_blocklist (A11, 86exrtjpc) — Channel C catalog of system IP/CIDR
+    -- blocks. Wire-payload: map(cidr → "<status>:block") (store.buildIPBlocklist).
+    -- Keys `<cidr>:<gen>` (suffix-match sweep, same shape as verified_bot_ips —
+    -- CIDR may contain `:` for IPv6, but the gen is always the last `:`-segment).
+    -- reputation.refresh() rebuilds the active matcher + staging matcher on a
+    -- gen flip. The per-host policy ip_blocklist is a SEPARATE catalog (policy)
+    -- applied via policy_matchers — not merged here.
+    ip_blocklist = {
+        name        = "ip_blocklist",
+        endpoint    = "/catalog/ip_blocklist",
+        dict_name   = "antibot_ip_blocklist",
+        gen_key     = "ip_blocklist_gen",
+        etag_key    = "ip_blocklist_etag",
+        version_key = "ip_blocklist_version",
+        apply = function(dict, entries, new_gen)
+            local n = 0
+            for cidr, val in pairs(entries) do
+                local ok, err = dict:set(cidr .. ":" .. new_gen, val)
+                if not ok then
+                    ngx.log(ngx.ERR, "ip_blocklist:set failed: ", err,
+                        " (cidr=", cidr, ", gen=", new_gen, ")")
+                    return false, n
+                end
+                n = n + 1
+            end
+            return true, n
+        end,
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "ip_blocklist.sweep: old_gen must be a number, got " ..
                 type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
             if old_gen < 0 then return 0 end
             local suffix = ":" .. old_gen

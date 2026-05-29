@@ -108,7 +108,7 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 	)
 	switch catalog {
 	case "tls_fp_blocklist":
-		body, err = jsonBytes(d.TLSFPBlocklist)
+		body, err = buildTLSFPBlocklist(d)
 	case "ua_blacklist":
 		body, err = buildUABlacklist(d, site)
 	case "ip_blocklist":
@@ -152,27 +152,53 @@ func (e errUnknownCatalog) Error() string { return "unknown catalog: " + e.name 
 // Каждый builder обязан быть детерминированным по содержимому Data+site —
 // иначе ETag будет «дёргаться» на каждом запросе и If-None-Match сломается.
 
-// buildUABlacklist собирает combined regex из глобальных UABlacklist +
-// (если site задан и policy[site].UABlacklist непуст) кастомных паттернов
-// клиента и отдаёт ОДНУ JSON-строку — ровно та форма, которую обещает
-// config-distribution.md §"The 'catalog' concept" (shape = "combined regex
-// string"). Edge парсит JSON, получает строку с regex'ом, компилирует её
-// один раз на swap.
+// buildUABlacklist отдаёт JSON-объект `{"active": "<combined-regex>",
+// "staging": ["<pattern>", …]}` (A11). Раньше форма была одной combined-regex
+// строкой (config-distribution.md §"The 'catalog' concept"); чтобы доставлять
+// staging, payload стал объектом. Изменение wire-схемы — минорное
+// (X-Catalog-Version 1.2.0), edge-парсер обновляется в том же изменении.
 //
-// Каждый паттерн валидируется в LoadYAML через regexp.Compile, так что в
-// combined regex попадает только синтаксически корректный RE2.
+//   - active  — combined regex (глобальные UABlacklist + при site —
+//     per-resource policy[site].UABlacklist). Эдж компилирует один раз на swap
+//     и при матче эмитит verdict=block.
+//   - staging — СПИСОК отдельных системных staging-паттернов (не combined):
+//     эдж матчит каждый отдельно, чтобы записать staging_match с конкретным
+//     pattern_id (`ua_blacklist:<pattern>`); combined-строка потеряла бы, какой
+//     именно паттерн сработал. Per-resource policy — runtime state, staged
+//     rollout к нему не применяется, поэтому в staging только системные.
+//
+// Каждый паттерн валидируется в Validate через regexp.Compile, так что в
+// payload попадает только синтаксически корректный RE2.
 func buildUABlacklist(d *Data, site string) ([]byte, error) {
 	// Срезы уже отсортированы normalize(). Просто конкатенируем — порядок
 	// "system, потом per-resource" фиксирован: если поменяем, не забыть про
 	// X-Catalog-Version major.
-	patterns := make([]string, 0, len(d.UABlacklist)+4)
-	patterns = append(patterns, d.UABlacklist...)
+	active := make([]string, 0, len(d.UABlacklist)+4)
+	active = append(active, d.UABlacklist...)
 	if site != "" {
 		if p, ok := d.Policy[site]; ok {
-			patterns = append(patterns, p.UABlacklist...)
+			active = append(active, p.UABlacklist...)
 		}
 	}
+	staging := d.UABlacklistStaging
+	if staging == nil {
+		staging = []string{}
+	}
+	out := struct {
+		Active  string   `json:"active"`
+		Staging []string `json:"staging"`
+	}{
+		Active:  combineRegex(active),
+		Staging: staging,
+	}
+	return jsonBytes(out)
+}
 
+// combineRegex склеивает паттерны в одну альтернацию `(?:p1)|(?:p2)|…`.
+// Non-capturing group: нам не нужны $1/$2 на edge, но альтернация должна
+// биндиться к одному паттерну, не к произвольному `|` внутри. Пустой вход
+// → "" (эдж трактует пустую строку как «нет паттернов»).
+func combineRegex(patterns []string) string {
 	var combined string
 	for _, p := range patterns {
 		if p == "" {
@@ -181,30 +207,41 @@ func buildUABlacklist(d *Data, site string) ([]byte, error) {
 		if combined != "" {
 			combined += "|"
 		}
-		// Non-capturing group: нам не нужны $1/$2 на edge, но альтернация
-		// должна биндиться к одному паттерну, не к произвольному `|` внутри.
 		combined += "(?:" + p + ")"
 	}
-	return jsonBytes(combined)
+	return combined
+}
+
+// buildTLSFPBlocklist кодирует каждую запись как "<status>:block" (A11),
+// симметрично tls_fp_catalog / verified_bot_ips: shared_dict на эдже хранит
+// готовую строку без per-entry JSON-разбора. Вердикт для этого каталога
+// всегда block; статус разводит active (эдж эмитит verdict=block) vs staging
+// (эдж пишет staging_match, не блокирует). Edge парсит split-по-первой-`:`.
+func buildTLSFPBlocklist(d *Data) ([]byte, error) {
+	out := make(map[string]string, len(d.TLSFPBlocklist))
+	for fp, status := range d.TLSFPBlocklist {
+		out[fp] = status + ":block"
+	}
+	return jsonBytes(out)
 }
 
 func buildIPBlocklist(d *Data, site string) ([]byte, error) {
 	// Системный ip_blocklist + per-resource policy[site].IPBlocklist. Эдж
 	// различит источник по rule_source через отдельный лог-маппинг — здесь
-	// просто объединяем; контракт payload — `{cidr: "block"}`.
-	if site == "" {
-		return jsonBytes(d.IPBlocklist)
+	// просто объединяем; контракт payload — `{cidr: "<status>:block"}` (A11):
+	// статус разводит active (verdict=block) vs staging (staging_match без
+	// блокировки). Системные записи несут свой status; per-resource всегда
+	// active (policy — runtime state, staged rollout к нему не применяется).
+	out := make(map[string]string, len(d.IPBlocklist)+4)
+	for cidr, status := range d.IPBlocklist {
+		out[cidr] = status + ":block"
 	}
-	p, ok := d.Policy[site]
-	if !ok || len(p.IPBlocklist) == 0 {
-		return jsonBytes(d.IPBlocklist)
-	}
-	out := make(map[string]string, len(d.IPBlocklist)+len(p.IPBlocklist))
-	for k, v := range d.IPBlocklist {
-		out[k] = v
-	}
-	for _, cidr := range p.IPBlocklist {
-		out[cidr] = "block"
+	if site != "" {
+		if p, ok := d.Policy[site]; ok {
+			for _, cidr := range p.IPBlocklist {
+				out[cidr] = "active:block"
+			}
+		}
 	}
 	return jsonBytes(out)
 }

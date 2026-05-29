@@ -92,9 +92,9 @@ Each thing pulled in Channel C is a **catalog**: a named, fully-versioned snapsh
 
 | Catalog | Shape | shared_dict | Updated by |
 |---|---|---|---|
-| `tls_fp_blocklist` | set(fp_string → "block") | `antibot_tls_fp_blocklist` | PR / future auto-pipeline |
-| `ua_blacklist` | combined regex string | `antibot_ua_blacklist` | PR |
-| `ip_blocklist` | CIDR list → "block" | `antibot_ip_blocklist` | PR + dashboard custom-add |
+| `tls_fp_blocklist` | map(fp_string → "&lt;status&gt;:block"), status ∈ {active, staging} (A11 staged rollout) | `antibot_tls_fp_blocklist` | PR / future auto-pipeline |
+| `ua_blacklist` | object {active: combined regex string, staging: [pattern, …]} (A11 staged rollout) | `antibot_ua_blacklist` | PR |
+| `ip_blocklist` | map(CIDR → "&lt;status&gt;:block"), status ∈ {active, staging} (A11 staged rollout) | `antibot_ip_blocklist` | PR + dashboard custom-add |
 | `ip_whitelist` | CIDR list | `antibot_ip_whitelist` | PR (monitoring, check services) |
 | `asn_datacenters` | set(asn → 1) | `antibot_asn_dc` | PR |
 | `verified_bot_ips` | map(ip → "&lt;status&gt;:&lt;family&gt;"), status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}; отсутствие ключа = provisional | `antibot_verified_bots` | backend background rDNS (B7) |

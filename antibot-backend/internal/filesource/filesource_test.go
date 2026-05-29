@@ -132,7 +132,7 @@ chrome:
 	}
 }
 
-func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
+func TestLoad_PopulatedActiveAndStaging(t *testing.T) {
 	dir := seed(t)
 	// tls_fp_blocklist: один active, один staging.
 	write(t, dir, "tls_fp_blocklist.yaml", `
@@ -165,17 +165,26 @@ func TestLoad_PopulatedAndStagingFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got, want := len(s.TLSFPBlocklist), 1; got != want {
-		t.Errorf("tls_fp_blocklist len=%d want %d (staging должен быть отфильтрован)", got, want)
+	if got, want := len(s.TLSFPBlocklist), 2; got != want {
+		t.Errorf("tls_fp_blocklist len=%d want %d (active+staging оба сохраняются)", got, want)
 	}
-	if s.TLSFPBlocklist["L13i17h2_aaa_bbb"] != "block" {
-		t.Errorf("tls_fp_blocklist active record missing: %+v", s.TLSFPBlocklist)
+	if s.TLSFPBlocklist["L13i17h2_aaa_bbb"] != "active" {
+		t.Errorf("tls_fp_blocklist active status missing: %+v", s.TLSFPBlocklist)
+	}
+	if s.TLSFPBlocklist["L12i14h1_ccc_ddd"] != "staging" {
+		t.Errorf("tls_fp_blocklist staging status missing: %+v", s.TLSFPBlocklist)
 	}
 	if got, want := len(s.UABlacklist), 2; got != want {
-		t.Errorf("ua_blacklist len=%d want %d", got, want)
+		t.Errorf("ua_blacklist(active) len=%d want %d", got, want)
 	}
-	if got, want := len(s.IPBlocklist), 1; got != want {
-		t.Errorf("ip_blocklist len=%d want %d", got, want)
+	if got, want := len(s.UABlacklistStaging), 1; got != want {
+		t.Errorf("ua_blacklist(staging) len=%d want %d", got, want)
+	}
+	if got, want := len(s.IPBlocklist), 2; got != want {
+		t.Errorf("ip_blocklist len=%d want %d (active+staging)", got, want)
+	}
+	if s.IPBlocklist["203.0.113.0/24"] != "active" || s.IPBlocklist["198.51.100.42/32"] != "staging" {
+		t.Errorf("ip_blocklist statuses wrong: %+v", s.IPBlocklist)
 	}
 	if got, want := len(s.IPWhitelist), 2; got != want {
 		t.Errorf("ip_whitelist len=%d want %d", got, want)

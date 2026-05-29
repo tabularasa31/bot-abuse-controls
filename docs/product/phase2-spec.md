@@ -133,7 +133,7 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 
 ## Staged rollout для PR-каталогов (новое в Phase 2)
 
-**Проблема.** Каталоги, которые наполняются через PR (`tls_fp_blocklist`, `tls_fp_catalog`, `tls_fp_browser_profiles`), содержат паттерны/сигнатуры. Если продакт добавит новую запись через PR и она сразу же поедет на proxy — в логах сразу появятся срабатывания. Если паттерн оказался слишком широким и задел легитимный браузер — массовый false-positive (в боевом режиме это блокировки; в Phase 1/2 — пока только мусор в логах, но все равно нежелательно).
+**Проблема.** Каталоги, которые наполняются через PR (`tls_fp_blocklist`, `tls_fp_catalog`, `tls_fp_browser_profiles`, а также `ua_blacklist` и `ip_blocklist`), содержат паттерны/сигнатуры. Если продакт добавит новую запись через PR и она сразу же поедет на proxy — в логах сразу появятся срабатывания. Если паттерн оказался слишком широким и задел легитимный браузер — массовый false-positive (в боевом режиме это блокировки; в Phase 1/2 — пока только мусор в логах, но все равно нежелательно).
 
 **Решение — staging-статус паттернов.** Каждая запись в каталоге имеет поле `status` с двумя значениями:
 
@@ -153,8 +153,18 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 - `tls_fp_blocklist` — `pattern_id` = сам fp-токен. Например, `staging_match: ["tls_fp_blocklist:L1300_a8b9c..._d4e5f..."]`.
 - `tls_fp_catalog` — `pattern_id` = `hash_b` запись из каталога. Например, `staging_match: ["tls_fp_catalog:1ed0482b9b4c"]`.
 - `tls_fp_browser_profiles` — `pattern_id` = `browser_family`. Например, `staging_match: ["tls_fp_browser_profiles:chrome"]`.
+- `ua_blacklist` — `pattern_id` = сам regex-паттерн. Например, `staging_match: ["ua_blacklist:(?i)\\bAhrefsBot\\b"]` (стадия hygiene).
+- `ip_blocklist` — `pattern_id` = CIDR/IP запись из каталога. Например, `staging_match: ["ip_blocklist:198.51.100.0/24"]` (стадия reputation).
 
 `pattern_id` стабилен между релизами каталога (один и тот же паттерн → один и тот же ID).
+
+**Доставка staging на эдж.** Все три каталога едут по Channel C из `catalogs/<catalog>.yaml` (A11, задача 86exrtjpc):
+
+- `tls_fp_blocklist` — композит `<status>:block` (backend `store.buildTLSFPBlocklist`); эдж строит staging-набор из pulled-snapshot в `tls_fp.refresh()`.
+- `ip_blocklist` — мапа `{cidr: "<status>:block"}` (`store.buildIPBlocklist`); `reputation.refresh()` пересобирает active + staging matcher'ы из snapshot.
+- `ua_blacklist` — объект `{"active": "<combined-regex>", "staging": ["<pattern>", …]}` (`store.buildUABlacklist`); `hygiene.refresh()` берёт combined regex для active и список паттернов для staging (по-паттернно — чтобы pattern_id в `staging_match` был конкретным).
+
+На эдже у `ua_blacklist` / `ip_blocklist` остаётся cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее источник истины — Channel C (gen 1+). `ip_whitelist` / `asn_datacenters` пока остаются edge-local conf (их миграция на Channel C — отдельный follow-up).
 
 **Новое поле в логах: `staging_match`** — массив строк `<catalog>:<pattern_id>`. Пустой если ничего не сматчилось в staging. Не влияет на `verdict`/`rule` — отдельный слот для аналитики promotion'а.
 

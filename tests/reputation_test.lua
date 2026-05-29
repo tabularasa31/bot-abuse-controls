@@ -102,6 +102,33 @@ check_arr(
     "active_values drops empty value, keeps ipv6 cidr")
 
 -- ===========================================================================
+-- reputation.staging_values() — mirror image of active_values: keeps only
+-- status=staging CIDRs (A11, 86exrtjpc), drops active/blank. Order preserved.
+-- ===========================================================================
+check_arr(reputation.staging_values(nil), {}, "staging_values nil -> {}")
+check_arr(
+    reputation.staging_values({
+        { value = "203.0.113.0/24", attrs = { status = "active" } },
+        { value = "198.51.100.42",  attrs = { status = "staging" } },
+        { value = "2001:db8::/48",  attrs = { status = "staging" } },
+    }),
+    { "198.51.100.42", "2001:db8::/48" },
+    "staging_values keeps only staging, order preserved")
+check_arr(
+    reputation.staging_values({
+        { value = "203.0.113.0/24", attrs = { status = "active" } },
+    }),
+    {},
+    "staging_values only-active -> {}")
+check_arr(
+    reputation.staging_values({
+        { value = "", attrs = { status = "staging" } },
+        { value = "10.0.0.1", attrs = { status = "staging" } },
+    }),
+    { "10.0.0.1" },
+    "staging_values drops empty value")
+
+-- ===========================================================================
 -- reputation.to_set() — array -> membership set (asn_datacenters lookup)
 -- ===========================================================================
 

@@ -16,11 +16,12 @@
 //	<dir>/ip_whitelist.yaml       — sequence of cidr (без status).
 //	<dir>/asn_datacenters.yaml    — sequence of uint32 (без status).
 //
-// `status` для каталогов с поддержкой staged rollout:
-//   - "active" — попадает в Channel C payload.
-//   - "staging" — читается из файла, валидируется, но в SlowData НЕ кладётся.
-//     Эдж эти записи увидит, когда A11 будет расширен на новые каталоги
-//     (отдельным PR / задачей).
+// `status` для каталогов с поддержкой staged rollout (A11): и "active", и
+// "staging" попадают в SlowData с сохранённым статусом. Сериализация в Channel
+// C несёт статус в payload ("<status>:block" для fp/ip; отдельный staging
+// combined regex для ua), эдж сам разводит active vs staging: active →
+// verdict=block, staging → staging_match без блокировки. (Раньше staging
+// фильтровался здесь — теперь доставляется, см. store.go build*-функции.)
 //
 // Пустой файл / только комментарии = пустой каталог. Отсутствующий файл —
 // ошибка (защита от опечатки в имени).
@@ -53,11 +54,6 @@ var trackedFiles = []string{
 	"tls_fp_catalog.yaml",
 	"tls_fp_browser_profiles.yaml",
 }
-
-// statusActive — единственное значение status, которое попадает в активный
-// payload. Всё остальное (включая "staging") отфильтровывается. Список
-// допустимых значений валидируется в parseStatusMap.
-const statusActive = "active"
 
 // validStatuses — что считаем валидным значением status. Любое другое
 // значение в файле валит Load: симметрично DB-схеме (CHECK (status IN
@@ -144,16 +140,18 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		TLSFPBlocklist:       map[string]string{},
 		IPBlocklist:          map[string]string{},
 		UABlacklist:          []string{},
+		UABlacklistStaging:   []string{},
 		IPWhitelist:          []string{},
 		ASNDatacenters:       []uint32{},
 		TLSFPCatalog:         map[string]catalog.TLSFPCatalog{},
 		TLSFPBrowserProfiles: map[string]catalog.BrowserProfile{},
 	}
 
-	// tls_fp_blocklist: map(fp → status). Активные → fp: "block" в SlowData.
-	if mt, err := loadStatusMap(l.dir, "tls_fp_blocklist.yaml", func(active []string) error {
-		for _, fp := range active {
-			slow.TLSFPBlocklist[fp] = "block"
+	// tls_fp_blocklist: map(fp → status). И active, и staging → fp: status
+	// в SlowData (A11); сериализатор кодирует "<status>:block" в payload.
+	if mt, err := loadStatusMap(l.dir, "tls_fp_blocklist.yaml", func(entries map[string]string) error {
+		for fp, status := range entries {
+			slow.TLSFPBlocklist[fp] = status
 		}
 		return nil
 	}); err != nil {
@@ -162,9 +160,16 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		mtimes["tls_fp_blocklist.yaml"] = mt
 	}
 
-	// ua_blacklist: map(pattern → status). Активные → []string в SlowData.
-	if mt, err := loadStatusMap(l.dir, "ua_blacklist.yaml", func(active []string) error {
-		slow.UABlacklist = append(slow.UABlacklist, active...)
+	// ua_blacklist: map(pattern → status). active → UABlacklist, staging →
+	// UABlacklistStaging (A11); сериализатор отдаёт два combined regex.
+	if mt, err := loadStatusMap(l.dir, "ua_blacklist.yaml", func(entries map[string]string) error {
+		for pat, status := range entries {
+			if status == "staging" {
+				slow.UABlacklistStaging = append(slow.UABlacklistStaging, pat)
+			} else {
+				slow.UABlacklist = append(slow.UABlacklist, pat)
+			}
+		}
 		return nil
 	}); err != nil {
 		return nil, err
@@ -172,10 +177,11 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		mtimes["ua_blacklist.yaml"] = mt
 	}
 
-	// ip_blocklist: map(cidr → status). Активные → cidr: "block".
-	if mt, err := loadStatusMap(l.dir, "ip_blocklist.yaml", func(active []string) error {
-		for _, cidr := range active {
-			slow.IPBlocklist[cidr] = "block"
+	// ip_blocklist: map(cidr → status). И active, и staging → cidr: status
+	// (A11); сериализатор кодирует "<status>:block".
+	if mt, err := loadStatusMap(l.dir, "ip_blocklist.yaml", func(entries map[string]string) error {
+		for cidr, status := range entries {
+			slow.IPBlocklist[cidr] = status
 		}
 		return nil
 	}); err != nil {
@@ -251,13 +257,14 @@ func readFile(dir, name string) ([]byte, time.Time, error) {
 }
 
 // loadStatusMap читает YAML-файл вида map[string]string, валидирует
-// status'ы, отдаёт активные ключи callback'у. Пустой файл / только
-// комментарии → пустой active-список (это нормальное состояние «каталог
-// ещё пуст»).
+// status'ы, отдаёт ВЕСЬ валидированный map (key → status) callback'у —
+// и active, и staging (A11): доставку staging решает сериализатор, не этот
+// загрузчик. Пустой файл / только комментарии → пустой map (это нормальное
+// состояние «каталог ещё пуст»).
 //
 // Возвращает mtime файла, чтобы reloader мог его закешировать; ошибку —
 // если YAML битый, ключ нестроковый, status незнакомый.
-func loadStatusMap(dir, name string, apply func(active []string) error) (time.Time, error) {
+func loadStatusMap(dir, name string, apply func(entries map[string]string) error) (time.Time, error) {
 	data, mt, err := readFile(dir, name)
 	if err != nil {
 		return time.Time{}, err
@@ -266,16 +273,12 @@ func loadStatusMap(dir, name string, apply func(active []string) error) (time.Ti
 	if err := decodeYAML(data, &m, name); err != nil {
 		return time.Time{}, err
 	}
-	active := make([]string, 0, len(m))
 	for key, status := range m {
 		if _, ok := validStatuses[status]; !ok {
 			return time.Time{}, fmt.Errorf("%s: entry %q has invalid status %q (expected one of: active, staging)", name, key, status)
 		}
-		if status == statusActive {
-			active = append(active, key)
-		}
 	}
-	if err := apply(active); err != nil {
+	if err := apply(m); err != nil {
 		return time.Time{}, fmt.Errorf("%s: %w", name, err)
 	}
 	return mt, nil

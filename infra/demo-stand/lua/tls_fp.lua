@@ -69,6 +69,15 @@
 -- seed) so the whole stage's staging detection is in one place; a staged fp is
 -- absent from the active dict, so verdict.lua never exits on it and the request
 -- always reaches run().
+--
+-- A11 follow-up (86exrtjpc): blocklist_staging is now built from the Channel C
+-- snapshot in refresh() (the tls_fp_blocklist shared_dict, where staged fps
+-- arrive as "staging:block" — see store.buildTLSFPBlocklist / parse_value),
+-- not from the local tls_fp_blocklist.conf. The .conf stays the cold-start
+-- seed for ACTIVE fps only (init.lua); staged observation is delivered live by
+-- Channel C, symmetric with tls_fp_catalog / tls_fp_browser_profiles staging.
+
+local fp_state = require "tls_fp_blocklist_state"
 
 local _M = {
     enabled  = true,
@@ -191,19 +200,20 @@ function _M.build_profiles(wire)
     return active, staging
 end
 
--- pure: build the staging fp set (status=staging only) from the parsed
--- tls_fp_blocklist (config_loader.parse_list output: array of { value=fp,
--- attrs={status=,…} }). Active fps are seeded into the tls_fp_blocklist shared_dict
--- by init.lua; the staged ones land here so run() can record them without ever
--- blocking.
-function _M.build_blocklist_staging(blocklist_list)
-    local out = {}
-    for _, entry in ipairs(blocklist_list or {}) do
-        if entry.value and entry.value ~= "" and entry.attrs and entry.attrs.status == "staging" then
-            out[entry.value] = true
+-- pure: build the staging fp set from a Channel C wire map { [fp] =
+-- "<status>:block" } (store.buildTLSFPBlocklist). Keeps only status=staging
+-- fps as a membership set; active fps are NOT kept here (verdict.lua blocks
+-- those directly off the same dict). A legacy bare "block" value (no colon)
+-- is treated as active and thus skipped. Symmetric to build_catalog, but the
+-- blocklist's verdict is implicit (block), so we keep only membership.
+function _M.build_blocklist(wire)
+    local staging = {}
+    for fp, raw in pairs(wire or {}) do
+        if type(raw) == "string" and fp_state.parse_value(raw) == "staging" then
+            staging[fp] = true
         end
     end
-    return out
+    return staging
 end
 
 -- pure: tls_fp_impersonator decision. Fires when the UA claims a browser
@@ -309,15 +319,17 @@ end
 -- catalog_pull.lua descriptors). Здесь только cold-start: ставим пустые
 -- lookup-таблицы; первая успешная pull в catalog_pull.fetch заполнит
 -- shared_dict, а refresh() в run() построит per-worker Lua-таблицы по
--- этому snapshot'у. blocklist_staging остаётся file-based — это другой
--- источник (tls_fp_blocklist.conf, ещё не мигрирован на Channel C).
+-- этому snapshot'у. blocklist_staging тоже Channel C-based (86exrtjpc):
+-- refresh() строит его из tls_fp_blocklist shared_dict; на init таблица пуста,
+-- staged fps приедут с первым pull. Локальный tls_fp_blocklist.conf остаётся
+-- только cold-start seed для ACTIVE fps (init.lua), staging через него больше
+-- не наблюдается.
 function _M.build(config)
     _M.catalog          = {}
     _M.profiles         = {}
     _M.catalog_staging  = {}
     _M.profiles_staging = {}
-
-    _M.blocklist_staging = _M.build_blocklist_staging(config.tls_fp_blocklist)
+    _M.blocklist_staging = {}
 
     -- Stage off via the shared kill-switch helper (config-templates.md
     -- kill_switch; defaults.conf [kill_switch.*]). The block path
@@ -328,15 +340,15 @@ function _M.build(config)
     -- Per-worker gen-cache reset (init_by_lua runs before fork, but a worker
     -- restart re-runs this code on the new master too). nil means "first
     -- refresh in this worker will rebuild from current dict gen".
-    _M._cached_gen_catalog  = nil
-    _M._cached_gen_profiles = nil
+    _M._cached_gen_catalog   = nil
+    _M._cached_gen_profiles  = nil
+    _M._cached_gen_blocklist = nil
 
-    -- На init возвращаем нули — pull ещё не запускался. Точные счётчики
+    -- Staged-таблицы пусты на init (pull ещё не запускался); их счётчики
     -- видны в /metrics и в bac_log staging_match после первого тика
-    -- catalog_pull (≤ 30 сек после старта).
-    local stg_bl_n = 0
-    for _ in pairs(_M.blocklist_staging) do stg_bl_n = stg_bl_n + 1 end
-    return _M, 0, 0, 0, 0, stg_bl_n
+    -- catalog_pull (≤ 30 сек). build() ничего не возвращает кроме модуля —
+    -- init.lua вызывает его только ради side-effects.
+    return _M
 end
 
 -- refresh — читает текущий gen из meta:get(gen_key) и, если он отличается
@@ -471,6 +483,22 @@ function _M.refresh()
         _M.profiles_staging  = staging
         _M._cached_gen_profiles = prof_gen
         reconcile_staging_metrics("tls_fp_browser_profiles", prev_staging, staging)
+    end
+
+    -- tls_fp_blocklist (86exrtjpc): staged fps arrive over Channel C in the
+    -- tls_fp_blocklist shared_dict as "staging:block". verdict.lua blocks the
+    -- ACTIVE ones directly off this dict; here we rebuild only the staging
+    -- membership set so run() can record staging_match for them. Same gen-cached
+    -- rebuild + metric reconcile as the two catalogs above. The gen key is the
+    -- blocklist's own (fp_state.META_GEN_KEY), bumped by catalog_pull's
+    -- tls_fp_blocklist descriptor.
+    local bl_gen = meta:get(fp_state.META_GEN_KEY) or 0
+    if bl_gen ~= _M._cached_gen_blocklist then
+        local staging = rebuild_from_dict("tls_fp_blocklist", bl_gen, _M.build_blocklist)
+        local prev_staging = _M.blocklist_staging
+        _M.blocklist_staging     = staging
+        _M._cached_gen_blocklist = bl_gen
+        reconcile_staging_metrics("tls_fp_blocklist", prev_staging, staging)
     end
 end
 

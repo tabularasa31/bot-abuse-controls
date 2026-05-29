@@ -42,9 +42,10 @@ func httpGetWith(t *testing.T, url string, headers map[string]string) *http.Resp
 func sampleData() *Data {
 	d := emptyData()
 	d.Version = "1.2.3"
-	d.TLSFPBlocklist = map[string]string{"L13i17h2_abc_def": "block", "L12i14h1_ghi_jkl": "block"}
+	d.TLSFPBlocklist = map[string]string{"L13i17h2_abc_def": "active", "L12i14h1_ghi_jkl": "staging"}
 	d.UABlacklist = []string{`curl/.*`, `python-requests/.*`}
-	d.IPBlocklist = map[string]string{"203.0.113.0/24": "block"}
+	d.UABlacklistStaging = []string{`scrapy/[0-9.]+`}
+	d.IPBlocklist = map[string]string{"203.0.113.0/24": "active", "198.51.100.7/32": "staging"}
 	d.IPWhitelist = []string{"198.51.100.5/32"}
 	d.ASNDatacenters = []uint32{14061, 16509, 14061} // дубликат — проверяем dedup
 	d.TLSFPCatalog = map[string]TLSFPCatalog{
@@ -195,7 +196,7 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 	etag1 := r1.Header.Get("ETag")
 
 	d2 := sampleData()
-	d2.TLSFPBlocklist["L99i99h9_new_token"] = "block"
+	d2.TLSFPBlocklist["L99i99h9_new_token"] = "active"
 	srv.Store().Replace(d2)
 
 	r2 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
@@ -217,39 +218,49 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 func TestMultiTenantUABlacklistCombinesRegex(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// Контракт shape — одна JSON-строка (config-distribution.md "combined
-	// regex string"). Без site — только системные паттерны, обёрнутые в
-	// non-capturing групп.
+	// Контракт shape (A11) — JSON-объект {"active": "<combined>", "staging":
+	// ["<pattern>", …]}. active — combined regex системных паттернов
+	// (+ per-resource при site); staging — СПИСОК системных staging-паттернов.
+	type uaPayload struct {
+		Active  string   `json:"active"`
+		Staging []string `json:"staging"`
+	}
 	r1 := httpGet(t, ts.URL+"/catalog/ua_blacklist")
-	pat1, err := readJSON[string](r1)
+	obj1, err := readJSON[uaPayload](r1)
 	etag1 := r1.Header.Get("ETag")
 	r1.Body.Close()
 	if err != nil {
-		t.Fatalf("без site: body не JSON-строка: %v", err)
+		t.Fatalf("без site: body не JSON-объект: %v", err)
 	}
-	if !strings.Contains(pat1, "curl/.*") || !strings.Contains(pat1, "python-requests/.*") {
-		t.Errorf("без site: pattern не содержит системных regex'ов: %q", pat1)
+	if !strings.Contains(obj1.Active, "curl/.*") || !strings.Contains(obj1.Active, "python-requests/.*") {
+		t.Errorf("без site: active не содержит системных regex'ов: %q", obj1.Active)
 	}
-	if strings.Contains(pat1, "evil-scraper/.*") {
-		t.Errorf("без site: pattern содержит per-resource паттерн: %q", pat1)
+	if strings.Contains(obj1.Active, "evil-scraper/.*") {
+		t.Errorf("без site: active содержит per-resource паттерн: %q", obj1.Active)
+	}
+	// staging-паттерн (scrapy) — отдельной записью списка, не в active.
+	if len(obj1.Staging) != 1 || obj1.Staging[0] != "scrapy/[0-9.]+" {
+		t.Errorf("staging список не содержит staging-паттерна: %v", obj1.Staging)
+	}
+	if strings.Contains(obj1.Active, "scrapy/[0-9.]+") {
+		t.Errorf("active содержит staging-паттерн (должен быть только в staging): %q", obj1.Active)
 	}
 
-	// С site=shop — добавляется кастомный.
+	// С site=shop — в active добавляется кастомный; staging не зависит от site.
 	r2 := httpGet(t, ts.URL+"/catalog/ua_blacklist?site=shop.example.com")
-	pat2, err := readJSON[string](r2)
+	obj2, err := readJSON[uaPayload](r2)
 	etag2 := r2.Header.Get("ETag")
 	r2.Body.Close()
 	if err != nil {
-		t.Fatalf("site=shop: body не JSON-строка: %v", err)
+		t.Fatalf("site=shop: body не JSON-объект: %v", err)
 	}
-	if !strings.Contains(pat2, "evil-scraper/.*") {
-		t.Errorf("site=shop: pattern не содержит кастомного regex'a: %q", pat2)
+	if !strings.Contains(obj2.Active, "evil-scraper/.*") {
+		t.Errorf("site=shop: active не содержит кастомного regex'a: %q", obj2.Active)
 	}
 
-	// Результат должен быть компилируемым regex (мы валидируем компоненты в
-	// LoadYAML, но имеет смысл проверить, что обёртка тоже не ломает).
-	if _, err := regexp.Compile(pat2); err != nil {
-		t.Errorf("combined regex не компилируется: %v (pattern=%q)", err, pat2)
+	// active combined regex должен компилироваться.
+	if _, err := regexp.Compile(obj2.Active); err != nil {
+		t.Errorf("active combined regex не компилируется: %v (pattern=%q)", err, obj2.Active)
 	}
 
 	if etag1 == etag2 {
@@ -319,17 +330,22 @@ func TestMultiTenantAttackMode(t *testing.T) {
 func TestPerTenantIPLists(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// ip_blocklist: системный CIDR + per-resource CIDR для shop.
+	// ip_blocklist: системный CIDR + per-resource CIDR для shop. Wire-формат
+	// A11 — "<status>:block": системный active → "active:block", системный
+	// staging → "staging:block", per-resource всегда "active:block".
 	r := httpGet(t, ts.URL+"/catalog/ip_blocklist?site=shop.example.com")
 	var bl map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&bl); err != nil {
 		t.Fatal(err)
 	}
 	r.Body.Close()
-	if bl["203.0.113.0/24"] != "block" {
-		t.Errorf("системный CIDR не в ip_blocklist: %+v", bl)
+	if bl["203.0.113.0/24"] != "active:block" {
+		t.Errorf("системный active CIDR не в ip_blocklist: %+v", bl)
 	}
-	if bl["192.0.2.10/32"] != "block" {
+	if bl["198.51.100.7/32"] != "staging:block" {
+		t.Errorf("системный staging CIDR не несёт staging: %+v", bl)
+	}
+	if bl["192.0.2.10/32"] != "active:block" {
 		t.Errorf("per-resource CIDR не в ip_blocklist: %+v", bl)
 	}
 
@@ -342,6 +358,24 @@ func TestPerTenantIPLists(t *testing.T) {
 	r.Body.Close()
 	if len(wl) != 2 {
 		t.Errorf("ip_whitelist?site=shop: len=%d want 2, got %v", len(wl), wl)
+	}
+}
+
+// TestTLSFPBlocklistStatusPayload: A11 — payload несёт "<status>:block"
+// для active И staging записей, эдж сам разводит блокировку vs staging_match.
+func TestTLSFPBlocklistStatusPayload(t *testing.T) {
+	ts := newTestServer(t, sampleData())
+	r := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
+	var bl map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&bl); err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if bl["L13i17h2_abc_def"] != "active:block" {
+		t.Errorf("active fp payload = %q want active:block", bl["L13i17h2_abc_def"])
+	}
+	if bl["L12i14h1_ghi_jkl"] != "staging:block" {
+		t.Errorf("staging fp payload = %q want staging:block (staging доезжает по Channel C)", bl["L12i14h1_ghi_jkl"])
 	}
 }
 
@@ -469,7 +503,7 @@ func TestConcurrentPullsNoRace(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 5; i++ {
 			d := sampleData()
-			d.TLSFPBlocklist[strings.Repeat("x", i+1)] = "block"
+			d.TLSFPBlocklist[strings.Repeat("x", i+1)] = "active"
 			srv.Store().Replace(d)
 		}
 	}()
@@ -557,10 +591,13 @@ func TestNormalizeDedupStrings(t *testing.T) {
 	}
 
 	r = httpGet(t, ts.URL+"/catalog/ua_blacklist")
-	pat, _ := readJSON[string](r)
+	obj, _ := readJSON[struct {
+		Active  string   `json:"active"`
+		Staging []string `json:"staging"`
+	}](r)
 	r.Body.Close()
-	if strings.Count(pat, "curl/") != 1 {
-		t.Errorf("ua_blacklist содержит дубликат curl/: %q", pat)
+	if strings.Count(obj.Active, "curl/") != 1 {
+		t.Errorf("ua_blacklist active содержит дубликат curl/: %q", obj.Active)
 	}
 
 	r = httpGet(t, ts.URL+"/catalog/ip_blocklist?site=shop.example.com")

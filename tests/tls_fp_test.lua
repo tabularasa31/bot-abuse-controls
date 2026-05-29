@@ -112,6 +112,25 @@ check(prof_staging.beta,   18,  "build_profiles staging beta=18")
 check(prof_active.bad,     nil, "build_profiles drops non-numeric")
 check(prof_active.zero,    nil, "build_profiles drops zero cipher_cnt")
 
+-- ===========================================================================
+-- build_blocklist — parse Channel C wire map { [fp] = "<status>:block" } into
+-- the staging fp set (A11, 86exrtjpc). Only status=staging fps are kept; active
+-- ones block directly in verdict.lua off the same dict, legacy bare "block" is
+-- active.
+-- ===========================================================================
+
+local bl_staging = tls_fp.build_blocklist({
+    ["L13i1900_aaa_bbb"] = "active:block",   -- active → not in staging set
+    ["L12i1400_ccc_ddd"] = "staging:block",  -- staged → kept
+    ["L13i1300_eee_fff"] = "block",          -- legacy bare → active → skipped
+    ["L13i1300_ggg_hhh"] = "unknown:block",  -- unknown status → skipped
+})
+check(bl_staging["L12i1400_ccc_ddd"], true, "build_blocklist keeps staging fp")
+check(bl_staging["L13i1900_aaa_bbb"], nil,  "build_blocklist drops active fp")
+check(bl_staging["L13i1300_eee_fff"], nil,  "build_blocklist treats bare 'block' as active")
+check(bl_staging["L13i1300_ggg_hhh"], nil,  "build_blocklist drops unknown status")
+check(next(tls_fp.build_blocklist(nil)), nil, "build_blocklist nil → empty")
+
 -- Локальные алиасы для остальных тестов файла — they expected single-table
 -- shape, теперь build_* возвращает (active, staging).
 local cat  = cat_active
@@ -211,6 +230,63 @@ check(tls_fp.is_suspicious_ciphers("chrome", 16, moved, true), false,
     "post-pull active: chrome matches updated profile → ok")
 -- Reset для последующих тестов (если будут добавлены ниже).
 tls_fp._cached_gen_profiles = nil
+
+-- ===========================================================================
+-- refresh() blocklist staging from the Channel C snapshot (A11, 86exrtjpc).
+-- Mock ngx.shared (meta + tls_fp_blocklist + metrics) and assert refresh()
+-- rebuilds tls_fp.blocklist_staging to exactly the status=staging fps in the
+-- dict at the published generation — verdict.lua blocks the active ones, this
+-- set drives staging_match in run().
+-- ===========================================================================
+
+do
+    local function new_dict()
+        local store = {}
+        local d = {}
+        function d:get(k) return store[k] end
+        function d:set(k, v) store[k] = v; return true end
+        function d:safe_add(k, v)
+            if store[k] ~= nil then return nil, "exists" end
+            store[k] = v; return true
+        end
+        function d:delete(k) store[k] = nil end
+        function d:get_keys(_) local ks = {} for k in pairs(store) do ks[#ks+1] = k end return ks end
+        return d
+    end
+
+    local saved_ngx = _G.ngx
+    local fp_state = require "tls_fp_blocklist_state"
+    local bl   = new_dict()
+    local meta = new_dict()
+    _G.ngx = {
+        shared = { meta = meta, tls_fp_blocklist = bl, metrics = new_dict() },
+        log = function() end, ERR = "ERR", WARN = "WARN", NOTICE = "NOTICE",
+    }
+
+    -- gen 1 snapshot: one active, one staging fp (wire "<status>:block").
+    bl:set(fp_state.key("L13i1900_active_fp", 1), "active:block")
+    bl:set(fp_state.key("L12i1400_staged_fp", 1), "staging:block")
+    meta:set(fp_state.META_GEN_KEY, 1)
+    tls_fp._cached_gen_blocklist = nil  -- force rebuild
+
+    tls_fp.refresh()
+    check(tls_fp.blocklist_staging["L12i1400_staged_fp"], true,
+        "refresh builds blocklist_staging from staging fp")
+    check(tls_fp.blocklist_staging["L13i1900_active_fp"], nil,
+        "refresh excludes active fp from blocklist_staging")
+
+    -- gen 2: staged fp promoted to active → it drops out of the staging set.
+    bl:delete(fp_state.key("L12i1400_staged_fp", 1))
+    bl:set(fp_state.key("L12i1400_staged_fp", 2), "active:block")
+    bl:set(fp_state.key("L13i1900_active_fp", 2), "active:block")
+    meta:set(fp_state.META_GEN_KEY, 2)
+    tls_fp.refresh()
+    check(tls_fp.blocklist_staging["L12i1400_staged_fp"], nil,
+        "refresh drops promoted fp from blocklist_staging on gen flip")
+
+    tls_fp._cached_gen_blocklist = nil
+    _G.ngx = saved_ngx
+end
 
 -- ===========================================================================
 -- Reporting
