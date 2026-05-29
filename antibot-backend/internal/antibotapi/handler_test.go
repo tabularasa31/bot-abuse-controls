@@ -419,6 +419,49 @@ func TestASNBlock_MissingAsnField_400(t *testing.T) {
 	}
 }
 
+func TestDeletePolicy_RoundTrip(t *testing.T) {
+	ts, pool, tok := newTestServer(t)
+	const site = "del-me.example"
+
+	// Создаём host первой мутацией.
+	if status, body := do(t, ts, http.MethodPatch, "/antibot/v1/policy/"+site, tok,
+		`{"attack_mode":true}`); status != http.StatusOK {
+		t.Fatalf("seed patch: status=%d body=%s", status, body)
+	}
+	// GET видит его.
+	if status, _ := do(t, ts, http.MethodGet, "/antibot/v1/policy/"+site, tok, ""); status != http.StatusOK {
+		t.Fatalf("get before delete: status=%d, want 200", status)
+	}
+
+	// DELETE целого host'а.
+	status, body := do(t, ts, http.MethodDelete, "/antibot/v1/policy/"+site, tok, "")
+	if status != http.StatusOK || !strings.Contains(string(body), `"changed":true`) {
+		t.Fatalf("delete: status=%d body=%s", status, body)
+	}
+	// Строка физически исчезла из БД.
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM policy WHERE host=$1`, site,
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("row still present after delete: count=%d", count)
+	}
+	// GET теперь 404.
+	if status, _ := do(t, ts, http.MethodGet, "/antibot/v1/policy/"+site, tok, ""); status != http.StatusNotFound {
+		t.Errorf("get after delete: status=%d, want 404", status)
+	}
+}
+
+func TestDeletePolicy_Absent_404(t *testing.T) {
+	ts, _, tok := newTestServer(t)
+	status, _ := do(t, ts, http.MethodDelete, "/antibot/v1/policy/never-existed.example", tok, "")
+	if status != http.StatusNotFound {
+		t.Errorf("delete absent host: status=%d, want 404", status)
+	}
+}
+
 // doNoFatal — concurrency-safe HTTP-хелпер: НЕ вызывает t.Fatalf
 // (testing.T.FailNow семейство — UB вне test goroutine, см. Go testing docs).
 // Возвращает только err; status в concurrency-тестах нас не интересует —

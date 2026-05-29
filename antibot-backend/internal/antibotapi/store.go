@@ -425,6 +425,22 @@ func (s *Store) GetPolicy(ctx context.Context, site string) (catalog.Policy, err
 	return p, nil
 }
 
+// DeletePolicy удаляет policy-строку host'а целиком. existed=false → строки
+// не было, handler возвращает 404 (как у array DELETE — отделяем «не было»
+// от «было и удалили»). Single-statement DELETE атомарен; ensureRow не нужен.
+//
+// После COMMIT host исчезает из таблицы. Reloader делает полный LoadRuntime +
+// Store.Replace, поэтому удалённый host просто не попадёт в следующий snapshot,
+// и buildPolicy отдаст PoolDefault() (mode=shadow, observe-only) — deletion
+// через Channel C обрабатывается семантикой полной перезагрузки, не upsert'ом.
+func (s *Store) DeletePolicy(ctx context.Context, site string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM policy WHERE host = $1`, site)
+	if err != nil {
+		return false, fmt.Errorf("delete policy: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // GetStringArray возвращает один JSONB-массив-поле. Отсутствие row = []
 // (не ErrNotFound: с точки зрения дашборда «у клиента ещё ничего нет»).
 func (s *Store) GetStringArray(ctx context.Context, site, field string) ([]string, error) {
