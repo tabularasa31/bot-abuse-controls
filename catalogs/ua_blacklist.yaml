@@ -19,3 +19,21 @@
 #   "curl/.*": active
 #   "python-requests/.*": active
 #   "scrapy/[0-9.]+": staging
+
+# --- Seed: однозначные сканеры / плохие боты (status=active). Перенесены сюда
+# --- из edge-конфига infra/demo-stand/config/ua_blacklist.conf после миграции
+# --- ua_blacklist на Channel C (86exrtjpc): теперь источник истины — этот файл,
+# --- иначе после первого pull эдж терял эти паттерны (конфиг-seed замещался
+# --- пустым каталогом). Honest UAs, нулевая бизнес-ценность, без FP-риска для
+# --- реальных пользователей. YAML single-quoted — чтобы `\b` оставался literal.
+'(?i)\bzgrab\b': active
+'(?i)\bl9scan\b': active
+'(?i)\bsqlmap\b': active
+'(?i)\bnikto\b': active
+'(?i)\bmasscan\b': active
+'(?i)\bnuclei\b': active
+'(?i)\bwpscan\b': active
+'(?i)\bAhrefsBot\b': active
+'(?i)\bSemrushBot\b': active
+'(?i)\bMJ12bot\b': active
+'(?i)\bDotBot\b': active
