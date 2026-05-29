@@ -85,6 +85,11 @@ if [ "$redeploy" = "1" ]; then
   # explicitly via a second `-f` for it to take effect — otherwise the
   # per-deploy customisations promised in README "Local override" would
   # silently never apply.
+  # NB: no `--profile observability` here, so profile-gated services
+  # (analytics / loki / grafana) are NOT rebuilt or recreated by this deploy —
+  # only the core backend/lb/postgres path. After changing the analytics image
+  # (infra/demo-backend/analytics/*) rebuild it by hand:
+  #   docker compose -f docker-compose.backend.yml --profile observability build analytics
   compose_args=("-f" "$COMPOSE_FILE")
   override="infra/demo-backend/docker-compose.override.yml"
   if [ -f "$override" ]; then
