@@ -6,5 +6,4 @@
 # The host autopilot (scripts/blocklist-autopilot.sh) reads the artifacts this
 # writes; schedule it from its own cron after this pass.
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$HERE/run.sh"
+exec bash "$(dirname "${BASH_SOURCE[0]}")/run.sh"
