@@ -224,6 +224,12 @@ services:
   # the repo's state/ — consumed host-side by scripts/blocklist-autopilot.sh —
   # and emails the daily report. Producer only: it never opens PRs (that needs
   # the checkout + gh creds, kept on the host). See docs/blocklist-promotion.md.
+  #
+  # CRON-DRIVEN ONE-SHOT: the entrypoint runs ONE pass and exits; scheduling is
+  # external (host cron at 08:00 — see the runbook), not an in-container loop.
+  # Run a pass with:
+  #   docker compose -f docker-compose.backend.yml --profile observability run --rm analytics
+  # `restart: "no"` so an `up` of this service doesn't restart-loop on exit 0.
   analytics:
     build:
       context: ./analytics
@@ -238,7 +244,6 @@ services:
       CATALOGS_DIR: "/data/catalogs"
       BAC_SOURCE: "loki"
       LOKI_URL: "http://loki:3100"
-      ANALYTICS_INTERVAL: "${ANALYTICS_INTERVAL:-86400}"
       BAC_TTL_DAYS: "${BAC_TTL_DAYS:-14}"
       BAC_MIN_STAGING_HOURS: "${BAC_MIN_STAGING_HOURS:-48}"
       TZ: "${TZ:-Europe/Moscow}"
@@ -259,7 +264,7 @@ services:
       # (same checkout) reads state/. Both are gitignored.
       - ../../state:/data/state
       - ../../reports:/data/reports
-    restart: unless-stopped
+    restart: "no"
 
 volumes:
   pgdata:
