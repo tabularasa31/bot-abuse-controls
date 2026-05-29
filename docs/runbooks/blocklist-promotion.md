@@ -92,8 +92,8 @@ activate staging-записей с verdict=activate; auto-demote молчащи�
 - **Producer (backend/Loki).** Контейнер `antibot-analytics` поднят на backend-VM
   (observability-профиль), прочитал **живой Loki** и записал `state/candidates.json`
   (**14 HIGH / 11 MEDIUM / 31 LOW**) + `stale.json` + `staging-observation.json`.
-  `analyze.py --source loki` работает end-to-end.
-- **Promote → PR.** `promote-fp.sh L13d1300_69e852b66fc7_10d89aa70559 --reason "..."`
+  `infra/demo-stand/scripts/analyze.py --source loki` работает end-to-end.
+- **Promote → PR.** `scripts/promote-fp.sh L13d1300_69e852b66fc7_10d89aa70559 --reason "..."`
   открыл чистый staging-PR (#106) от main с evidence-паспортом (score 6 HIGH:
   impersonator go-http-client + leakix recon, multi-IP 13, DC, `human_share 0.0`,
   gates ✓); CI зелёный.
@@ -108,7 +108,7 @@ activate staging-записей с verdict=activate; auto-demote молчащи�
   после загрузки).
 - **Активация.** Гейтится §D dwell-часами (`staging-since.json`, дефолт 48ч) +
   чистым наблюдением (`human_share=0`): выполняется после окна через
-  `promote-fp.sh <fp> --activate` (или `--force` для демо) → второй PR в `active`.
+  `scripts/promote-fp.sh <fp> --activate` (или `--force` для демо) → второй PR в `active`.
 
 > Acceptance «≥1 HIGH-кандидат проведён через flow» закрыт по доставке: живой
 > HIGH из Loki → promote-PR → merge → загружен на эдж как staging. Реальный
