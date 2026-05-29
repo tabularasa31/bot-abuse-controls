@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"regexp"
 
+	"golang.org/x/net/publicsuffix"
+
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 )
 
@@ -38,6 +40,15 @@ func ValidateSite(s string) error {
 	}
 	if !siteRE.MatchString(s) {
 		return fmt.Errorf("site: must be a valid LDH hostname (RFC 1123)")
+	}
+	// Reject registering a public suffix itself (`com`, `co.uk`, `xn--p1ai`=рф):
+	// the edge applies a parent-domain policy fallback (86exrefdz) — a row for a
+	// public suffix would then be inherited by every unrelated child host that
+	// merely points DNS at the edge, breaking unknown-host isolation (codex P1
+	// on PR #100). icann-only: internal single-label names (`staging`) return
+	// icann=false and stay allowed.
+	if suffix, icann := publicsuffix.PublicSuffix(s); icann && suffix == s {
+		return fmt.Errorf("site: must not be a public suffix (%q)", s)
 	}
 	return nil
 }

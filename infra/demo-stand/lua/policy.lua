@@ -91,44 +91,25 @@ end
 local VALID_MODES         = { shadow = true, active = true }
 local VALID_STRICTNESSES  = { standard = true, permissive = true }
 
--- lookup(host) — uncached read path: shared_dict + cjson.decode + enum
--- guards. Always returns a non-nil Policy table; falls back to a fresh
--- POOL_DEFAULT on any miss/error so callers can read `.mode` /
--- `.strictness` directly without nil-guards. The fallback also covers
--- schema drift (missing / invalid mode|strictness): pool default treats
--- the host as shadow rather than guessing, and the ERR-log surfaces the
--- bad payload to the operator.
-local function lookup(host)
-    local key_host = canonical_host(host)
-    if not key_host then return new_pool_default() end
-    local dict = ngx.shared.antibot_policy
-    local meta = ngx.shared.meta
-    if not dict or not meta then return new_pool_default() end
-    local gen = meta:get("antibot_policy_gen")
-    if not gen then return new_pool_default() end
-    local raw = dict:get(key_host .. ":" .. gen)
-    if not raw then return new_pool_default() end
+-- decode_entry(raw, host) — decode one shared_dict raw Policy value + enum-guard
+-- it. Shared by the walk-up in lookup(). Always returns a non-nil Policy table.
+--
+-- Enum guards: a malformed Policy missing `mode` / carrying an unknown value
+-- would otherwise silently degrade an active client to shadow
+-- (`nil == "active"` is false). Fail to pool default + ERR so the
+-- misconfiguration is visible. origin_ip is PRESERVED through this fallback:
+-- routing (proxy_target, 86exrefdz) must not depend on mode/strictness
+-- validity, otherwise a forward-compat schema change would silently deroute
+-- a tenant to the BAC landing instead of just failing enforcement stale.
+local function decode_entry(raw, host)
     local p, err = cjson.decode(raw)
     if not p or type(p) ~= "table" then
         ngx.log(ngx.ERR, "policy: decode failed for ", host, ": ", tostring(err))
         return new_pool_default()
     end
-    -- Enum guards: a malformed Policy that's missing `mode` or carries a
-    -- value outside the known set would otherwise silently degrade an
-    -- active client to shadow (`nil == "active"` is false). Fail to pool
-    -- default + ERR so the misconfiguration is visible.
-    --
-    -- origin_ip is preserved through this fallback: routing (proxy_target,
-    -- 86exrefdz) must NOT depend on mode/strictness validity. Without this,
-    -- a forward-compat schema change (backend adds a 3rd mode the edge
-    -- doesn't know yet) would make lookup() drop origin_ip → the tenant's
-    -- traffic silently routes to the BAC landing instead of its backend —
-    -- a routing outage, not just an enforcement fail-stale. So we keep a
-    -- valid origin_ip on the pool-default fallback (enforcement still
-    -- safely degrades to shadow/standard).
     local function fallback()
         local d = new_pool_default()
-        if type(p) == "table" and type(p.origin_ip) == "string" and p.origin_ip ~= "" then
+        if type(p.origin_ip) == "string" and p.origin_ip ~= "" then
             d.origin_ip = p.origin_ip
         end
         return d
@@ -144,6 +125,47 @@ local function lookup(host)
         return fallback()
     end
     return p
+end
+
+-- lookup(host) — uncached read path with PARENT-DOMAIN fallback (86exrefdz).
+-- A client onboards a whole DOMAIN, so policy must cover its subdomains too
+-- (otherwise `www.<domain>` and friends fall to pool-default shadow / non-
+-- tenant). We try the exact host, then strip the leftmost label and retry up
+-- the domain, returning the FIRST existing entry (most specific wins): a single
+-- `пример.рф` row covers `www.пример.рф`, `app.пример.рф`, … with the same
+-- mode/strictness/origin_ip, while an explicit `api.пример.рф` row still
+-- overrides for that subdomain. Public-suffix-safe: the walk only matches rows
+-- that actually exist, and nobody registers a policy for `рф` / `co.uk`.
+-- Always returns a non-nil Policy table so callers can read fields directly.
+local function lookup(host)
+    if not host or host == "" then return new_pool_default() end
+    local dict = ngx.shared.antibot_policy
+    local meta = ngx.shared.meta
+    if not dict or not meta then return new_pool_default() end
+    local gen = meta:get("antibot_policy_gen")
+    if not gen then return new_pool_default() end
+
+    local candidate = string.lower(host)
+    while candidate and candidate ~= "" do
+        local key = canonical_host(candidate)
+        local raw = key and dict:get(key .. ":" .. gen)
+        if raw then
+            return decode_entry(raw, candidate)
+        end
+        -- Strip the leftmost label: www.x.com → x.com → com → stop.
+        local dot = candidate:find(".", 1, true)
+        if not dot then break end
+        local parent = candidate:sub(dot + 1)
+        -- Defense-in-depth: never walk up to a single-label candidate (a bare
+        -- TLD like "com" / "рф"=xn--p1ai). The backend ValidateSite rejects
+        -- public-suffix policy rows at write time (codex P1 on PR #100), so a
+        -- public-suffix row can only exist via manual SQL — this stops the walk
+        -- from inheriting it. (Single-label EXACT lookups still work — internal
+        -- hosts like `staging` are matched on the first iteration above.)
+        if not parent:find(".", 1, true) then break end
+        candidate = parent
+    end
+    return new_pool_default()
 end
 
 -- get(host) → Policy table. Per-request memoization on ngx.ctx: the same
