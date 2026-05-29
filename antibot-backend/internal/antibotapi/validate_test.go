@@ -33,6 +33,14 @@ func TestValidateSite(t *testing.T) {
 		{"foo.例え.jp", true},    // non-ASCII (IDN не поддерживаем)
 		{"foo\x00bar", true},   // NUL
 		{"foo\nbar", true},     // newline (header injection guard)
+		// Public suffixes rejected — the edge parent-domain fallback would
+		// otherwise let any child host inherit them (codex P1 on PR #100).
+		{"com", true},                     // bare gTLD
+		{"org", true},                     // bare gTLD
+		{"co.uk", true},                   // multi-label ccTLD suffix
+		{"xn--p1ai", true},                // .рф (punycode)
+		{"example.com", false},            // registrable domain — allowed
+		{"xn--e1afmkfd.xn--p1ai", false}, // пример.рф — registrable, allowed
 	}
 	for _, tc := range cases {
 		err := antibotapi.ValidateSite(tc.in)

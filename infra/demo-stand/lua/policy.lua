@@ -155,7 +155,15 @@ local function lookup(host)
         -- Strip the leftmost label: www.x.com → x.com → com → stop.
         local dot = candidate:find(".", 1, true)
         if not dot then break end
-        candidate = candidate:sub(dot + 1)
+        local parent = candidate:sub(dot + 1)
+        -- Defense-in-depth: never walk up to a single-label candidate (a bare
+        -- TLD like "com" / "рф"=xn--p1ai). The backend ValidateSite rejects
+        -- public-suffix policy rows at write time (codex P1 on PR #100), so a
+        -- public-suffix row can only exist via manual SQL — this stops the walk
+        -- from inheriting it. (Single-label EXACT lookups still work — internal
+        -- hosts like `staging` are matched on the first iteration above.)
+        if not parent:find(".", 1, true) then break end
+        candidate = parent
     end
     return new_pool_default()
 end
