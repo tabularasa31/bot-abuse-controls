@@ -246,6 +246,13 @@ services:
       LOKI_URL: "http://loki:3100"
       BAC_TTL_DAYS: "${BAC_TTL_DAYS:-14}"
       BAC_MIN_STAGING_HOURS: "${BAC_MIN_STAGING_HOURS:-48}"
+      # Lifetime-state rotation (D7): run.sh runs rotate-state.py before analyze.py
+      # to archive the aged-out tail of seen-fps.json / ip-cache.json. Defaults
+      # applied in run.sh; surfaced here so .env can override per deploy.
+      STATE_FP_TTL_DAYS: "${STATE_FP_TTL_DAYS:-30}"
+      STATE_IP_TTL_DAYS: "${STATE_IP_TTL_DAYS:-7}"
+      STATE_COMPACT_MIN_COUNT: "${STATE_COMPACT_MIN_COUNT:-3}"
+      STATE_ARCHIVE_RETENTION_MONTHS: "${STATE_ARCHIVE_RETENTION_MONTHS:-6}"
       TZ: "${TZ:-Europe/Moscow}"
       # Daily report email (Gmail SMTP). All optional: unset → artifacts still
       # written, email simply skipped. Secrets live in .env, never in the image.

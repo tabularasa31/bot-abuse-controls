@@ -97,7 +97,7 @@ CRON_TZ=Europe/Moscow
 на one-shot, добавьте `--entrypoint /opt/analytics/run.sh`, чтобы форсировать один
 проход (иначе старый loop-образ не завершится).
 
-Edge-cron старого `daily-report.sh` отключён (аналитика переехала на backend).
+Старый edge-скрипт `daily-report.sh` удалён (аналитика переехала на backend; на эдже `analyze.py` остался ручным debug-инструментом с `--source docker`).
 
 ## Что наблюдать
 

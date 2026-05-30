@@ -341,8 +341,14 @@ json (via `docker logs --since 25h nginx-demo`), builds a per-fingerprint
 view, scores blocklist candidates, and renders markdown / HTML / a
 subject line. fp comes from the record's `tls_fp`; lifetime state lives
 in `state/seen-fps.json` (keyed by fp) and `state/ip-cache.json` (ASN
-enrichment via ip-api.com). Per-day markdown is archived under
-`reports/`. Both dirs are gitignored.
+enrichment from the edge-logged fields). Per-day markdown is archived
+under `reports/`. Both dirs are gitignored.
+
+That lifetime state would grow unbounded at production scale, so cron runs
+[`scripts/rotate-state.py`](scripts/rotate-state.py) **before** `analyze.py`:
+it archives the aged-out tail into `state/archive/YYYY-MM.json` and drops
+one-off probes, and `analyze.py` lazily restores any key that reappears. TTL
+logic and overrides are documented in [`scripts/README.md`](scripts/README.md).
 
 ```sh
 python3 infra/demo-stand/scripts/analyze.py            # markdown
@@ -350,30 +356,14 @@ python3 infra/demo-stand/scripts/analyze.py --html     # HTML for email
 python3 infra/demo-stand/scripts/analyze.py --subject  # subject line
 ```
 
-[`scripts/daily-report.sh`](scripts/daily-report.sh) wraps it for cron
-(emails the HTML via msmtp + Gmail SMTP). It resolves paths from its own
-location, so it tracks `main` like everything else:
-
-```cron
-0 8 * * * /home/ubuntu/abuse-controls/infra/demo-stand/scripts/daily-report.sh >> /home/ubuntu/abuse-controls/state/cron.log 2>&1
-```
-
-Report addresses live in their **own** gitignored file
-`infra/demo-stand/.env.report` — deliberately separate from `.env` so a
-`> .env` rewrite on redeploy can't drop them. Set `REPORT_FROM=<sender>` (must match the authenticated
-msmtp account) and `REPORT_TO=<routine mailbox>` there:
-
-```sh
-cat > infra/demo-stand/.env.report <<'EOT'
-REPORT_FROM=sender@example.com
-REPORT_TO=recipient@example.com
-EOT
-```
-
-`daily-report.sh` sources `.env` then `.env.report` (the latter wins).
-`REPORT_TO` falls back to `REPORT_FROM`; the run aborts if neither is set.
-Legacy deploys that still keep `REPORT_*` in `.env` keep working, but move
-them to `.env.report` so a redeploy doesn't lose them.
+The scheduled daily run (report email + candidate JSON + state rotation) has
+**moved off the edge** onto the backend `antibot-analytics` container, which
+reads Loki (7d, all edges) instead of one host's docker logs — see
+[`infra/demo-backend/analytics/run.sh`](../demo-backend/analytics/run.sh) and
+its compose service. Report addresses (`REPORT_FROM` / `REPORT_TO`) and SMTP
+creds are supplied to that container via the backend `.env`. The edge cron
+wrapper (`daily-report.sh`) is retired; on the edge, `analyze.py` is just a
+manual debug tool (`--source docker` reads the local `nginx-demo`).
 
 Scoring: impersonator +3 · suspicious cipher count +2 · automation UA +1
 · multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 days +1 · recon URI +1.

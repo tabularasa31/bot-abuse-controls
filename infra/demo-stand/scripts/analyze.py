@@ -53,6 +53,34 @@ STAGING_SINCE_FILE = STATE_DIR / "staging-since.json"
 # rebuilding the container (a recreate drops the container's docker-json log
 # history). We fold these back in so a rebuild deploy leaves no gap.
 ARCHIVE_DIR = STATE_DIR / "bac-archive"
+# Aged-out lifetime records (rotate-state.py / D7). Monthly shards keyed by the
+# record's last-seen month. Distinct from bac-archive above (which holds raw
+# events, not lifetime state). seen-fps.json / ip-cache.json grow unbounded on a
+# production edge (millions of unique fp/IP per day), so rotate-state.py moves
+# the stale tail here and analyze.py lazily restores any key that reappears.
+STATE_ARCHIVE_DIR = STATE_DIR / "archive"
+# key -> shard-month index, so a restore lookup for a key that was never archived
+# (the common case — brand-new fps appear every day) costs O(1) instead of
+# parsing every monthly shard. Sibling of the archive dir so the shard glob
+# (`archive/*.json`) never picks it up. Rebuilt from the shards if absent/corrupt.
+STATE_ARCHIVE_INDEX = STATE_DIR / "archive-index.json"
+# TTL / compaction knobs (env-overridable; set in the backend analytics run.sh).
+# An fp/IP is ARCHIVED once its last_seen is older
+# than its TTL; a low-signal record (count < min AND >7d idle, i.e. a likely
+# one-off probe) is DROPPED outright (not archived — nothing worth restoring).
+STATE_FP_TTL_DAYS = int(os.environ.get("STATE_FP_TTL_DAYS", "30"))
+STATE_IP_TTL_DAYS = int(os.environ.get("STATE_IP_TTL_DAYS", "7"))
+STATE_COMPACT_MIN_COUNT = int(os.environ.get("STATE_COMPACT_MIN_COUNT", "3"))
+# A record must be idle this long before compaction can drop it, regardless of
+# TTL — guards a brand-new low-count fp from being culled the same week.
+STATE_COMPACT_MIN_IDLE_DAYS = 7
+# Cold-storage retention: monthly shards older than this are deleted, so the
+# archive itself stays bounded (hot/cold tiering, not infinite cold growth). The
+# value of restoring a fp's history decays with age — detection is about recent
+# behaviour — so a few months is plenty for the slow-burn anti-evasion case. 0
+# disables pruning (keep forever).
+STATE_ARCHIVE_RETENTION_MONTHS = int(os.environ.get("STATE_ARCHIVE_RETENTION_MONTHS", "6"))
+_SHARD_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 # The stand's container. It emits one Phase 1 `BAC_LOG {json}` record per
 # request to docker stdout.
@@ -456,7 +484,8 @@ def seed_ip_cache_from_log(events, cache):
     `hosting` (the DC signal) = membership in the asn_datacenters catalog, the
     same source the edge's reputation:asn_dc tag uses. Any accumulated `count`
     on an existing good entry is preserved (the lifetime pass increments it);
-    entries that were previously errors are reset (they were never counted)."""
+    entries that were previously errors are reset (they were never counted).
+    A prior `last_seen` (the rotation clock, D7) survives the rebuild too."""
     dc = _load_asn_datacenters()
     for e in events:
         ip = e.get("remote")
@@ -465,15 +494,289 @@ def seed_ip_cache_from_log(events, cache):
             continue
         asn = str(asn)
         prev = cache.get(ip)
-        count = prev["count"] if (isinstance(prev, dict) and "error" not in prev
-                                  and "count" in prev) else 0
-        cache[ip] = {
+        good_prev = isinstance(prev, dict) and "error" not in prev
+        count = prev["count"] if (good_prev and "count" in prev) else 0
+        entry = {
             "asn": asn,
             "country": e.get("geo_country") or "",
             "hosting": asn in dc,
             "count": count,
             "source": "log",
         }
+        # Carry forward the rotation clock if it was set; only added when present
+        # so first-seen entries keep the original (last_seen-free) shape until
+        # the lifetime pass stamps them.
+        if good_prev and prev.get("last_seen"):
+            entry["last_seen"] = prev["last_seen"]
+        cache[ip] = entry
+
+
+# --- Lifetime-state rotation (D7) ------------------------------------------
+# seen-fps.json / ip-cache.json accumulate every fp/IP ever seen. rotate-state.py
+# (run from cron BEFORE analyze.py) calls rotate_state() to move the aged-out
+# tail into state/archive/YYYY-MM.json and drop low-signal one-offs; analyze.py
+# calls restore_from_archive() to pull a key back the moment it reappears.
+
+def _fp_last_seen(entry):
+    """Last day an fp was seen, 'YYYY-MM-DD' or None. days_seen is the canonical
+    clock (docs/blocklist-scoring.md §last-seen); fall back to a stored last_seen
+    or first_seen for legacy/edge cases."""
+    days = [d for d in entry.get("days_seen", []) if d]
+    if days:
+        return max(days)
+    for k in ("last_seen", "first_seen"):
+        v = entry.get(k)
+        if v:
+            return v[:10]
+    return None
+
+
+def _ip_last_seen(entry):
+    """Last day an IP was seen, 'YYYY-MM-DD' or None. IP entries have no day list,
+    so this leans on the last_seen the lifetime pass stamps; None ⇒ never stamped
+    (legacy/just-seeded) and rotation leaves it alone rather than guess it stale."""
+    v = entry.get("last_seen")
+    return v[:10] if v else None
+
+
+def _shard_path(month):
+    return STATE_ARCHIVE_DIR / f"{month}.json"
+
+
+def _load_shard(path):
+    if not path.exists():
+        return {"fps": {}, "ips": {}}
+    try:
+        d = json.loads(path.read_text())
+    except Exception:
+        return {"fps": {}, "ips": {}}
+    if not isinstance(d, dict):  # corrupted / [] / null -> start clean
+        return {"fps": {}, "ips": {}}
+    d.setdefault("fps", {})
+    d.setdefault("ips", {})
+    return d
+
+
+def _save_shard(path, data):
+    STATE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _save_archive_index(idx):
+    STATE_ARCHIVE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    STATE_ARCHIVE_INDEX.write_text(json.dumps(idx, indent=2, sort_keys=True))
+
+
+def _rebuild_archive_index():
+    """Scan every shard once to rebuild the key->month index. The only full-scan
+    path — runs when the index is missing/corrupt (fresh deploy, or after manual
+    archive surgery: delete archive-index.json and it is rebuilt on next run)."""
+    idx = {"fps": {}, "ips": {}}
+    if STATE_ARCHIVE_DIR.exists():
+        for path in sorted(STATE_ARCHIVE_DIR.glob("*.json")):
+            month = path.stem
+            shard = _load_shard(path)
+            for kind in ("fps", "ips"):
+                for key in shard.get(kind, {}):
+                    idx[kind][key] = month
+    _save_archive_index(idx)
+    return idx
+
+
+def _load_archive_index():
+    """{'fps': {key: 'YYYY-MM'}, 'ips': {...}} mapping each archived key to its
+    shard. Lets restore skip keys that were never archived without touching a
+    single shard. Rebuilt from the shards if absent/corrupt."""
+    try:
+        d = json.loads(STATE_ARCHIVE_INDEX.read_text())
+        if isinstance(d, dict):
+            d.setdefault("fps", {})
+            d.setdefault("ips", {})
+            return d
+    except Exception:
+        pass
+    return _rebuild_archive_index()
+
+
+def archive_records(kind, records):
+    """Merge {key: entry} into the monthly shard(s) for each record's last-seen
+    month and update the key->month index. `kind` is 'fps' or 'ips'. A record
+    with no resolvable last_seen lands in an 'unknown' shard so it is still
+    recoverable by lazy restore."""
+    last_seen = _fp_last_seen if kind == "fps" else _ip_last_seen
+    by_month = defaultdict(dict)
+    for key, entry in records.items():
+        ls = last_seen(entry)
+        by_month[ls[:7] if ls else "unknown"][key] = entry
+    idx = _load_archive_index()
+    kidx = idx.setdefault(kind, {})
+    for month, recs in by_month.items():
+        path = _shard_path(month)
+        shard = _load_shard(path)
+        shard[kind].update(recs)
+        _save_shard(path, shard)
+        for key in recs:
+            kidx[key] = month
+    _save_archive_index(idx)
+
+
+def restore_from_archive(kind, keys):
+    """Pop archived `kind` entries matching `keys` out of their monthly shards and
+    return {key: entry}. Removes them from the shard AND the index (a record is
+    either active or archived, never both) so re-archival doesn't double counts.
+
+    The index gates the work: keys that were never archived — the common case,
+    since brand-new fps/IPs appear every run — intersect to empty and cost zero
+    shard reads. Only shards actually holding a wanted key are opened."""
+    wanted = set(keys)
+    if not wanted or not STATE_ARCHIVE_DIR.exists():
+        return {}
+    idx = _load_archive_index()
+    kidx = idx.get(kind, {})
+    by_month = defaultdict(set)
+    for key in wanted:
+        month = kidx.get(key)
+        if month is not None:
+            by_month[month].add(key)
+    if not by_month:
+        return {}  # nothing the index knows about -> no shard I/O
+    found, idx_dirty = {}, False
+    for month, mkeys in by_month.items():
+        shard = _load_shard(_shard_path(month))
+        bucket = shard.get(kind, {})
+        hit = mkeys & bucket.keys()
+        for key in hit:
+            found[key] = bucket.pop(key)
+        # Drop index entries for the hits and for any stale pointer (index said a
+        # key was in this shard but it wasn't — keep the two from drifting).
+        for key in mkeys:
+            kidx.pop(key, None)
+            idx_dirty = True
+        if hit:
+            path = _shard_path(month)
+            # Drained shards are unlinked, not left as empty {} files to pile up.
+            if not shard.get("fps") and not shard.get("ips"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            else:
+                _save_shard(path, shard)
+    if idx_dirty:
+        _save_archive_index(idx)
+    return found
+
+
+def _months_ago(today, n):
+    """The 'YYYY-MM' that is `n` whole months before today's month."""
+    total = today.year * 12 + (today.month - 1) - n
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def prune_archive(now_utc=None, retention_months=None):
+    """Delete monthly shards older than the retention horizon and drop their keys
+    from the index, so the cold archive stays bounded instead of growing forever.
+    retention 0 (or negative) disables pruning. The undated 'unknown' shard is
+    never aged out (it has no month to compare). Returns {shards, records}."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    retention = (STATE_ARCHIVE_RETENTION_MONTHS if retention_months is None
+                 else retention_months)
+    result = {"shards": 0, "records": 0}
+    if retention <= 0 or not STATE_ARCHIVE_DIR.exists():
+        return result
+    cutoff = _months_ago(now_utc.astimezone().date(), retention)  # prune months < cutoff
+    for path in sorted(STATE_ARCHIVE_DIR.glob("*.json")):
+        month = path.stem
+        if not _SHARD_MONTH_RE.match(month) or month >= cutoff:
+            continue
+        shard = _load_shard(path)
+        n = len(shard.get("fps", {})) + len(shard.get("ips", {}))
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        result["shards"] += 1
+        result["records"] += n
+    if result["shards"]:
+        # Drop index entries that pointed into the deleted shards. 'unknown' and
+        # any future-dated month sort >= cutoff and are kept.
+        idx = _load_archive_index()
+        changed = False
+        for kind in ("fps", "ips"):
+            kept = {k: m for k, m in idx.get(kind, {}).items()
+                    if not (_SHARD_MONTH_RE.match(m) and m < cutoff)}
+            if len(kept) != len(idx.get(kind, {})):
+                idx[kind] = kept
+                changed = True
+        if changed:
+            _save_archive_index(idx)
+    return result
+
+
+def _rotation_decision(entry, last_seen_str, today, ttl, min_count):
+    """Classify one record: 'archive' | 'drop' | 'keep'. The single source of
+    truth for the rotation rule — both rotate_state() and rotate-state.py's
+    --dry-run preview call this, so the preview can never drift from a real run."""
+    ls = _parse_day(last_seen_str or "")
+    if ls is None:
+        return "keep"  # no clock yet -> keep (don't guess it stale)
+    idle = (today - ls).days
+    if entry.get("count", 0) < min_count and idle > STATE_COMPACT_MIN_IDLE_DAYS:
+        return "drop"            # likely a stray one-off probe
+    if idle > ttl:
+        return "archive"
+    return "keep"
+
+
+def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None,
+                 retention_months=None):
+    """Bound seen-fps.json / ip-cache.json growth. For each store: ARCHIVE entries
+    idle longer than their TTL, DROP low-signal ones (count < min AND idle > the
+    compaction floor) outright. Then PRUNE the cold archive of shards older than
+    the retention horizon so it stays bounded too. Idempotent — safe to run before
+    every analyze pass. Returns {fps, ips, archive_pruned} summaries.
+
+    Fps currently in the blocklist catalog are EXEMPT — never archived or dropped.
+    The auto-demote view (find_stale_blocklist_entries) only consults active
+    seen-fps.json; archiving a silent catalog fp would erase the very last_seen
+    signal that demotes it, stranding it enforced forever. The catalog is small
+    and bounded, so keeping these active costs nothing against the size goal."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    today = now_utc.astimezone().date()
+    fp_ttl = STATE_FP_TTL_DAYS if fp_ttl is None else fp_ttl
+    ip_ttl = STATE_IP_TTL_DAYS if ip_ttl is None else ip_ttl
+    min_count = STATE_COMPACT_MIN_COUNT if min_count is None else min_count
+    catalog_fps = set(_parse_blocklist_yaml())  # exempt; {} if no catalog present
+
+    def _rotate(store, kind, ttl, exempt=frozenset()):
+        last_seen = _fp_last_seen if kind == "fps" else _ip_last_seen
+        archive, drop = {}, []
+        for key, entry in store.items():
+            if key in exempt:
+                continue
+            action = _rotation_decision(entry, last_seen(entry), today, ttl, min_count)
+            if action == "drop":
+                drop.append(key)
+            elif action == "archive":
+                archive[key] = entry
+        for key in archive:
+            del store[key]
+        for key in drop:
+            del store[key]
+        if archive:
+            archive_records(kind, archive)
+        return {"archived": len(archive), "dropped": len(drop), "kept": len(store)}
+
+    seen = load_seen()
+    fp_summary = _rotate(seen, "fps", fp_ttl, exempt=catalog_fps)
+    save_seen(seen)
+
+    ip_cache = load_ip_cache()
+    ip_summary = _rotate(ip_cache, "ips", ip_ttl)
+    save_ip_cache(ip_cache)
+
+    archive_pruned = prune_archive(now_utc, retention_months)
+    return {"fps": fp_summary, "ips": ip_summary, "archive_pruned": archive_pruned}
 
 
 def classify_event(ev):
@@ -1561,6 +1864,10 @@ def main() -> int:
     events_all, blocklist_size, init_ts, per_source = fetch_events(args.source, fetch_hours)
     seen = load_seen()
     ip_cache = load_ip_cache()
+    # IPs active at load time, BEFORE seeding fills ip_cache with every windowed
+    # IP — the lazy restore below uses this to look up only IPs that weren't
+    # already active (the rest can't be in the archive, so skip the disk scan).
+    pre_seed_ips = set(ip_cache)
     now_utc = datetime.now(timezone.utc)
     today_str = now_utc.astimezone().strftime("%Y-%m-%d")
     events_24h = split_24h(events_all, now_utc)
@@ -1617,6 +1924,30 @@ def main() -> int:
         sys.stdout.write(render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
         return 0
 
+    # Lazy restore (D7): a fp/IP that reappears in this window but was archived
+    # by rotate-state.py is pulled back into the active state with its history
+    # intact, BEFORE the accumulation below adds the new window onto it. Only the
+    # full-report path does this (and then persists) — the read-only JSON views
+    # above return early and must not mutate the archive without saving. fps key
+    # the archive; for IPs (re-seeded fresh each run) we fold the archived count
+    # back into the seeded entry rather than overwrite its fresh enrichment.
+    win_fps = {e["fp"] for e in events_24h if e.get("fp")}
+    seen.update(restore_from_archive("fps", win_fps - seen.keys()))
+    # Only IPs not already active before seeding can possibly be in the archive
+    # (a record is either active or archived, never both) — restrict the lookup
+    # to those so we don't scan shards for every windowed IP. Their seeded entry
+    # has count=0, so folding the archived count back in restores the history.
+    win_ips = {e["remote"] for e in events_24h
+               if e.get("remote") and e["remote"] != "-"}
+    for ip, entry in restore_from_archive("ips", win_ips - pre_seed_ips).items():
+        cur = ip_cache.get(ip)
+        if isinstance(cur, dict) and "error" not in cur:
+            cur["count"] = cur.get("count", 0) + entry.get("count", 0)
+            if entry.get("last_seen"):
+                cur["last_seen"] = max(cur.get("last_seen", ""), entry["last_seen"])
+        else:
+            ip_cache[ip] = entry
+
     # Update lifetime state only for events strictly newer than the
     # watermark, so overlapping/repeated runs (cron's 25h window + manual
     # runs) don't double-count. The windowed report above already reflects
@@ -1645,6 +1976,9 @@ def main() -> int:
         ip = e["remote"]
         if ip in ip_cache and "error" not in ip_cache[ip]:
             ip_cache[ip]["count"] = ip_cache[ip].get("count", 0) + 1
+            # The IP rotation clock (D7): newest day this IP was counted.
+            ip_cache[ip]["last_seen"] = max(
+                ip_cache[ip].get("last_seen", ""), ev_day)
 
     # Advance the watermark to the newest event in the window (never
     # regress it, even if old events have since aged out).
@@ -1659,9 +1993,9 @@ def main() -> int:
     archive = REPORTS_DIR / f"{today_str}.md"
     archive.write_text(md_report)
 
-    # Cache the subject line so daily-report.sh gets it without a second
-    # invocation (which would re-fetch docker logs). Written on every full
-    # run; daily-report.sh reads state/last-subject.txt.
+    # Cache the subject line so the report wrapper (backend run.sh) gets it
+    # without a second invocation (which would re-fetch the logs). Written on
+    # every full run; run.sh reads state/last-subject.txt.
     sLT = collect_lifetime_stats(seen, ip_cache)
     (STATE_DIR / "last-subject.txt").write_text(
         render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
