@@ -1036,13 +1036,25 @@ def enriched_label(info):
     return " · ".join(parts)
 
 
-def render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source=None):
+def _container_start_str(init_ts, source):
+    """Human label for 'container last started'. Under the Loki source the resty
+    init marker (`[demo] tls_fp_blocklist loaded: N`, nginx error_log) is NOT
+    shipped to Loki, so init_ts is None BY DESIGN — say so rather than the
+    alarming '(неизвестно)', which read like a failure (#3)."""
+    if init_ts:
+        return init_ts.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    if source == "loki":
+        return "n/a (Loki source: init-маркер не шипится в Loki)"
+    return "(неизвестно)"
+
+
+def render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source=None, source=None):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     asn_watch = find_asn_watch_candidates(events_24h, ip_cache)
     now_msk = now_utc.astimezone()
-    init_str = init_ts.astimezone().strftime("%Y-%m-%d %H:%M %Z") if init_ts else "(неизвестно)"
+    init_str = _container_start_str(init_ts, source)
 
     L = []
     L.append(f"# Demo-stand report — {now_msk.strftime('%Y-%m-%d %H:%M %Z')}")
@@ -1308,13 +1320,13 @@ def html_candidate(c, tier_cls):
     return "".join(parts)
 
 
-def render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc):
+def render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, source=None):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     asn_watch = find_asn_watch_candidates(events_24h, ip_cache)
     now_msk = now_utc.astimezone()
-    init_str = init_ts.astimezone().strftime("%Y-%m-%d %H:%M %Z") if init_ts else "(неизвестно)"
+    init_str = _container_start_str(init_ts, source)
 
     parts = ["<!doctype html><html><head><meta charset='utf-8'>",
              f"<style>{CSS}</style></head><body>"]
@@ -1643,7 +1655,7 @@ def main() -> int:
     save_ip_cache(ip_cache)
     save_watermark(newest)
 
-    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source)
+    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source, source=args.source)
     archive = REPORTS_DIR / f"{today_str}.md"
     archive.write_text(md_report)
 
@@ -1657,7 +1669,7 @@ def main() -> int:
     if args.html:
         # HTML renderer keeps the resty-only signature for now; comparison
         # info is in the markdown report archived under reports/.
-        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc))
+        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, source=args.source))
     else:
         sys.stdout.write(md_report)
     return 0

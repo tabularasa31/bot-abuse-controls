@@ -90,6 +90,24 @@ jobs:
                    luajit tests/policy_test.lua && \
                    luajit tests/tls_autossl_test.lua'
 
+  pytest:
+    name: Python tests (pytest, analyze.py)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run analyzer unit tests
+        run: python -m pytest -q tests/test_analyze.py
+
   lint-lua:
     name: Lint Lua (luacheck)
     needs: changes
