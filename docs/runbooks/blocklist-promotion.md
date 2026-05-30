@@ -70,9 +70,12 @@ scripts/blocklist-autopilot.sh --dry-run
 #   30 8 * * * cd ~/abuse-controls && scripts/blocklist-autopilot.sh >> ~/autopilot.log 2>&1
 ```
 
-Автомат: auto-promote стабильного HIGH (≥3 дня, gates+intent) → draft staging-PR;
-activate staging-записей с verdict=activate; auto-demote молчащих >14д (active→staging→remove).
-Дубликаты PR отсекаются по имени ветки.
+Автомат собирает все созревшие изменения за прогон в **один draft-PR** (ветка
+`blocklist-auto-YYYY-MM-DD`): auto-promote стабильного HIGH (≥3 дня, gates+intent) →
+staging; activate staging-записей с verdict=activate; auto-demote молчащих >14д
+(active→staging→remove). Идемпотентно: одна ветка на день — повторный прогон в тот же
+день no-op. CI на таком catalog-only PR гоняет только `validate-catalogs` (остальные
+джобы отфильтрованы по путям, см. `.github/workflows/ci.yml`).
 
 ## Расписание (cron на backend-VM)
 
