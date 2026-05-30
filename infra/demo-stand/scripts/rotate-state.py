@@ -59,14 +59,12 @@ def main() -> int:
             for key, entry in store.items():
                 if key in exempt:
                     continue
-                ls = az._parse_day(last_seen(entry) or "")
-                if ls is None:
-                    continue
-                idle = (today - ls).days
-                if (entry.get("count", 0) < args.min_count
-                        and idle > az.STATE_COMPACT_MIN_IDLE_DAYS):
+                # Same classifier the real run uses -> the preview can't drift.
+                action = az._rotation_decision(entry, last_seen(entry), today,
+                                               ttl, args.min_count)
+                if action == "drop":
                     dropped += 1
-                elif idle > ttl:
+                elif action == "archive":
                     archived += 1
             return {"archived": archived, "dropped": dropped,
                     "kept": len(store) - archived - dropped}

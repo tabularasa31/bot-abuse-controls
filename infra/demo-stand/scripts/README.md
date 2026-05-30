@@ -56,6 +56,20 @@ it back out of the monthly shard into the active state — counts and history
 intact — before the new window accumulates onto it. A record is therefore either
 active or archived, never both. (Dropped records are gone; nothing to restore.)
 
+A key→month index at `state/archive-index.json` gates this: a lookup for a key
+that was never archived — the common case, since brand-new fps/IPs appear every
+run — returns immediately without opening a single shard, so restore cost does
+**not** grow with the archive. The index is maintained as records are archived
+and restored, and **rebuilt from the shards if it is missing or corrupt**. So to
+hand-restore a record (e.g. the manual archive test), move it into the right
+`state/archive/YYYY-MM.json` shard, `rm state/archive-index.json`, and the next
+`analyze.py` run rebuilds the index and picks the record up.
+
+> Note: because rotation runs *before* the daily analyze pass, an fp that aged
+> out but reappears in the same window is archived by `rotate-state.py` and then
+> immediately restored by `analyze.py` — correct, but one redundant shard write
+> per such fp. Rare (only aged-out fps that resurface that day), so left as-is.
+
 ### Overriding the TTLs
 
 Env vars (set in the backend `run.sh`, or exported before a manual run):

@@ -59,6 +59,11 @@ ARCHIVE_DIR = STATE_DIR / "bac-archive"
 # production edge (millions of unique fp/IP per day), so rotate-state.py moves
 # the stale tail here and analyze.py lazily restores any key that reappears.
 STATE_ARCHIVE_DIR = STATE_DIR / "archive"
+# key -> shard-month index, so a restore lookup for a key that was never archived
+# (the common case — brand-new fps appear every day) costs O(1) instead of
+# parsing every monthly shard. Sibling of the archive dir so the shard glob
+# (`archive/*.json`) never picks it up. Rebuilt from the shards if absent/corrupt.
+STATE_ARCHIVE_INDEX = STATE_DIR / "archive-index.json"
 # TTL / compaction knobs (env-overridable; set in the backend analytics run.sh).
 # An fp/IP is ARCHIVED once its last_seen is older
 # than its TTL; a low-signal record (count < min AND >7d idle, i.e. a likely
@@ -550,51 +555,124 @@ def _save_shard(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True))
 
 
+def _save_archive_index(idx):
+    STATE_ARCHIVE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    STATE_ARCHIVE_INDEX.write_text(json.dumps(idx, indent=2, sort_keys=True))
+
+
+def _rebuild_archive_index():
+    """Scan every shard once to rebuild the key->month index. The only full-scan
+    path — runs when the index is missing/corrupt (fresh deploy, or after manual
+    archive surgery: delete archive-index.json and it is rebuilt on next run)."""
+    idx = {"fps": {}, "ips": {}}
+    if STATE_ARCHIVE_DIR.exists():
+        for path in sorted(STATE_ARCHIVE_DIR.glob("*.json")):
+            month = path.stem
+            shard = _load_shard(path)
+            for kind in ("fps", "ips"):
+                for key in shard.get(kind, {}):
+                    idx[kind][key] = month
+    _save_archive_index(idx)
+    return idx
+
+
+def _load_archive_index():
+    """{'fps': {key: 'YYYY-MM'}, 'ips': {...}} mapping each archived key to its
+    shard. Lets restore skip keys that were never archived without touching a
+    single shard. Rebuilt from the shards if absent/corrupt."""
+    try:
+        d = json.loads(STATE_ARCHIVE_INDEX.read_text())
+        if isinstance(d, dict):
+            d.setdefault("fps", {})
+            d.setdefault("ips", {})
+            return d
+    except Exception:
+        pass
+    return _rebuild_archive_index()
+
+
 def archive_records(kind, records):
     """Merge {key: entry} into the monthly shard(s) for each record's last-seen
-    month. `kind` is 'fps' or 'ips'. A record with no resolvable last_seen lands
-    in an 'unknown' shard so it is still recoverable by lazy restore."""
+    month and update the key->month index. `kind` is 'fps' or 'ips'. A record
+    with no resolvable last_seen lands in an 'unknown' shard so it is still
+    recoverable by lazy restore."""
     last_seen = _fp_last_seen if kind == "fps" else _ip_last_seen
     by_month = defaultdict(dict)
     for key, entry in records.items():
         ls = last_seen(entry)
         by_month[ls[:7] if ls else "unknown"][key] = entry
+    idx = _load_archive_index()
+    kidx = idx.setdefault(kind, {})
     for month, recs in by_month.items():
         path = _shard_path(month)
         shard = _load_shard(path)
         shard[kind].update(recs)
         _save_shard(path, shard)
+        for key in recs:
+            kidx[key] = month
+    _save_archive_index(idx)
 
 
 def restore_from_archive(kind, keys):
-    """Pop archived `kind` entries matching `keys` out of the monthly shards and
-    return {key: entry}. Removes them from the shard (a record is either active
-    or archived, never both) so re-archival doesn't double the counts. Returns {}
-    when nothing matches — the common case, so this stays cheap."""
+    """Pop archived `kind` entries matching `keys` out of their monthly shards and
+    return {key: entry}. Removes them from the shard AND the index (a record is
+    either active or archived, never both) so re-archival doesn't double counts.
+
+    The index gates the work: keys that were never archived — the common case,
+    since brand-new fps/IPs appear every run — intersect to empty and cost zero
+    shard reads. Only shards actually holding a wanted key are opened."""
     wanted = set(keys)
     if not wanted or not STATE_ARCHIVE_DIR.exists():
         return {}
-    found = {}
-    for path in sorted(STATE_ARCHIVE_DIR.glob("*.json")):
-        shard = _load_shard(path)
+    idx = _load_archive_index()
+    kidx = idx.get(kind, {})
+    by_month = defaultdict(set)
+    for key in wanted:
+        month = kidx.get(key)
+        if month is not None:
+            by_month[month].add(key)
+    if not by_month:
+        return {}  # nothing the index knows about -> no shard I/O
+    found, idx_dirty = {}, False
+    for month, mkeys in by_month.items():
+        shard = _load_shard(_shard_path(month))
         bucket = shard.get(kind, {})
-        hit = wanted & bucket.keys()
-        if not hit:
-            continue
+        hit = mkeys & bucket.keys()
         for key in hit:
             found[key] = bucket.pop(key)
-        # Drained shards are unlinked, not left as empty {} files to accumulate.
-        if not shard.get("fps") and not shard.get("ips"):
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        else:
-            _save_shard(path, shard)
-        wanted -= hit
-        if not wanted:
-            break
+        # Drop index entries for the hits and for any stale pointer (index said a
+        # key was in this shard but it wasn't — keep the two from drifting).
+        for key in mkeys:
+            kidx.pop(key, None)
+            idx_dirty = True
+        if hit:
+            path = _shard_path(month)
+            # Drained shards are unlinked, not left as empty {} files to pile up.
+            if not shard.get("fps") and not shard.get("ips"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            else:
+                _save_shard(path, shard)
+    if idx_dirty:
+        _save_archive_index(idx)
     return found
+
+
+def _rotation_decision(entry, last_seen_str, today, ttl, min_count):
+    """Classify one record: 'archive' | 'drop' | 'keep'. The single source of
+    truth for the rotation rule — both rotate_state() and rotate-state.py's
+    --dry-run preview call this, so the preview can never drift from a real run."""
+    ls = _parse_day(last_seen_str or "")
+    if ls is None:
+        return "keep"  # no clock yet -> keep (don't guess it stale)
+    idle = (today - ls).days
+    if entry.get("count", 0) < min_count and idle > STATE_COMPACT_MIN_IDLE_DAYS:
+        return "drop"            # likely a stray one-off probe
+    if idle > ttl:
+        return "archive"
+    return "keep"
 
 
 def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None):
@@ -621,14 +699,10 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None):
         for key, entry in store.items():
             if key in exempt:
                 continue
-            ls = _parse_day(last_seen(entry) or "")
-            if ls is None:
-                continue  # no clock yet -> keep (don't guess it stale)
-            idle = (today - ls).days
-            if (entry.get("count", 0) < min_count
-                    and idle > STATE_COMPACT_MIN_IDLE_DAYS):
-                drop.append(key)            # likely a stray one-off probe
-            elif idle > ttl:
+            action = _rotation_decision(entry, last_seen(entry), today, ttl, min_count)
+            if action == "drop":
+                drop.append(key)
+            elif action == "archive":
                 archive[key] = entry
         for key in archive:
             del store[key]

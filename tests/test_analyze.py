@@ -160,6 +160,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(az, "SEEN_FPS", tmp_path / "seen-fps.json")
     monkeypatch.setattr(az, "IP_CACHE", tmp_path / "ip-cache.json")
     monkeypatch.setattr(az, "STATE_ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(az, "STATE_ARCHIVE_INDEX", tmp_path / "archive-index.json")
     return tmp_path
 
 
@@ -244,6 +245,33 @@ def test_restore_unlinks_drained_shard(state):
     assert shards  # archived to a shard
     az.restore_from_archive("fps", {"x"})  # the only record -> shard drained
     assert not list(az.STATE_ARCHIVE_DIR.glob("*.json"))
+
+
+def test_restore_miss_does_not_open_shards(state, monkeypatch):
+    """A never-archived key must restore to {} without reading any shard — the
+    index gates it (F1: no full-archive scan for brand-new fps)."""
+    az.save_seen({"archived": {"count": 9, "days_seen": [_day(40)], "first_seen": _day(40)}})
+    az.save_ip_cache({})
+    az.rotate_state(fp_ttl=30)
+    # Trip a sentinel if any shard is opened during the miss.
+    calls = {"n": 0}
+    real = az._load_shard
+    monkeypatch.setattr(az, "_load_shard", lambda p: (calls.__setitem__("n", calls["n"] + 1), real(p))[1])
+    assert az.restore_from_archive("fps", {"totally_new"}) == {}
+    assert calls["n"] == 0                      # index said "not here" -> no shard I/O
+    # the genuinely archived key is still retrievable
+    assert "archived" in az.restore_from_archive("fps", {"archived"})
+
+
+def test_index_rebuilt_when_missing(state):
+    """Deleting the index (or manual archive surgery) is recovered by a one-time
+    rebuild from the shards, so a manually-placed record is still restorable."""
+    az.save_seen({"x": {"count": 9, "days_seen": [_day(40)], "first_seen": _day(40)}})
+    az.save_ip_cache({})
+    az.rotate_state(fp_ttl=30)
+    az.STATE_ARCHIVE_INDEX.unlink()             # simulate manual surgery / fresh deploy
+    restored = az.restore_from_archive("fps", {"x"})
+    assert restored.get("x", {}).get("count") == 9
 
 
 def test_rotate_exempts_catalog_fps(state, monkeypatch, tmp_path):
