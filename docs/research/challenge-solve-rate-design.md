@@ -48,22 +48,32 @@ Fp, которому массово выдавали JS-challenge и котор�
 
 ### A. Определение сигнала
 
-**Только `mode=active` события.** Страница-проверка физически отдаётся лишь в режиме `active`; в
-`shadow` каскад пишет would-be `verdict=challenge`, но **страницу не серверит** (C5). Значит под
-shadow `solved` физически всегда 0 → `solve_rate=0` у всех → ложный «бот»-сигнал. Поэтому
-`issued`/`solved` считаем **строго по событиям с `mode=active`** (поле `mode` в логе есть, B11).
-Следствие для продукта: сигнал «включается» только для хостов в active-энфорсменте; для shadow-хостов
-он молчит — это зависимость от раската enforcement, не баг.
+**Только `mode=active` И `attack_mode=off` события.** Сигнал валиден лишь когда challenge выдан
+**как вердикт о самом fp**, а не как блановая поза хоста:
+- *shadow*: страница физически не серверится (C5) → `solved` всегда 0 → ложный «бот» у всех. Поле
+  `mode` в логе есть (B11).
+- *attack_mode=on*: L5 форсит challenge почти всем не-`allow` запросам (C4), включая нормальные
+  браузеры. Часть живых людей уходит с неожиданного interstitial, не решив → легитимный fp копит
+  «нерешённые» challenge → ложно низкий solve_rate → риск ложного промоута. Под атакой challenge —
+  не суждение о fp, поэтому в сигнал не идёт. **Требует залогировать `attack_mode`** (см. §C).
+
+Следствие для продукта: сигнал «включается» только для хостов в active-энфорсменте **вне атаки** —
+зависимость от раската enforcement, не баг. Атака даёт много challenge, но это самый зашумлённый
+период (форс-проверки + отвал людей), поэтому осознанно его не учитываем.
 
 **Окно — накопительное (lifetime), НЕ 24ч.** challenge редок, и low-and-slow бот не наберёт
 `MIN_CHALLENGE_ISSUED` за сутки (review). Поэтому `issued`/`solved` копим per-fp в `seen-fps.json`
 рядом с `count`/`days_seen`: на каждом прогоне инкрементим дельтой из свежего Loki-окна (watermark
-для дедупа уже есть у `count`), **учитывая только active-события**. Это же убирает зависимость от
-того, в каком суточном окне оказалось событие.
+для дедупа уже есть у `count`), **учитывая только active-вне-атаки события**. Это же убирает
+зависимость от того, в каком суточном окне оказалось событие.
+
+> Счётчик — **all-time (lifetime)**, не скользящее окно: устойчив, но медленно реагирует на смену
+> поведения fp (для ботов норма). Отдельного «забывания» нет — fp выходит из рассмотрения через
+> auto-demote по молчанию > TTL (14д).
 
 ```
-issued(fp)  = накопл. |events: mode==active AND verdict==challenge|
-solved(fp)  = накопл. |events: mode==active AND verdict==allow AND rule=="challenge_pass"|
+issued(fp)  = накопл. |events: mode==active AND attack_mode==off AND verdict==challenge|
+solved(fp)  = накопл. |events: mode==active AND attack_mode==off AND verdict==allow AND rule=="challenge_pass"|
 solve_rate  = min(solved / issued, 1.0)   # cap 1.0 (см. ниже), при issued > 0
 ```
 **Cap на 1.0 (review):** даже при накопительном счёте на самой первой загрузке fp solved-событие
@@ -127,12 +137,18 @@ issued >= MIN_CHALLENGE_ISSUED AND solve_rate <= LOW_SOLVE_RATE(0.05)  → +2, r
 
 ### C. Изменения в коде (объём)
 
-Минимальный вариант — **только `analyze.py`**:
-1. В `_event_from_bac_line` есть `verdict`/`rule`; добавить чтение `mode` (поле в логе уже есть,
-   B11) — нужно для active-фильтра §A.
+**Edge (одна строка):** добавить `attack_mode = p.attack_mode` в схему `bac_log`
+([bac_log.lua](../../infra/demo-stand/lua/bac_log.lua):320-321, рядом с `mode`/`strictness`; `p`
+уже читается из `policy.get`). Без этого поля аналитика не отличит атак-challenge от обычного.
+Поле `mode` уже логируется (B11) — отдельно добавлять не нужно. Приём на backend нестрогий (лишнее
+поле уходит в `raw` jsonb).
+
+**`analyze.py` (основной объём):**
+1. В `_event_from_bac_line` есть `verdict`/`rule`/`mode`(если уже); добавить чтение `mode` и
+   `attack_mode` — нужно для фильтра §A (`mode==active AND attack_mode==off`).
 2. **Накопление в `seen-fps.json`:** к существующим per-fp полям (`count`/`days_seen`) добавить
    `challenge_issued`/`challenge_solved`, инкремент дельтой на каждом прогоне **только по
-   `mode==active` событиям** (`load_seen`/`save_seen` уже есть, watermark-дедуп общий с `count`).
+   active-вне-атаки событиям** (`load_seen`/`save_seen` уже есть, watermark-дедуп общий с `count`).
    Это lifetime-окно сигнала (см. §A).
 3. Чистая функция `solve_signal(seen_entry) -> {issued, solved, solve_rate(cap 1.0), enough:bool}`
    (`enough = issued >= MIN_CHALLENGE_ISSUED`).
@@ -144,7 +160,7 @@ issued >= MIN_CHALLENGE_ISSUED AND solve_rate <= LOW_SOLVE_RATE(0.05)  → +2, r
    `observe` по solve_rate среди active-матчей).
 6. Новые константы + флаги/env (паттерн D1): `MIN_CHALLENGE_ISSUED`, `LOW_SOLVE_RATE`,
    `HUMAN_SOLVE_RATE` (+ `BAC_*` env).
-7. Тесты: unit на `solve_signal` (cap >1.0; mode-фильтр: shadow-события игнорятся) + матрица
+7. Тесты: unit на `solve_signal` (cap >1.0; фильтр игнорит shadow- И attack-события) + матрица
    лестницы §B2 (issued<MIN×{solved 0,1} ; issued≥MIN×solve_rate{0,0.03,0.3(серая),0.9}) +
    staging-исходы fp_caught/activate/observe.
 
@@ -184,6 +200,10 @@ issued >= MIN_CHALLENGE_ISSUED AND solve_rate <= LOW_SOLVE_RATE(0.05)  → +2, r
    low-and-slow бот не наберёт `MIN_CHALLENGE_ISSUED`. См. §A/§C.
 2. **Shadow vs active** → считаем строго по `mode==active`; под shadow страница не серверится,
    `solved` всегда 0 → сигнал не валиден. Следствие: сигнал работает только на active-хостах. §A.
+6. **Режим атаки** → **исключаем attack-mode события** (`attack_mode==off`). Под атакой L5 форсит
+   challenge всем (C4), живые люди отваливаются с interstitial → ложно низкий solve_rate. Challenge
+   под атакой — поза хоста, не суждение о fp. Цена: **+1 строка на эдже** (`attack_mode` в
+   `bac_log`), «только analyze.py» больше неверно. §A/§C.
 3. **Branch B/C** (`non_browser_blocked`/`unchallengeable`) → **игнорируем**: каскад логирует их как
    `verdict=block`, в знаменатель `issued` (только `verdict=challenge`) они не попадают
    автоматически; и они уже блокируются. Паттерн «браузер, но всегда Branch C» — сигнал для трека
