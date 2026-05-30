@@ -746,7 +746,15 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None,
     fp_ttl = STATE_FP_TTL_DAYS if fp_ttl is None else fp_ttl
     ip_ttl = STATE_IP_TTL_DAYS if ip_ttl is None else ip_ttl
     min_count = STATE_COMPACT_MIN_COUNT if min_count is None else min_count
-    catalog_fps = set(_parse_blocklist_yaml())  # exempt; {} if no catalog present
+    # The catalog drives the fp exemption. If it is UNREADABLE (missing mount,
+    # wrong CATALOGS_DIR) _parse_blocklist_yaml() returns {} — which would mean
+    # "no exemptions" and let a silent enforced fp be archived out of the stale
+    # view. So gate fp rotation on the catalog file actually existing; absent ->
+    # skip fp archival entirely (IP rotation + prune are catalog-independent and
+    # still run). Distinct from an EMPTY-but-present catalog, which legitimately
+    # yields no exemptions and rotates normally.
+    catalog_present = (CATALOGS_DIR / "tls_fp_blocklist.yaml").exists()
+    catalog_fps = set(_parse_blocklist_yaml()) if catalog_present else set()
 
     def _rotate(store, kind, ttl, exempt=frozenset()):
         last_seen = _fp_last_seen if kind == "fps" else _ip_last_seen
@@ -768,8 +776,17 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None,
         return {"archived": len(archive), "dropped": len(drop), "kept": len(store)}
 
     seen = load_seen()
-    fp_summary = _rotate(seen, "fps", fp_ttl, exempt=catalog_fps)
-    save_seen(seen)
+    if catalog_present:
+        fp_summary = _rotate(seen, "fps", fp_ttl, exempt=catalog_fps)
+        save_seen(seen)
+    else:
+        sys.stderr.write(
+            f"rotate_state: blocklist catalog not found at "
+            f"{CATALOGS_DIR / 'tls_fp_blocklist.yaml'} — skipping fp archival to "
+            f"avoid stranding enforced fps; rotate again once the catalogs mount "
+            f"is present. IP rotation + archive prune still run.\n")
+        fp_summary = {"archived": 0, "dropped": 0, "kept": len(seen),
+                      "skipped": "no-catalog"}
 
     ip_cache = load_ip_cache()
     ip_summary = _rotate(ip_cache, "ips", ip_ttl)
