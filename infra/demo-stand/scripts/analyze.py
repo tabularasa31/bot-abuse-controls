@@ -138,12 +138,6 @@ SUSPICIOUS_URI_RE = re.compile(
     re.I,
 )
 
-IPAPI_BATCH = (
-    "https://ip-api.com/batch?fields="
-    "status,country,countryCode,city,isp,org,as,asname,reverse,hosting,query"
-)
-
-
 def classify_ua(ua):
     if not ua or ua == "-":
         return "(empty)"
@@ -219,6 +213,11 @@ def _event_from_bac_line(line):
         "status": str(status) if status is not None else "-",
         "uri": rec.get("path") or "-",
         "remote": rec.get("ip") or "-",
+        # geo/ASN the edge already resolved (A6, GeoLite2) and shipped in the
+        # log. The analytics container is in-network for Loki and cannot reach a
+        # public geo-IP API, so we use these instead of an external lookup.
+        "asn": rec.get("asn"),
+        "geo_country": rec.get("geo_country"),
         "ua": rec.get("ua") or "-",
         # A11 staged rollout: array of "<catalog>:<pattern_id>" the request
         # matched in staging (matched but not enforced). Drives the
@@ -445,47 +444,36 @@ def save_ip_cache(cache):
     IP_CACHE.write_text(json.dumps(cache, indent=2, sort_keys=True))
 
 
-def enrich_ips(ips, cache):
-    to_query = sorted({ip for ip in ips if ip and ip not in cache})
-    if not to_query:
-        return
-    for chunk_start in range(0, len(to_query), 100):
-        chunk = to_query[chunk_start:chunk_start + 100]
-        body = json.dumps([{"query": ip} for ip in chunk]).encode()
-        req = urllib.request.Request(
-            IPAPI_BATCH,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "abuse-controls-demo/1.0 (https://bac.example.com)",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                results = json.loads(resp.read())
-        except Exception as e:
-            err = str(e)[:120]
-            for ip in chunk:
-                cache[ip] = {"error": err, "count": 0}
+def seed_ip_cache_from_log(events, cache):
+    """Populate ip_cache from the asn/geo_country the EDGE already resolves and
+    ships in BAC_LOG (A6, GeoLite2) — no external geo-IP API.
+
+    Why: the analytics container sits in-network for Loki and cannot reach a
+    public geo-IP service, so the old external lookup failed wholesale and every
+    per-ASN row rendered "(нет данных)" — and the DC-ASN scoring signal silently
+    went dark too. The edge already does the lookup; we just read it.
+
+    `hosting` (the DC signal) = membership in the asn_datacenters catalog, the
+    same source the edge's reputation:asn_dc tag uses. Any accumulated `count`
+    on an existing good entry is preserved (the lifetime pass increments it);
+    entries that were previously errors are reset (they were never counted)."""
+    dc = _load_asn_datacenters()
+    for e in events:
+        ip = e.get("remote")
+        asn = e.get("asn")
+        if not ip or ip == "-" or not asn or asn == "-":
             continue
-        for r in results if isinstance(results, list) else []:
-            ip = r.get("query")
-            if not ip:
-                continue
-            if r.get("status") == "success":
-                cache[ip] = {
-                    "country": r.get("countryCode") or "",
-                    "city": r.get("city") or "",
-                    "isp": r.get("isp") or "",
-                    "org": r.get("org") or "",
-                    "asn": r.get("as") or "",
-                    "rdns": r.get("reverse") or "",
-                    "hosting": bool(r.get("hosting")),
-                    "count": 0,
-                }
-            else:
-                cache[ip] = {"error": r.get("message", "unknown"), "count": 0}
+        asn = str(asn)
+        prev = cache.get(ip)
+        count = prev["count"] if (isinstance(prev, dict) and "error" not in prev
+                                  and "count" in prev) else 0
+        cache[ip] = {
+            "asn": asn,
+            "country": e.get("geo_country") or "",
+            "hosting": asn in dc,
+            "count": count,
+            "source": "log",
+        }
 
 
 def classify_event(ev):
@@ -550,6 +538,26 @@ def human_share(events_for_fp):
 # ---------------------------------------------------------------------------
 # Auxiliary catalogs for promotion gates (allowlist / verified / legit-browser)
 # ---------------------------------------------------------------------------
+
+def _load_asn_datacenters():
+    """catalogs/asn_datacenters.yaml — flat sequence of bare uint32 ASN. Hand-
+    parsed (no yaml dep): lines like `- 24940  # comment`. Returns a set of ASN
+    strings (matching the string form geoip.lua logs, e.g. "24940")."""
+    asns = set()
+    path = CATALOGS_DIR / "asn_datacenters.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return asns
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("-"):
+            continue
+        s = s[1:].split("#", 1)[0].strip().strip('"').strip("'")
+        if s:
+            asns.add(s)
+    return asns
+
 
 def _load_ip_whitelist():
     """catalogs/ip_whitelist.yaml — flat sequence of CIDR strings. Hand-parsed
@@ -1546,6 +1554,12 @@ def main() -> int:
     events_24h = split_24h(events_all, now_utc)
     gen = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Seed ip_cache (asn/country/hosting) from the edge-logged fields up front so
+    # EVERY path below — --candidates-json, --subject, the full report — sees a
+    # populated cache (bot classification + DC-ASN score depend on it). Local and
+    # cheap (no network), so no reason to gate it per-branch.
+    seed_ip_cache_from_log(events_24h, ip_cache)
+
     # Loki carries no resty init marker, so _fetch_loki can't report the enforced
     # blocklist size — derive it from the catalog's active entries instead, else
     # the report's mode line would falsely read SHADOW under the Loki source.
@@ -1554,7 +1568,6 @@ def main() -> int:
 
     if args.candidates_json:
         _require_catalog()
-        enrich_ips({e["remote"] for e in events_24h}, ip_cache)
         high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
         sys.stdout.write(json.dumps({
             "generated_utc": gen,
@@ -1591,8 +1604,6 @@ def main() -> int:
         sLT = collect_lifetime_stats(seen, ip_cache)
         sys.stdout.write(render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
         return 0
-
-    enrich_ips({e["remote"] for e in events_24h}, ip_cache)
 
     # Update lifetime state only for events strictly newer than the
     # watermark, so overlapping/repeated runs (cron's 25h window + manual
