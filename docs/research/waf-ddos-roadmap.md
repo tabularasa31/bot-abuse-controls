@@ -49,9 +49,9 @@ WAF и DDoS добавляют **источники флагов**, а не па
 - **WAF** → новая стадия инспекции контента, которая копит флаги (`waf:sqli`,
   `waf:xss`, …) и в active-режиме может сама блокировать на критичных правилах —
   по аналогии с тем, как `tls_fp_blocklist` hit делает прямой `policy.enforce(403)`.
-- **DDoS L7** → не новая стадия, а **адаптивность** существующих L4/L5: пороги
-  rate-limit и решение «challenge vs block» становятся функцией текущей нагрузки,
-  а `attack_mode` взводится автоматически, а не только руками через Policy API.
+- **DDoS L7** → не новая стадия и **не новая ось**: это адаптивность существующих L4/L5
+  (пороги rate-limit + авто-`attack_mode`), уже заскоупленная в D-серии (D12–D17, §4.1).
+  В post-post-MVP по L7-DDoS своего скоупа нет.
 
 Это сохраняет инвариант rules-reference: «единственная точка решения — L5», флаги не
 выдают вердикт сами (кроме явных hard-block exit-точек под `policy.enforce`).
@@ -113,32 +113,31 @@ staged rollout и `git revert` бесплатно (ADR-006).
 - Per-host WAF-профиль (paranoia level / выключенные правила) — расширение `policy`
   (B10 Policy API уже умеет PATCH скаляров и JSONB-массивов).
 
-## 4. DDoS — поэтапно, от L7 (наша зона) к L3/L4 (за рамками стенда)
+## 4. DDoS — L7 уже в D-серии (post-MVP); ново у нас только L3/L4-контракт
 
-### 4.1 Фаза 1 — углубить L7 application-layer (наша прямая зона, дёшево)
-Надстройки над уже существующими L4/L5:
-- **Адаптивные пороги rate-limit.** Сейчас пороги статичны (`defaults.conf
-  [blocking.rate_*]`). Ввести зависимость от текущей нагрузки на host/эдж: при росте
-  RPS/латентности origin — автоматически ужесточать `rate_*` и понижать порог challenge.
-- **Авто-`attack_mode`.** `attack_mode` (C7) сейчас взводится только руками через Policy
-  API. Добавить **детектор атаки** (всплеск RPS / доля грей-вердиктов / рост 5xx от
-  origin) → авто-взвод `attack_mode` для host с гистерезисом и авто-сбросом. Перекликается
-  с research §6 кросс-тенант threat-intel ([cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md)).
-- **Бюджет CPU/полосы эджа** как сигнал — частично уже продуман в
-  [subnet-unit-design.md](subnet-unit-design.md) (критерий (а) volumetric). Когда challenge-rate
-  упирается в бюджет эджа — эскалация на более дешёвый дроп.
+> **Поправка после сверки с бэклогом ClickUp (список «Resty BAC»).** Анти-DDoS L7
+> — это **НЕ новая post-post-MVP-ось**: углубление application-layer-защиты уже
+> заскоуплено в D-серии (post-MVP). Этот документ DDoS-L7 **не дублирует**, а
+> ссылается на существующие тикеты. Реально новое для post-post-MVP — только
+> волюметрика L3/L4 (§4.3).
 
-### 4.2 Фаза 2 — агрегаты выше отдельного IP/fp (пересекается с D14/D15/#3)
-L7-флуд с ротацией IP/fp бьётся только на агрегатах:
-- **subnet/ASN-уровень rate-limit и репутация** — единица «/24 датацентра» вместо
-  отдельного IP (см. [subnet-unit-design.md](subnet-unit-design.md), тикеты D14/D15/D16).
-  `reputation.lua` уже знает ASN/geo — рейт-лимит этим пока не пользуется.
-- **быстрый hot-list атакующих** (short-TTL, авто-публикация во время атаки, пред-взвод
-  всех эджей) — см. [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md).
-- challenge-solve-rate как сигнал бота под флудом
-  ([challenge-solve-rate-design.md](challenge-solve-rate-design.md), D12).
+### 4.1 L7 application-layer — уже заскоуплено в D-серии (не дублируем)
+Всё, что я изначально набросал как «DDoS-Фаза 1/2», при сверке с бэклогом оказалось
+уже оформленными D-тикетами:
 
-### 4.3 Фаза 3 — волюметрика L3/L4 (⚠️ ВНЕ OpenResty-стенда)
+| Идея | Где уже живёт (ClickUp / research) |
+|---|---|
+| Авто-взвод `attack_mode` по «плохому» трафику (не голому объёму), гистерезис, precedence ручного над авто, per-host флаг `auto_attack_mode` | **[D16]** `86ext6yuq` (backlog, дизайн готов) — детект по bot-rate/solve_rate/origin-latency относительно базлайна хоста |
+| Subnet/ASN-репутация DC-пулов (soft, аналитика) | **[D14]** `86ext6yn6` (backlog) + [subnet-unit-design.md](subnet-unit-design.md) |
+| Transient subnet challenge→drop под атакой | **[D15]** `86ext6ytk` (backlog) |
+| Быстрый hot-list атакующих (пред-взвод эджей при пивоте ботнета) | **[D17]** `86ext718e` (backlog) + [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
+| solve-rate как сигнал бота под флудом | **[D12]** `86ext5daf` (to do) + [challenge-solve-rate-design.md](challenge-solve-rate-design.md) |
+
+**Вывод:** механизмы L4 (`rate_limit`) + L5 (`attack_mode`/challenge) уже есть, а их
+адаптивное углубление — это D-серия, которую и так делаем. В post-post-MVP по L7-DDoS
+**нового скоупа нет** — он закрывается завершением D14–D17. Не плодим дубль-тикеты.
+
+### 4.2 Волюметрика L3/L4 — единственное реально новое по DDoS (⚠️ ВНЕ OpenResty-стенда)
 **Честная граница:** SYN-флуд, UDP/амплификация, пакетный флуд **не лечатся в
 OpenResty/Lua** — к моменту, когда трафик дошёл до nginx, TCP-handshake уже состоялся.
 Это сетевой уровень: edge-ACL, conntrack/iptables-rate, eBPF/XDP-дроп, BGP-blackhole,
@@ -157,27 +156,31 @@ prod-edge/инфра-админов CDN operator, прод-доступа к к�
 
 ## 5. Предлагаемая очерёдность (по «эффект/стоимость»)
 
-1. **DDoS Фаза 1** (§4.1) — авто-`attack_mode` + адаптивные пороги. **Дёшево, данные и
-   механизмы (`attack_mode`, rate_limit, метрики) уже есть.** Наибольший эффект на вложенное.
-2. **WAF спайк + ADR-007** (§3.2) — параллельно, это research, не блокирует №1.
-3. **WAF MVP** (§3.1) — после ADR, по выбранному в нём пути.
-4. **DDoS Фаза 2** (§4.2) — subnet-агрегаты; синхронизировать с D14/D15 и threat-intel.
-5. **DDoS Фаза 3 контракт** (§4.3) — спроектировать edge-ACL feed; реализация сетевого
+Опорная точка: post-MVP (D-серия) ещё в работе и **сам по себе закрывает L7-DDoS**
+(D12–D17). post-post-MVP добавляет **новые оси**, которых в бэклоге нет вообще:
+
+1. **WAF спайк + ADR-007** (§3.2) — research, не блокирует D-серию, можно начинать рано.
+2. **WAF MVP** (§3.1) — после ADR, по выбранному пути.
+3. **API security / account protection** — соседние оси (см. отдельное обсуждение);
+   дешевле WAF, т.к. ближе к тому, что уже есть (rate/reputation/challenge/fp).
+4. **DDoS L3/L4-контракт** (§4.2) — спроектировать edge-ACL feed; реализация сетевого
    дропа — будущая фаза с прод-доступом.
+5. **DDoS L7** — отдельным пунктом НЕ ведём: это D14–D17 в D-серии.
 
 ## 6. Связь с существующим бэклогом и research
-- **DDoS Фаза 1/2** прямо опирается на: `attack_mode` (C7, есть), `rate_limit` (A7/A10, есть),
-  [subnet-unit-design.md](subnet-unit-design.md) (D14/D15/D16),
-  [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) (D17),
-  [challenge-solve-rate-design.md](challenge-solve-rate-design.md) (D12).
-- **WAF** — новая ветка (предложить серию `W` в бэклоге: W1 спайк/ADR, W2 движок,
-  W3 сигнатурный каталог через Channel C, W4 per-host WAF-профиль в policy,
-  W5 virtual patching workflow). Переиспользует ADR-006 (git-каталоги), B10 (Policy API),
-  `policy.enforce` (mode-gate), `bac_log`/метрики.
-- **Волюметрика L3/L4** — вне репо-скоупа стенда; в roadmap присутствует как контракт +
-  research, не как реализация (reality-level 3).
+- **DDoS L7 — уже в бэклоге, не post-post-MVP:** [D12] `86ext5daf`, [D14] `86ext6yn6`,
+  [D15] `86ext6ytk`, [D16] `86ext6yuq` (авто-attack-mode), [D17] `86ext718e`. Опирается на
+  `attack_mode` (C7) + `rate_limit` (A7/A10), которые уже в коде.
+- **WAF — новой оси в бэклоге НЕТ** (сверено: 0 задач по WAF/SQLi/XSS). Предложить серию
+  `W`: W1 спайк/ADR-007, W2 движок, W3 сигнатурный каталог через Channel C, W4 per-host
+  WAF-профиль в policy, W5 virtual patching. Переиспользует ADR-006 (git-каталоги), B10
+  (Policy API), `policy.enforce` (mode-gate), `bac_log`/метрики.
+- **API security / account protection — в бэклоге НЕТ** (сверено: 0 задач). Кандидаты на
+  новую серию; ближе к существующему ядру, чем WAF.
+- **Волюметрика L3/L4** — вне репо-скоупа стенда; присутствует как контракт + research,
+  не как реализация (reality-level 3).
 
 ## 7. Что НЕ делаем на этом шаге
 - Не коммитим WAF-код до ADR-007 (build-vs-buy решается спайком).
-- Не выдаём DDoS Фазу 1/2 за сделанное — пока это research-документ.
+- Не плодим DDoS-L7-тикеты — это D-серия (D12–D17), уже в бэклоге.
 - Не лезем в прод-сеть prod-edge (salt/Puppet/eBPF на боевых эджах) — нет доступа, не наша фаза.
