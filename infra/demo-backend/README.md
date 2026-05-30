@@ -392,6 +392,29 @@ not in the CIDR-allowlist: `ssh -L 8443:127.0.0.1:443 backend-vm`,
 then `https://localhost:8443/grafana/`). Login: `admin` /
 `$GRAFANA_ADMIN_PASSWORD`. The default dashboard is **BAC raw logs**.
 
+### BAC analytics (`antibot-analytics`, observability profile)
+
+The daily traffic analyzer (`analyze.py`, moved off the edge — D1) runs here so
+it reads Loki (7d, all edges) in-network. It's a **cron-driven one-shot**: the
+container runs one pass and exits, scheduled by host cron at 08:00. It writes
+`state/*.json` (consumed by the host-side blocklist promotion tooling — see
+[`docs/runbooks/blocklist-promotion.md`](../../docs/runbooks/blocklist-promotion.md))
+and emails the report. Run a pass manually:
+
+```sh
+docker compose -f docker-compose.backend.yml --profile observability run -T --rm analytics
+```
+
+Email + thresholds are env (`REPORT_*` / `MSMTP_*` / `BAC_TTL_DAYS` /
+`BAC_MIN_STAGING_HOURS`) in `.env`; unset email vars → artifacts still written,
+email skipped.
+
+> **Deploy caveat:** `scripts/update.sh` runs `compose up -d --build` **without**
+> `--profile observability`, so it never rebuilds the profile-gated services
+> (`analytics` / `loki` / `grafana`). After changing
+> `infra/demo-backend/analytics/*`, rebuild the image by hand:
+> `docker compose -f docker-compose.backend.yml --profile observability build analytics`.
+
 ### What's intentionally not surfaced through this path
 
 - **No public read API on Loki.** Only `POST /loki/api/v1/push` is
