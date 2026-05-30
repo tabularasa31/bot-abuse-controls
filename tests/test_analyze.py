@@ -302,6 +302,49 @@ def test_months_ago():
     assert az._months_ago(date(2026, 3, 1), 0) == "2026-03"
 
 
+def test_rotate_skips_fps_when_catalog_absent(state, monkeypatch, tmp_path):
+    """If the blocklist catalog is unreadable, fp rotation is skipped (so a silent
+    enforced fp can't be archived out of the stale view), but IP rotation and
+    archive pruning still run."""
+    empty = tmp_path / "no-catalogs"
+    empty.mkdir()                                  # exists but has no blocklist yaml
+    monkeypatch.setattr(az, "CATALOGS_DIR", empty)
+    az.save_seen({"old": {"count": 99, "days_seen": [_day(60)], "first_seen": _day(60)}})
+    az.save_ip_cache({"1.1.1.1": {"asn": "1", "country": "US", "hosting": False,
+                                  "count": 9, "last_seen": _day(20)}})
+    summary = az.rotate_state(fp_ttl=30, ip_ttl=7)
+    assert summary["fps"]["skipped"] == "no-catalog"
+    assert summary["fps"]["archived"] == 0
+    import json
+    assert "old" in json.loads((state / "seen-fps.json").read_text())  # fp untouched
+    assert summary["ips"]["archived"] == 1                              # IP still rotated
+
+
+def test_read_blocklist_catalog_states(state, monkeypatch, tmp_path):
+    cat = tmp_path / "c"
+    cat.mkdir()
+    monkeypatch.setattr(az, "CATALOGS_DIR", cat)
+    assert az._read_blocklist_catalog() == (False, {})            # missing -> unreadable
+    (cat / "tls_fp_blocklist.yaml").write_text("# only comments\n")
+    assert az._read_blocklist_catalog() == (True, {})             # present but empty
+    (cat / "tls_fp_blocklist.yaml").write_text('"fpX": active\n')
+    assert az._read_blocklist_catalog() == (True, {"fpX": "active"})
+
+
+def test_rotate_skips_fps_when_catalog_unreadable(state, monkeypatch):
+    """Permission/I-O error (not just missing) must also skip fp rotation — the
+    guard keys off readability, not .exists()."""
+    monkeypatch.setattr(az, "_read_blocklist_catalog", lambda: (False, {}))
+    az.save_seen({"old": {"count": 99, "days_seen": [_day(60)], "first_seen": _day(60)}})
+    az.save_ip_cache({"1.1.1.1": {"asn": "1", "country": "US", "hosting": False,
+                                  "count": 9, "last_seen": _day(20)}})
+    s = az.rotate_state(fp_ttl=30, ip_ttl=7)
+    assert s["fps"]["skipped"] == "no-catalog" and s["fps"]["archived"] == 0
+    import json
+    assert "old" in json.loads((state / "seen-fps.json").read_text())
+    assert s["ips"]["archived"] == 1
+
+
 def test_rotate_exempts_catalog_fps(state, monkeypatch, tmp_path):
     """A silent catalog (blocklist) fp must NOT be archived — the auto-demote
     view reads only active seen-fps.json, so archiving it would strand it

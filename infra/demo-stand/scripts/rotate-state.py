@@ -73,9 +73,16 @@ def main() -> int:
             return {"archived": archived, "dropped": dropped,
                     "kept": len(store) - archived - dropped}
 
-        # Catalog fps are exempt from rotation (see analyze.rotate_state).
-        catalog_fps = set(az._parse_blocklist_yaml())
-        fp = preview(az.load_seen(), az._fp_last_seen, args.fp_ttl_days, catalog_fps)
+        # Catalog fps are exempt; an unreadable catalog means fp rotation is
+        # skipped entirely (mirror analyze.rotate_state's guard, same one-read
+        # readability check).
+        seen = az.load_seen()
+        catalog_present, catalog_map = az._read_blocklist_catalog()
+        if catalog_present:
+            fp = preview(seen, az._fp_last_seen, args.fp_ttl_days, set(catalog_map))
+        else:
+            fp = {"archived": 0, "dropped": 0, "kept": len(seen),
+                  "skipped": "no-catalog"}
         ip = preview(az.load_ip_cache(), az._ip_last_seen, args.ip_ttl_days)
         pruned = _preview_prune(now_utc, args.retention_months)
         summary = {"fps": fp, "ips": ip, "archive_pruned": pruned}
@@ -88,8 +95,9 @@ def main() -> int:
         prefix = "rotate-state"
 
     fp, ip, pr = summary["fps"], summary["ips"], summary["archive_pruned"]
+    fp_note = " (fps skipped: no catalog)" if fp.get("skipped") else ""
     print(f"{prefix}: fps archived={fp['archived']} dropped={fp['dropped']} "
-          f"kept={fp['kept']} | ips archived={ip['archived']} "
+          f"kept={fp['kept']}{fp_note} | ips archived={ip['archived']} "
           f"dropped={ip['dropped']} kept={ip['kept']} | "
           f"archive pruned {pr['shards']} shards / {pr['records']} records")
     return 0

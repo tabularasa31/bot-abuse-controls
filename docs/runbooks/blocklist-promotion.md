@@ -80,8 +80,10 @@ staging; activate staging-записей с verdict=activate; auto-demote мол
 ## Расписание (cron на backend-VM)
 
 Аналитика — **cron-driven one-shot** (контейнер не крутит loop): host-cron в 08:00 MSK
-делает один прогон `analyze.py` (артефакты + отчёт), затем autopilot читает свежие
-артефакты. На `ubuntu@<BACKEND_VM_IP>` (`CRON_TZ` — иначе хост в UTC и `0 8` = 11:00 MSK;
+делает один прогон — сперва `rotate-state.py` (D7: ограничивает рост `seen-fps.json` /
+`ip-cache.json`, архив в `state/archive/`), затем `analyze.py` (артефакты + отчёт), затем
+autopilot читает свежие артефакты. Ротация non-fatal — её сбой не блокирует отчёт; TTL-логика
+и env-ручки в [`infra/demo-stand/scripts/README.md`](../../infra/demo-stand/scripts/README.md). На `ubuntu@<BACKEND_VM_IP>` (`CRON_TZ` — иначе хост в UTC и `0 8` = 11:00 MSK;
 `-T` — cron не выделяет TTY; `PATH` — чтобы cron нашёл `git`/`gh` для autopilot):
 
 ```cron

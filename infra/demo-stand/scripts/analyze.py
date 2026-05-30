@@ -746,7 +746,16 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None,
     fp_ttl = STATE_FP_TTL_DAYS if fp_ttl is None else fp_ttl
     ip_ttl = STATE_IP_TTL_DAYS if ip_ttl is None else ip_ttl
     min_count = STATE_COMPACT_MIN_COUNT if min_count is None else min_count
-    catalog_fps = set(_parse_blocklist_yaml())  # exempt; {} if no catalog present
+    # The catalog drives the fp exemption. If it is UNREADABLE (missing mount,
+    # wrong CATALOGS_DIR, permission/I-O error) reading it yields {} — which would
+    # mean "no exemptions" and let a silent enforced fp be archived out of the
+    # stale view. So gate fp rotation on the catalog being readable (one read,
+    # reused for the exemption set so the check can't diverge); unreadable -> skip
+    # fp archival entirely (IP rotation + prune are catalog-independent and still
+    # run). Distinct from an EMPTY-but-present catalog, which is readable and
+    # legitimately yields no exemptions, so it rotates normally.
+    catalog_present, catalog_map = _read_blocklist_catalog()
+    catalog_fps = set(catalog_map)
 
     def _rotate(store, kind, ttl, exempt=frozenset()):
         last_seen = _fp_last_seen if kind == "fps" else _ip_last_seen
@@ -768,8 +777,17 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None,
         return {"archived": len(archive), "dropped": len(drop), "kept": len(store)}
 
     seen = load_seen()
-    fp_summary = _rotate(seen, "fps", fp_ttl, exempt=catalog_fps)
-    save_seen(seen)
+    if catalog_present:
+        fp_summary = _rotate(seen, "fps", fp_ttl, exempt=catalog_fps)
+        save_seen(seen)
+    else:
+        sys.stderr.write(
+            f"rotate_state: blocklist catalog unreadable at "
+            f"{CATALOGS_DIR / 'tls_fp_blocklist.yaml'} — skipping fp archival to "
+            f"avoid stranding enforced fps; rotate again once the catalogs mount "
+            f"is readable. IP rotation + archive prune still run.\n")
+        fp_summary = {"archived": 0, "dropped": 0, "kept": len(seen),
+                      "skipped": "no-catalog"}
 
     ip_cache = load_ip_cache()
     ip_summary = _rotate(ip_cache, "ips", ip_ttl)
@@ -909,15 +927,10 @@ def _fp_has_identity_allow(events_for_fp):
     return any(e.get("verdict") == "allow" for e in events_for_fp)
 
 
-def _parse_blocklist_yaml():
-    """catalogs/tls_fp_blocklist.yaml — flat map `"<fp>": <status>`. Hand-parsed
-    (no yaml dep): returns {fp: status}. Comment/blank lines ignored."""
+def _parse_blocklist_text(text):
+    """Parse the flat `"<fp>": <status>` map (no yaml dep). Comment/blank lines
+    ignored. Pure — no I/O — so callers can read once and reuse the text."""
     out = {}
-    path = CATALOGS_DIR / "tls_fp_blocklist.yaml"
-    try:
-        text = path.read_text()
-    except OSError:
-        return out
     for line in text.splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
@@ -930,6 +943,24 @@ def _parse_blocklist_yaml():
         if fp and status:
             out[fp] = status
     return out
+
+
+def _read_blocklist_catalog():
+    """Return (readable, {fp: status}). `readable` is False ONLY when the catalog
+    file cannot be read — missing, permission denied, I/O error — as opposed to a
+    present-but-empty catalog (readable=True, {}). The fp-rotation exemption keys
+    off `readable`: an unreadable catalog must NOT silently read as 'no fps to
+    exempt', or a silent enforced fp would be archived out of the stale view."""
+    try:
+        text = (CATALOGS_DIR / "tls_fp_blocklist.yaml").read_text()
+    except OSError:
+        return False, {}
+    return True, _parse_blocklist_text(text)
+
+
+def _parse_blocklist_yaml():
+    """catalogs/tls_fp_blocklist.yaml → {fp: status}; {} if unreadable."""
+    return _read_blocklist_catalog()[1]
 
 
 def _require_catalog():

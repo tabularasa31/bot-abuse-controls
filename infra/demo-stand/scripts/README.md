@@ -47,6 +47,14 @@ For each store, keyed off the record's **last-seen day**:
   day yet (e.g. a just-seeded IP the lifetime pass hasn't stamped) is left alone
   rather than guessed stale.
 
+**fps in the blocklist catalog are exempt** — never archived or dropped,
+regardless of TTL/count. Archiving a silent enforced fp would remove it from the
+auto-demote view (`stale.json` reads only active `seen-fps.json`) and strand it
+enforced forever. This covers hand-added catalog fps too. The exemption is gated
+on the catalog being readable: if `tls_fp_blocklist.yaml` is missing/unmounted at
+rotation time, **fp rotation is skipped entirely** (logged) so nothing enforced
+is lost — IP rotation and archive pruning still run.
+
 **fp** last-seen comes from `max(days_seen)` (the canonical clock, see
 [`docs/blocklist-scoring.md`](../../../docs/blocklist-scoring.md)); **IP**
 last-seen comes from the `last_seen` field the lifetime pass stamps. The IP TTL
