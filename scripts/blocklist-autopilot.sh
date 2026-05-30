@@ -170,6 +170,9 @@ apply_all() {
 
 if [ -n "$DRY_FLAG" ]; then
   echo "=== would open ONE draft PR ($BRANCH) ==="
+  # Revert the in-place catalog edits even if apply_all aborts mid-loop, so a
+  # dry run never leaves the working tree dirty.
+  trap 'git -C "$REPO" checkout -- "$CATALOG" 2>/dev/null || true; rm -f "$BODY"' EXIT
   apply_all
   echo "--- catalog diff ---"; git -C "$REPO" --no-pager diff -- "$CATALOG" || true
   git -C "$REPO" checkout -- "$CATALOG"
@@ -178,13 +181,16 @@ if [ -n "$DRY_FLAG" ]; then
   exit 0
 fi
 
-# Idempotency: only a PUSHED branch (= an opened PR) blocks a rerun today. A
-# LOCAL-only branch is the residue of a failed earlier run — clear it and retry,
-# so a mid-run failure doesn't silently skip the whole day (codex P2).
-if git -C "$REPO" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-  echo "autopilot: $BRANCH already on origin — PR opened today, skipping"; exit 0
+# Idempotency: skip only if an OPEN PR for today's branch already exists. A
+# pushed branch alone is NOT proof — `git push` and `gh pr create` are separate
+# steps in bl_open_pr, so a push that succeeded while pr-create failed must not
+# block the day. Clear any stale branch (local residue, or pushed-without-PR on
+# origin) so the retry starts clean.
+if [ "$( ( cd "$REPO" && gh pr list --head "$BRANCH" --state open --json number -q 'length' ) 2>/dev/null || echo 0)" -gt 0 ]; then
+  echo "autopilot: open PR for $BRANCH already exists — skipping"; exit 0
 fi
 git -C "$REPO" branch -D "$BRANCH" >/dev/null 2>&1 || true
+git -C "$REPO" push origin --delete "$BRANCH" >/dev/null 2>&1 || true
 
 # From here we mutate the worktree. On ANY failure, revert the catalog and
 # return to base so the next run starts clean (the stale local branch is
