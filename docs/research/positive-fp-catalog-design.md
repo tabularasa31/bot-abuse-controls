@@ -38,22 +38,26 @@ ja4-логику в ферме не нужно.
 ### Компоненты
 
 1. **Харвестер (ферма), cron-one-shot.** Playwright + реальные stable Chrome / Firefox /
-   Edge (desktop), auto-update до текущего stable. Каждый браузер → `/__fp` → извлечь
-   `hash_b`/`hash_c`/`cipher_cnt`. Выход — `{family → {hash_b, hash_c, cipher_cnt}}`.
-   Переиспользует cron + draft-PR паттерн `antibot-analytics`. Частота калибруется по
-   реальному дрейфу (TLS у Chrome задаётся BoringSSL, меняется редко — вероятно «раз в
-   несколько мажоров», не ежемесячно).
+   Edge (desktop), auto-update до текущего stable. Каждый браузер → `/__fp` → берём **полный
+   `fp`** (`L<ver><sni><cnt><alpn>_<hash_b>_<hash_c>`, как отдаёт `probe.lua`). Выход —
+   `{full_fp → {family, status}}`. Переиспользует cron + draft-PR паттерн `antibot-analytics`.
+   Частота калибруется по реальному дрейфу (TLS у Chrome задаётся BoringSSL, меняется редко —
+   вероятно «раз в несколько мажоров», не ежемесячно).
 2. **Позитивный каталог** — **новый файл** `catalogs/tls_fp_browser_known.yaml`:
-   `hash_b → {family, status}` (зеркало `tls_fp_catalog`, только known-good). PR-only,
+   **`full_fp → {family, status}`** (зеркало `tls_fp_catalog`, только known-good). PR-only,
    `status: active|staging` как у всех slow-каталогов (ADR-006). *Решение 1: новый файл, а не
-   расширение `tls_fp_browser_profiles.yaml` — другой ключ (`hash_b`, не `family`) и обратная
+   расширение `tls_fp_browser_profiles.yaml` — другой ключ (полный fp, не `family`) и обратная
    семантика.*
 3. **Эдж — усилить `tls_fp_suspicious_ciphers`** ([tls_fp.lua](../../infra/demo-stand/lua/tls_fp.lua)):
-   UA=браузер И `hash_b` **не** в known-good set → soft-флаг. **Проверка — membership-only**
-   (`hash_b ∈ known-good`, БЕЗ сверки семейства): спрашиваем «это вообще рукопожатие реального
-   браузера?», а не «совпало ли семейство». Это снимает проблему `classify_ua` (`edge`/`chrome` —
-   разные семейства: сверка `family==family` дала бы ложный mismatch у Edge на chrome-hash); сверка
-   family/version — это Phase 2 (D3), там и нужна карта эквивалентности Chromium. **soft-only**
+   UA=браузер И **полный fp** запроса **не** в known-good set → soft-флаг. **Проверка —
+   membership по ПОЛНОМУ fp** (не по `hash_b`, БЕЗ сверки семейства): спрашиваем «это вообще
+   рукопожатие реального браузера?». **Почему полный fp, а не `hash_b` (catch Codex):** `hash_b`
+   считается ТОЛЬКО из отсортированных шифров (`ja4_compute.lua`), а curves/ALPN/TLS-версия — в
+   `hash_c`+префиксе. Membership по одному `hash_b` = та же cipher-list-проверка, только тоньше:
+   headless, скопировавший шифры Chrome, но с другими расширениями, прошёл бы как known-good.
+   Полный fp это закрывает. **Почему БЕЗ сверки семейства (catch Gemini):** `classify_ua` делит
+   `edge`/`chrome` — сверка `family==family` дала бы ложный mismatch у Edge на chrome-fp; полный fp
+   family-agnostic, поэтому проблемы нет. Сверка family/version — Phase 2 (D3). **soft-only**
    (challenge/флаг, никогда не hard-block) — лаг каталога стоит максимум одной капчи раннему
    апдейтеру. **mobile-UA → исключение** через подстроку `mobi` в lower-case UA (стандартный
    лёгкий способ, MDN; без regex) — новый хелпер `is_mobile_ua`, т.к. в `classify_ua` мобильного
@@ -62,16 +66,17 @@ ja4-логику в ферме не нужно.
    остаётся как поле каталога для наблюдения/отчёта, но решение принимает хеш).*
 4. **Аналитика — заострить `is_genuine_browser`** ([analyze.py](../../infra/demo-stand/scripts/analyze.py)):
    сейчас genuine = `cipher_cnt ∈ {15,16,20}` + «нет в tool-словаре»; Phase 1 → genuine =
-   `hash_b ∈ known-good`. Прямо усиливает purity-гейт из #1 (меньше и ложняков, и пропусков).
+   `full_fp ∈ known-good`. Прямо усиливает purity-гейт из #1 (меньше и ложняков, и пропусков).
 
 ### Приятное свойство покрытия
 
-Chromium-форки (Brave, Vivaldi, Opera, Edge) делят BoringSSL → **один Chrome-entry
-покрывает их транзитивно** — но только потому, что Phase 1-проверка membership-only (см.
-компонент 3): `hash_b` известен → не флагуем, какое бы Chromium-семейство ни заявлял UA. Если бы
-проверка сверяла `family==family`, Edge (`ua_family=edge`) на chrome-hash дал бы ложный mismatch.
-Реально фармить надо мало: Chrome (= весь Chromium), Firefox, Edge-если-отличается. Отдельная забота — Firefox-форки (LibreWolf) и Tor (намеренно
-унифицированный fp) — кандидаты в ручные staging-записи.
+Chromium-форки (Brave, Vivaldi, Opera, Edge) на одном Chromium-build дают **идентичный полный
+fp** (ciphers + curves/ALPN/version — всё из BoringSSL) → **один entry покрывает их
+транзитивно**, и проверка family-agnostic, так что `ua_family=edge` на chrome-fp не флагуется.
+Если форк тронул расширения — у него другой полный fp → своя запись (это правильно: мы хотим это
+видеть). Реально фармить надо мало: Chrome (= весь Chromium), Firefox, Edge-если-отличается.
+Отдельная забота — Firefox-форки (LibreWolf) и Tor (намеренно унифицированный fp) — кандидаты в
+ручные staging-записи.
 
 ### Где крутить ферму
 
@@ -91,13 +96,13 @@ Chromium-форки (Brave, Vivaldi, Opera, Edge) делят BoringSSL → **о�
 ## Риски
 
 - **Лаг каталога — ДВА окна, не путать** (catch из review):
-  - *Окно 1: релиз браузера → ферма сняла → draft-PR смержен как `staging`.* Здесь нового hash
+  - *Окно 1: релиз браузера → ферма сняла → draft-PR смержен как `staging`.* Здесь нового fp
     ещё нет в каталоге вообще → mismatch срабатывает. Гасится только **soft-only** (одна капча),
     cadence фермы и Phase 2 self-healing. Staging тут НЕ помогает.
   - *Окно 2: `staging` → `active` (калибровка).* **Семантика staging для белого списка
     ИНВЕРТИРОВАНА** относительно чёрного: для blocklist `staging` = «матчим, но не блокируем»; для
     allowlist `staging` = «уже доверяем, флаг подавляем». Поэтому membership-проверка считает
-    `hash_b ∈ (active ∪ staging)` → **staging-запись сразу подавляет mismatch** у юзеров новой
+    `full_fp ∈ (active ∪ staging)` → **staging-запись сразу подавляет mismatch** у юзеров новой
     версии. Промоут в `active` — это «благословение» человеком (проверка, что в выхлоп фермы не
     просочился бот-hash), а не гейт, за которым ждут живые пользователи.
 - **Неизвестный легитимный desktop-браузер** не в каталоге → mismatch. Покрытие Chromium
