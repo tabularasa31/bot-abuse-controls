@@ -396,9 +396,10 @@ then `https://localhost:8443/grafana/`). Login: `admin` /
 
 The daily traffic analyzer (`analyze.py`, moved off the edge — D1) runs here so
 it reads Loki (7d, all edges) in-network. It's a **cron-driven one-shot**: the
-container runs one pass and exits, scheduled by host cron at 08:00. It writes
-`state/*.json` (consumed by the host-side blocklist promotion tooling — see
-[`docs/runbooks/blocklist-promotion.md`](../../docs/runbooks/blocklist-promotion.md))
+container runs one pass and exits, scheduled by host cron at 08:00. Each pass
+first runs `rotate-state.py` (D7) to bound the lifetime state, then `analyze.py`,
+writing `state/*.json` (consumed by the host-side blocklist promotion tooling —
+see [`docs/runbooks/blocklist-promotion.md`](../../docs/runbooks/blocklist-promotion.md))
 and emails the report. Run a pass manually:
 
 ```sh
@@ -408,6 +409,16 @@ docker compose -f docker-compose.backend.yml --profile observability run -T --rm
 Email + thresholds are env (`REPORT_*` / `MSMTP_*` / `BAC_TTL_DAYS` /
 `BAC_MIN_STAGING_HOURS`) in `.env`; unset email vars → artifacts still written,
 email skipped.
+
+**State rotation (D7).** `analyze.py` accumulates lifetime state in
+`state/seen-fps.json` and `state/ip-cache.json`, which would grow unbounded at
+edge scale. `rotate-state.py` (run before `analyze.py` each pass) archives the
+aged-out tail into `state/archive/YYYY-MM.json`, drops one-off probes, and prunes
+archive shards past the retention horizon; `analyze.py` lazily restores any key
+that reappears. fps in the blocklist catalog are exempt. Knobs are env
+(`STATE_FP_TTL_DAYS` / `STATE_IP_TTL_DAYS` / `STATE_COMPACT_MIN_COUNT` /
+`STATE_ARCHIVE_RETENTION_MONTHS`); full TTL logic in
+[`infra/demo-stand/scripts/README.md`](../demo-stand/scripts/README.md).
 
 > **Deploy caveat:** `scripts/update.sh` runs `compose up -d --build` **without**
 > `--profile observability`, so it never rebuilds the profile-gated services
