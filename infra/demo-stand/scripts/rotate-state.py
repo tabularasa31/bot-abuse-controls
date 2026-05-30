@@ -74,11 +74,12 @@ def main() -> int:
                     "kept": len(store) - archived - dropped}
 
         # Catalog fps are exempt; an unreadable catalog means fp rotation is
-        # skipped entirely (mirror analyze.rotate_state's guard).
+        # skipped entirely (mirror analyze.rotate_state's guard, same one-read
+        # readability check).
         seen = az.load_seen()
-        if (az.CATALOGS_DIR / "tls_fp_blocklist.yaml").exists():
-            catalog_fps = set(az._parse_blocklist_yaml())
-            fp = preview(seen, az._fp_last_seen, args.fp_ttl_days, catalog_fps)
+        catalog_present, catalog_map = az._read_blocklist_catalog()
+        if catalog_present:
+            fp = preview(seen, az._fp_last_seen, args.fp_ttl_days, set(catalog_map))
         else:
             fp = {"archived": 0, "dropped": 0, "kept": len(seen),
                   "skipped": "no-catalog"}
