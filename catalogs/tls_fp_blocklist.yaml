@@ -49,3 +49,6 @@
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 6 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.git/config +1
 # human_share 0.0 · events 22 · review-by 2026-06-13
 "L13d2500_68ddea46f551_10d89aa70559": staging
+# score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.example, /.env.example.php +1
+# human_share 0.0 · events 119 · review-by 2026-06-13
+"L13i1300_69e852b66fc7_58c7b6d0026c": staging
