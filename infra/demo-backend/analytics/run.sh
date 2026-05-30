@@ -26,6 +26,7 @@ echo "[analytics] $(date -u +%FT%TZ) source=${BAC_SOURCE:-loki} loki=${LOKI_URL:
 export STATE_FP_TTL_DAYS="${STATE_FP_TTL_DAYS:-30}"
 export STATE_IP_TTL_DAYS="${STATE_IP_TTL_DAYS:-7}"
 export STATE_COMPACT_MIN_COUNT="${STATE_COMPACT_MIN_COUNT:-3}"
+export STATE_ARCHIVE_RETENTION_MONTHS="${STATE_ARCHIVE_RETENTION_MONTHS:-6}"
 python3 "$ROTATE" || echo "[analytics] WARN rotate-state failed (non-fatal)"
 
 # 1) Daily HTML report + email FIRST. This --html run is the one that updates the

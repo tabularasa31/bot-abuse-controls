@@ -274,6 +274,34 @@ def test_index_rebuilt_when_missing(state):
     assert restored.get("x", {}).get("count") == 9
 
 
+def test_prune_archive_deletes_old_shards(state):
+    """Shards older than the retention horizon are deleted and their keys dropped
+    from the index, so the cold archive stays bounded; recent shards survive."""
+    az.archive_records("fps", {
+        "old": {"count": 5, "days_seen": [_day(400)]},      # ~13mo ago -> old shard
+        "recent": {"count": 5, "days_seen": [_day(2)]},      # this month -> kept
+    })
+    assert len({p.name for p in az.STATE_ARCHIVE_DIR.glob("*.json")}) == 2
+    res = az.prune_archive(retention_months=6)
+    assert res["shards"] == 1 and res["records"] == 1
+    assert len({p.name for p in az.STATE_ARCHIVE_DIR.glob("*.json")}) == 1
+    assert az.restore_from_archive("fps", {"old"}) == {}          # pruned from index too
+    assert "recent" in az.restore_from_archive("fps", {"recent"})
+
+
+def test_prune_retention_zero_keeps_everything(state):
+    az.archive_records("fps", {"old": {"count": 5, "days_seen": [_day(400)]}})
+    assert az.prune_archive(retention_months=0) == {"shards": 0, "records": 0}
+    assert {p.name for p in az.STATE_ARCHIVE_DIR.glob("*.json")}
+
+
+def test_months_ago():
+    from datetime import date
+    assert az._months_ago(date(2026, 5, 15), 6) == "2025-11"
+    assert az._months_ago(date(2026, 1, 10), 1) == "2025-12"
+    assert az._months_ago(date(2026, 3, 1), 0) == "2026-03"
+
+
 def test_rotate_exempts_catalog_fps(state, monkeypatch, tmp_path):
     """A silent catalog (blocklist) fp must NOT be archived — the auto-demote
     view reads only active seen-fps.json, so archiving it would strand it

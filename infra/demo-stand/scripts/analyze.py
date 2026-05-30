@@ -74,6 +74,13 @@ STATE_COMPACT_MIN_COUNT = int(os.environ.get("STATE_COMPACT_MIN_COUNT", "3"))
 # A record must be idle this long before compaction can drop it, regardless of
 # TTL — guards a brand-new low-count fp from being culled the same week.
 STATE_COMPACT_MIN_IDLE_DAYS = 7
+# Cold-storage retention: monthly shards older than this are deleted, so the
+# archive itself stays bounded (hot/cold tiering, not infinite cold growth). The
+# value of restoring a fp's history decays with age — detection is about recent
+# behaviour — so a few months is plenty for the slow-burn anti-evasion case. 0
+# disables pruning (keep forever).
+STATE_ARCHIVE_RETENTION_MONTHS = int(os.environ.get("STATE_ARCHIVE_RETENTION_MONTHS", "6"))
+_SHARD_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 # The stand's container. It emits one Phase 1 `BAC_LOG {json}` record per
 # request to docker stdout.
@@ -660,6 +667,52 @@ def restore_from_archive(kind, keys):
     return found
 
 
+def _months_ago(today, n):
+    """The 'YYYY-MM' that is `n` whole months before today's month."""
+    total = today.year * 12 + (today.month - 1) - n
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def prune_archive(now_utc=None, retention_months=None):
+    """Delete monthly shards older than the retention horizon and drop their keys
+    from the index, so the cold archive stays bounded instead of growing forever.
+    retention 0 (or negative) disables pruning. The undated 'unknown' shard is
+    never aged out (it has no month to compare). Returns {shards, records}."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    retention = (STATE_ARCHIVE_RETENTION_MONTHS if retention_months is None
+                 else retention_months)
+    result = {"shards": 0, "records": 0}
+    if retention <= 0 or not STATE_ARCHIVE_DIR.exists():
+        return result
+    cutoff = _months_ago(now_utc.astimezone().date(), retention)  # prune months < cutoff
+    for path in sorted(STATE_ARCHIVE_DIR.glob("*.json")):
+        month = path.stem
+        if not _SHARD_MONTH_RE.match(month) or month >= cutoff:
+            continue
+        shard = _load_shard(path)
+        n = len(shard.get("fps", {})) + len(shard.get("ips", {}))
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        result["shards"] += 1
+        result["records"] += n
+    if result["shards"]:
+        # Drop index entries that pointed into the deleted shards. 'unknown' and
+        # any future-dated month sort >= cutoff and are kept.
+        idx = _load_archive_index()
+        changed = False
+        for kind in ("fps", "ips"):
+            kept = {k: m for k, m in idx.get(kind, {}).items()
+                    if not (_SHARD_MONTH_RE.match(m) and m < cutoff)}
+            if len(kept) != len(idx.get(kind, {})):
+                idx[kind] = kept
+                changed = True
+        if changed:
+            _save_archive_index(idx)
+    return result
+
+
 def _rotation_decision(entry, last_seen_str, today, ttl, min_count):
     """Classify one record: 'archive' | 'drop' | 'keep'. The single source of
     truth for the rotation rule — both rotate_state() and rotate-state.py's
@@ -675,11 +728,13 @@ def _rotation_decision(entry, last_seen_str, today, ttl, min_count):
     return "keep"
 
 
-def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None):
+def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None,
+                 retention_months=None):
     """Bound seen-fps.json / ip-cache.json growth. For each store: ARCHIVE entries
     idle longer than their TTL, DROP low-signal ones (count < min AND idle > the
-    compaction floor) outright. Idempotent — safe to run before every analyze
-    pass. Returns a per-store {archived, dropped, kept} summary.
+    compaction floor) outright. Then PRUNE the cold archive of shards older than
+    the retention horizon so it stays bounded too. Idempotent — safe to run before
+    every analyze pass. Returns {fps, ips, archive_pruned} summaries.
 
     Fps currently in the blocklist catalog are EXEMPT — never archived or dropped.
     The auto-demote view (find_stale_blocklist_entries) only consults active
@@ -720,7 +775,8 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None):
     ip_summary = _rotate(ip_cache, "ips", ip_ttl)
     save_ip_cache(ip_cache)
 
-    return {"fps": fp_summary, "ips": ip_summary}
+    archive_pruned = prune_archive(now_utc, retention_months)
+    return {"fps": fp_summary, "ips": ip_summary, "archive_pruned": archive_pruned}
 
 
 def classify_event(ev):

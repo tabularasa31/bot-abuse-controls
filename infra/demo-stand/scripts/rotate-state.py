@@ -46,13 +46,17 @@ def main() -> int:
     ap.add_argument("--fp-ttl-days", type=int, default=az.STATE_FP_TTL_DAYS)
     ap.add_argument("--ip-ttl-days", type=int, default=az.STATE_IP_TTL_DAYS)
     ap.add_argument("--min-count", type=int, default=az.STATE_COMPACT_MIN_COUNT)
+    ap.add_argument("--retention-months", type=int,
+                    default=az.STATE_ARCHIVE_RETENTION_MONTHS,
+                    help="delete archive shards older than N months (0 disables)")
     args = ap.parse_args()
 
     if args.dry_run:
         # Count against an in-memory copy without touching disk: load, run the
         # same predicate, but don't save or archive.
         from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).astimezone().date()
+        now_utc = datetime.now(timezone.utc)
+        today = now_utc.astimezone().date()
 
         def preview(store, last_seen, ttl, exempt=frozenset()):
             archived = dropped = 0
@@ -73,19 +77,38 @@ def main() -> int:
         catalog_fps = set(az._parse_blocklist_yaml())
         fp = preview(az.load_seen(), az._fp_last_seen, args.fp_ttl_days, catalog_fps)
         ip = preview(az.load_ip_cache(), az._ip_last_seen, args.ip_ttl_days)
-        summary = {"fps": fp, "ips": ip}
+        pruned = _preview_prune(now_utc, args.retention_months)
+        summary = {"fps": fp, "ips": ip, "archive_pruned": pruned}
         prefix = "rotate-state [dry-run]"
     else:
         summary = az.rotate_state(fp_ttl=args.fp_ttl_days,
                                   ip_ttl=args.ip_ttl_days,
-                                  min_count=args.min_count)
+                                  min_count=args.min_count,
+                                  retention_months=args.retention_months)
         prefix = "rotate-state"
 
-    fp, ip = summary["fps"], summary["ips"]
+    fp, ip, pr = summary["fps"], summary["ips"], summary["archive_pruned"]
     print(f"{prefix}: fps archived={fp['archived']} dropped={fp['dropped']} "
           f"kept={fp['kept']} | ips archived={ip['archived']} "
-          f"dropped={ip['dropped']} kept={ip['kept']}")
+          f"dropped={ip['dropped']} kept={ip['kept']} | "
+          f"archive pruned {pr['shards']} shards / {pr['records']} records")
     return 0
+
+
+def _preview_prune(now_utc, retention_months):
+    """Count shards/records that prune_archive would delete, without unlinking."""
+    out = {"shards": 0, "records": 0}
+    if retention_months <= 0 or not az.STATE_ARCHIVE_DIR.exists():
+        return out
+    cutoff = az._months_ago(now_utc.astimezone().date(), retention_months)
+    for path in sorted(az.STATE_ARCHIVE_DIR.glob("*.json")):
+        month = path.stem
+        if not az._SHARD_MONTH_RE.match(month) or month >= cutoff:
+            continue
+        shard = az._load_shard(path)
+        out["shards"] += 1
+        out["records"] += len(shard.get("fps", {})) + len(shard.get("ips", {}))
+    return out
 
 
 if __name__ == "__main__":

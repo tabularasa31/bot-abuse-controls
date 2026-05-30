@@ -35,7 +35,10 @@ For each store, keyed off the record's **last-seen day**:
 
 - **Archive** — last seen longer ago than its TTL → moved out of the active file
   into a monthly shard `state/archive/YYYY-MM.json` (the month it was last seen).
-  Nothing is deleted; the record is just parked.
+  Nothing is deleted; the record is just parked. Shards older than
+  `STATE_ARCHIVE_RETENTION_MONTHS` (default 6) are then deleted, so the cold
+  archive stays bounded too rather than growing forever — the value of restoring
+  a fp's history decays with age, so a few months covers the slow-burn case.
 - **Drop (compaction)** — `count < STATE_COMPACT_MIN_COUNT` **and** idle for more
   than 7 days → deleted outright. These are likely one-off probes not worth
   keeping. (The 7-day floor also guards a brand-new low-count fp from being
@@ -79,6 +82,7 @@ Env vars (set in the backend `run.sh`, or exported before a manual run):
 | `STATE_FP_TTL_DAYS` | `30` | archive an fp once last-seen is older than N days |
 | `STATE_IP_TTL_DAYS` | `7` | archive an IP once last-seen is older than N days |
 | `STATE_COMPACT_MIN_COUNT` | `3` | count below which an idle (>7d) record is dropped |
+| `STATE_ARCHIVE_RETENTION_MONTHS` | `6` | delete archive shards older than N months (`0` keeps forever) |
 | `ABUSE_CONTROLS_ROOT` | repo checkout | repo root holding `state/` |
 
 ```sh
