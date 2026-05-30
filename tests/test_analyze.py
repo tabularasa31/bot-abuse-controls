@@ -226,3 +226,42 @@ def test_seed_preserves_last_seen_when_present(dc_catalog):
     az.seed_ip_cache_from_log([_ev(remote="8.8.8.8", asn="15169")], cache)
     assert cache["8.8.8.8"]["last_seen"] == "2026-05-01"
     assert cache["8.8.8.8"]["count"] == 5
+
+
+def test_load_shard_handles_non_dict_and_corrupt(state):
+    az.STATE_ARCHIVE_DIR.mkdir(parents=True)
+    bad = az.STATE_ARCHIVE_DIR / "2026-01.json"
+    for content in ("[]", "null", "not json"):
+        bad.write_text(content)
+        assert az._load_shard(bad) == {"fps": {}, "ips": {}}
+
+
+def test_restore_unlinks_drained_shard(state):
+    az.save_seen({"x": {"count": 9, "days_seen": [_day(40)], "first_seen": _day(40)}})
+    az.save_ip_cache({})
+    az.rotate_state(fp_ttl=30)
+    shards = list(az.STATE_ARCHIVE_DIR.glob("*.json"))
+    assert shards  # archived to a shard
+    az.restore_from_archive("fps", {"x"})  # the only record -> shard drained
+    assert not list(az.STATE_ARCHIVE_DIR.glob("*.json"))
+
+
+def test_rotate_exempts_catalog_fps(state, monkeypatch, tmp_path):
+    """A silent catalog (blocklist) fp must NOT be archived — the auto-demote
+    view reads only active seen-fps.json, so archiving it would strand it
+    enforced (Codex P2)."""
+    cat = tmp_path / "catalogs"
+    cat.mkdir()
+    (cat / "tls_fp_blocklist.yaml").write_text('"blocked_silent": active\n')
+    monkeypatch.setattr(az, "CATALOGS_DIR", cat)
+    az.save_seen({
+        "blocked_silent": {"count": 99, "days_seen": [_day(60)], "first_seen": _day(60)},
+        "plain_old": {"count": 99, "days_seen": [_day(60)], "first_seen": _day(60)},
+    })
+    az.save_ip_cache({})
+    summary = az.rotate_state(fp_ttl=30)
+    import json
+    active = json.loads((state / "seen-fps.json").read_text())
+    assert "blocked_silent" in active      # exempt — kept active for the stale view
+    assert "plain_old" not in active        # non-catalog -> archived
+    assert summary["fps"]["archived"] == 1

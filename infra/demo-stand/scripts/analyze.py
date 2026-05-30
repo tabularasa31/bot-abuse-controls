@@ -538,6 +538,8 @@ def _load_shard(path):
         d = json.loads(path.read_text())
     except Exception:
         return {"fps": {}, "ips": {}}
+    if not isinstance(d, dict):  # corrupted / [] / null -> start clean
+        return {"fps": {}, "ips": {}}
     d.setdefault("fps", {})
     d.setdefault("ips", {})
     return d
@@ -581,7 +583,14 @@ def restore_from_archive(kind, keys):
             continue
         for key in hit:
             found[key] = bucket.pop(key)
-        _save_shard(path, shard)
+        # Drained shards are unlinked, not left as empty {} files to accumulate.
+        if not shard.get("fps") and not shard.get("ips"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        else:
+            _save_shard(path, shard)
         wanted -= hit
         if not wanted:
             break
@@ -592,17 +601,26 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None):
     """Bound seen-fps.json / ip-cache.json growth. For each store: ARCHIVE entries
     idle longer than their TTL, DROP low-signal ones (count < min AND idle > the
     compaction floor) outright. Idempotent — safe to run before every analyze
-    pass. Returns a per-store {archived, dropped, kept} summary."""
+    pass. Returns a per-store {archived, dropped, kept} summary.
+
+    Fps currently in the blocklist catalog are EXEMPT — never archived or dropped.
+    The auto-demote view (find_stale_blocklist_entries) only consults active
+    seen-fps.json; archiving a silent catalog fp would erase the very last_seen
+    signal that demotes it, stranding it enforced forever. The catalog is small
+    and bounded, so keeping these active costs nothing against the size goal."""
     now_utc = now_utc or datetime.now(timezone.utc)
     today = now_utc.astimezone().date()
     fp_ttl = STATE_FP_TTL_DAYS if fp_ttl is None else fp_ttl
     ip_ttl = STATE_IP_TTL_DAYS if ip_ttl is None else ip_ttl
     min_count = STATE_COMPACT_MIN_COUNT if min_count is None else min_count
+    catalog_fps = set(_parse_blocklist_yaml())  # exempt; {} if no catalog present
 
-    def _rotate(store, kind, ttl):
+    def _rotate(store, kind, ttl, exempt=frozenset()):
         last_seen = _fp_last_seen if kind == "fps" else _ip_last_seen
         archive, drop = {}, []
         for key, entry in store.items():
+            if key in exempt:
+                continue
             ls = _parse_day(last_seen(entry) or "")
             if ls is None:
                 continue  # no clock yet -> keep (don't guess it stale)
@@ -621,7 +639,7 @@ def rotate_state(now_utc=None, fp_ttl=None, ip_ttl=None, min_count=None):
         return {"archived": len(archive), "dropped": len(drop), "kept": len(store)}
 
     seen = load_seen()
-    fp_summary = _rotate(seen, "fps", fp_ttl)
+    fp_summary = _rotate(seen, "fps", fp_ttl, exempt=catalog_fps)
     save_seen(seen)
 
     ip_cache = load_ip_cache()
@@ -1716,6 +1734,10 @@ def main() -> int:
     events_all, blocklist_size, init_ts, per_source = fetch_events(args.source, fetch_hours)
     seen = load_seen()
     ip_cache = load_ip_cache()
+    # IPs active at load time, BEFORE seeding fills ip_cache with every windowed
+    # IP — the lazy restore below uses this to look up only IPs that weren't
+    # already active (the rest can't be in the archive, so skip the disk scan).
+    pre_seed_ips = set(ip_cache)
     now_utc = datetime.now(timezone.utc)
     today_str = now_utc.astimezone().strftime("%Y-%m-%d")
     events_24h = split_24h(events_all, now_utc)
@@ -1781,9 +1803,13 @@ def main() -> int:
     # back into the seeded entry rather than overwrite its fresh enrichment.
     win_fps = {e["fp"] for e in events_24h if e.get("fp")}
     seen.update(restore_from_archive("fps", win_fps - seen.keys()))
+    # Only IPs not already active before seeding can possibly be in the archive
+    # (a record is either active or archived, never both) — restrict the lookup
+    # to those so we don't scan shards for every windowed IP. Their seeded entry
+    # has count=0, so folding the archived count back in restores the history.
     win_ips = {e["remote"] for e in events_24h
                if e.get("remote") and e["remote"] != "-"}
-    for ip, entry in restore_from_archive("ips", win_ips).items():
+    for ip, entry in restore_from_archive("ips", win_ips - pre_seed_ips).items():
         cur = ip_cache.get(ip)
         if isinstance(cur, dict) and "error" not in cur:
             cur["count"] = cur.get("count", 0) + entry.get("count", 0)

@@ -54,9 +54,11 @@ def main() -> int:
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).astimezone().date()
 
-        def preview(store, last_seen, ttl):
+        def preview(store, last_seen, ttl, exempt=frozenset()):
             archived = dropped = 0
-            for entry in store.values():
+            for key, entry in store.items():
+                if key in exempt:
+                    continue
                 ls = az._parse_day(last_seen(entry) or "")
                 if ls is None:
                     continue
@@ -69,7 +71,9 @@ def main() -> int:
             return {"archived": archived, "dropped": dropped,
                     "kept": len(store) - archived - dropped}
 
-        fp = preview(az.load_seen(), az._fp_last_seen, args.fp_ttl_days)
+        # Catalog fps are exempt from rotation (see analyze.rotate_state).
+        catalog_fps = set(az._parse_blocklist_yaml())
+        fp = preview(az.load_seen(), az._fp_last_seen, args.fp_ttl_days, catalog_fps)
         ip = preview(az.load_ip_cache(), az._ip_last_seen, args.ip_ttl_days)
         summary = {"fps": fp, "ips": ip}
         prefix = "rotate-state [dry-run]"
