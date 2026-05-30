@@ -12,10 +12,21 @@
 set -uo pipefail
 ROOT="${ABUSE_CONTROLS_ROOT:-/data}"
 ANALYZE="${ANALYZE:-$ROOT/infra/demo-stand/scripts/analyze.py}"
+ROTATE="${ROTATE:-$ROOT/infra/demo-stand/scripts/rotate-state.py}"
 STATE="$ROOT/state"
 mkdir -p "$STATE"
 
 echo "[analytics] $(date -u +%FT%TZ) source=${BAC_SOURCE:-loki} loki=${LOKI_URL:-http://loki:3100}"
+
+# 0) Bound lifetime-state growth (D7) BEFORE the analyze run below reads it.
+# rotate-state.py archives the aged-out tail of seen-fps.json / ip-cache.json
+# into state/archive/ and drops one-off probes; analyze.py lazily restores any
+# key that reappears. TTLs are env-overridable (see scripts/README.md). Non-fatal
+# on failure — a rotation hiccup must not block the daily report.
+export STATE_FP_TTL_DAYS="${STATE_FP_TTL_DAYS:-30}"
+export STATE_IP_TTL_DAYS="${STATE_IP_TTL_DAYS:-7}"
+export STATE_COMPACT_MIN_COUNT="${STATE_COMPACT_MIN_COUNT:-3}"
+python3 "$ROTATE" || echo "[analytics] WARN rotate-state failed (non-fatal)"
 
 # 1) Daily HTML report + email FIRST. This --html run is the one that updates the
 # lifetime state (seen-fps.json / watermark / last-subject); the JSON views below

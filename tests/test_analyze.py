@@ -145,3 +145,84 @@ def test_human_share_weights_genuine_fraction():
     botlike = _ev(ua_family="(empty)", cipher_count=99)
     assert az.human_share([genuine, botlike]) == pytest.approx(0.5)
     assert az.human_share([]) == 0.0
+
+
+# --- lifetime-state rotation (D7) ------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """Point the module's state paths at a temp dir so rotate/archive/restore
+    operate in isolation."""
+    monkeypatch.setattr(az, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(az, "SEEN_FPS", tmp_path / "seen-fps.json")
+    monkeypatch.setattr(az, "IP_CACHE", tmp_path / "ip-cache.json")
+    monkeypatch.setattr(az, "STATE_ARCHIVE_DIR", tmp_path / "archive")
+    return tmp_path
+
+
+def _day(n):
+    return (datetime.now(timezone.utc).astimezone().date()
+            - timedelta(days=n)).strftime("%Y-%m-%d")
+
+
+def test_fp_last_seen_prefers_days_seen():
+    assert az._fp_last_seen({"days_seen": ["2026-01-02", "2026-03-04"]}) == "2026-03-04"
+    # falls back to last_seen, then first_seen (day only)
+    assert az._fp_last_seen({"last_seen": "2026-05-06T00:00:00Z"}) == "2026-05-06"
+    assert az._fp_last_seen({"first_seen": "2026-07-08T09:00:00Z"}) == "2026-07-08"
+    assert az._fp_last_seen({}) is None
+
+
+def test_rotate_archives_old_drops_weak_keeps_recent(state):
+    az.save_seen({
+        "old_strong": {"count": 50, "days_seen": [_day(40)], "first_seen": _day(40)},
+        "recent": {"count": 50, "days_seen": [_day(2)], "first_seen": _day(2)},
+        "old_weak": {"count": 1, "days_seen": [_day(20)], "first_seen": _day(20)},
+        "no_clock": {"count": 5},
+    })
+    az.save_ip_cache({})
+    summary = az.rotate_state(fp_ttl=30, ip_ttl=7, min_count=3)
+    assert summary["fps"] == {"archived": 1, "dropped": 1, "kept": 2}
+    import json
+    active = json.loads((state / "seen-fps.json").read_text())
+    assert set(active) == {"recent", "no_clock"}      # old_weak dropped, no_clock kept (no clock)
+    # old_strong archived under its last-seen month, recoverable
+    restored = az.restore_from_archive("fps", {"old_strong"})
+    assert restored["old_strong"]["count"] == 50
+
+
+def test_restore_removes_from_archive(state):
+    az.save_seen({"x": {"count": 9, "days_seen": [_day(40)], "first_seen": _day(40)}})
+    az.save_ip_cache({})
+    az.rotate_state(fp_ttl=30)
+    assert az.restore_from_archive("fps", {"x"})       # first restore finds it
+    assert az.restore_from_archive("fps", {"x"}) == {}  # gone from the shard now
+
+
+def test_restore_empty_keys_is_noop(state):
+    assert az.restore_from_archive("fps", set()) == {}
+
+
+def test_ip_rotation_uses_last_seen_and_keeps_unclocked(state):
+    az.save_seen({})
+    az.save_ip_cache({
+        "old": {"asn": "1", "country": "US", "hosting": False, "count": 9, "last_seen": _day(20)},
+        "fresh": {"asn": "2", "country": "US", "hosting": True, "count": 9, "last_seen": _day(1)},
+        "unclocked": {"asn": "3", "country": "US", "hosting": False, "count": 9},
+    })
+    summary = az.rotate_state(fp_ttl=30, ip_ttl=7, min_count=3)
+    assert summary["ips"] == {"archived": 1, "dropped": 0, "kept": 2}
+    import json
+    active = json.loads((state / "ip-cache.json").read_text())
+    assert set(active) == {"fresh", "unclocked"}
+
+
+def test_seed_preserves_last_seen_when_present(dc_catalog):
+    cache = {"8.8.8.8": {"asn": "15169", "count": 5, "source": "log",
+                         "last_seen": "2026-05-01"}}
+    az.seed_ip_cache_from_log([_ev(remote="8.8.8.8", asn="15169")], cache)
+    assert cache["8.8.8.8"]["last_seen"] == "2026-05-01"
+    assert cache["8.8.8.8"]["count"] == 5
