@@ -115,7 +115,11 @@ def test_container_start_unknown_docker():
 
 def test_container_start_renders_timestamp_when_known():
     ts = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)
-    assert "2026-05-30" in az._container_start_str(ts, "loki")
+    # _container_start_str converts to local time; derive the expected date the
+    # same way so the test is stable in any runner timezone (a fixed UTC date
+    # can roll over under astimezone() east of UTC).
+    expected_date = ts.astimezone().strftime("%Y-%m-%d")
+    assert expected_date in az._container_start_str(ts, "loki")
 
 
 # --- purity / classification ------------------------------------------------
