@@ -166,6 +166,88 @@ check(reputation.country_blocked({ RU = true }, ""), false,
     "country_blocked: blank country -> pass")
 
 -- ===========================================================================
+-- reputation.refresh_whitelist() / refresh_asn() — gen-cached rebuild from the
+-- Channel C snapshot (B12, 86ext2zb4). Mock ngx.shared (meta + the two catalog
+-- dicts) and a fake resty.ipmatcher; assert a gen flip swaps the matcher/set.
+-- ===========================================================================
+
+do
+    local function new_dict()
+        local s, d = {}, {}
+        function d:get(k) return s[k] end
+        function d:set(k, v) s[k] = v; return true end
+        function d:delete(k) s[k] = nil end
+        function d:get_keys(_) local out = {} for k in pairs(s) do out[#out+1] = k end return out end
+        return d
+    end
+
+    local saved_ngx       = _G.ngx
+    local saved_ipmatcher = package.loaded["resty.ipmatcher"]
+    local meta, wl, asn   = new_dict(), new_dict(), new_dict()
+    _G.ngx = { shared = { meta = meta, antibot_ip_whitelist = wl,
+                          antibot_asn_datacenters = asn },
+               log = function() end, ERR = "ERR", WARN = "WARN" }
+
+    -- Fake ipmatcher: capture the CIDR set passed to new() so we can assert the
+    -- matcher was rebuilt from exactly the snapshot's gen.
+    local captured
+    package.loaded["resty.ipmatcher"] = {
+        new = function(values) captured = values; return { match = function() return true end } end,
+    }
+
+    -- ---- ip_whitelist refresh ------------------------------------------------
+    reputation.ip_whitelist_enabled = true
+    reputation._cached_gen_wl = nil
+
+    wl:set("203.0.113.7:1", "1")
+    wl:set("2001:db8::/48:1", "1")
+    wl:set("198.51.100.0/24:0", "1") -- stale gen-0 key, must be ignored at gen 1
+    meta:set("ip_whitelist_gen", 1)
+    reputation.refresh_whitelist()
+    table.sort(captured)
+    check_arr(captured, { "2001:db8::/48", "203.0.113.7" },
+        "refresh_whitelist rebuilds matcher from current gen only")
+    check(reputation.whitelist ~= nil, true, "refresh_whitelist sets matcher")
+
+    -- gen 2: empty snapshot → nil matcher (rule becomes a no-op).
+    meta:set("ip_whitelist_gen", 2)
+    reputation.refresh_whitelist()
+    check(reputation.whitelist, nil, "refresh_whitelist empty gen -> nil matcher")
+
+    -- kill-switch: disabled → matcher cleared regardless of snapshot.
+    reputation.ip_whitelist_enabled = false
+    wl:set("10.0.0.1:3", "1")
+    meta:set("ip_whitelist_gen", 3)
+    reputation.refresh_whitelist()
+    check(reputation.whitelist, nil, "refresh_whitelist respects kill-switch")
+
+    -- ---- asn_datacenters refresh --------------------------------------------
+    reputation._cached_gen_asn = nil
+    asn:set("24940:1", "1")
+    asn:set("16276:1", "1")
+    asn:set("14061:0", "1") -- stale gen-0, ignored at gen 1
+    meta:set("asn_datacenters_gen", 1)
+    reputation.refresh_asn()
+    check(reputation.asn_dc_set["24940"], true, "refresh_asn set contains 24940")
+    check(reputation.asn_dc_set["16276"], true, "refresh_asn set contains 16276")
+    check(reputation.asn_dc_set["14061"], nil,  "refresh_asn ignores stale gen-0 key")
+    check(reputation.asn_dc_set["99999"], nil,  "refresh_asn absent asn -> nil")
+
+    -- gen 2: empty snapshot → empty set (tag never fires).
+    meta:set("asn_datacenters_gen", 2)
+    reputation.refresh_asn()
+    check(next(reputation.asn_dc_set), nil, "refresh_asn empty gen -> empty set")
+
+    -- gen-cache: a second call without a gen flip is a no-op (no rescan).
+    asn:set("8075:2", "1")
+    reputation.refresh_asn()
+    check(reputation.asn_dc_set["8075"], nil, "refresh_asn gen-cached: no rescan without flip")
+
+    package.loaded["resty.ipmatcher"] = saved_ipmatcher
+    _G.ngx = saved_ngx
+end
+
+-- ===========================================================================
 -- Reporting
 -- ===========================================================================
 
