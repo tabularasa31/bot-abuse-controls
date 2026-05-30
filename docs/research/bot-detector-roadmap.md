@@ -4,6 +4,14 @@
 > после D1 (скоринг + blocklist-цикл)». Ничего из ниже **НЕ реализовано** в стенде,
 > пока явно не уехало в PROGRESS.md → «ЕСТЬ СЕЙЧАС». Не выдавать за сделанное.
 > Точкой отсчёта служит закрытый D1 (см. [blocklist-scoring.md](../blocklist-scoring.md)).
+>
+> **Триаж завершён (2026-05-30): все шесть идей проработаны в дизайн-доки + тикеты.**
+> #1 [solve-rate](challenge-solve-rate-design.md) (D12) · #2 [позитивный fp-каталог](positive-fp-catalog-design.md)
+> (D13, +спайк E2 HTTP/2) · #3 [subnet-юнит](subnet-unit-design.md) (D14/D15/D16) ·
+> #5 [anti-poisoning](scoring-anti-poisoning-design.md) (D18/D19) ·
+> #6 [кросс-тенант threat-intel](cross-tenant-threat-intel-design.md) (D17) ·
+> #4 [поведенческие сигналы](behavioral-signals-design.md) — **дизайн зафиксирован, реализация
+> ОТЛОЖЕНА** (худшее эффект/точность). Приоритет дальше — реализация #1/#3/#5, не новые сигналы.
 
 ## Точка отсчёта (что уже есть, D1)
 
