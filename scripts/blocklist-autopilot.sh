@@ -101,15 +101,32 @@ TODAY="$(date -u +%F)"
 BRANCH="blocklist-auto-$TODAY"
 TITLE="Blocklist auto-update $TODAY"
 BODY="$(mktemp)"; trap 'rm -f "$BODY"' EXIT
-REVIEW_BY="$(python3 -c "import datetime;print((datetime.date.today()+datetime.timedelta(days=${BAC_TTL_DAYS:-14})).isoformat())")"
+# review-by = $TODAY (UTC) + TTL. Parse $TODAY in Python so we don't mix it with
+# the local-tz date.today() (codex: off-by-one across the UTC/local boundary).
+REVIEW_BY="$(python3 -c "import datetime;print((datetime.date.fromisoformat('$TODAY')+datetime.timedelta(days=${BAC_TTL_DAYS:-14})).isoformat())")"
 
-# Promote passport (YAML comment) built from candidates.json evidence.
-mk_passport() {  # <fp>
+# Promote passport (YAML comment) from pre-fetched candidate fields — caller
+# passes them so we don't re-spawn Python + re-parse candidates.json per field.
+mk_passport() {  # <score> <tier> <reasons> <human_share> <n_lifetime>
   printf 'promoted %s (auto) — reason: stable HIGH, gates+intent passed\nscore %s (%s) · %s\nhuman_share %s · events %s · review-by %s\n' \
-    "$TODAY" \
-    "$(bl_cand_field "$1" "c['score']")" "$(bl_cand_field "$1" "c['tier']")" \
-    "$(bl_cand_field "$1" "' / '.join(c['reasons'])")" \
-    "$(bl_cand_field "$1" "c['human_share']")" "$(bl_cand_field "$1" "c['n_lifetime']")" "$REVIEW_BY"
+    "$TODAY" "$1" "$2" "$3" "$4" "$5" "$REVIEW_BY"
+}
+
+# All evidence fields for one fp in a SINGLE Python call (tab-separated).
+cand_fields() {  # <fp> → score\ttier\treasons\thuman_share\tn_lifetime
+  python3 - "$CANDIDATES" "$1" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for c in d.get("high", []) + d.get("medium", []) + d.get("low", []):
+    if c.get("fp") == sys.argv[2]:
+        print("\t".join([str(c.get("score", "")), str(c.get("tier", "")),
+                         " / ".join(c.get("reasons", [])),
+                         str(c.get("human_share", "")), str(c.get("n_lifetime", ""))]))
+        break
+PY
 }
 
 # Apply every action to the catalog on the current branch and fill the PR body.
@@ -122,8 +139,9 @@ apply_all() {
   if [ -n "$PROMOTE" ]; then
     { echo; echo "### Promote → staging"; } >> "$BODY"
     while IFS= read -r fp; do [ -z "$fp" ] && continue
-      python3 "$EDITOR_PY" --file "$CATALOG" add "$fp" staging --comment "$(mk_passport "$fp")" >/dev/null
-      echo "- \`$fp\` — score $(bl_cand_field "$fp" "c['score']") $(bl_cand_field "$fp" "c['tier']") · $(bl_cand_field "$fp" "' / '.join(c['reasons'])")" >> "$BODY"
+      IFS=$'\t' read -r score tier reasons hs life <<< "$(cand_fields "$fp")"
+      python3 "$EDITOR_PY" --file "$CATALOG" add "$fp" staging --comment "$(mk_passport "$score" "$tier" "$reasons" "$hs" "$life")" >/dev/null
+      echo "- \`$fp\` — score $score $tier · $reasons" >> "$BODY"
     done <<< "$PROMOTE"
   fi
   if [ -n "$ACTIVATE" ]; then
@@ -160,11 +178,21 @@ if [ -n "$DRY_FLAG" ]; then
   exit 0
 fi
 
-bl_branch_exists "$BRANCH" && { echo "autopilot: $BRANCH already exists — PR likely opened today, skipping"; exit 0; }
+# Idempotency: only a PUSHED branch (= an opened PR) blocks a rerun today. A
+# LOCAL-only branch is the residue of a failed earlier run — clear it and retry,
+# so a mid-run failure doesn't silently skip the whole day (codex P2).
+if git -C "$REPO" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+  echo "autopilot: $BRANCH already on origin — PR opened today, skipping"; exit 0
+fi
+git -C "$REPO" branch -D "$BRANCH" >/dev/null 2>&1 || true
+
+# From here we mutate the worktree. On ANY failure, revert the catalog and
+# return to base so the next run starts clean (the stale local branch is
+# cleared above next time). On success this is harmless (worktree already clean).
+trap 'st=$?; rm -f "$BODY"; git -C "$REPO" checkout -- "$CATALOG" 2>/dev/null || true; bl_restore_base "$BASE" 2>/dev/null || true; exit $st' EXIT
 bl_start_branch "$BRANCH" "$BASE"
 apply_all
 bl_validate_catalog
 bl_commit_catalog "blocklist: auto-update $TODAY ($n_p promote / $n_a activate / $n_d demote)" "$(cat "$BODY")"
 bl_open_pr "$BRANCH" "$BASE" "$TITLE" "$BODY" true
-bl_restore_base "$BASE"
 echo "=== autopilot done: one draft PR for $BRANCH ==="
