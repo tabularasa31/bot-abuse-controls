@@ -373,11 +373,11 @@ end
 local function seed_ip_whitelist_cold()
     if not wl_dict then return 0 end
     clear_gen0(wl_dict)
-    local n = 0
+    local seeded = 0
     for _, v in ipairs(reputation.active_values(config.whitelist_ip)) do
         local ok, err = wl_dict:set(v .. ":0", "1")
         if ok then
-            n = n + 1
+            seeded = seeded + 1
         else
             -- Loud: refresh_whitelist() rebuilds the allow matcher from this
             -- gen-0 dict on the first request; a dropped CIDR would silently
@@ -387,7 +387,7 @@ local function seed_ip_whitelist_cold()
                 " — edge may under-allow until the first Channel C pull")
         end
     end
-    return n
+    return seeded
 end
 
 -- asn_datacenters seed (B12): `<asn>:0` → "1" for every conf entry, matching the
@@ -397,18 +397,18 @@ end
 local function seed_asn_datacenters_cold()
     if not asn_dict then return 0 end
     clear_gen0(asn_dict)
-    local n = 0
+    local seeded = 0
     for _, v in ipairs(reputation.active_values(config.asn_datacenters)) do
         local ok, err = asn_dict:set(v .. ":0", "1")
         if ok then
-            n = n + 1
+            seeded = seeded + 1
         else
             ngx.log(ngx.WARN, "[demo] asn_datacenters seed ", v,
                 ":0 failed: ", tostring(err),
                 " — reputation:asn_dc tag may miss this ASN until the first pull")
         end
     end
-    return n
+    return seeded
 end
 
 for _, spec in ipairs({
