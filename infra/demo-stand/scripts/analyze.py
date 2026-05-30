@@ -546,7 +546,7 @@ def _load_asn_datacenters():
     asns = set()
     path = CATALOGS_DIR / "asn_datacenters.yaml"
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return asns
     for line in text.splitlines():
@@ -1554,6 +1554,12 @@ def main() -> int:
     events_24h = split_24h(events_all, now_utc)
     gen = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Seed ip_cache (asn/country/hosting) from the edge-logged fields up front so
+    # EVERY path below — --candidates-json, --subject, the full report — sees a
+    # populated cache (bot classification + DC-ASN score depend on it). Local and
+    # cheap (no network), so no reason to gate it per-branch.
+    seed_ip_cache_from_log(events_24h, ip_cache)
+
     # Loki carries no resty init marker, so _fetch_loki can't report the enforced
     # blocklist size — derive it from the catalog's active entries instead, else
     # the report's mode line would falsely read SHADOW under the Loki source.
@@ -1562,7 +1568,6 @@ def main() -> int:
 
     if args.candidates_json:
         _require_catalog()
-        seed_ip_cache_from_log(events_24h, ip_cache)
         high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
         sys.stdout.write(json.dumps({
             "generated_utc": gen,
@@ -1599,8 +1604,6 @@ def main() -> int:
         sLT = collect_lifetime_stats(seen, ip_cache)
         sys.stdout.write(render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
         return 0
-
-    seed_ip_cache_from_log(events_24h, ip_cache)
 
     # Update lifetime state only for events strictly newer than the
     # watermark, so overlapping/repeated runs (cron's 25h window + manual
