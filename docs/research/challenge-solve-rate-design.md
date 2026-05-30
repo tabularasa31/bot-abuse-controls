@@ -48,15 +48,22 @@ Fp, которому массово выдавали JS-challenge и котор�
 
 ### A. Определение сигнала
 
+**Только `mode=active` события.** Страница-проверка физически отдаётся лишь в режиме `active`; в
+`shadow` каскад пишет would-be `verdict=challenge`, но **страницу не серверит** (C5). Значит под
+shadow `solved` физически всегда 0 → `solve_rate=0` у всех → ложный «бот»-сигнал. Поэтому
+`issued`/`solved` считаем **строго по событиям с `mode=active`** (поле `mode` в логе есть, B11).
+Следствие для продукта: сигнал «включается» только для хостов в active-энфорсменте; для shadow-хостов
+он молчит — это зависимость от раската enforcement, не баг.
+
 **Окно — накопительное (lifetime), НЕ 24ч.** challenge редок, и low-and-slow бот не наберёт
 `MIN_CHALLENGE_ISSUED` за сутки (review). Поэтому `issued`/`solved` копим per-fp в `seen-fps.json`
 рядом с `count`/`days_seen`: на каждом прогоне инкрементим дельтой из свежего Loki-окна (watermark
-для дедупа уже есть у `count`). Это же убирает зависимость от того, в каком суточном окне
-оказалось событие.
+для дедупа уже есть у `count`), **учитывая только active-события**. Это же убирает зависимость от
+того, в каком суточном окне оказалось событие.
 
 ```
-issued(fp)  = накопл. |events: verdict==challenge|
-solved(fp)  = накопл. |events: verdict==allow AND rule=="challenge_pass"|
+issued(fp)  = накопл. |events: mode==active AND verdict==challenge|
+solved(fp)  = накопл. |events: mode==active AND verdict==allow AND rule=="challenge_pass"|
 solve_rate  = min(solved / issued, 1.0)   # cap 1.0 (см. ниже), при issued > 0
 ```
 **Cap на 1.0 (review):** даже при накопительном счёте на самой первой загрузке fp solved-событие
@@ -89,20 +96,29 @@ issued >= MIN_CHALLENGE_ISSUED AND solve_rate <= LOW_SOLVE_RATE(0.05)  → +2, r
       промоутить; review). Снять вето на малых N нельзя — `solved/issued` тут шумит.
     - `solved == 0` → нейтрально (этот сигнал не ветирует). На практике такой fp почти всегда
       отсекает volume-гейт `n_lifetime >= MIN_EVENTS(20)` — снятие вето здесь почти ни на что не влияет.
-  - `issued >= MIN_CHALLENGE_ISSUED` — **данных достаточно, судим по rate**:
-    - `solve_rate <= LOW_SOLVE_RATE(0.05)` → НЕ вето (бот, который не решает) — промоут разрешён,
+  - `issued >= MIN_CHALLENGE_ISSUED` — **данных достаточно, судим по rate** (три зоны, не две):
+    - `solve_rate <= LOW_SOLVE_RATE(0.05)` → **НЕ вето** (бот, который не решает) — промоут разрешён,
       **даже если было несколько случайных solved** (это и есть headless, «решил пару раз из сотен»;
       ровно тот дефект «один solve шилдит навсегда», который дизайн чинит);
-    - `solve_rate >= HUMAN_SOLVE_RATE(0.5)` → вето (реально решают → есть люди/легит-браузеры);
-    - между порогами → консервативно вето (серая зона, не рискуем).
+    - `solve_rate >= HUMAN_SOLVE_RATE(0.5)` → **вето** (реально решают → есть люди/легит-браузеры);
+    - `LOW < solve_rate < HUMAN` — **серая зона → не авто-промоут, но и не хард-вето**: сигнал
+      неубедителен, отдаём решение staging-наблюдению (см. ниже). На practике: fp **не** становится
+      `auto_eligible`, но как кандидат на staging допустим (через ручной promote или просто
+      остаётся в отчёте). Staging безвреден — только логирует, не блокирует, — поэтому «припарковать
+      сомнительный fp в наблюдении» безопаснее, чем поспешно блокировать или поспешно простить.
 
   > Асимметрия осознанная: **добавить/сохранить** вето можно по одному solved (защита человека),
-  > **снять** вето — только при достаточном `issued` (нужна статистика, а не единичный случай).
+  > **снять** вето — только при достаточном `issued`; в промежутке — не блок и не прощение, а
+  > наблюдение.
 
-То же расщепление применить в `find_staging_observation`
-([analyze.py:964](../../infra/demo-stand/scripts/analyze.py)): сейчас любой identity-allow среди
-матчей → `fp_caught`. После: challenge_pass с низким solve_rate **не** даёт `fp_caught`;
-high solve_rate — по-прежнему `fp_caught`.
+То же расщепление — в `find_staging_observation`
+([analyze.py:964](../../infra/demo-stand/scripts/analyze.py)), и **здесь у `HUMAN_SOLVE_RATE`
+появляется реальный смысл** (B-решение). Сейчас любой identity-allow среди staging-матчей →
+`fp_caught`. После — по solve_rate среди матчей (только active):
+  - `>= HUMAN_SOLVE_RATE` → `fp_caught` (поймали живых → demote/remove);
+  - `<= LOW_SOLVE_RATE` (и прочие staging-гейты ок) → `activate`;
+  - серая зона → `observe` (остаёмся в staging, добираем данные по решаемости — ровно «наблюдать
+    дольше»). Парковка в `observe` безопасна: staging не блокирует.
 
 > **Важно — purity не дублирует это.** purity (`human_share`) смотрит на «выглядит как браузер»
 > по UA+cipher+hash. solve_rate смотрит на **способность пройти активную проверку**. Headless с
@@ -112,20 +128,25 @@ high solve_rate — по-прежнему `fp_caught`.
 ### C. Изменения в коде (объём)
 
 Минимальный вариант — **только `analyze.py`**:
-1. В `_event_from_bac_line` уже есть `verdict` и `rule` — ничего добавлять не нужно.
+1. В `_event_from_bac_line` есть `verdict`/`rule`; добавить чтение `mode` (поле в логе уже есть,
+   B11) — нужно для active-фильтра §A.
 2. **Накопление в `seen-fps.json`:** к существующим per-fp полям (`count`/`days_seen`) добавить
-   `challenge_issued`/`challenge_solved`, инкремент дельтой на каждом прогоне (`load_seen`/`save_seen`
-   уже есть, watermark-дедуп общий с `count`). Это lifetime-окно сигнала (см. §A).
+   `challenge_issued`/`challenge_solved`, инкремент дельтой на каждом прогоне **только по
+   `mode==active` событиям** (`load_seen`/`save_seen` уже есть, watermark-дедуп общий с `count`).
+   Это lifetime-окно сигнала (см. §A).
 3. Чистая функция `solve_signal(seen_entry) -> {issued, solved, solve_rate(cap 1.0), enough:bool}`
    (`enough = issued >= MIN_CHALLENGE_ISSUED`).
 4. `score_fp_candidate`: добавить ветку сигнала (B1).
 5. Расщепить `_fp_has_identity_allow` → `_fp_hard_identity_allow` (без challenge_pass) +
-   отдельная проверка challenge_pass через лестницу §B2; обновить вызовы в
-   `find_blocklist_candidates` (gate `allowlist`) и `find_staging_observation`.
+   отдельная проверка challenge_pass через лестницу §B2 с тремя исходами (veto / no-veto /
+   gray→no-auto). Обновить вызовы в `find_blocklist_candidates` (gate `allowlist` + снятие
+   `auto_eligible` в серой зоне) и `find_staging_observation` (исходы `fp_caught`/`activate`/
+   `observe` по solve_rate среди active-матчей).
 6. Новые константы + флаги/env (паттерн D1): `MIN_CHALLENGE_ISSUED`, `LOW_SOLVE_RATE`,
    `HUMAN_SOLVE_RATE` (+ `BAC_*` env).
-7. Тесты: unit на `solve_signal` (cap >1.0) + матрица лестницы §B2
-   (issued<MIN×{solved 0,1} ; issued≥MIN×solve_rate{0,0.03,0.5,0.9}).
+7. Тесты: unit на `solve_signal` (cap >1.0; mode-фильтр: shadow-события игнорятся) + матрица
+   лестницы §B2 (issued<MIN×{solved 0,1} ; issued≥MIN×solve_rate{0,0.03,0.3(серая),0.9}) +
+   staging-исходы fp_caught/activate/observe.
 
 Опциональный edge-follow-up (НЕ в этом дизайне): явный `rule=challenge_issued` маркер вместо
 вывода из `verdict=challenge`, если захотим различать Branch A render от прочих challenge-путей.
@@ -135,8 +156,9 @@ high solve_rate — по-прежнему `fp_caught`.
 
 - **Бот решает, чтобы поднять solve_rate и защитить fp.** Чтобы перевалить `HUMAN_SOLVE_RATE=0.5`,
   ему надо решать ≥половину выданных challenge — это уже дорого и, главное, означает, что
-  enforcement РАБОТАЕТ (он платит CPU за каждый визит). Низкий порог промоута (`<=0.05`)
-  оставляет широкую серую зону под вето — мы осознанно НЕ блокируем, когда неуверены.
+  enforcement РАБОТАЕТ (он платит CPU за каждый визит). А чтобы хотя бы выйти из зоны промоута
+  (`>0.05`), он попадает лишь в серую зону → staging-наблюдение, а не мгновенное прощение: добиться
+  блокировки сложно, но и иммунитет одним-двумя solve не купить.
 - **Загрязнение чужого fp.** solve_rate per-fp; подмешать «нерешения» в чужой fp = слать трафик с
   тем же ClientHello — та же модель угроз, что у purity-poisoning (#5), отдельный трек.
 - **Single-use не раздувает solved** — считаем строго `rule=challenge_pass` (см. выше).
@@ -156,12 +178,23 @@ high solve_rate — по-прежнему `fp_caught`.
 - HTTP/2 fp, поведенческие сигналы (#2-#4) — отдельные треки.
 - Per-fp метрики на эдже (на стенде нет per-host метрик-инфры; считаем в аналитике из Loki).
 
-## Открытые вопросы
+## Решённые вопросы (обсуждение 2026-05-30)
 
-1. ~~Окно для issued/solved~~ — **РЕШЕНО (review):** накопительно в `seen-fps.json` (lifetime),
-   не 24ч-окно — иначе low-and-slow бот не наберёт `MIN_CHALLENGE_ISSUED`. См. §A/§C.
-2. Branch B/C (`non_browser_blocked`/`unchallengeable`) — учитывать как «не-solved» сигнал или
-   игнорировать (они и так блок)? Скорее игнор: они не получают решаемый challenge.
-3. Порог `HUMAN_SOLVE_RATE=0.5` — калибровать по реальным staging-данным стенда.
-4. Рост `seen-fps.json` от двух новых полей — в пределах существующего D7 (state rotation);
+1. **Окно для issued/solved** → накопительно в `seen-fps.json` (lifetime), не 24ч — иначе
+   low-and-slow бот не наберёт `MIN_CHALLENGE_ISSUED`. См. §A/§C.
+2. **Shadow vs active** → считаем строго по `mode==active`; под shadow страница не серверится,
+   `solved` всегда 0 → сигнал не валиден. Следствие: сигнал работает только на active-хостах. §A.
+3. **Branch B/C** (`non_browser_blocked`/`unchallengeable`) → **игнорируем**: каскад логирует их как
+   `verdict=block`, в знаменатель `issued` (только `verdict=challenge`) они не попадают
+   автоматически; и они уже блокируются. Паттерн «браузер, но всегда Branch C» — сигнал для трека
+   #4 (поведение), не сюда.
+4. **Структура порогов** → три зоны (не две): серая зона `LOW<rate<HUMAN` = **не авто-промоут и не
+   хард-вето**, а staging-наблюдение. Так у `HUMAN_SOLVE_RATE` появляется реальный смысл (на решении
+   staging→active). §B2.
+5. **Рост `seen-fps.json`** от двух новых полей — в пределах существующего D7 (state rotation),
    отдельного решения не требует.
+
+## Остаётся на калибровку (не блокирует код)
+
+- Конкретные значения `LOW_SOLVE_RATE` (старт 0.05) и `HUMAN_SOLVE_RATE` (старт 0.5) — подстроить по
+  реальным active-staging-данным стенда, когда они накопятся. Вынесены в флаги/env, меняются без кода.
