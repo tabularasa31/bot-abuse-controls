@@ -16,8 +16,42 @@ permissions:
   contents: read
 
 jobs:
+  # Detect whether the PR touches anything other than catalogs/ or docs. A
+  # catalog-only PR (e.g. the blocklist autopilot's auto-update) needs only the
+  # validate-catalogs gate — running the Go/Lua/smoke/integration suite on a
+  # YAML-line change is pointless. The heavy jobs below are gated on
+  # `needs.changes.outputs.code == 'true'`; validate-catalogs always runs.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.f.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          persist-credentials: true
+          fetch-depth: 0
+      - id: f
+        name: code vs catalog/docs-only
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          # push event (no PR context) → run everything.
+          if [ -z "$base" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          changed="$(git diff --name-only "$base" "$head")"
+          echo "changed files:"; printf '%s\n' "$changed"
+          # code=true if any changed file is NOT catalogs/**, docs/**, or *.md
+          if printf '%s\n' "$changed" | grep -qvE '^(catalogs/|docs/)|\.md$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Unit tests (luajit in openresty container)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +92,8 @@ jobs:
 
   lint-lua:
     name: Lint Lua (luacheck)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +115,8 @@ jobs:
 
   lint-go:
     name: Lint Go (golangci-lint)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +141,8 @@ jobs:
 
   test-go:
     name: Build Go (antibot-backend)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,6 +168,8 @@ jobs:
 
   lint-shell:
     name: Lint shell (shellcheck)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -175,6 +217,8 @@ jobs:
 
   smoke-demo-stand:
     name: Smoke (demo-stand brings up)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     # Catches broken Dockerfile / nginx.demo.conf / init_by_lua / Lua module
     # imports that would crash a `update.sh --force-recreate` on the live edge
     # but pass luacheck/unit tests. Without this gate, a bad commit on main
@@ -233,6 +277,8 @@ jobs:
 
   smoke-demo-backend:
     name: Smoke (demo-backend brings up)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     # Catches broken Dockerfile / Go service init / compose / nginx-lb config
     # before main lands on the backend VM. `update.sh` on the backend VM is
     # safer than the edge's (no --force-recreate; failed `up` keeps old
@@ -289,6 +335,8 @@ jobs:
 
   test-integration:
     name: Integration (Channel C contract, D8/B13)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     # End-to-end harness from infra/test-harness/: postgres + antibot-backend
     # + edge under docker compose, four contract scenarios from
     # vision.md §«Обновление каталогов» (latency / atomicity / fail-stale /
