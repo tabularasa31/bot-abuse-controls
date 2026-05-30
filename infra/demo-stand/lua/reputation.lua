@@ -28,16 +28,20 @@
 -- Switching the allow-side to a real fastpass is a separate task (paired
 -- with per-host policy.ip_whitelist application, 86exr05xt).
 --
--- Data. ip_whitelist: static whitelist_ip.conf, parsed once in init_by_lua
--- (config.lua) and compiled into an ipmatcher by build() (master pre-fork; no
--- shared dict yet — its Channel C migration is a follow-up). ip_blocklist
--- follows the production Channel C model (A11, 86exrtjpc): build() seeds the
--- cold-start matcher from blocklist_ip.conf, init.lua seeds gen 0 into the
--- antibot_ip_blocklist shared_dict, and refresh() (per request, gen-cached)
--- swaps to the Channel C snapshot (gen 1+, sourced from catalogs/
--- ip_blocklist.yaml). The rule names, stage, category and log contract are
--- unchanged — only the data source changes. The per-host policy.ip_blocklist
--- is a separate catalog applied via policy_matchers and is unaffected.
+-- Data. ip_whitelist, ip_blocklist and asn_datacenters all follow the
+-- production Channel C model: build() compiles the cold-start matcher/set from
+-- the local conf (whitelist_ip.conf / blocklist_ip.conf / asn_datacenters.conf),
+-- init.lua seeds gen 0 into the matching shared_dict, and a per-request,
+-- gen-cached refresh swaps to the Channel C snapshot (gen 1+, sourced from
+-- catalogs/*.yaml):
+--   * ip_blocklist     — refresh()           (A11, 86exrtjpc; active + staging).
+--   * ip_whitelist     — refresh_whitelist()  (B12, 86ext2zb4; flat allow list,
+--                        no status → no staging matcher).
+--   * asn_datacenters  — refresh_asn()        (B12, 86ext2zb4; membership set
+--                        behind the reputation:asn_dc tag, flat list).
+-- The rule names, stage, category and log contract are unchanged — only the
+-- data source changes. The per-host policy.{ip_whitelist,ip_blocklist} are
+-- separate catalogs applied via policy_matchers and are unaffected.
 --
 -- Staging (A11, 86exrtjpc): blocklist entries with status=staging are excluded
 -- from the active matcher and compiled into a parallel staging matcher
@@ -84,7 +88,7 @@ local _M = {
     whitelist      = nil,   -- ipmatcher or nil when no active entries
     blocklist      = nil,   -- ipmatcher or nil when no active entries
     blocklist_staging = nil, -- ipmatcher (new_with_value: match→cidr) or nil; A11 observe-only
-    asn_dc_set     = {},    -- { ["24940"] = true, ... } from asn_datacenters.conf
+    asn_dc_set     = {},    -- { ["24940"] = true, ... }; cold-start from asn_datacenters.conf, then Channel C via refresh_asn (B12)
     geo_enabled    = true,  -- [blocking.geo_blocklist].enabled (dormant: no source yet)
     demo_geo_header = false, -- honour X-Demo-IP override (stand testing); env-gated
 }
@@ -251,11 +255,16 @@ function _M.build(config)
     -- kill_switch; defaults.conf [kill_switch.*]).
     _M.enabled = require("config").stage_enabled(defaults, "reputation")
 
-    -- Per-worker gen cache for the Channel C ip_blocklist refresh (A11,
-    -- 86exrtjpc). nil = "first refresh rebuilds from current gen". The matchers
-    -- above (from the local conf) are the cold-start state; refresh() takes over
-    -- once init.lua seeds gen 0 (conf) and Channel C lands gen 1+ (yaml).
-    _M._cached_gen_ip = nil
+    -- Per-worker gen caches for the Channel C refreshes. nil = "first refresh
+    -- rebuilds from current gen". The matchers/set above (from the local conf)
+    -- are the cold-start state; the refreshes take over once init.lua seeds gen 0
+    -- (conf) and Channel C lands gen 1+ (yaml):
+    --   * _cached_gen_ip  — ip_blocklist active + staging matcher (A11, 86exrtjpc)
+    --   * _cached_gen_wl  — ip_whitelist allow matcher (B12, 86ext2zb4)
+    --   * _cached_gen_asn — asn_datacenters membership set (B12, 86ext2zb4)
+    _M._cached_gen_ip  = nil
+    _M._cached_gen_wl  = nil
+    _M._cached_gen_asn = nil
 
     return _M, wl_n, bl_n
 end
@@ -337,6 +346,85 @@ function _M.refresh()
     staging_metrics.reconcile("ip_blocklist", prev, _M.blocklist_staging_values)
 end
 
+-- refresh_whitelist — gen-cached rebuild of the ip_whitelist allow matcher from
+-- the Channel C snapshot (B12, 86ext2zb4). antibot_ip_whitelist holds
+-- `<cidr>:<gen>` → "1" (flat list, no status → no staging matcher, unlike
+-- ip_blocklist). On a gen flip we scan the current gen and rebuild the single
+-- ipmatcher. Cheap in steady state (one meta:get + int compare). Honours the
+-- ip_whitelist kill-switch. Fail-soft: a matcher that fails to rebuild keeps
+-- the previous one (backend validates CIDRs — defence-in-depth). When the gen
+-- key is absent (catalog never seeded/pulled) it keeps the build()-time conf
+-- state.
+function _M.refresh_whitelist()
+    if not ngx or not ngx.shared then return end
+    local meta = ngx.shared.meta
+    if not meta then return end
+    local gen = meta:get("ip_whitelist_gen")
+    if gen == nil or gen == _M._cached_gen_wl then return end
+    local dict = ngx.shared.antibot_ip_whitelist
+    if not dict then return end
+
+    if not _M.ip_whitelist_enabled then
+        _M.whitelist      = nil
+        _M._cached_gen_wl = gen
+        return
+    end
+
+    local ipmatcher = package.loaded["resty.ipmatcher"] or require "resty.ipmatcher"
+    local suffix = ":" .. gen
+    local active = {}
+    for _, k in ipairs(dict:get_keys(0)) do
+        if k:sub(-#suffix) == suffix then
+            active[#active + 1] = k:sub(1, -#suffix - 1)
+        end
+    end
+
+    if #active == 0 then
+        _M.whitelist = nil
+    else
+        local m, err = ipmatcher.new(active)
+        if m then
+            _M.whitelist = m
+        else
+            ngx.log(ngx.ERR, "reputation: ip_whitelist matcher rebuild ",
+                "failed, keeping previous: ", tostring(err))
+        end
+    end
+
+    _M._cached_gen_wl = gen
+end
+
+-- refresh_asn — gen-cached rebuild of the asn_datacenters membership set from
+-- the Channel C snapshot (B12, 86ext2zb4). antibot_asn_datacenters holds
+-- `<asn>:<gen>` → "1". On a gen flip we scan the current gen and rebuild the
+-- lookup set behind the reputation:asn_dc tag. Keys are stored as strings so
+-- they match the geoip.lookup asn (also a string). The tag has no kill-switch
+-- of its own (the stage-level kill-switch in run() covers it). When the gen key
+-- is absent it keeps the build()-time conf set.
+function _M.refresh_asn()
+    if not ngx or not ngx.shared then return end
+    local meta = ngx.shared.meta
+    if not meta then return end
+    local gen = meta:get("asn_datacenters_gen")
+    if gen == nil or gen == _M._cached_gen_asn then return end
+    local dict = ngx.shared.antibot_asn_datacenters
+    if not dict then return end
+
+    local suffix = ":" .. gen
+    local set = {}
+    for _, k in ipairs(dict:get_keys(0)) do
+        if k:sub(-#suffix) == suffix then
+            set[k:sub(1, -#suffix - 1)] = true
+        end
+    end
+
+    -- Empty set is a valid state (backend published an empty asn_datacenters):
+    -- the tag simply never fires. Unlike the matchers there is no "keep
+    -- previous on build error" — set construction can't fail.
+    _M.asn_dc_set      = set
+    _M._cached_gen_asn = gen
+end
+
 -- Called per request from verdict.lua, after bac_log.init(). Records the
 -- would-be verdict via bac_log; on a block-side match (ip_blocklist /
 -- geo_blocklist) it then calls policy.enforce(403), which 403s the
@@ -348,9 +436,14 @@ end
 function _M.run()
     if not _M.enabled then return false end
 
-    -- Pull the latest Channel C ip_blocklist snapshot (A11). Cheap in steady
-    -- state (gen compare); rebuilds the matchers only on a gen flip.
+    -- Pull the latest Channel C snapshots. Cheap in steady state (gen compare);
+    -- each rebuilds only on its own gen flip:
+    --   * refresh()           — ip_blocklist active + staging matchers (A11)
+    --   * refresh_whitelist()  — ip_whitelist allow matcher (B12)
+    --   * refresh_asn()        — asn_datacenters membership set (B12)
     _M.refresh()
+    _M.refresh_whitelist()
+    _M.refresh_asn()
 
     local ip = ngx.var.remote_addr
     if not ip then return false end

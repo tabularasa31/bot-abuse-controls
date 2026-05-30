@@ -29,10 +29,11 @@
 --                               stored as `active:<gen>` / `staging:<gen>`.
 --   * ip_blocklist            — reputation.lua (active + staging, A11 86exrtjpc).
 --                               Per-key `<cidr>:<gen>` → "<status>:block".
+--   * ip_whitelist            — reputation.lua (B12 86ext2zb4). Flat array of
+--                               CIDRs, per-key `<cidr>:<gen>` → "1" (no status).
+--   * asn_datacenters         — reputation.lua asn_dc tag (B12 86ext2zb4). Map
+--                               (asn → 1), per-key `<asn>:<gen>` → "1" (no status).
 --   * policy                  — policy.lua / policy_matchers (B11).
--- ip_whitelist / asn_datacenters remain edge-local conf for now (their Channel C
--- migration is a follow-up — adding a descriptor without a consumer would write
--- to a dict nobody reads).
 
 local cjson        = require "cjson.safe"
 local fp_state     = require "tls_fp_blocklist_state"
@@ -361,6 +362,109 @@ _M.catalogs = {
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "ip_blocklist.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
+
+    -- ip_whitelist (B12) — Channel C catalog of system allow CIDRs.
+    -- Wire-payload is a flat JSON ARRAY of CIDR strings (store.buildIPWhitelist),
+    -- NOT a per-key map: there is no per-entry status (staged rollout does not
+    -- apply to the allow list — a whitelist entry either allows or it doesn't).
+    -- We store each CIDR as `<cidr>:<gen>` → "1" so it mirrors ip_blocklist's
+    -- §В1 atomic-swap shape (suffix-match sweep, gen always the last `:`-segment
+    -- even for IPv6 CIDRs). reputation.refresh_whitelist() rebuilds the active
+    -- matcher on a gen flip. The per-host policy ip_whitelist is a SEPARATE
+    -- catalog (policy) applied via policy_matchers — not merged here.
+    ip_whitelist = {
+        name        = "ip_whitelist",
+        endpoint    = "/catalog/ip_whitelist",
+        dict_name   = "antibot_ip_whitelist",
+        gen_key     = "ip_whitelist_gen",
+        etag_key    = "ip_whitelist_etag",
+        version_key = "ip_whitelist_version",
+        apply = function(dict, entries, new_gen)
+            -- entries is a JSON array → a Lua sequence; iterate with ipairs.
+            -- A non-string element (malformed payload) is skipped rather than
+            -- crashing the pull — handle_response already type-checked the
+            -- top-level value is a table.
+            local n = 0
+            for _, cidr in ipairs(entries) do
+                if type(cidr) == "string" and cidr ~= "" then
+                    local ok, err = dict:set(cidr .. ":" .. new_gen, "1")
+                    if not ok then
+                        ngx.log(ngx.ERR, "ip_whitelist:set failed: ", err,
+                            " (cidr=", cidr, ", gen=", new_gen, ")")
+                        return false, n
+                    end
+                    n = n + 1
+                end
+            end
+            return true, n
+        end,
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "ip_whitelist.sweep: old_gen must be a number, got " ..
+                type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
+            if old_gen < 0 then return 0 end
+            local suffix = ":" .. old_gen
+            local n = 0
+            for _, k in ipairs(dict:get_keys(0)) do
+                if k:sub(-#suffix) == suffix then
+                    dict:delete(k)
+                    n = n + 1
+                end
+            end
+            return n
+        end,
+    },
+
+    -- asn_datacenters (B12) — Channel C catalog of datacenter ASNs feeding the
+    -- reputation:asn_dc informational tag. Wire-payload is a JSON OBJECT
+    -- map(asn → 1) (store.buildASNDatacenters — written by hand for numeric key
+    -- order). No per-entry status (flat list, no staged rollout). We store each
+    -- ASN as `<asn>:<gen>` → "1" (suffix-match sweep, same shape as ip_blocklist;
+    -- ASN keys are decimal digits with no `:`). reputation.refresh_asn() rebuilds
+    -- the membership set on a gen flip. The value side of the wire map (always 1)
+    -- is dropped — only key membership matters for the tag.
+    asn_datacenters = {
+        name        = "asn_datacenters",
+        endpoint    = "/catalog/asn_datacenters",
+        dict_name   = "antibot_asn_datacenters",
+        gen_key     = "asn_datacenters_gen",
+        etag_key    = "asn_datacenters_etag",
+        version_key = "asn_datacenters_version",
+        apply = function(dict, entries, new_gen)
+            -- entries is a map(asn → 1); iterate keys with pairs. cjson decodes
+            -- the string keys as Lua strings, which is exactly the type the
+            -- reputation:asn_dc membership test uses (geoip.lookup returns asn
+            -- as a string).
+            local n = 0
+            for asn, _ in pairs(entries) do
+                if type(asn) == "string" and asn ~= "" then
+                    local ok, err = dict:set(asn .. ":" .. new_gen, "1")
+                    if not ok then
+                        ngx.log(ngx.ERR, "asn_datacenters:set failed: ", err,
+                            " (asn=", asn, ", gen=", new_gen, ")")
+                        return false, n
+                    end
+                    n = n + 1
+                end
+            end
+            return true, n
+        end,
+        sweep = function(dict, old_gen)
+            assert(type(old_gen) == "number",
+                "asn_datacenters.sweep: old_gen must be a number, got " ..
                 type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
             if old_gen < 0 then return 0 end
             local suffix = ":" .. old_gen

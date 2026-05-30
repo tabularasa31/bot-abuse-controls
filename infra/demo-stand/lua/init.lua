@@ -299,8 +299,10 @@ end
 --     entries and the edit is silently ignored until a full restart).
 --   * gen  > 0 — real Channel C state survived; DON'T clobber it, just run the
 --     divergence check.
-local ua_dict = ngx.shared.antibot_ua_blacklist
-local ip_dict = ngx.shared.antibot_ip_blocklist
+local ua_dict  = ngx.shared.antibot_ua_blacklist
+local ip_dict  = ngx.shared.antibot_ip_blocklist
+local wl_dict  = ngx.shared.antibot_ip_whitelist
+local asn_dict = ngx.shared.antibot_asn_datacenters
 
 -- Delete all `:0` keys in a dict (the static-fallback generation) so a re-seed
 -- drops entries removed from the conf. gen > 0 keys are Channel C state and are
@@ -363,9 +365,57 @@ local function seed_ip_blocklist_cold()
     return act, stg
 end
 
+-- ip_whitelist seed (B12): `<cidr>:0` → "1" for every conf entry, matching the
+-- Channel C flat-list layout (no status — the allow list has no staging). Uses
+-- reputation.active_values so the seeded set matches the matcher build()
+-- compiled. Clears prior gen-0 keys first so a re-seed on reload drops CIDRs
+-- removed from the conf.
+local function seed_ip_whitelist_cold()
+    if not wl_dict then return 0 end
+    clear_gen0(wl_dict)
+    local seeded = 0
+    for _, v in ipairs(reputation.active_values(config.whitelist_ip)) do
+        local ok, err = wl_dict:set(v .. ":0", "1")
+        if ok then
+            seeded = seeded + 1
+        else
+            -- Loud: refresh_whitelist() rebuilds the allow matcher from this
+            -- gen-0 dict on the first request; a dropped CIDR would silently
+            -- narrow the ip_whitelist allow until the first Channel C pull.
+            ngx.log(ngx.ERR, "[demo] ip_whitelist seed ", v,
+                ":0 failed: ", tostring(err),
+                " — edge may under-allow until the first Channel C pull")
+        end
+    end
+    return seeded
+end
+
+-- asn_datacenters seed (B12): `<asn>:0` → "1" for every conf entry, matching the
+-- Channel C flat-list layout. Feeds the reputation:asn_dc tag (analytics-only,
+-- no verdict), so a dropped entry is a missing tag rather than an allow/block
+-- gap — logged at WARN, not ERR.
+local function seed_asn_datacenters_cold()
+    if not asn_dict then return 0 end
+    clear_gen0(asn_dict)
+    local seeded = 0
+    for _, v in ipairs(reputation.active_values(config.asn_datacenters)) do
+        local ok, err = asn_dict:set(v .. ":0", "1")
+        if ok then
+            seeded = seeded + 1
+        else
+            ngx.log(ngx.WARN, "[demo] asn_datacenters seed ", v,
+                ":0 failed: ", tostring(err),
+                " — reputation:asn_dc tag may miss this ASN until the first pull")
+        end
+    end
+    return seeded
+end
+
 for _, spec in ipairs({
-    { name = "ua_blacklist", seed = seed_ua_blacklist_cold },
-    { name = "ip_blocklist", seed = seed_ip_blocklist_cold },
+    { name = "ua_blacklist",    seed = seed_ua_blacklist_cold },
+    { name = "ip_blocklist",    seed = seed_ip_blocklist_cold },
+    { name = "ip_whitelist",    seed = seed_ip_whitelist_cold },
+    { name = "asn_datacenters", seed = seed_asn_datacenters_cold },
 }) do
     local cat = catalog_pull.catalogs[spec.name]
     if not cat then

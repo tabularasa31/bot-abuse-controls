@@ -87,6 +87,8 @@ ngx.shared = {
     metrics      = new_dict(),
     antibot_ua_blacklist = new_dict(),
     antibot_ip_blocklist = new_dict(),
+    antibot_ip_whitelist = new_dict(),
+    antibot_asn_datacenters = new_dict(),
 }
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
@@ -775,6 +777,50 @@ do
     check(swept, 1, "ip_blocklist sweep removed 1 old-gen key")
     check(d:get("198.51.100.0/24:4"), nil, "ip_blocklist sweep deleted old gen")
     check(d:get("203.0.113.0/24:5"), "active:block", "ip_blocklist sweep kept current gen")
+end
+
+-- ===========================================================================
+-- B12 (86ext2zb4): ip_whitelist + asn_datacenters descriptors.
+-- ===========================================================================
+
+-- ip_whitelist: flat ARRAY payload [cidr, …]. apply writes `<cidr>:<gen>` → "1";
+-- sweep removes the old gen by suffix. No status (flat allow list).
+do
+    local wlcat = cp.catalogs.ip_whitelist
+    check_true(wlcat ~= nil, "ip_whitelist descriptor registered")
+    local d = ngx.shared.antibot_ip_whitelist
+    d._store = {}
+    local ok, n = wlcat.apply(d, { "203.0.113.7", "2001:db8::/48", "" }, 5)
+    check_true(ok, "ip_whitelist apply ok")
+    check(n, 2, "ip_whitelist apply wrote 2 keys (empty entry skipped)")
+    check(d:get("203.0.113.7:5"), "1", "ip_whitelist cidr stored")
+    check(d:get("2001:db8::/48:5"), "1", "ip_whitelist ipv6 cidr stored")
+    -- old-gen ghost + current; sweep(4) removes only the `:4` key.
+    d:set("198.51.100.0/24:4", "1")
+    local swept = wlcat.sweep(d, 4)
+    check(swept, 1, "ip_whitelist sweep removed 1 old-gen key")
+    check(d:get("198.51.100.0/24:4"), nil, "ip_whitelist sweep deleted old gen")
+    check(d:get("203.0.113.7:5"), "1", "ip_whitelist sweep kept current gen")
+end
+
+-- asn_datacenters: OBJECT payload {asn → 1}. apply writes `<asn>:<gen>` → "1";
+-- sweep removes the old gen by suffix. No status (flat list).
+do
+    local asncat = cp.catalogs.asn_datacenters
+    check_true(asncat ~= nil, "asn_datacenters descriptor registered")
+    local d = ngx.shared.antibot_asn_datacenters
+    d._store = {}
+    local ok, n = asncat.apply(d, { ["24940"] = 1, ["16276"] = 1 }, 3)
+    check_true(ok, "asn_datacenters apply ok")
+    check(n, 2, "asn_datacenters apply wrote 2 keys")
+    check(d:get("24940:3"), "1", "asn_datacenters asn stored")
+    check(d:get("16276:3"), "1", "asn_datacenters second asn stored")
+    -- old-gen ghost + current; sweep(2) removes only the `:2` key.
+    d:set("14061:2", "1")
+    local swept = asncat.sweep(d, 2)
+    check(swept, 1, "asn_datacenters sweep removed 1 old-gen key")
+    check(d:get("14061:2"), nil, "asn_datacenters sweep deleted old gen")
+    check(d:get("24940:3"), "1", "asn_datacenters sweep kept current gen")
 end
 
 -- ===========================================================================

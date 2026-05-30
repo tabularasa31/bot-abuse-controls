@@ -164,7 +164,14 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 - `ip_blocklist` — мапа `{cidr: "<status>:block"}` (`store.buildIPBlocklist`); `reputation.refresh()` пересобирает active + staging matcher'ы из snapshot.
 - `ua_blacklist` — объект `{"active": "<combined-regex>", "staging": ["<pattern>", …]}` (`store.buildUABlacklist`); `hygiene.refresh()` берёт combined regex для active и список паттернов для staging (по-паттернно — чтобы pattern_id в `staging_match` был конкретным).
 
-На эдже у `ua_blacklist` / `ip_blocklist` остаётся cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее источник истины — Channel C (gen 1+). `ip_whitelist` / `asn_datacenters` пока остаются edge-local conf (их миграция на Channel C — отдельный follow-up).
+На эдже у `ua_blacklist` / `ip_blocklist` остаётся cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее источник истины — Channel C (gen 1+).
+
+`ip_whitelist` / `asn_datacenters` тоже едут по Channel C (B12, задача 86ext2zb4) — это плоские списки без `status` (staged rollout к ним не применяется):
+
+- `ip_whitelist` — массив CIDR (`store.buildIPWhitelist`); `reputation.refresh_whitelist()` пересобирает allow-matcher из snapshot.
+- `asn_datacenters` — мапа `{asn: 1}` (`store.buildASNDatacenters`); `reputation.refresh_asn()` пересобирает membership-набор за тегом `reputation:asn_dc`.
+
+У обоих та же модель, что у `ip_blocklist`: cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее Channel C (gen 1+).
 
 **Новое поле в логах: `staging_match`** — массив строк `<catalog>:<pattern_id>`. Пустой если ничего не сматчилось в staging. Не влияет на `verdict`/`rule` — отдельный слот для аналитики promotion'а.
 
