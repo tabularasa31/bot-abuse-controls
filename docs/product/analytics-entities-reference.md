@@ -84,8 +84,8 @@
 
 | Справочник | Определение |
 | --- | --- |
-| **словарь инструментов** | хеши известных инструментов (curl/python/go/okhttp). Опора impersonator (S1), automation UA (S3), intent (G5). |
-| **позитивный каталог браузеров** | справочник «известный-хороший»: хеши → семейство (и версия) браузера. Дает genuine-browser проверку (purity), known-good (G6) и version mismatch (S9). |
+| **словарь инструментов** (`tls_fp_catalog`) | хеши известных инструментов (curl/python/go/okhttp). Опора impersonator (S1), automation UA (S3), intent (G5). |
+| **позитивный каталог браузеров** (`tls_fp_browser_profiles`) | справочник «известный-хороший»: хеши → семейство (и версия) браузера. Дает genuine-browser проверку (purity), known-good (G6) и version mismatch (S9). |
 | **headless-каталог** | справочник отпечатков headless-стэков (Playwright/Puppeteer/undetected-chromedriver). Опора сигнала headless (S8). |
 | **challenge issued/solved** | счетчики выданных/решенных challenge по fp. Опора гейта challenge-solve-rate (G7) и ускорения `staging → active`. |
 

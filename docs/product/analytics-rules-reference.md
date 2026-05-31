@@ -63,8 +63,8 @@ Score может быть любым; если хоть один гейт не �
 
 | Справочник | Что дает | Кормит |
 | --- | --- | --- |
-| словарь инструментов | хеши curl/python/go/okhttp | impersonator (S1), automation UA (S3), intent (G5) |
-| позитивный каталог браузеров | хеши → семейство (и версия) браузера | genuine-browser для purity (G1), known-good (G6), version mismatch (S9) |
+| словарь инструментов (`tls_fp_catalog`) | хеши curl/python/go/okhttp | impersonator (S1), automation UA (S3), intent (G5) |
+| позитивный каталог браузеров (`tls_fp_browser_profiles`) | хеши → семейство (и версия) браузера | genuine-browser для purity (G1), known-good (G6), version mismatch (S9) |
 | headless-каталог | хеши headless-стэков (Playwright/Puppeteer/UCD) | headless-сигнал (S8) |
 | challenge issued/solved | счетчики выданных/решенных challenge по fp | challenge-solve-rate гейт (G7), ускорение `staging → active` |
 
