@@ -67,7 +67,7 @@ scripts/demote-fp.sh <fp> --reason "campaign over" --remove                     
 scripts/blocklist-autopilot.sh --dry-run
 
 # Боевой прогон (открывает ТОЛЬКО draft-PR; человек ревьюит/мержит):
-#   30 8 * * * cd ~/abuse-controls && scripts/blocklist-autopilot.sh >> ~/autopilot.log 2>&1
+#   30 5 * * * cd ~/abuse-controls && ./scripts/blocklist-autopilot.sh >> ~/autopilot.log 2>&1
 ```
 
 Автомат собирает все созревшие изменения за прогон в **один draft-PR** (ветка
@@ -93,7 +93,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 05:00 UTC = 08:00 MSK — прогон аналитики (Loki → state/*.json + email)
 0 5 * * * cd /home/ubuntu/abuse-controls/infra/demo-backend && /usr/bin/docker compose -f docker-compose.backend.yml --profile observability run -T --rm analytics >> /home/ubuntu/analytics-cron.log 2>&1
 # 05:30 UTC = 08:30 MSK — autopilot: один draft-PR по свежим артефактам
-30 5 * * * cd /home/ubuntu/abuse-controls && scripts/blocklist-autopilot.sh >> /home/ubuntu/autopilot.log 2>&1
+30 5 * * * cd /home/ubuntu/abuse-controls && ./scripts/blocklist-autopilot.sh >> /home/ubuntu/autopilot.log 2>&1
 ```
 
 `run.sh` — дефолтный entrypoint образа (см. #108). Пока образ на VM не пересобран
