@@ -1,6 +1,9 @@
 # Дизайн #1 — challenge solve-rate как сигнал скоринга
 
-> **Статус: ПЛАНИРУЕТСЯ / design draft.** НЕ реализовано. Развивает идею #1 из
+> **Статус: РЕАЛИЗОВАНО (D12).** Сигнал в `analyze.py` + 1 строка на эдже
+> (`attack_mode` в `bac_log`); тесты в `tests/test_analyze.py`. Пороги
+> (`LOW_SOLVE_RATE`/`HUMAN_SOLVE_RATE`) остаются на калибровку по реальным
+> active-staging-данным (env-overridable). Развивает идею #1 из
 > [bot-detector-roadmap.md](bot-detector-roadmap.md). Базируется на D1
 > ([blocklist-scoring.md](../blocklist-scoring.md)) и C5 (challenge verify).
 
@@ -18,10 +21,20 @@ Fp, которому массово выдавали JS-challenge и котор�
 | Плечо | Как выглядит событие | Откуда |
 |---|---|---|
 | **issued** | `verdict=challenge`, есть `tls_fp` | основной поток, verdict.lua Branch A (emit до `ngx.exit(200)`) |
-| **solved** | `verdict=allow`, `rule=challenge_pass`, `tls_fp` выставлен | [challenge_verify.lua](../../infra/demo-stand/lua/challenge_verify.lua):382/404/405 |
+| **solved** | `verdict=allow`, `rule=challenge_pass`, `tls_fp` выставлен | [challenge_verify.lua](../../infra/demo-stand/lua/challenge_verify.lua) |
 
-Значит `solve_rate(fp)` считается **полностью в `analyze.py`**, без новых стадий каскада
-и (в минимальном варианте) без правок Lua. Это надстройка над D1, не новая подсистема.
+> **Правка при реализации (D12).** Изначально дизайн считал, что solved-плечо уже
+> несёт `tls_fp`. Это было неверно: `/__challenge/verify` — carve-out без
+> `access_by_lua`, L3-стадия `tls_fp` там не запускается, и emit писал только
+> `challenge_fp` (browser JS fp) при `tls_fp=null` → `_event_from_bac_line` **дропал
+> событие**, и `challenge_solved` оставался 0 у всех. Поэтому D12 добавляет на verify-пути
+> `bac_log.set_tls_fp(ja4.compute())` — тот же клиент по TLS, его fp совпадает с issued.
+> Без этого сигнал помечал бы решающих людей как ботов. (code-review on PR.)
+
+Значит `solve_rate(fp)` считается **в `analyze.py`** из уже доезжающих в Loki плеч —
+без новых стадий каскада. Правка Lua минимальна: `attack_mode` в `bac_log` (фильтр §C)
+и `set_tls_fp` на verify-пути (join issued↔solved выше). Это надстройка над D1, не
+новая подсистема.
 
 > Замечание про single-use: одно решение challenge → `clearance` cookie, дальше запросы
 > фастпасят на L2.1 (`rule=cookie_valid`, тоже `verdict=allow`). Их **нельзя** считать
