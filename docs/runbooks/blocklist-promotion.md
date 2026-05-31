@@ -71,7 +71,7 @@ scripts/blocklist-autopilot.sh --dry-run
 ```
 
 Автомат собирает все созревшие изменения за прогон в **один draft-PR** (ветка
-`blocklist-auto-YYYY-MM-DD`): auto-promote стабильного HIGH (≥3 дня, gates+intent) →
+`blocklist-auto-YYYY-MM-DD`): auto-promote HIGH (≥1 день, gates+intent) →
 staging; activate staging-записей с verdict=activate; auto-demote молчащих >14д
 (active→staging→remove). Идемпотентно: одна ветка на день — повторный прогон в тот же
 день no-op. CI на таком catalog-only PR гоняет только `validate-catalogs` (остальные

@@ -124,7 +124,11 @@ BROWSER_UA_FAMILIES = {"chrome", "firefox", "safari"}
 # flags in main() override these in turn.
 MAX_HUMAN_SHARE = float(os.environ.get("BAC_MAX_HUMAN_SHARE", "0.05"))
 MIN_EVENTS = int(os.environ.get("BAC_MIN_EVENTS", "20"))
-MIN_DAYS_PROMOTE = int(os.environ.get("BAC_MIN_DAYS_PROMOTE", "3"))
+# Days an fp must be observed before auto-promote to STAGING. 1 = promote on the
+# first HIGH day: staging is observe-only (matches, doesn't block), so the real
+# proving ground is the 48h staging→active window, not a pre-staging wait. The
+# volume gate (MIN_EVENTS) still filters single-request blips.
+MIN_DAYS_PROMOTE = int(os.environ.get("BAC_MIN_DAYS_PROMOTE", "1"))
 # Inactivity threshold (days) after which a blocklist entry is an auto-demote
 # candidate. > Loki's 7d retention, so the >7d tail leans on the seen-fps
 # accumulator's last_seen, not the log window.

@@ -96,11 +96,13 @@ browser*, если одновременно:
 
 ## Auto-promote (триггер автомата)
 
-`auto_eligible = tier==HIGH И days_seen≥3 (--min-days-promote) И все gates И intent`.
+`auto_eligible = tier==HIGH И days_seen≥1 (--min-days-promote) И все gates И intent`.
 Автомат открывает **draft-PR** на `staging`, никогда не active напрямую и никогда не auto-merge.
 
-«evidence неизменна 3 дня» аппроксимируется как «HIGH сейчас + наблюдается ≥3 дня + проходит
-gates»; точный daily-snapshot diff цепочки — future-follow-up (см. PROGRESS).
+Порог `days_seen` низкий (1) намеренно: **staging — observe-only** (матчит, не блокирует),
+поэтому проверять «устойчивость» до входа смысла мало — настоящий полигон это 48ч-окно
+`staging → active` (см. ниже), а блипы-однодневки отсекает volume-гейт (`MIN_EVENTS`). Вход в
+staging дешёвый и быстрый, строгость — на активации.
 
 ## staging → active — подтверждение наблюдением
 
@@ -157,7 +159,7 @@ demote/remove, активацию НЕ предлагаем), `observe` (мал�
 |---|---|---|
 | purity-порог | 0.05 | `--max-human-share` / `BAC_MAX_HUMAN_SHARE` |
 | min events (lifetime) | 20 | `--min-events` / `BAC_MIN_EVENTS` |
-| min дней для auto-promote | 3 | `--min-days-promote` / `BAC_MIN_DAYS_PROMOTE` |
+| min дней для auto-promote (вход в staging) | 1 | `--min-days-promote` / `BAC_MIN_DAYS_PROMOTE` |
 | TTL неактивности (дни) | 14 | `--ttl-days` / `BAC_TTL_DAYS` |
 | окно staging-наблюдения (ч) | 48 | `--min-staging-hours` / `BAC_MIN_STAGING_HOURS` |
 | min staging-матчей | 10 | `--min-staging-matches` / `BAC_MIN_STAGING_MATCHES` |
