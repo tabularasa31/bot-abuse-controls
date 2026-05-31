@@ -54,7 +54,7 @@
 
 | Тег | Когда появляется | Источник |
 | --- | --- | --- |
-| `slow_client` | таймаут заголовков/тела/чтения → `$status=408` | log-фаза, `$status`/`$request_time` |
+| `slow_client` | таймаут заголовков/тела → `$status=408` (slow read по `send_timeout` обрывается без 408, тег не ставится) | log-фаза, `$status` |
 | `conn_flood` | отказ `limit_conn` → `$status` = `limit_conn_status` (`503`) | log-фаза, `$status` |
 | `h2_abuse` | аномальный HTTP/2 SETTINGS/stream-паттерн (опц., если доступна h2-идентификация) | log-фаза / репутация |
 
@@ -66,8 +66,8 @@ log-фазе постфактум, описывает уже состоявши�
 | Поле | Тип | Описание | Источник |
 | --- | --- | --- | --- |
 | `status` | int | HTTP-код в log-фазе. `408` → кандидат на `slow_client`; `503` → кандидат на `conn_flood` | `$status` |
-| `request_time` | float | длительность обработки (сек); высокое при `408` — индикатор медленного клиента | `$request_time` |
-| `connection_requests` | int | сколько запросов обслужило keepalive-соединение (keepalive-abuse) | `$connection_requests` |
+| `latency_ms` | float | длительность обработки (мс), из `$request_time`; высокое при `408` — индикатор медленного клиента. Тот же канонический lat-field, что у лог-контракта каскада | `$request_time` |
+| `connection_requests` | int | **новое поле этого слоя**: сколько запросов обслужило keepalive-соединение (keepalive-abuse) | `$connection_requests` |
 | `tags` | array | namespace-теги connection/protocol-сигналов | log-хук |
 
 ## 6. Перечисления
@@ -76,7 +76,8 @@ log-фазе постфактум, описывает уже состоявши�
 
 | Код | Когда | Триггер | Тег |
 | --- | --- | --- | --- |
-| `408` | таймаут приема заголовков/тела или slow read | `client_header_timeout` / `client_body_timeout` / `send_timeout` | `slow_client` |
+| `408` | таймаут приема заголовков/тела запроса | `client_header_timeout` / `client_body_timeout` | `slow_client` |
+| (обрыв) | slow read — клиент медленно вычитывает ответ | `send_timeout` | — (не 408; connection-close, ограниченно наблюдается) |
 | `503` | отказ по cap одновременных соединений | `limit_conn` (через `limit_conn_status`) | `conn_flood` |
 
 ### Категория объекта правила

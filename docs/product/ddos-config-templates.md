@@ -133,24 +133,33 @@ keepalive_requests 1000;
 # server { } / location { } — наблюдательный хук в log-фазе
 log_by_lua_block {
     local status = tonumber(ngx.var.status)
-    local rt     = tonumber(ngx.var.request_time)
 
-    -- 408 от таймаутов заголовков/тела/чтения → slow_client
-    if status == 408 then
-        bac_log.emit{ tags = { "slow_client" }, request_time = rt }
-        metrics.incr_by_ip_and_subnet("slow_client")   -- счетчик по IP / /24
-    -- 503 (= limit_conn_status) → conn_flood
-    elseif status == 503 then
-        bac_log.emit{ tags = { "conn_flood" } }
-        metrics.incr_by_ip_and_subnet("conn_flood")
+    -- 408 ← таймаут заголовков/тела (client_header_timeout/client_body_timeout);
+    -- 503 ← отказ limit_conn. Slow read (send_timeout) обрывает соединение БЕЗ 408,
+    -- сюда не попадает (см. ограничение наблюдаемости ниже).
+    if status == 408 or status == 503 then
+        local bac_log = require "bac_log"
+        -- access-фаза для slow-attacks не отрабатывает → ctx пуст, инициализируем
+        if not ngx.ctx.bac then bac_log.init() end
+
+        if status == 408 then
+            bac_log.add_tag("slow_client")
+            metrics.incr_by_ip_and_subnet("slow_client")   -- счетчик по IP / /24
+        else
+            bac_log.add_tag("conn_flood")
+            metrics.incr_by_ip_and_subnet("conn_flood")
+        end
+        bac_log.emit()   -- emit() без аргументов: сериализует накопленный ctx
     end
 }
 ```
 
 > **Ограничение наблюдаемости.** Видно только то, что nginx отдает в log-фазе
-> (`$status`, `$request_time`, `$connection_requests`). Сам процесс цежения медленного
-> соединения в реальном времени Lua не видит — фиксируется итог дропа. Счетчики по
-> IP / /24 питают общий сток репутации и через него edge-ACL feed.
+> (`$status`, длительность `$request_time` → пишется в лог как `latency_ms`).
+> Сам процесс цежения медленного соединения в реальном времени Lua не видит. **Slow
+> read** (`send_timeout`) обрывает соединение **без 408** — наблюдается лишь как
+> connection-close (обрыв, не тег `slow_client`). Счетчики по IP / /24 питают общий
+> сток репутации и через него edge-ACL feed.
 
 ---
 
