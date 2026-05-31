@@ -318,6 +318,11 @@ function _M.emit()
         rule          = ctx.rule or cjson_base.null,
         action        = VERDICT_TO_ACTION[ctx.verdict] or "pass",
         mode          = p.mode,
+        -- [D12] solve-rate signal needs to exclude attack-mode challenges: under
+        -- attack L5 forces challenge on almost everyone (C4), so a low solve_rate
+        -- there is the host's posture, not a judgement about the fp. analyze.py
+        -- counts issued/solved only on `mode==active AND attack_mode==false`.
+        attack_mode   = p.attack_mode,
         strictness    = p.strictness,
         latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
         cascade_ms           = cascade_ms or cjson_base.null,

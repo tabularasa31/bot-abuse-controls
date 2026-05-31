@@ -1,6 +1,9 @@
 # Дизайн #1 — challenge solve-rate как сигнал скоринга
 
-> **Статус: ПЛАНИРУЕТСЯ / design draft.** НЕ реализовано. Развивает идею #1 из
+> **Статус: РЕАЛИЗОВАНО (D12).** Сигнал в `analyze.py` + 1 строка на эдже
+> (`attack_mode` в `bac_log`); тесты в `tests/test_analyze.py`. Пороги
+> (`LOW_SOLVE_RATE`/`HUMAN_SOLVE_RATE`) остаются на калибровку по реальным
+> active-staging-данным (env-overridable). Развивает идею #1 из
 > [bot-detector-roadmap.md](bot-detector-roadmap.md). Базируется на D1
 > ([blocklist-scoring.md](../blocklist-scoring.md)) и C5 (challenge verify).
 
