@@ -1259,15 +1259,18 @@ def find_blocklist_candidates(events, ip_cache, seen):
         # D12 challenge_pass ladder (§B2), on lifetime issued/solved from state.
         # "veto" kills the allowlist gate; "gray" passes the gate but blocks
         # auto-promote (→ staging observation); "clear" imposes no constraint.
-        cp_gate = _challenge_pass_gate((seen.get(fp) or {}).get("challenge_issued", 0),
-                                       (seen.get(fp) or {}).get("challenge_solved", 0))
+        # Read the counters and the two hard-identity components once so the
+        # gate, the output dict, and the operator message all agree.
+        cl_issued = (seen.get(fp) or {}).get("challenge_issued", 0)
+        cl_solved = (seen.get(fp) or {}).get("challenge_solved", 0)
+        cp_gate = _challenge_pass_gate(cl_issued, cl_solved)
+        wl_hit = any(_ip_in_whitelist(ip, whitelist_nets) for ip in ips)
+        hard_id = _fp_hard_identity_allow(evs)
 
         gates = {
             "purity": hs <= MAX_HUMAN_SHARE,
             "volume": n_lifetime >= MIN_EVENTS and len(ips) >= 1,
-            "allowlist": not any(_ip_in_whitelist(ip, whitelist_nets) for ip in ips)
-                          and not _fp_hard_identity_allow(evs)
-                          and cp_gate != "veto",
+            "allowlist": not wl_hit and not hard_id and cp_gate != "veto",
             "dedup": fp not in in_catalog,
         }
         if score >= 5:
@@ -1298,8 +1301,11 @@ def find_blocklist_candidates(events, ip_cache, seen):
         elif tier == "HIGH" and not gates["volume"]:
             suggested_action = (f"HIGH, но мало данных: lifetime {n_lifetime} < {MIN_EVENTS} "
                                 f"или дней {len(days)} < {MIN_DAYS_PROMOTE} — наблюдать")
-        elif tier == "HIGH" and not gates["allowlist"]:
+        elif tier == "HIGH" and (wl_hit or hard_id):
             suggested_action = "HIGH, но в allowlist/verified — не блокировать (жесткое вето)"
+        elif tier == "HIGH" and cp_gate == "veto":
+            suggested_action = (f"HIGH, но challenge решается (issued={cl_issued}, "
+                                f"solved={cl_solved}) — под fp есть люди/легит, не блокировать")
         elif tier == "HIGH" and cp_gate == "gray":
             suggested_action = ("HIGH, но challenge solve-rate в серой зоне "
                                 f"({LOW_SOLVE_RATE}–{HUMAN_SOLVE_RATE}) — не авто-промоут, "
@@ -1325,8 +1331,8 @@ def find_blocklist_candidates(events, ip_cache, seen):
             "generic_honest_tool": generic_honest_tool,
             "intent": intent,
             "gates": gates,
-            "challenge_issued": (seen.get(fp) or {}).get("challenge_issued", 0),
-            "challenge_solved": (seen.get(fp) or {}).get("challenge_solved", 0),
+            "challenge_issued": cl_issued,
+            "challenge_solved": cl_solved,
             "challenge_gate": cp_gate,
             "auto_eligible": auto_eligible,
             "suggested_action": suggested_action,
@@ -1426,6 +1432,12 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
     whitelist_nets = _load_ip_whitelist()
     catalog = _parse_blocklist_yaml()
     staging_fps = [fp for fp, st in catalog.items() if st == "staging"]
+    # Index events by fp once (O(E)) so the per-fp solve-rate count below is a
+    # dict lookup, not another full scan per staging fp (was O(S·E)).
+    events_by_fp = defaultdict(list)
+    for e in events:
+        if e.get("fp"):
+            events_by_fp[e["fp"]].append(e)
     out = []
     for fp in sorted(staging_fps):
         token = "tls_fp_blocklist:" + fp
@@ -1444,8 +1456,7 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
         # set on the verify path) but NOT the staging_match token. Counting only
         # `matched` (token-keyed) would miss every solve → undercount s_solved →
         # a real browser fp with many solves could still reach `activate`.
-        fp_events = [e for e in events if e.get("fp") == fp]
-        s_issued, s_solved = _challenge_counts(fp_events)
+        s_issued, s_solved = _challenge_counts(events_by_fp.get(fp, []))
         cp_gate = _challenge_pass_gate(s_issued, s_solved)
         if fp in since_map:
             observed_hours = round((now_utc - since_map[fp]).total_seconds() / 3600, 1)
