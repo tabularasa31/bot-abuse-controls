@@ -140,12 +140,12 @@ attack_mode (auto vs manual) — прецедент различения «кт�
 
 ## Разбивка на тикеты
 
-- **[D14] #3 Phase 1** — subnet-репутация (soft, аналитика): DC-гейт, /24-агрегация
+- **[G1] #3 Phase 1** — subnet-репутация (soft, аналитика): DC-гейт, /24-агрегация
   churn/human_share/recon, +score в fp, апгрейд `find_asn_watch_candidates`, опц. soft-Strictness
   через Channel C `subnet_reputation`. Не трогает attack-путь.
-- **[D15] #3 Phase 2** — transient subnet challenge→drop под атакой: эдж-реактивные /24-счётчики,
-  гейт attack_mode, эскалация по бюджету/solve_rate, TTL+авто-снятие, прайор из D14. Зависит от D16.
-- **[D16] авто-attack-mode** — адаптивный детект атаки (плохой трафик + origin-стресс), флаг
+- **[G2] #3 Phase 2** — transient subnet challenge→drop под атакой: эдж-реактивные /24-счётчики,
+  гейт attack_mode, эскалация по бюджету/solve_rate, TTL+авто-снятие, прайор из G1. Зависит от G3.
+- **[G3] авто-attack-mode** — адаптивный детект атаки (плохой трафик + origin-стресс), флаг
   `auto_attack_mode` (дефолт off) + алерт при off, авто-вкл/выкл с источником, override клиента.
 
 ## Честное ограничение (обе фазы)

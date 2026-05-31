@@ -10,7 +10,7 @@
 > [CLAUDE.md](../../CLAUDE.md)) — см. §4.3.
 >
 > **Что с момента первой версии уже уехало в бэклог:** connection/protocol-level
-> DDoS (slow-attacks D21–D23, HTTP/2-DoS E3–E4) заведён как тикеты (§4.2). Ось
+> DDoS (slow-attacks E1–E3, HTTP/2-DoS E4–E5) заведён как тикеты (§4.2). Ось
 > **API/account** разложена в §5 (серия `P` — кандидаты, тикетов пока нет).
 >
 > **Где это на шкале продукта:** WAF/DDoS — это **post-post-MVP** (новые оси рядом
@@ -55,12 +55,12 @@ WAF и DDoS добавляют **источники флагов**, а не па
   по аналогии с тем, как `tls_fp_blocklist` hit делает прямой `policy.enforce(403)`.
 - **DDoS L7 (rate-based)** → не новая стадия и **не новая ось**: это адаптивность
   существующих L4/L5 (пороги rate-limit + авто-`attack_mode`), уже заскоупленная в
-  D-серии (D12–D17, §4.1).
+  G-серии (G1–G4, §4.1).
 - **DDoS connection/protocol-level (slow-attacks, HTTP/2-DoS)** → это **реально новый
   скоуп**, и он **не ложится в каскад** вовсе: slowloris/slow-POST/slow-read и Rapid
   Reset живут НИЖЕ `access_by_lua` (соединение/фрейм, до HTTP-семантики). Лечатся
   nginx-директивами и версией билда, а Lua здесь только наблюдает и кормит репутацию.
-  Заскоуплено как D21–D23 / E3–E4 (§4.2).
+  Заскоуплено как E1–E3 / E4–E5 (§4.2).
 
 Это сохраняет инвариант rules-reference: «единственная точка решения — L5», флаги не
 выдают вердикт сами (кроме явных hard-block exit-точек под `policy.enforce`).
@@ -126,28 +126,28 @@ staged rollout и `git revert` бесплатно (ADR-006).
 
 > **Поправка после сверки с бэклогом ClickUp (список «Resty BAC»).** DDoS у нас
 > распадается на три слоя, не на один:
-> - **§4.1 L7 rate-based** — уже заскоуплено в D-серии (D12–D17), не дублируем.
+> - **§4.1 L7 rate-based** — уже заскоуплено в G-серии (G1–G4), не дублируем.
 > - **§4.2 connection/protocol-level (slow-attacks, HTTP/2-DoS)** — реально новый
->   скоуп, заведён как D21–D23 / E3–E4; живёт в nginx-директивах + версии билда,
+>   скоуп, заведён как E1–E3 / E4–E5; живёт в nginx-директивах + версии билда,
 >   НЕ в каскаде.
 > - **§4.3 волюметрика L3/L4** — вне OpenResty-стенда (reality-level 3), только
 >   контракт edge-ACL feed.
 
-### 4.1 L7 application-layer — уже заскоуплено в D-серии (не дублируем)
+### 4.1 L7 application-layer — уже заскоуплено в G-серии (не дублируем)
 Всё, что я изначально набросал как «DDoS-Фаза 1/2», при сверке с бэклогом оказалось
-уже оформленными D-тикетами:
+уже оформленными тикетами (G-серия + один сигнал из слоя D):
 
 | Идея | Где уже живёт (ClickUp / research) |
 |---|---|
-| Авто-взвод `attack_mode` по «плохому» трафику (не голому объёму), гистерезис, precedence ручного над авто, per-host флаг `auto_attack_mode` | **[D16]** `86ext6yuq` (backlog, дизайн готов) — детект по bot-rate/solve_rate/origin-latency относительно базлайна хоста |
-| Subnet/ASN-репутация DC-пулов (soft, аналитика) | **[D14]** `86ext6yn6` (backlog) + [subnet-unit-design.md](subnet-unit-design.md) |
-| Transient subnet challenge→drop под атакой | **[D15]** `86ext6ytk` (backlog) |
-| Быстрый hot-list атакующих (пред-взвод эджей при пивоте ботнета) | **[D17]** `86ext718e` (backlog) + [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
-| solve-rate как сигнал бота под флудом | **[D12]** `86ext5daf` (to do) + [challenge-solve-rate-design.md](challenge-solve-rate-design.md) |
+| Авто-взвод `attack_mode` по «плохому» трафику (не голому объёму), гистерезис, precedence ручного над авто, per-host флаг `auto_attack_mode` | **[G3]** `86ext6yuq` (backlog, дизайн готов) — детект по bot-rate/solve_rate/origin-latency относительно базлайна хоста |
+| Subnet/ASN-репутация DC-пулов (soft, аналитика) | **[G1]** `86ext6yn6` (backlog) + [subnet-unit-design.md](subnet-unit-design.md) |
+| Transient subnet challenge→drop под атакой | **[G2]** `86ext6ytk` (backlog) |
+| Быстрый hot-list атакующих (пред-взвод эджей при пивоте ботнета) | **[G4]** `86ext718e` (backlog) + [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
+| solve-rate как сигнал бота под флудом (сам тикет — **слой D**, детектор; G-серия его переиспользует) | **[D12]** `86ext5daf` (review) + [challenge-solve-rate-design.md](challenge-solve-rate-design.md) |
 
 **Вывод:** механизмы L4 (`rate_limit`) + L5 (`attack_mode`/challenge) уже есть, а их
-адаптивное углубление — это D-серия, которую и так делаем. По **rate-based** L7-DDoS
-нового скоупа нет — он закрывается завершением D14–D17. Не плодим дубль-тикеты.
+адаптивное углубление — это G-серия, которую и так делаем. По **rate-based** L7-DDoS
+нового скоупа нет — он закрывается завершением G1–G4. Не плодим дубль-тикеты.
 Новое по DDoS — **не rate-based**, а connection/protocol-level: §4.2.
 
 ### 4.2 Connection/protocol-level — slow-attacks и HTTP/2-DoS (реально новое, НЕ в каскаде)
@@ -158,15 +158,15 @@ HTTP/2-фреймов. Все они живут **ниже `access_by_lua`** —
 
 | Угроза | Почему мимо §4.1 | Где лечится | Тикеты |
 |---|---|---|---|
-| **slowloris / slow POST / slow read** | GCRA считает запросы; здесь мало запросов, много idle-соединений; challenge незавершающему запрос клиенту не доходит | `client_*_timeout`, `limit_conn`, `keepalive_*` в nginx + `log_by_lua`-шим → `bac_log` → репутация | **[D21]** baseline, **[D22]** observability, **[D23]** policy-ручка (опц.) |
-| **HTTP/2 Rapid Reset (CVE-2023-44487) и родня** | frame-уровень, ниже HTTP-семантики; стрим сброшен до того, как Lua увидит запрос | пропатченный билд (nginx ≥1.25.3) + `http2_max_concurrent_streams` | **[E3]** mitigation-аудит; **[E4]** h2-abuse как сигнал репутации (зависит от E2) |
+| **slowloris / slow POST / slow read** | GCRA считает запросы; здесь мало запросов, много idle-соединений; challenge незавершающему запрос клиенту не доходит | `client_*_timeout`, `limit_conn`, `keepalive_*` в nginx + `log_by_lua`-шим → `bac_log` → репутация | **[E1]** baseline, **[E2]** observability, **[E3]** policy-ручка (опц.) |
+| **HTTP/2 Rapid Reset (CVE-2023-44487) и родня** | frame-уровень, ниже HTTP-семантики; стрим сброшен до того, как Lua увидит запрос | пропатченный билд (nginx ≥1.25.3) + `http2_max_concurrent_streams` | **[E4]** mitigation-аудит; **[E5]** h2-abuse как сигнал репутации (зависит от R2) |
 
-Принципиально: **ни D21–D23, ни E3–E4 не добавляют стадию в `verdict.lua`** — slow-клиент
+Принципиально: **ни E1–E3, ни E4–E5 не добавляют стадию в `verdict.lua`** — slow-клиент
 и сброшенный стрим туда не доходят. Наш BAC-вклад здесь = observability + подмешивание в
-репутацию (D14) и эскалация в edge-ACL feed (§4.3), а не новая точка решения.
+репутацию (G1) и эскалация в edge-ACL feed (§4.3), а не новая точка решения.
 
-> ⚠️ **E3 ≠ E2.** E2 — это HTTP/2 **fingerprint** (детект/идентификация клиента,
-> анти-JA4-ротация). E3 — HTTP/2 **DoS-mitigation** (Rapid Reset). Разные слои задачи;
+> ⚠️ **E4 ≠ R2.** R2 — это HTTP/2 **fingerprint** (детект/идентификация клиента,
+> анти-JA4-ротация). E4 — HTTP/2 **DoS-mitigation** (Rapid Reset). Разные слои задачи;
 > в тикетах граница проговорена явно.
 
 ### 4.3 Волюметрика L3/L4 — сетевой слой (⚠️ ВНЕ OpenResty-стенда)
@@ -272,28 +272,29 @@ mass-assignment в семантике, бизнес-логика, PII-в-отв�
 
 ## 6. Предлагаемая очерёдность (по «эффект/стоимость»)
 
-Опорная точка: post-MVP (D-серия) ещё в работе и **сам по себе закрывает L7-DDoS**
-(D12–D17). post-post-MVP добавляет **новые оси**, которых в бэклоге нет вообще:
+Опорная точка: post-MVP (D-серия детектора) + rate-based G-серия еще в работе и **сами по себе закрывают L7-DDoS**
+(G1–G4). post-post-MVP добавляет **новые оси**, которых в бэклоге нет вообще:
 
-1. **Slow-attacks baseline** (§4.2, [D21]) — самый дешёвый и срочный: стенд сейчас
+1. **Slow-attacks baseline** (§4.2, [E1]) — самый дешёвый и срочный: стенд сейчас
    уязвим к slowloris из коробки (нет `limit_conn`/таймаутов). Чистый nginx-конфиг.
 2. **WAF спайк + ADR-007** (§3.2) — research, не блокирует D-серию, можно начинать рано.
 3. **API security / account protection** (§5) — дешевле WAF, т.к. ближе к ядру
    (rate/reputation/challenge/fp). Фундамент — identity-extraction (§5.4).
 4. **WAF MVP** (§3.1) — после ADR, по выбранному пути.
-5. **HTTP/2 DoS аудит** (§4.2, [E3]) — точечно, зависит от версии билда.
+5. **HTTP/2 DoS аудит** (§4.2, [E4]) — точечно, зависит от версии билда.
 6. **DDoS L3/L4-контракт** (§4.3) — спроектировать edge-ACL feed; реализация сетевого
    дропа — будущая фаза с прод-доступом.
-7. **DDoS L7 rate-based** — отдельным пунктом НЕ ведём: это D14–D17 в D-серии.
+7. **DDoS L7 rate-based** — отдельным пунктом НЕ ведём: это G1–G4 в G-серии.
 
 ## 7. Связь с существующим бэклогом и research
-- **DDoS L7 rate-based — уже в бэклоге:** [D12] `86ext5daf`, [D14] `86ext6yn6`,
-  [D15] `86ext6ytk`, [D16] `86ext6yuq` (авто-attack-mode), [D17] `86ext718e`. Опирается на
+- **DDoS L7 rate-based — уже в бэклоге (слой G):** [G1] `86ext6yn6` (subnet-репутация),
+  [G2] `86ext6ytk` (transient drop), [G3] `86ext6yuq` (авто-attack-mode), [G4] `86ext718e`
+  (cross-tenant). Использует сигнал solve-rate из слоя D ([D12] `86ext5daf`). Опирается на
   `attack_mode` (C7) + `rate_limit` (A7/A10), которые уже в коде.
-- **DDoS connection/protocol-level — заведено (§4.2):** [D21] `86ext8r0p` (slow-attacks
-  baseline), [D22] `86ext8r0x` (observability), [D23] `86ext8r15` (policy-ручка, опц.);
-  [E3] `86ext8r2q` (HTTP/2 DoS mitigation-аудит), [E4] `86ext8r31` (h2-abuse как сигнал,
-  зависит от E2 `86ext6dez`). Переиспользует `bac_log`, метрики, D14-репутацию, edge-ACL.
+- **DDoS connection/protocol-level — заведено (§4.2):** [E1] `86ext8r0p` (slow-attacks
+  baseline), [E2] `86ext8r0x` (observability), [E3] `86ext8r15` (policy-ручка, опц.);
+  [E4] `86ext8r2q` (HTTP/2 DoS mitigation-аудит), [E5] `86ext8r31` (h2-abuse как сигнал,
+  зависит от R2 `86ext6dez`). Переиспользует `bac_log`, метрики, G1-репутацию, edge-ACL.
 - **WAF — новой оси в бэклоге НЕТ** (сверено: 0 задач по WAF/SQLi/XSS). Предложить серию
   `W`: W1 спайк/ADR-007, W2 движок, W3 сигнатурный каталог через Channel C, W4 per-host
   WAF-профиль в policy, W5 virtual patching. Переиспользует ADR-006 (git-каталоги), B10
@@ -311,7 +312,7 @@ mass-assignment в семантике, бизнес-логика, PII-в-отв�
 
 ## 8. Что НЕ делаем на этом шаге
 - Не коммитим WAF-код до ADR-007 (build-vs-buy решается спайком).
-- Не плодим **rate-based** DDoS-L7-тикеты — это D-серия (D12–D17), уже в бэклоге.
+- Не плодим **rate-based** DDoS-L7-тикеты — это G-серия (G1–G4), уже в бэклоге.
 - Не добавляем slow-attacks / HTTP/2-DoS как стадию каскада — они ниже `access_by_lua`
-  (nginx-директивы + билд + log-шим; D21–D23 / E3–E4).
+  (nginx-директивы + билд + log-шим; E1–E3 / E4–E5).
 - Не лезем в прод-сеть prod-edge (salt/Puppet/eBPF на боевых эджах) — нет доступа, не наша фаза.

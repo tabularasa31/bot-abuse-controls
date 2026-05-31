@@ -22,7 +22,7 @@ connection/protocol-level DDoS (slow-attacks + HTTP/2 DoS) в формате
 - **log-signal** — наш BAC-вклад: `log_by_lua`-хук видит nginx-дроп в log-фазе и
   превращает его в наблюдаемое событие `bac_log`.
 - **tag** — метка на этом событии (`slow_client` / `conn_flood` / h2-abuse
-  сигнал), которая питает дашборд и репутацию (D14 subnet/IP), а через неё —
+  сигнал), которая питает дашборд и репутацию (G1 subnet/IP), а через неё —
   эскалацию в edge-ACL feed.
 
 То есть схема всей оси: **nginx митигирует → Lua наблюдает → reputation
@@ -69,7 +69,7 @@ hygiene/reputation. Ограничение: видно только то, что
 | -- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------- | ----------- | --------------------------------------- | ------------- |
 | 6  | В log-фазе `$status=408` (сработал один из header/body таймаутов из правил 1–2)                                 | событие `bac_log` с тегом `slow_client`; инкремент счётчика по IP / /24                  | log-signal | `log_by_lua` | `$status` / `$request_time`             | Observability |
 | 7  | В log-фазе зафиксирован отказ `limit_conn` (`$status` = `limit_conn_status`, 503)                              | событие `bac_log` с тегом `conn_flood`; инкремент счётчика по IP / /24                    | log-signal | `log_by_lua` | `$status` (= `limit_conn_status`)       | Observability |
-| 8  | Накопленный по IP / /24 счётчик `slow_client`/`conn_flood` указывает на повторного нарушителя                  | сигнал в reputation (D14 subnet/IP) → D15 → при достаточной тяжести эскалация в edge-ACL feed | log-signal | `log_by_lua` → reputation | счётчики `bac_log` + D14 | Observability  |
+| 8  | Накопленный по IP / /24 счётчик `slow_client`/`conn_flood` указывает на повторного нарушителя                  | сигнал в reputation (G1 subnet/IP) → G2 → при достаточной тяжести эскалация в edge-ACL feed | log-signal | `log_by_lua` → reputation | счётчики `bac_log` + G1 | Observability  |
 
 ---
 
@@ -103,16 +103,16 @@ Baseline + Observability уже закрывают риск.
 
 ## E. HTTP/2 DoS — h2-abuse как сигнал (опционально)
 
-Зависит от наличия HTTP/2-fingerprint-спайка (E2). Детект-ассист, не
+Зависит от наличия HTTP/2-fingerprint-спайка (R2). Детект-ассист, не
 митигация: frame-митигация остаётся в nginx, fp лишь даёт способ видеть
 аномалию.
 
-> ⚠️ E3 (DoS-mitigation, Rapid Reset) ≠ E2 (HTTP/2 fingerprint, идентификация
+> ⚠️ E4 (DoS-mitigation, Rapid Reset) ≠ R2 (HTTP/2 fingerprint, идентификация
 > клиента / анти-JA4-ротация). Разные слои задачи.
 
 | #  | Если…                                                                                                                | То…                                                                                  | Категория  | Где живёт                  | Источник                          | Этап                 |
 | -- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ---------- | -------------------------- | --------------------------------- | -------------------- |
-| 13 | HTTP/2-fingerprint-спайк (E2) видит аномальные SETTINGS/stream-паттерны соединения                                   | сигнал h2-abuse в reputation/score (рядом со `slow_client`/`conn_flood`), verdict не эмитится | tag | reputation (через fp-спайк) | HTTP/2 fingerprint (E2)            | h2-abuse как сигнал  |
+| 13 | HTTP/2-fingerprint-спайк (R2) видит аномальные SETTINGS/stream-паттерны соединения                                   | сигнал h2-abuse в reputation/score (рядом со `slow_client`/`conn_flood`), verdict не эмитится | tag | reputation (через fp-спайк) | HTTP/2 fingerprint (R2)            | h2-abuse как сигнал  |
 
 ---
 
@@ -121,7 +121,7 @@ Baseline + Observability уже закрывают риск.
 | Этап                        | Появляется                                                                                             |
 | --------------------------- | ------------------------------------------------------------------------------------------------------ |
 | **Baseline-директивы**      | таймауты `client_header_timeout`/`client_body_timeout`/`send_timeout` (→408), `limit_conn` (→503), `keepalive_requests`/`keepalive_timeout` |
-| **Observability**           | log-сигналы `slow_client`/`conn_flood` из `log_by_lua` → `bac_log` + счётчики по IP / /24 → reputation (D14) |
+| **Observability**           | log-сигналы `slow_client`/`conn_flood` из `log_by_lua` → `bac_log` + счётчики по IP / /24 → reputation (G1) |
 | **Policy-ручка**            | `map`-driven ужесточение `limit_conn`/таймаутов под `attack_mode`/strictness (опц., coarse, не per-request) |
 | **HTTP/2 mitigation-аудит** | фиксация билда ≥ 1.25.3, `http2_max_concurrent_streams`, пороги CONTINUATION/PING/SETTINGS              |
 | **h2-abuse как сигнал**     | h2-fp-аномалия как репутационный сигнал (опц., зависит от HTTP/2 fingerprint-спайка)                    |
