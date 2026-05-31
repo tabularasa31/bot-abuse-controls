@@ -322,7 +322,11 @@ function _M.emit()
         -- attack L5 forces challenge on almost everyone (C4), so a low solve_rate
         -- there is the host's posture, not a judgement about the fp. analyze.py
         -- counts issued/solved only on `mode==active AND attack_mode==false`.
-        attack_mode   = p.attack_mode,
+        -- Boolean-safe null sentinel: a bare `p.attack_mode or null` would log
+        -- null for the common `false` case (Lua: `false or x == x`); guard on
+        -- nil so `false` stays false and only a missing field becomes an
+        -- explicit null, keeping the schema's full key set stable.
+        attack_mode   = p.attack_mode == nil and cjson_base.null or p.attack_mode,
         strictness    = p.strictness,
         latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
         cascade_ms           = cascade_ms or cjson_base.null,

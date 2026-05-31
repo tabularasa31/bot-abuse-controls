@@ -439,6 +439,13 @@ def test_challenge_pass_gate_ladder(ladder, issued, solved, expected):
     assert az._challenge_pass_gate(issued, solved) == expected
 
 
+def test_challenge_pass_gate_no_zero_division_when_min_zero(monkeypatch):
+    # A misconfigured MIN_CHALLENGE_ISSUED==0 must not crash on issued==0.
+    monkeypatch.setattr(az, "MIN_CHALLENGE_ISSUED", 0)
+    assert az._challenge_pass_gate(0, 0) == "clear"
+    assert az._challenge_pass_gate(0, 3) == "veto"
+
+
 def test_hard_identity_allow_excludes_challenge_pass():
     assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="cookie_valid")]) is True
     assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="ip_whitelist")]) is True
@@ -448,11 +455,17 @@ def test_hard_identity_allow_excludes_challenge_pass():
 
 
 def _staging_events(fp, issued, solved, **kw):
-    """Build staging-matched events (the catalog token in staging_match)."""
+    """Build staging events. issued events run the cascade staging stage so they
+    carry the staging_match token; solved events come from the separate
+    /__challenge/verify endpoint — they carry the fp (tls_fp join key) but NOT
+    the token. find_staging_observation must count solves by fp, not by token."""
     token = "tls_fp_blocklist:" + fp
-    evs = _issued(issued, fp=fp, **kw) + _solved(solved, fp=fp, **kw)
-    for e in evs:
+    iss = _issued(issued, fp=fp, **kw)
+    for e in iss:
         e["staging_match"] = [token]
+    sol = _solved(solved, fp=fp, **kw)   # no staging_match token (separate endpoint)
+    evs = iss + sol
+    for e in evs:
         e["ts_dt"] = datetime(2026, 5, 1, tzinfo=timezone.utc)
     return evs
 

@@ -986,7 +986,9 @@ def _challenge_pass_gate(issued, solved):
                                   even after a few stray solves — the fixed bug);
                       otherwise:  gray (unconvincing → no auto-promote, no hard
                                   veto → staging observation)."""
-    if issued < MIN_CHALLENGE_ISSUED:
+    # issued <= 0 guards a misconfigured MIN_CHALLENGE_ISSUED==0 (the
+    # `issued < MIN` check would not catch issued==0 then → ZeroDivisionError).
+    if issued <= 0 or issued < MIN_CHALLENGE_ISSUED:
         return "veto" if solved > 0 else "clear"
     rate = min(solved / issued, 1.0)
     if rate >= HUMAN_SOLVE_RATE:
@@ -1436,7 +1438,14 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
         # real meaning: many solved challenges → humans → fp_caught.
         hard_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
             or _fp_hard_identity_allow(matched)
-        s_issued, s_solved = _challenge_counts(matched)
+        # Count solves by fp, NOT among `matched`: a solved challenge is emitted
+        # by the separate /__challenge/verify endpoint, which never runs the
+        # tls_fp staging stage, so the solve event carries tls_fp (the join key,
+        # set on the verify path) but NOT the staging_match token. Counting only
+        # `matched` (token-keyed) would miss every solve → undercount s_solved →
+        # a real browser fp with many solves could still reach `activate`.
+        fp_events = [e for e in events if e.get("fp") == fp]
+        s_issued, s_solved = _challenge_counts(fp_events)
         cp_gate = _challenge_pass_gate(s_issued, s_solved)
         if fp in since_map:
             observed_hours = round((now_utc - since_map[fp]).total_seconds() / 3600, 1)
