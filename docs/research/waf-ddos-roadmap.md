@@ -227,7 +227,8 @@ rate-limit/reputation, ровно как `rate_tls_fp` кеит на fp. Без 
 `reputation` (per-key/per-account), `challenge`/`attack_mode` (step-up на auth), `bac_log`
 + теги, паттерн D12 (response-phase feedback для failed-login-ratio).
 
-### 5.4 Что реально новое (кандидаты в серию `P`)
+### 5.4 Серия `P` — первая волна (auth-абьюз + квоты), заведено
+P закрывает домены auth-credential-abuse и rate/quota. Тикеты — см. §7.
 1. **Identity-extraction стадия** — username/token/API-key → ключи. ⚠️ **PII/security**:
    хешировать username, **никогда не логировать/хранить пароли**, тело пароля не инспектировать.
 2. **Per-credential / per-key GCRA-профили** (`rate_login_per_account`, `rate_api_key`).
@@ -243,6 +244,31 @@ rate-limit/reputation, ровно как `rate_tls_fp` кеит на fp. Без 
   валидности пароля по брешь-листу (эдж пароли не трогает).
 - **Schema enforcement** частично перетекает в WAF (§3) — границу зафиксировать в ADR,
   чтобы не дублить с W-серией.
+
+### 5.6 Серия `Q` — вторая волна (API-contract / governance / transport), заведено
+P закрывает только abuse-control-срез (auth + квоты). Полная защита API шире — вторая
+волна добавляет то, что edge-доступно, но в P не входило (домены 4/7/8 + часть 1/3).
+Это **позитивная модель** (белый список разрешённого), комплементарная негативной WAF
+(§3, серия `W`); границу Q↔W фиксируем в ADR. Тикеты — см. §7.
+
+| Тикет | Что | OWASP API |
+|---|---|---|
+| **Q1** | позитивный per-endpoint contract (allowlist метода/CT/параметров) | API5 (BFLA-срез) |
+| **Q2** | schema-валидация тела (подмн. OpenAPI) через Channel C | API3-вход (mass-assignment) |
+| **Q3** | resource limits: размер тела + глубина JSON / стоимость GraphQL | API4 |
+| **Q4** | edge JWT/token-валидация (подпись + exp/aud/iss) | API2 |
+| **Q5** | mTLS / client-cert для API (опц., per-tenant) | API2 |
+| **Q6** | transport-гигиена: HSTS/CORS + срезка баннеров + маскировка ошибок | API8 |
+| **Q7** | API inventory: shadow-эндпоинты из лога + enforcement устаревших версий | API9 |
+
+DAG: опирается на фундамент P — `P4` держит Q1/Q7, `P1` держит Q4; внутри Q: Q1→Q2,
+Q3→Q2. Ранние/дешёвые: Q3, Q6 (и спайк-уровня Q5).
+
+**Твёрдая граница (⛔ бэкенд, не эдж):** авторизация объектов/функций (BOLA/BFLA-полный),
+mass-assignment в семантике, бизнес-логика, PII-в-ответах — требуют identity+ownership+
+бизнес-правил, которых у эджа нет. Эдж даёт сигнал (перебор ID, бот-скор), не решение.
+Нюанс: для API **нельзя полагаться на challenge** (C-серия браузерная) — enforcement
+опирается на rate/key-auth/reputation/mTLS.
 
 ## 6. Предлагаемая очерёдность (по «эффект/стоимость»)
 
@@ -272,10 +298,14 @@ rate-limit/reputation, ровно как `rate_tls_fp` кеит на fp. Без 
   `W`: W1 спайк/ADR-007, W2 движок, W3 сигнатурный каталог через Channel C, W4 per-host
   WAF-профиль в policy, W5 virtual patching. Переиспользует ADR-006 (git-каталоги), B10
   (Policy API), `policy.enforce` (mode-gate), `bac_log`/метрики.
-- **API security / account protection — в бэклоге НЕТ** (сверено: 0 задач). Кандидаты на
-  новую серию `P` (§5.4): P1 identity-extraction, P2 per-key/per-account профили, P3
-  failed-auth feedback, P4 auth-endpoint policy-config, P5 (опц.) breached-cred сигнал.
-  Ближе к существующему ядру, чем WAF.
+- **API security / account protection — заведено (§5.4, серия `P`):** [P1] `86ext9dze`
+  (identity-extraction), [P2] `86ext9dzx` (per-key/per-account профили), [P3] `86ext9e02`
+  (failed-auth feedback), [P4] `86ext9dzk` (auth-endpoint policy-config), [P5] `86ext9e0x`
+  (опц. breached-cred). Ближе к существующему ядру, чем WAF.
+- **API-contract / governance — заведено (§5.6, серия `Q`):** [Q1] `86ext9y83` (per-endpoint
+  contract), [Q2] `86ext9y70` (schema-валидация), [Q3] `86ext9y7d` (resource limits),
+  [Q4] `86ext9ybj` (edge JWT), [Q5] `86ext9ycp` (mTLS, опц.), [Q6] `86ext9ydp` (transport-
+  гигиена), [Q7] `86ext9ye2` (API inventory). Позитивная модель, комплементарна WAF (`W`).
 - **Волюметрика L3/L4** — вне репо-скоупа стенда; присутствует как контракт + research,
   не как реализация (reality-level 3).
 
