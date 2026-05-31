@@ -40,7 +40,7 @@ DDoS-сток. Запись в `bac_log` здесь — наблюдение п�
 | **Эскалация в репутацию**       | Повторные нарушители по IP / /24 уходят в общий DDoS-сток: G1 (subnet/IP reputation) → G2 → при достаточной тяжести — edge-ACL feed (сетевой слой).                                                                                                               |
 | **edge-ACL feed**               | Контракт эскалации в сетевой слой (roadmap §4.3) для случаев, которые выше OpenResty (волюметрика L3/L4). Наш максимум по волюметрике — поставка в этот feed, сама митигация — вне OpenResty.                                                                       |
 | **Policy-ручка**                | Опциональное ужесточение `limit_conn`/таймаутов под `attack_mode`/повышенной strictness. Реализуется `map`-driven выбором зоны per-host или грубым global-toggle — не per-request (nginx-директивы нельзя менять per-request из Lua).                            |
-| **HTTP/2 fingerprint (E2)**     | Отдельная задача идентификации HTTP/2-клиента (анти-JA4-ротация). Не митигация. Может опционально дать сигнал h2-abuse для репутации. Не путать с HTTP/2 DoS-mitigation (E3).                                                                                   |
+| **HTTP/2 fingerprint (R2)**     | Отдельная задача идентификации HTTP/2-клиента (анти-JA4-ротация). Не митигация. Может опционально дать сигнал h2-abuse для репутации. Не путать с HTTP/2 DoS-mitigation (E4).                                                                                   |
 
 ---
 
@@ -70,7 +70,7 @@ DDoS-сток. Запись в `bac_log` здесь — наблюдение п�
 | ---------------- | --------------------------------------------------------------------------- | ------------ | --------------------------------------- |
 | `slow_client`    | таймаут заголовков/тела/чтения → `$status=408` (`client_*_timeout`/`send_timeout`) | `log_by_lua` | `$status` / `$request_time`             |
 | `conn_flood`     | отказ `limit_conn` → `$status` = `limit_conn_status` (целевой `503`)        | `log_by_lua` | `$status`                               |
-| h2-abuse сигнал  | аномальный HTTP/2 SETTINGS/stream-паттерн (опционально, зависит от E2)        | `log_by_lua` / reputation | HTTP/2 fingerprint (E2)        |
+| h2-abuse сигнал  | аномальный HTTP/2 SETTINGS/stream-паттерн (опционально, зависит от R2)        | `log_by_lua` / reputation | HTTP/2 fingerprint (R2)        |
 
 **Формат тега:** `<namespace>:<short_name>`, как у тегов каскада — namespace позволяет
 добавлять сигналы без конфликта имён. Отличие от вердикта каскада: тег ставится в
@@ -121,7 +121,7 @@ log-фазе, постфактум, и описывает уже состояв�
 | Observability               | slow      | Baseline-директивы                  |
 | Policy-ручка (опц.)         | slow      | Observability                       |
 | HTTP/2 mitigation-аудит     | HTTP/2    | — (самостоятелен)                   |
-| h2-abuse как сигнал (опц.)  | HTTP/2    | HTTP/2 fingerprint-спайк (E2)       |
+| h2-abuse как сигнал (опц.)  | HTTP/2    | HTTP/2 fingerprint-спайк (R2)       |
 
 ---
 

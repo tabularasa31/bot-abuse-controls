@@ -66,9 +66,9 @@ reputation   →  ЭСКАЛИРУЕТ (G1 подсеть/IP → G2 → edge-ACL
 Наш BAC-вклад здесь — не блокировка (её делает nginx), а превращение nginx-дропов в
 наблюдаемый, репутационно-питающий сигнал и его эскалация в общий DDoS-механизм.
 
-## 4. Как — slow-attacks (D21–D23)
+## 4. Как — slow-attacks (E1–E3)
 
-### 4.1 Baseline-директивы (D21) — реальная защита
+### 4.1 Baseline-директивы (E1) — реальная защита
 Чистый nginx-конфиг, 0 Lua, даёт ~80% эффекта:
 
 - `client_header_timeout` / `client_body_timeout` / `send_timeout` → срезать до 10–15s
@@ -81,34 +81,34 @@ reputation   →  ЭСКАЛИРУЕТ (G1 подсеть/IP → G2 → edge-ACL
 Гарантия: легитимные клиенты с запасом (solver шлёт <2KB; `client_body_buffer_size 8k`
 уже стоит). Полностью обратимо.
 
-### 4.2 Observability (D22) — наш слой
+### 4.2 Observability (E2) — наш слой
 `log_by_lua`-хук читает `$status`/`$request_time`/`$connection_requests`; таймаут (408) и
 отказ `limit_conn` (503) → событие `bac_log` с тегом `slow_client`/`conn_flood` → дашборд
 + счётчик по IP / /24. Переиспользует `bac_log`-контракт (как hygiene/reputation).
 Ограничение: видно только то, что nginx отдаёт в log-фазе; сам процесс цежения не виден.
 
-### 4.3 Policy-ручка (D23) — опционально
+### 4.3 Policy-ручка (E3) — опционально
 Под `attack_mode`/повышенной strictness — более жёсткая `limit_conn`-зона / ниже таймауты.
 ⚠️ **Честное ограничение:** nginx-директивы нельзя менять per-request из Lua. Реализация —
 `map`-driven выбор зоны per-host или coarse global-toggle, не плавная per-request
-подстройка. Может не делаться, если D21+D22 закрывают риск.
+подстройка. Может не делаться, если E1+E2 закрывают риск.
 
-## 5. Как — HTTP/2 DoS (E3–E4)
+## 5. Как — HTTP/2 DoS (E4–E5)
 
-### 5.1 Mitigation-аудит (E3) — в основном билд + директивы
+### 5.1 Mitigation-аудит (E4) — в основном билд + директивы
 - Подтвердить версию OpenResty/nginx ≥ 1.25.3 (считает сброшенные стримы, рвёт соединение
   при превышении reset-без-завершённого-запроса). Зафиксировать в Dockerfile/конфиге стенда.
 - `http2_max_concurrent_streams` (дефолт 128) — затюнить; `keepalive_requests` для h2;
   пороги CONTINUATION/PING/SETTINGS flood по версии.
 - `http2 on` уже стоит (`nginx.demo.conf:291`).
 
-### 5.2 h2-abuse как сигнал репутации (E4) — опционально, зависит от E2
-Если спайк E2 (HTTP/2 fingerprint) даст способ видеть аномальные SETTINGS/stream-паттерны
+### 5.2 h2-abuse как сигнал репутации (E5) — опционально, зависит от R2
+Если спайк R2 (HTTP/2 fingerprint) даст способ видеть аномальные SETTINGS/stream-паттерны
 — использовать как сигнал в reputation/score, даже когда frame-митигация остаётся в nginx.
 Детект-ассист, не митигация.
 
-> ⚠️ E3 ≠ E2. E2 — это HTTP/2 fingerprint (детект/идентификация клиента,
-> анти-JA4-ротация). E3 — HTTP/2 DoS-mitigation (Rapid Reset). Разные слои задачи.
+> ⚠️ E4 ≠ R2. R2 — это HTTP/2 fingerprint (детект/идентификация клиента,
+> анти-JA4-ротация). E4 — HTTP/2 DoS-mitigation (Rapid Reset). Разные слои задачи.
 
 ## 6. Что переиспользуем
 `bac_log` + теги, `metrics.lua`, G1 (subnet/IP reputation) как сток повторных нарушителей,
@@ -120,7 +120,7 @@ merge для ручки.
   Reality-3, наш максимум — контракт edge-ACL feed (roadmap §4.3).
 - **Adaptive per-request лимиты** — nginx так не умеет (см. §4.3).
 - HTTP/2-DoS — слабый fit для Lua: фикс на 90% «пропатченный билд + 2 директивы», наш
-  value-add = аудит (E3) + fp-as-signal (E4).
+  value-add = аудит (E4) + fp-as-signal (E5).
 
 ## 8. Состав и порядок внедрения
 | Этап | Суть | Зависит от |

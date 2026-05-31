@@ -7,7 +7,7 @@
 >
 > **Триаж завершён (2026-05-30): все шесть идей проработаны в дизайн-доки + тикеты.**
 > #1 [solve-rate](challenge-solve-rate-design.md) (D12) · #2 [позитивный fp-каталог](positive-fp-catalog-design.md)
-> (D13, +спайк E2 HTTP/2) · #3 [subnet-юнит](subnet-unit-design.md) (G1/G2/G3) ·
+> (D13, +спайк R2 HTTP/2) · #3 [subnet-юнит](subnet-unit-design.md) (G1/G2/G3) ·
 > #5 [anti-poisoning](scoring-anti-poisoning-design.md) (D18/D19) ·
 > #6 [кросс-тенант threat-intel](cross-tenant-threat-intel-design.md) (G4) ·
 > #4 [поведенческие сигналы](behavioral-signals-design.md) — **дизайн зафиксирован, реализация
@@ -71,7 +71,7 @@ Score сейчас бинарно-аддитивный по статике. До
 G1 (`subnet_reputation` стоит делать глобальным) и G2 (горячие /24).
 
 ## Связь с существующим бэклогом D-серии (PROGRESS.md)
-- Уже стоит: **D2, D3, D4** (каталоги/mismatch), D5 (кэш), D6 (метрики), E1 (DBSC).
+- Уже стоит: **D2, D3, D4** (каталоги/mismatch), D5 (кэш), D6 (метрики), R1 (DBSC).
 - Новое/недооформленное: **#1** (challenge-solve-rate→scoring), **#2 HTTP/2 fp**,
   **#3 subnet/поведенческая единица**, **#4 поведенческие сигналы**, **#5 anti-poisoning**,
   **#6 кросс-тенантный threat-intel**.

@@ -66,7 +66,7 @@ allowed_methods + allowed_content_types + опц. required_params; всё про
 - структурная сложность JSON: max глубина/длина массивов («billion laughs»-защита);
 - GraphQL (опц.): глубина/стоимость/алиасы.
 Часть — nginx (размер), часть — Lua (структура после безопасного парса). Дополняет `limit_conn`
-из D21 (там соединения, тут стоимость одного запроса).
+из E1 (там соединения, тут стоимость одного запроса).
 
 ### 4.4 Edge JWT/token-валидация (Q4) — API2
 P1 извлекает токен как ключ; Q4 проверяет его валидность: подпись (JWKS/секрет), exp/nbf,
@@ -78,7 +78,7 @@ iss/aud — на api-путях (P4), через `lua-resty-jwt`. Форжед/�
 ### 4.5 mTLS / client-cert (Q5) — опц., per-tenant
 Для API с сильной клиентской аутентификацией: nginx `ssl_verify_client` + проверка
 `$ssl_client_verify` в Lua на mTLS-хостах. Транспортный уровень, до каскада. ⚠️ Проверить
-совместимость с on-demand TLS (`lua-resty-acme`) — см. E2/E3 про TLS-стек. По умолчанию выкл.
+совместимость с on-demand TLS (`lua-resty-acme`) — см. R2/E4 про TLS-стек. По умолчанию выкл.
 
 ### 4.6 Transport-гигиена (Q6) — API8
 Response-side, дёшево/высокий ROI: security-заголовки (HSTS, X-Content-Type-Options,
