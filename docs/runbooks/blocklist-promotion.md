@@ -67,7 +67,7 @@ scripts/demote-fp.sh <fp> --reason "campaign over" --remove                     
 scripts/blocklist-autopilot.sh --dry-run
 
 # Боевой прогон (открывает ТОЛЬКО draft-PR; человек ревьюит/мержит):
-#   30 8 * * * cd ~/abuse-controls && scripts/blocklist-autopilot.sh >> ~/autopilot.log 2>&1
+#   30 5 * * * cd ~/abuse-controls && ./scripts/blocklist-autopilot.sh >> ~/autopilot.log 2>&1
 ```
 
 Автомат собирает все созревшие изменения за прогон в **один draft-PR** (ветка
@@ -83,16 +83,17 @@ staging; activate staging-записей с verdict=activate; auto-demote мол
 делает один прогон — сперва `rotate-state.py` (D7: ограничивает рост `seen-fps.json` /
 `ip-cache.json`, архив в `state/archive/`), затем `analyze.py` (артефакты + отчёт), затем
 autopilot читает свежие артефакты. Ротация non-fatal — её сбой не блокирует отчёт; TTL-логика
-и env-ручки в [`infra/demo-stand/scripts/README.md`](../../infra/demo-stand/scripts/README.md). На `ubuntu@<BACKEND_VM_IP>` (`CRON_TZ` — иначе хост в UTC и `0 8` = 11:00 MSK;
-`-T` — cron не выделяет TTY; `PATH` — чтобы cron нашёл `git`/`gh` для autopilot):
+и env-ручки в [`infra/demo-stand/scripts/README.md`](../../infra/demo-stand/scripts/README.md). На `ubuntu@<BACKEND_VM_IP>`. **Время — в явном UTC**: хост в UTC, а этот
+cron (Debian) `CRON_TZ` НЕ уважает (проверено: `0 8` с `CRON_TZ=Europe/Moscow` всё равно
+сработал в 08:00 UTC). Поэтому `05:00 UTC = 08:00 MSK` (Москва круглый год без DST).
+`-T` — cron не выделяет TTY; `PATH` — чтобы cron нашёл `git`/`gh` для autopilot:
 
 ```cron
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-CRON_TZ=Europe/Moscow
-# 08:00 MSK — прогон аналитики (Loki → state/*.json + email)
-0 8 * * * cd /home/ubuntu/abuse-controls/infra/demo-backend && /usr/bin/docker compose -f docker-compose.backend.yml --profile observability run -T --rm analytics >> /home/ubuntu/analytics-cron.log 2>&1
-# 08:30 — autopilot (опц.): draft-PR по свежим артефактам
-# 30 8 * * * cd /home/ubuntu/abuse-controls && scripts/blocklist-autopilot.sh >> /home/ubuntu/autopilot.log 2>&1
+# 05:00 UTC = 08:00 MSK — прогон аналитики (Loki → state/*.json + email)
+0 5 * * * cd /home/ubuntu/abuse-controls/infra/demo-backend && /usr/bin/docker compose -f docker-compose.backend.yml --profile observability run -T --rm analytics >> /home/ubuntu/analytics-cron.log 2>&1
+# 05:30 UTC = 08:30 MSK — autopilot: один draft-PR по свежим артефактам
+30 5 * * * cd /home/ubuntu/abuse-controls && ./scripts/blocklist-autopilot.sh >> /home/ubuntu/autopilot.log 2>&1
 ```
 
 `run.sh` — дефолтный entrypoint образа (см. #108). Пока образ на VM не пересобран
