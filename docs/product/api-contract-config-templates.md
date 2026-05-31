@@ -217,7 +217,7 @@ example.com:
 
 Enforcement устаревших версий API — поле policy. Inventory (shadow/zombie) — аналитика поверх
 `bac_log` (diff вызываемых vs объявленных путей), отдельной конфигурации не требует; опц.
-draft-PR кандидатов в декларацию (паттерн `find_asn_watch_candidates` из D14).
+draft-PR кандидатов в декларацию (паттерн `find_asn_watch_candidates` из G2).
 
 ```yaml
 # policy[host].deprecated_versions (mode-gated)

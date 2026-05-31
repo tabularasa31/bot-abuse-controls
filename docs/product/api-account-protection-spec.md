@@ -46,7 +46,7 @@ Per-IP лимит обходится ботнетом/прокси-ротаци�
 
 Второй сквозной принцип: сильнейший сигнал auth-абьюза — доля неуспешных логинов, а её
 эдж видит только из ответа origin (`$status` 401/403 в response/log-фазе). Это тот же
-паттерн обратной связи, что D12 (challenge solve-rate).
+паттерн обратной связи, что G1 (challenge solve-rate).
 
 ## 4. Где в каскаде
 
@@ -85,7 +85,7 @@ Graceful skip при отсутствии ключа (как `fp_usable`-guard).
 ### 5.3 Failed-auth feedback (P3)
 `log_by_lua`/`header_filter` на login-путях: читает upstream `$status`, классифицирует
 success/fail. Всплеск failed-ratio по hashed-account / IP-/24 → +score в reputation и
-эскалация challenge/strictness на следующих запросах источника. Прецедент — D12.
+эскалация challenge/strictness на следующих запросах источника. Прецедент — G1.
 
 ⚠️ Это статистика ответов, не проверка валидности пароля. Зависит от того, что origin
 отдаёт различимые статусы на success/fail (задокументировать допущение).
@@ -105,7 +105,7 @@ edge-скоуп это disposable-email домены (каталог через 
 `rate_limit.lua` (GCRA-движок + keying), `is_api_path`/glob, `policy` + B10 Policy API,
 `reputation` (per-key/per-account рядом с per-IP), `challenge`/`attack_mode` (step-up на auth),
 `bac_log` + теги (`account:cred_stuffing`, `api:key_abuse`, `account:auth_fail_spike`),
-паттерн D12, Channel C/ADR-006 (для P5).
+паттерн G1, Channel C/ADR-006 (для P5).
 
 ## 7. Честные границы (⛔ это бэкенд, не эдж)
 - **ATO** (аномальный успешный вход) — эдж не знает истории аккаунта; решение на бэкенде,

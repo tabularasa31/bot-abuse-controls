@@ -121,7 +121,7 @@ example.com:
 
 ## 3. Failed-auth feedback (P3)
 
-Пороги всплеска доли неуспешных логинов. Эдж читает upstream `$status` в log/response-фазе, классифицирует 401/403 как fail и копит failed-ratio по hashed-account и по IP-/24. Превышение → `+score` в reputation и эскалация challenge/strictness на следующих запросах. Прецедент — паттерн D12.
+Пороги всплеска доли неуспешных логинов. Эдж читает upstream `$status` в log/response-фазе, классифицирует 401/403 как fail и копит failed-ratio по hashed-account и по IP-/24. Превышение → `+score` в reputation и эскалация challenge/strictness на следующих запросах. Прецедент — паттерн G1.
 
 ```yaml
 example.com:
