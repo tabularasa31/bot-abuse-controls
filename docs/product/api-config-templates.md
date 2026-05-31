@@ -160,7 +160,7 @@ example.com:
 
   mtls:                                  # опц., per-tenant, по умолчанию выкл.
     enabled: false
-    verify: optional                     # off | optional | on
+    verify: optional                     # off | optional | on (на уровне nginx всегда optional, при on проверка идет в Lua)
 ```
 
 JWT — stateless-проверка (подпись/exp/nbf/iss/aud); ревокация/интроспекция со
