@@ -4,7 +4,7 @@
 
 **Статус:** проектный контракт (целевое поведение), предшествует реализации. Что уже в стенде — сверяй с [PROGRESS.md](../../PROGRESS.md) и кодом.
 
-> **PII/security (сквозной инвариант).** Все ключи идентичности (username, token/API-key) используются и пишутся в лог **только в хешированном виде** (HMAC/sha256), никогда сырьём. **Пароль никогда не логируется, не хранится и не инспектируется.**
+> **PII/security (сквозной инвариант).** Все ключи идентичности (username, token/API-key) используются и пишутся в лог только в хешированном виде (HMAC/sha256), никогда сырьём. Пароль никогда не логируется, не хранится и не инспектируется.
 
 ---
 
@@ -47,7 +47,7 @@
 | ------------------ | -------------------------------------------------------------------------- | ------------------------- | --------------------------------------------- | ------------------------------ |
 | **hashed username**| login/register-форма (form-urlencoded / JSON тело) на login-путях          | HMAC/sha256, никогда сырьём | `rate_login_per_account`, failed-auth feedback, reputation | хешируется до использования и записи |
 | **hashed api key** | `Authorization` / `X-API-Key` / query на auth/API-путях (bearer/API-key)   | HMAC/sha256, никогда сырьём | `rate_api_key`, reputation                    | хешируется до использования и записи |
-| **пароль**         | — (не извлекается)                                                          | **не логируется, не хранится, не инспектируется** | никто                          | значение оси не нужно          |
+| **пароль**         | — (не извлекается)                                                          | не логируется, не хранится, не инспектируется | никто                          | значение оси не нужно          |
 
 ---
 
@@ -60,7 +60,7 @@ GCRA-профили (`gcra` / `windows` / shared_dict-ячейки). Профи�
 | `rate_login_per_account`  | hashed username   | Стаффинг, размазанный по многим аккаунтам; targeted brute force одного   | `challenge` или `block` (429) по `policy.enforce`/strictness | `account:cred_stuffing`   |
 | `rate_api_key`            | hashed api key    | Abuse одного ключа с многих IP; scraping/enumeration; leaked-key         | `block` (429) или `challenge` по `policy.enforce`/strictness | `api:key_abuse`           |
 
-Оба профиля делают **graceful skip** при отсутствии ключа из identity-extraction (как `fp_usable`-guard). Сетевые профили (`rate_ip`/`rate_ip_ua`/`rate_api`/`rate_tls_fp`/`rate_scan_urls`) при этом продолжают работать.
+Оба профиля делают graceful skip при отсутствии ключа из identity-extraction (как `fp_usable`-guard). Сетевые профили (`rate_ip`/`rate_ip_ua`/`rate_api`/`rate_tls_fp`/`rate_scan_urls`) при этом продолжают работать.
 
 ---
 
@@ -98,9 +98,9 @@ Namespace по поверхности (`account:` / `api:`). Влияют на �
 | `verdict`          | string (enum)   | Решение по запросу. Для оси — `block` / `challenge` / `pass` (по `policy.enforce`/strictness)                                                      | всегда                                   |
 | `rule`             | string          | Код сработавшего профиля оси (`rate_login_per_account` / `rate_api_key`)                                                                            | при срабатывании профиля P2              |
 | `tags`             | array of string | Теги оси (`account:cred_stuffing` / `api:key_abuse` / `account:auth_fail_spike`) рядом с тегами каскада                                            | всегда (может быть `[]`)                 |
-| hashed-account     | string          | Hashed username из identity-extraction. **Только HMAC/sha256**, никогда сырьём                                                                     | на login-путях, если username извлечён   |
-| hashed-key         | string          | Hashed api key из identity-extraction. **Только HMAC/sha256**, никогда сырьём                                                                      | на auth/API-путях, если ключ извлечён    |
-| (пароль)           | —               | **Не логируется ни в каком виде**                                                                                                                  | никогда                                  |
+| hashed-account     | string          | Hashed username из identity-extraction. Только HMAC/sha256, никогда сырьём                                                                     | на login-путях, если username извлечён   |
+| hashed-key         | string          | Hashed api key из identity-extraction. Только HMAC/sha256, никогда сырьём                                                                      | на auth/API-путях, если ключ извлечён    |
+| (пароль)           | —               | Не логируется ни в каком виде                                                                                                                  | никогда                                  |
 
 ---
 

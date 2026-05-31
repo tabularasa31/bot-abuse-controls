@@ -15,7 +15,7 @@ schema-каталога, пороги resource-limits, конфиг JWT/JWKS и 
 
 > **Где живут эти конфиги.** Per-endpoint contract, resource-limits, JWT/mTLS-config,
 > transport/header config и deprecated-version patterns — поля `policy` (per-host/per-endpoint),
-> редактируются через **B10 Policy API**. Schema-каталог — slow-каталог через **Channel C**
+> редактируются через B10 Policy API. Schema-каталог — slow-каталог через Channel C
 > (ADR-006, PR-only, staged rollout `active`/`staging`, CI-валидация B13). JWKS/секрет —
 > доставка как секрет/каталог (паттерн C1). Все блокирующие правила mode-gated через
 > `policy.enforce` (`mode: shadow` по умолчанию).
@@ -94,7 +94,7 @@ schema:
 ```
 
 **Конвенции.**
-- `additionalProperties: false` режет неизвестные поля **на входе**. Семантика mass-assignment (какое поле кому можно менять) — ⛔ бэкенд, не сюда.
+- `additionalProperties: false` режет неизвестные поля на входе. Семантика mass-assignment (какое поле кому можно менять) — ⛔ бэкенд, не сюда.
 - Новые/изменённые схемы добавляются с `status: staging`, промоутятся в `active` отдельным PR после калибровки (как у PR-каталогов серии P).
 - Непарсимое тело там, где объявлена схема → `api:schema_violation`, reject 422.
 
@@ -155,7 +155,7 @@ example.com:
 ```
 
 **Конвенции.**
-- ⚠️ Q4 — аутентификация **токена**, не авторизация объекта. BOLA и полный BFLA — ⛔ бэкенд. Ревокация/интроспекция со state — тоже бэкенд.
+- ⚠️ Q4 — аутентификация токена, не авторизация объекта. BOLA и полный BFLA — ⛔ бэкенд. Ревокация/интроспекция со state — тоже бэкенд.
 - Невалидная подпись / протухший / неверный iss/aud → `api:token_invalid`, reject 401 (403 для scope).
 - JWKS/секрет в hot-path не fetch'атся: ключи приходят заранее как каталог/секрет (C1).
 

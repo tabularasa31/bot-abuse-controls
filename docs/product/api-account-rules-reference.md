@@ -12,31 +12,31 @@
 - **Источник** — откуда берутся данные для проверки.
 - **Phase / компонент** — к какому компоненту оси относится правило.
 
-> **PII/security (сквозной инвариант для всех правил оси).** Username и token/ключ используются как ключ и пишутся в лог **только в хешированном виде** (HMAC/sha256), никогда сырьём. **Пароль никогда не логируется, не хранится и не инспектируется** — его значение для правил не нужно. Чтение тела запроса включается только на login-путях, с лимитом размера и bypass для крупных/upload-эндпоинтов.
+> **PII/security (сквозной инвариант для всех правил оси).** Username и token/ключ используются как ключ и пишутся в лог только в хешированном виде (HMAC/sha256), никогда сырьём. Пароль никогда не логируется, не хранится и не инспектируется — его значение для правил не нужно. Чтение тела запроса включается только на login-путях, с лимитом размера и bypass для крупных/upload-эндпоинтов.
 
 ---
 
 ## P1 — Identity-extraction (стадия `identity-extract`)
 
-Лёгкая стадия перед `rate_limits`, активна **только на путях, объявленных в auth-endpoint config** (`auth_login_paths` / `auth_register_paths` / `api_paths`). Кладёт нормализованный хешированный ключ идентичности в `ctx` — ровно как `rate_tls_fp` кеит на fp. Сама вердикт не выносит: это фундамент для P2/P3.
+Лёгкая стадия перед `rate_limits`, активна только на путях, объявленных в auth-endpoint config (`auth_login_paths` / `auth_register_paths` / `api_paths`). Кладёт нормализованный хешированный ключ идентичности в `ctx` — ровно как `rate_tls_fp` кеит на fp. Сама вердикт не выносит: это фундамент для P2/P3.
 
 | #   | Если…                                                                                                                  | То…                                                                                                          | Категория | Источник                                  | Компонент           |
 | --- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------- | ----------------------------------------- | ------------------- |
-| P1.1 | Запрос на auth/API-пути, и из `Authorization`/`X-API-Key`/query извлечён API-key/bearer-токен | В `ctx` кладётся **hashed api key** (HMAC/sha256); вердикт не эмитится. Ключ доступен для `rate_api_key` и reputation | —         | Заголовки/query запроса, identity-extraction | identity-extraction |
-| P1.2 | Запрос на login/register-пути с телом (form-urlencoded/JSON), из которого извлечён username | В `ctx` кладётся **hashed username** (HMAC/sha256); вердикт не эмитится. Ключ доступен для `rate_login_per_account` и P3 | —         | Тело запроса (login-пути), identity-extraction | identity-extraction |
-| P1.3 | Идентичность извлечь не удалось (нет заголовка/поля, тело не читается, путь не объявлен auth/API) | **Graceful skip** — стадия не ставит ключ, зависящие профили P2 пропускаются (как `fp_usable`-guard для `rate_tls_fp`). Запрос продолжает каскад без ошибки | —         | identity-extraction                        | identity-extraction |
+| P1.1 | Запрос на auth/API-пути, и из `Authorization`/`X-API-Key`/query извлечён API-key/bearer-токен | В `ctx` кладётся hashed api key (HMAC/sha256); вердикт не эмитится. Ключ доступен для `rate_api_key` и reputation | —         | Заголовки/query запроса, identity-extraction | identity-extraction |
+| P1.2 | Запрос на login/register-пути с телом (form-urlencoded/JSON), из которого извлечён username | В `ctx` кладётся hashed username (HMAC/sha256); вердикт не эмитится. Ключ доступен для `rate_login_per_account` и P3 | —         | Тело запроса (login-пути), identity-extraction | identity-extraction |
+| P1.3 | Идентичность извлечь не удалось (нет заголовка/поля, тело не читается, путь не объявлен auth/API) | Graceful skip — стадия не ставит ключ, зависящие профили P2 пропускаются (как `fp_usable`-guard для `rate_tls_fp`). Запрос продолжает каскад без ошибки | —         | identity-extraction                        | identity-extraction |
 
 ---
 
 ## P2 — Per-credential / per-key профили (стадия `rate_limits`)
 
-Новые GCRA-профили поверх движка `rate_limit.lua` (те же `gcra`/`windows`/shared_dict-ячейки), но ключ — **идентичность из P1**, а не сетевой параметр. Проверяются рядом с существующими per-IP/per-fp профилями. При отсутствии ключа из P1 — **graceful skip** (профиль не срабатывает, как `fp_usable`-guard). Enforcement mode-gated через `policy.enforce`: финальное действие (challenge / 429) зависит от mode и strictness, как у существующих rate-правил (429 с Retry-After).
+Новые GCRA-профили поверх движка `rate_limit.lua` (те же `gcra`/`windows`/shared_dict-ячейки), но ключ — идентичность из P1, а не сетевой параметр. Проверяются рядом с существующими per-IP/per-fp профилями. При отсутствии ключа из P1 — graceful skip (профиль не срабатывает, как `fp_usable`-guard). Enforcement mode-gated через `policy.enforce`: финальное действие (challenge / 429) зависит от mode и strictness, как у существующих rate-правил (429 с Retry-After).
 
 | #   | Если…                                                                                                                                 | То…                                                                                                                                | Категория          | Источник                          | Компонент         |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------ | --------------------------------- | ----------------- |
-| P2.1 | По **hashed username** превышены окна профиля `rate_login_per_account` (ловит стаффинг, размазанный по многим аккаунтам, и targeted brute force одного аккаунта) | Действие по `policy.enforce`/strictness: `verdict=challenge` (step-up верификация) или `verdict=block` (429). Тег `account:cred_stuffing`. В shadow — только лог | `blocking` / `soft` | Счётчики `rate_limit.lua` (GCRA) по hashed username | per-key profiles  |
-| P2.2 | По **hashed api key** превышены окна профиля `rate_api_key` (ловит abuse одного ключа с многих IP, scraping/enumeration, leaked-key) | Действие по `policy.enforce`/strictness: `verdict=block` (429) или `verdict=challenge`. Тег `api:key_abuse`. В shadow — только лог | `blocking` / `soft` | Счётчики `rate_limit.lua` (GCRA) по hashed api key  | per-key profiles  |
-| P2.3 | Идентичность из P1 отсутствует (ключ не извлечён) | Профили P2 **пропускаются** (graceful skip), сетевые профили (`rate_ip`/`rate_ip_ua`/`rate_api`/`rate_tls_fp`/`rate_scan_urls`) продолжают работать | —                  | `fp_usable`-подобный guard         | per-key profiles  |
+| P2.1 | По hashed username превышены окна профиля `rate_login_per_account` (ловит стаффинг, размазанный по многим аккаунтам, и targeted brute force одного аккаунта) | Действие по `policy.enforce`/strictness: `verdict=challenge` (step-up верификация) или `verdict=block` (429). Тег `account:cred_stuffing`. В shadow — только лог | `blocking` / `soft` | Счётчики `rate_limit.lua` (GCRA) по hashed username | per-key profiles  |
+| P2.2 | По hashed api key превышены окна профиля `rate_api_key` (ловит abuse одного ключа с многих IP, scraping/enumeration, leaked-key) | Действие по `policy.enforce`/strictness: `verdict=block` (429) или `verdict=challenge`. Тег `api:key_abuse`. В shadow — только лог | `blocking` / `soft` | Счётчики `rate_limit.lua` (GCRA) по hashed api key  | per-key profiles  |
+| P2.3 | Идентичность из P1 отсутствует (ключ не извлечён) | Профили P2 пропускаются (graceful skip), сетевые профили (`rate_ip`/`rate_ip_ua`/`rate_api`/`rate_tls_fp`/`rate_scan_urls`) продолжают работать | —                  | `fp_usable`-подобный guard         | per-key profiles  |
 
 > Нюанс enforcement для API: на API-путях нельзя полагаться на JS-challenge (он браузерный) — опора на rate / key-auth / reputation. Для login-путей с браузерным клиентом step-up через challenge уместен.
 
@@ -44,20 +44,20 @@
 
 ## P3 — Failed-auth feedback (log/response-фаза)
 
-Не hot-path-правило, а обратная связь из ответа origin. `log_by_lua`/`header_filter` на login-путях читает upstream `$status`, классифицирует success/fail (401/403 = fail) и копит статистику по hashed-account / IP-/24. Всплеск доли неуспешных логинов → `+score` в reputation и эскалация challenge/strictness на **следующих** запросах источника. Прецедент — паттерн обратной связи D12 (challenge solve-rate).
+Не hot-path-правило, а обратная связь из ответа origin. `log_by_lua`/`header_filter` на login-путях читает upstream `$status`, классифицирует success/fail (401/403 = fail) и копит статистику по hashed-account / IP-/24. Всплеск доли неуспешных логинов → `+score` в reputation и эскалация challenge/strictness на следующих запросах источника. Прецедент — паттерн обратной связи D12 (challenge solve-rate).
 
 | #   | Если…                                                                                                          | То…                                                                                                                            | Категория | Источник                          | Компонент            |
 | --- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | --------- | --------------------------------- | -------------------- |
-| P3.1 | Ответ origin на login-пути имеет `$status` 401/403 | Запрос классифицируется как **failed-auth**, инкрементит счётчик по hashed-account и по IP-/24. Вердикт текущего запроса не меняется | —         | upstream `$status` (response-фаза) | failed-auth feedback |
-| P3.2 | Доля неуспешных логинов (failed-ratio) по hashed-account или IP-/24 превышает порог (всплеск) | `+score` в `reputation` для источника + эскалация challenge/strictness на **последующих** запросах. Тег `account:auth_fail_spike` | `soft`    | Накопленная статистика P3 + reputation | failed-auth feedback |
+| P3.1 | Ответ origin на login-пути имеет `$status` 401/403 | Запрос классифицируется как failed-auth, инкрементит счётчик по hashed-account и по IP-/24. Вердикт текущего запроса не меняется | —         | upstream `$status` (response-фаза) | failed-auth feedback |
+| P3.2 | Доля неуспешных логинов (failed-ratio) по hashed-account или IP-/24 превышает порог (всплеск) | `+score` в `reputation` для источника + эскалация challenge/strictness на последующих запросах. Тег `account:auth_fail_spike` | `soft`    | Накопленная статистика P3 + reputation | failed-auth feedback |
 
-> ⚠️ Это **статистика ответов**, а не проверка валидности пароля. Зависит от допущения, что origin отдаёт различимые статусы на success/fail; допущение фиксируется при внедрении на конкретном домене.
+> ⚠️ Это статистика ответов, а не проверка валидности пароля. Зависит от допущения, что origin отдаёт различимые статусы на success/fail; допущение фиксируется при внедрении на конкретном домене.
 
 ---
 
 ## P5 — Breached-cred / disposable-email (опционально, стадия `identity-extract`/reputation)
 
-Дополнительный сигнал для стаффинга и фейк-регистрации. Реалистичный edge-скоуп — **только disposable-email домены** (каталог через Channel C, как `ua_blacklist`). Полноценная breached-password проверка — бэкенд-функция, **не Lua hot-path** (см. границы ниже).
+Дополнительный сигнал для стаффинга и фейк-регистрации. Реалистичный edge-скоуп — только disposable-email домены (каталог через Channel C, как `ua_blacklist`). Полноценная breached-password проверка — бэкенд-функция, не Lua hot-path (см. границы ниже).
 
 | #   | Если…                                                                                          | То…                                                                                            | Категория | Источник                                | Компонент      |
 | --- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------- | --------------------------------------- | -------------- |
@@ -79,11 +79,11 @@
 
 ## Честные границы — что НЕ делает эдж (⛔ это бэкенд)
 
-Эти сценарии **не** реализуются правилами оси на эдже — они требуют контекста, которого у эджа нет. Перечислены, чтобы правила выше не путали с ними.
+Эти сценарии не реализуются правилами оси на эдже — они требуют контекста, которого у эджа нет. Перечислены, чтобы правила выше не путали с ними.
 
 | Сценарий                       | Почему не эдж                                                                                  | Где решается                          |
 | ------------------------------ | --------------------------------------------------------------------------------------------- | ------------------------------------- |
 | **ATO** (аномальный успешный вход) | Эдж не знает истории аккаунта; даёт лишь fp/geo-контекст                                       | Бэкенд (ADR-005)                      |
 | **Business-logic abuse** (скальпинг, купоны) | Нужен app-контекст, которого нет у эджа                                                        | Приложение клиента / бэкенд           |
-| **Credential stuffing на эдже** | На эдже это = объём + failed-ratio + bot-score, **не** проверка пароля по брешь-листу          | Эдж даёт сигнал, вердикт по объёму P2/P3 |
+| **Credential stuffing на эдже** | На эдже это = объём + failed-ratio + bot-score, не проверка пароля по брешь-листу          | Эдж даёт сигнал, вердикт по объёму P2/P3 |
 | **Breached-password validation** | Полная проверка пароля по брешь-листу — бэкенд-функция, не Lua hot-path (эдж пароль не валидирует) | Бэкенд (ADR-005)                      |
