@@ -76,7 +76,7 @@
 1. Пул под атакой получает обычную реакцию — challenge.
 2. Эскалация challenge → DROP только если challenge перестал окупаться:
      (а) challenge-rate пула упёрся в бюджет CPU/полосы эджа (volumetric); ИЛИ
-     (б) solve_rate пула ≈ 0 ПРИ issued >= MIN_SUBNET_CHALLENGES (G1-guard): тысячи
+     (б) solve_rate пула ≈ 0 ПРИ issued >= MIN_SUBNET_CHALLENGES (D12-guard): тысячи
          выдач, решено ≈ноль → жжём CPU впустую
 3. DROP — на короткий TTL:
      • сам снимается по TTL / окончании атаки
@@ -85,7 +85,7 @@
 
 **Min-порог перед solve_rate (review).** Критерий (б) применяется только при `issued >=
 MIN_SUBNET_CHALLENGES` — иначе 1-2 нерешённых challenge с тихой легит-подсети дали бы формальный
-`solve_rate≈0` и ложный DROP. Тот же асимметричный guard, что в G1 (`MIN_CHALLENGE_ISSUED`).
+`solve_rate≈0` и ложный DROP. Тот же асимметричный guard, что в D12 (`MIN_CHALLENGE_ISSUED`).
 Критерий (а) — volumetric — на малых N и так не срабатывает.
 
 **Защита памяти эджа (review).** Распределённая ротация по огромному числу /24 могла бы
@@ -99,7 +99,7 @@ MIN_SUBNET_CHALLENGES` — иначе 1-2 нерешённых challenge с ти
 attack_mode).
 
 **Как узнаём, что challenge стал нагрузкой (Q1):** rate `antibot_challenge_issued_total` (C5) ×
-стоимость vs бюджет эджа + `cascade_ms` (BAC_LOG timing); и `solve_rate≈0` по пулу (G1) —
+стоимость vs бюджет эджа + `cascade_ms` (BAC_LOG timing); и `solve_rate≈0` по пулу (D12) —
 формальный сигнал «challenge тут только нагрузка». Оба наблюдаемы в метриках/Grafana.
 
 **Гарантии:** жёсткое живёт минутами не вечно; challenge всегда первым, drop — fallback; только
@@ -121,7 +121,7 @@ PATCH, как C7/B10):
 **Детект — на «плохом» трафике, НЕ на голом объёме** (чтобы не наказать флеш-крауд живых людей),
 относительно базлайна хоста:
 - всплеск bot-like вердиктов / challenge-выдачи;
-- `solve_rate` хоста падает в пол (G1);
+- `solve_rate` хоста падает в пол (D12);
 - **origin в стрессе** — растут `upstream_response_ms`/`proxy_ms` (timing-поля BAC_LOG уже есть).
 
 **ВКЛ и ВЫКЛ — на РАЗНЫХ сигналах (review, защита от осцилляции):** origin-стресс годится только
@@ -140,12 +140,12 @@ attack_mode (auto vs manual) — прецедент различения «кт�
 
 ## Разбивка на тикеты
 
-- **[G2] #3 Phase 1** — subnet-репутация (soft, аналитика): DC-гейт, /24-агрегация
+- **[G1] #3 Phase 1** — subnet-репутация (soft, аналитика): DC-гейт, /24-агрегация
   churn/human_share/recon, +score в fp, апгрейд `find_asn_watch_candidates`, опц. soft-Strictness
   через Channel C `subnet_reputation`. Не трогает attack-путь.
-- **[G3] #3 Phase 2** — transient subnet challenge→drop под атакой: эдж-реактивные /24-счётчики,
-  гейт attack_mode, эскалация по бюджету/solve_rate, TTL+авто-снятие, прайор из G2. Зависит от G4.
-- **[G4] авто-attack-mode** — адаптивный детект атаки (плохой трафик + origin-стресс), флаг
+- **[G2] #3 Phase 2** — transient subnet challenge→drop под атакой: эдж-реактивные /24-счётчики,
+  гейт attack_mode, эскалация по бюджету/solve_rate, TTL+авто-снятие, прайор из G1. Зависит от G3.
+- **[G3] авто-attack-mode** — адаптивный детект атаки (плохой трафик + origin-стресс), флаг
   `auto_attack_mode` (дефолт off) + алерт при off, авто-вкл/выкл с источником, override клиента.
 
 ## Честное ограничение (обе фазы)

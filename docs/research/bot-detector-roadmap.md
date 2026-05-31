@@ -6,10 +6,10 @@
 > Точкой отсчёта служит закрытый D1 (см. [blocklist-scoring.md](../blocklist-scoring.md)).
 >
 > **Триаж завершён (2026-05-30): все шесть идей проработаны в дизайн-доки + тикеты.**
-> #1 [solve-rate](challenge-solve-rate-design.md) (G1) · #2 [позитивный fp-каталог](positive-fp-catalog-design.md)
-> (D13, +спайк E2 HTTP/2) · #3 [subnet-юнит](subnet-unit-design.md) (G2/G3/G4) ·
+> #1 [solve-rate](challenge-solve-rate-design.md) (D12) · #2 [позитивный fp-каталог](positive-fp-catalog-design.md)
+> (D13, +спайк E2 HTTP/2) · #3 [subnet-юнит](subnet-unit-design.md) (G1/G2/G3) ·
 > #5 [anti-poisoning](scoring-anti-poisoning-design.md) (D18/D19) ·
-> #6 [кросс-тенант threat-intel](cross-tenant-threat-intel-design.md) (G5) ·
+> #6 [кросс-тенант threat-intel](cross-tenant-threat-intel-design.md) (G4) ·
 > #4 [поведенческие сигналы](behavioral-signals-design.md) — **дизайн зафиксирован, реализация
 > ОТЛОЖЕНА** (худшее эффект/точность). Приоритет дальше — реализация #1/#3/#5, не новые сигналы.
 
@@ -68,7 +68,7 @@ Score сейчас бинарно-аддитивный по статике. До
 активных атакующих, авто-публикуемый во время атаки и пред-взводящий ВСЕ эджи (challenge-first,
 ниже порог), чтобы при пивоте ботнета A→B другие реагировали за секунды. Высокий порог промоции
 (ложняк теперь бьёт всех → усиливает важность #5). Дизайн: см. отдельный документ. Связано с
-G2 (`subnet_reputation` стоит делать глобальным) и G3 (горячие /24).
+G1 (`subnet_reputation` стоит делать глобальным) и G2 (горячие /24).
 
 ## Связь с существующим бэклогом D-серии (PROGRESS.md)
 - Уже стоит: **D2, D3, D4** (каталоги/mismatch), D5 (кэш), D6 (метрики), E1 (DBSC).

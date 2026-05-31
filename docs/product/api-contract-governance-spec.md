@@ -89,7 +89,7 @@ Response-side, дёшево/высокий ROI: security-заголовки (HST
 Эдж уже логирует весь трафик (`bac_log`) и знает объявленные пути (P4) → почти бесплатная
 инвентаризация: diff вызываемых vs объявленных → undeclared (shadow) / declared-but-unused
 (zombie), тег `api:shadow_endpoint`; enforcement устаревших версий (deprecated path → 410,
-mode-gated); опц. draft-PR кандидатов в декларацию (паттерн `find_asn_watch_candidates` из G2).
+mode-gated); опц. draft-PR кандидатов в декларацию (паттерн `find_asn_watch_candidates` из G1).
 
 ## 5. Что переиспользуем
 hygiene method-модель (`method_lookup`), `policy` + B10 Policy API, glob (`is_api_path`),
