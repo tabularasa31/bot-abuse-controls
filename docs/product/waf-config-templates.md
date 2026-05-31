@@ -7,8 +7,8 @@ virtual-patch правила. Источник правды по поведен�
 сущностей — [waf-entities-reference.md](waf-entities-reference.md).
 
 **Статус:** проектный контракт (целевое поведение); движок (build-vs-buy) не
-выбран — открыт в ADR-007. **Точный синтаксис сигнатур фиксируется вместе с
-движком** (своя Lua / Coraza+CRS seclang / гибрид). Шаблоны ниже сознательно
+выбран — открыт (решается спайком + архитектурным решением). Точный синтаксис сигнатур фиксируется вместе с
+движком (своя Lua / Coraza+CRS seclang / гибрид). Шаблоны ниже сознательно
 описывают структуру и семантику на уровне контракта — поля записи, статусы,
 скоуп инспекции, mode-gate — так, чтобы они держались независимо от выбора
 движка. Внутренности сигнатур (regex/seclang) показаны как абстрактные
@@ -18,7 +18,7 @@ placeholder'ы.
 структура данных и семантика полей, не конкретный синтаксис.
 
 > **Прецедент.** `waf_rules` доставляется через Channel C ровно как
-> `tls_fp_blocklist`: git — единственный источник истины (ADR-006), PR-only +
+> `tls_fp_blocklist`: git — единственный источник истины, PR-only +
 > CODEOWNERS, staged rollout (`staging`/`active`), `git revert`, CI-валидация
 > (синтаксис/компиляция) перед мержем. Контракт каталога-блоклиста тот же,
 > отличается лишь содержимое записи (сигнатура вместо fp-строки).
@@ -33,7 +33,7 @@ waf_rules/                  ← сигнатурный каталог (PR-нап
   command_injection.yaml    ← сигнатуры command-injection
   ssrf_lfi.yaml             ← сигнатуры SSRF/LFI
   virtual_patch.yaml        ← точечные правила-щиты под CVE/эндпоинты клиентов
-policy/<host>.yaml          ← per-host WAF-профиль (часть policy, через B10 Policy API)
+policy/<host>.yaml          ← per-host WAF-профиль (часть политики, per-host)
 ```
 
 Разбивка по файлам — иллюстративная; фактическая раскладка (один файл или
@@ -45,11 +45,11 @@ policy/<host>.yaml          ← per-host WAF-профиль (часть policy, 
 
 Каждая запись — одна сигнатура под класс атаки. Поля записи контрактны
 (`id`, `class`, `category`, `targets`, `status`); тело сигнатуры (`signature`)
-— абстрактный placeholder, его синтаксис задаёт ADR-007.
+— абстрактный placeholder, его синтаксис задает выбранный движок.
 
 ```yaml
 # waf_rules — сигнатурный каталог (через Channel C, PR-only, с staged rollout)
-# Тело сигнатуры (signature) — placeholder; реальный синтаксис фиксирует ADR-007.
+# Тело сигнатуры (signature) — placeholder; реальный синтаксис фиксирует выбранный движок.
 
 rules:
   - id: sqli_union_select_001          # стабильный id, пишется в rule / staging_match
@@ -59,7 +59,7 @@ rules:
     targets: [query, body]             # цели инспекции: query | body | headers | path
     paranoia: low                      # с какого уровня waf_paranoia правило включается
     status: active                     # staging | active (см. staged rollout ниже)
-    signature: <ABSTRACT>              # тело сигнатуры — синтаксис по ADR-007
+    signature: <ABSTRACT>              # тело сигнатуры — синтаксис по выбранному движку
     reason: "UNION SELECT exfil pattern"
 
   - id: sqli_boolean_blind_014
@@ -111,14 +111,13 @@ rules:
   (`low`/`medium`/`high`). Соответствие уровней правилам — содержимое каталога.
 - `status` — `staging` или `active` (staged rollout).
 - `signature` — тело сигнатуры. Применяется ПОСЛЕ общей нормализации
-  (URL-decode, unicode, comment-strip) — иначе тривиален evasion. Синтаксис —
-  ADR-007.
+  (URL-decode, unicode, comment-strip) — иначе тривиален evasion. Синтаксис задает выбранный движок.
 
 ---
 
 ## 2. Per-host WAF-профиль (внутри `policy/<host>.yaml`)
 
-Расширение policy домена. Редактируется через B10 Policy API (PATCH), приходит
+Расширение policy домена. Редактируется через per-host политику (PATCH), приходит
 на proxy через Channel C как часть каталога `policy`. Независим от
 `mode`/`strictness`: `mode` управляет shadow/active исполнением (mode-gate
 `policy.enforce`), WAF-профиль — охватом инспекции.
@@ -155,7 +154,7 @@ example.com:
 
 ## 3. Соглашения по staged rollout (как у `tls_fp_blocklist`)
 
-Те же правила, что и для прочих PR-каталогов каскада (ADR-006), применяются к
+Те же правила, что и для прочих PR-каталогов каскада, применяются к
 `waf_rules`:
 
 1. **Новые сигнатуры всегда добавляются с `status: staging`.** В этом статусе
@@ -165,8 +164,8 @@ example.com:
    выборка по логам).
 3. После наблюдения, при отсутствии false-positive, — отдельный PR с переводом
    `status: staging` → `status: active`.
-4. Если в `staging`-периоде сигнатура дала false-positive — **revert исходного
-   PR** (не оставляем в staging, чтобы не копить «забытые» записи).
+4. Если в `staging`-периоде сигнатура дала false-positive — revert исходного
+   PR (не оставляем в staging, чтобы не копить «забытые» записи).
 
 Промоут сигнатуры — отдельный осознанный этап, не автоматический. CI-валидация
 (синтаксис/компиляция правила) — обязательный гейт перед мержем любого PR в
@@ -210,7 +209,7 @@ rules:
 
 ## 5. Чего в формате НЕТ (границы)
 
-- **Синтаксис тела сигнатуры** — не зафиксирован до ADR-007 (`signature:
+- **Синтаксис тела сигнатуры** — не зафиксирован до выбора движка (`signature:
   <ABSTRACT>`). Зависит от выбора движка (своя Lua / seclang CRS / гибрид).
 - **Позитивная модель (контракт API)** — отдельная ось и отдельный формат; WAF
   (негативная модель) её не заменяет, см. [waf-spec.md](waf-spec.md) §1 и
