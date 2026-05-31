@@ -33,6 +33,9 @@ def _ev(**kw):
         remote="9.9.9.9", asn=None, geo_country=None, fp="L13d1_aaaa_bbbb",
         ua_family="(empty)", cipher_count=99, hash_tail="zz", cipher_hash="yy",
         uri="/", ua="-", verdict="pass",
+        # D12 solve-rate signal defaults: active host, not under attack, so a
+        # plain _ev() counts toward the signal unless a test overrides these.
+        rule="-", mode="active", attack_mode=False,
     )
     base.update(kw)
     return base
@@ -364,3 +367,138 @@ def test_rotate_exempts_catalog_fps(state, monkeypatch, tmp_path):
     assert "blocked_silent" in active      # exempt — kept active for the stale view
     assert "plain_old" not in active        # non-catalog -> archived
     assert summary["fps"]["archived"] == 1
+
+
+# --- D12 challenge solve-rate signal -----------------------------------------
+
+def _issued(n, **kw):
+    return [_ev(verdict="challenge", **kw) for _ in range(n)]
+
+
+def _solved(n, **kw):
+    return [_ev(verdict="allow", rule="challenge_pass", **kw) for _ in range(n)]
+
+
+def test_solve_signal_caps_rate_at_one():
+    # solved > issued can happen on the first load (issued below retention) —
+    # min(.,1.0) absorbs it instead of reporting a >100% solve rate.
+    sig = az.solve_signal(issued=2, solved=5)
+    assert sig["solve_rate"] == 1.0
+
+
+def test_solve_signal_zero_issued_is_safe():
+    sig = az.solve_signal(issued=0, solved=0)
+    assert sig["solve_rate"] == 0.0 and sig["enough"] is False
+
+
+def test_solve_signal_enough_at_threshold(monkeypatch):
+    monkeypatch.setattr(az, "MIN_CHALLENGE_ISSUED", 10)
+    assert az.solve_signal(9, 0)["enough"] is False
+    assert az.solve_signal(10, 0)["enough"] is True
+
+
+def test_challenge_counts_filters_shadow_and_attack():
+    events = (
+        _solved(3)                                    # active, attack off  -> counted
+        + _issued(4)                                  # active, attack off  -> counted
+        + _solved(5, mode="shadow")                   # shadow              -> ignored
+        + _issued(5, mode="shadow")
+        + _solved(5, attack_mode=True)                # under attack        -> ignored
+        + _issued(5, attack_mode=True)
+        + _solved(2, attack_mode=None)                # field absent (old)  -> ignored
+        + _issued(2, attack_mode=None)
+    )
+    issued, solved = az._challenge_counts(events)
+    assert (issued, solved) == (4, 3)
+
+
+def test_challenge_counts_solved_strictly_challenge_pass():
+    # the single-use clearance cookie fastpaths as verdict=allow rule=cookie_valid
+    # — it must NOT inflate solved (design §single-use).
+    events = _issued(3) + _solved(1) + [_ev(verdict="allow", rule="cookie_valid")]
+    issued, solved = az._challenge_counts(events)
+    assert (issued, solved) == (3, 1)
+
+
+@pytest.fixture
+def ladder(monkeypatch):
+    monkeypatch.setattr(az, "MIN_CHALLENGE_ISSUED", 10)
+    monkeypatch.setattr(az, "LOW_SOLVE_RATE", 0.05)
+    monkeypatch.setattr(az, "HUMAN_SOLVE_RATE", 0.5)
+
+
+@pytest.mark.parametrize("issued,solved,expected", [
+    (5, 0, "clear"),     # small N, no solve -> neutral (volume gate handles it)
+    (5, 1, "veto"),      # small N, a human solved -> veto (protect people)
+    (100, 0, "clear"),   # enough, rate 0   -> bot, promote OK
+    (100, 3, "clear"),   # enough, 0.03 <= LOW -> still bot (the fixed "one solve shields" bug)
+    (100, 30, "gray"),   # enough, 0.30 in band -> gray (staging observation)
+    (100, 90, "veto"),   # enough, 0.90 >= HUMAN -> veto (humans/legit browsers)
+])
+def test_challenge_pass_gate_ladder(ladder, issued, solved, expected):
+    assert az._challenge_pass_gate(issued, solved) == expected
+
+
+def test_challenge_pass_gate_no_zero_division_when_min_zero(monkeypatch):
+    # A misconfigured MIN_CHALLENGE_ISSUED==0 must not crash on issued==0.
+    monkeypatch.setattr(az, "MIN_CHALLENGE_ISSUED", 0)
+    assert az._challenge_pass_gate(0, 0) == "clear"
+    assert az._challenge_pass_gate(0, 3) == "veto"
+
+
+def test_hard_identity_allow_excludes_challenge_pass():
+    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="cookie_valid")]) is True
+    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="ip_whitelist")]) is True
+    # challenge_pass is no longer a hard veto — it goes through the ladder.
+    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="challenge_pass")]) is False
+    assert az._fp_hard_identity_allow([_ev(verdict="pass")]) is False
+
+
+def _staging_events(fp, issued, solved, **kw):
+    """Build staging events. issued events run the cascade staging stage so they
+    carry the staging_match token; solved events come from the separate
+    /__challenge/verify endpoint — they carry the fp (tls_fp join key) but NOT
+    the token. find_staging_observation must count solves by fp, not by token."""
+    token = "tls_fp_blocklist:" + fp
+    iss = _issued(issued, fp=fp, **kw)
+    for e in iss:
+        e["staging_match"] = [token]
+    sol = _solved(solved, fp=fp, **kw)   # no staging_match token (separate endpoint)
+    evs = iss + sol
+    for e in evs:
+        e["ts_dt"] = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    return evs
+
+
+@pytest.fixture
+def staging_catalog(tmp_path, monkeypatch, ladder):
+    cat = tmp_path / "catalogs"
+    cat.mkdir()
+    (cat / "tls_fp_blocklist.yaml").write_text('"FP_STAGE": staging\n')
+    (cat / "ip_whitelist.yaml").write_text("[]\n")
+    monkeypatch.setattr(az, "CATALOGS_DIR", cat)
+    monkeypatch.setattr(az, "MIN_STAGING_MATCHES", 10)
+    return cat
+
+
+def _staging_verdict(events, now):
+    out = az.find_staging_observation(events, now, min_staging_hours=48)
+    return out[0]["verdict"]
+
+
+def test_staging_high_solve_rate_is_fp_caught(staging_catalog):
+    now = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    evs = _staging_events("FP_STAGE", issued=100, solved=90)
+    assert _staging_verdict(evs, now) == "fp_caught"
+
+
+def test_staging_low_solve_rate_activates(staging_catalog):
+    now = datetime(2026, 5, 10, tzinfo=timezone.utc)   # >48h after the events
+    evs = _staging_events("FP_STAGE", issued=100, solved=0)
+    assert _staging_verdict(evs, now) == "activate"
+
+
+def test_staging_gray_solve_rate_observes(staging_catalog):
+    now = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    evs = _staging_events("FP_STAGE", issued=100, solved=30)
+    assert _staging_verdict(evs, now) == "observe"

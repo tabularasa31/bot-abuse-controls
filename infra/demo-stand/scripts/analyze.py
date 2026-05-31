@@ -136,6 +136,13 @@ TTL_DAYS = int(os.environ.get("BAC_TTL_DAYS", "14"))
 # staging→active observation gates (§D).
 MIN_STAGING_HOURS = int(os.environ.get("BAC_MIN_STAGING_HOURS", "48"))
 MIN_STAGING_MATCHES = int(os.environ.get("BAC_MIN_STAGING_MATCHES", "10"))
+# D12 challenge solve-rate signal (docs/research/challenge-solve-rate-design.md).
+# issued/solved are accumulated lifetime per-fp in seen-fps.json, counted only on
+# `mode==active AND attack_mode==off` events. Start values are calibration-only
+# (env-overridable, tuned later on real active-staging data — no code change).
+MIN_CHALLENGE_ISSUED = int(os.environ.get("BAC_MIN_CHALLENGE_ISSUED", "10"))
+LOW_SOLVE_RATE = float(os.environ.get("BAC_LOW_SOLVE_RATE", "0.05"))
+HUMAN_SOLVE_RATE = float(os.environ.get("BAC_HUMAN_SOLVE_RATE", "0.5"))
 
 KNOWN_TOOL_HASH_TAILS = {
     "2d5fbeed7632": "curl",
@@ -242,6 +249,12 @@ def _event_from_bac_line(line):
         "fp": fp,
         "verdict": rec.get("verdict") or "pass",
         "rule": rec.get("rule") or "-",
+        # D12 solve-rate signal filter (§A): valid only on active-host,
+        # attack-off events. `mode` is the per-host enum (B11); `attack_mode`
+        # is the edge boolean — None means the log predates the field rollout,
+        # which _is_signal_event treats as not-countable (conservative).
+        "mode": rec.get("mode") or "-",
+        "attack_mode": rec.get("attack_mode"),
         "status": str(status) if status is not None else "-",
         "uri": rec.get("path") or "-",
         "remote": rec.get("ip") or "-",
@@ -919,16 +932,82 @@ def _ip_in_whitelist(ip, nets):
     return any(addr in n for n in nets)
 
 
-def _fp_has_identity_allow(events_for_fp):
-    """True if the cascade ever let this fp through on a positive-identity rule.
+# --- D12 challenge solve-rate signal -----------------------------------------
+# docs/research/challenge-solve-rate-design.md. Splits the old binary
+# _fp_has_identity_allow (any verdict==allow) into a HARD identity veto
+# (ip_whitelist/cookie_valid/... — stays binary) plus a challenge_pass LADDER
+# (a bet by volume, not a binary shield), so one solved challenge no longer
+# shields a headless fp forever.
 
-    verdict=="allow" is emitted only by clearance/identity rules — ip_whitelist,
-    policy.ip_whitelist (reputation.lua), cookie_valid (verdict.lua), challenge_pass
-    (challenge_verify.lua) — never by a mere absence of bot signal (that is "pass").
-    We match on the verdict, NOT a hardcoded rule-name list: the rule names drift
-    (e.g. policy.ip_whitelist) and a missed name silently weakens the allowlist veto.
-    If a fp rode in on any of these, auto-blocking it is unsafe."""
-    return any(e.get("verdict") == "allow" for e in events_for_fp)
+def _is_signal_event(e):
+    """True if this event is valid for the solve-rate signal (§A): the challenge
+    was a verdict ABOUT the fp, not a host posture. Requires mode==active (under
+    shadow the page is not served → solved always 0) and attack_mode==off (under
+    attack L5 forces challenge on everyone, real humans bail → falsely low rate).
+    attack_mode is None on logs predating the edge field — not countable."""
+    return e.get("mode") == "active" and e.get("attack_mode") is False
+
+
+def _challenge_counts(events):
+    """(issued, solved) over signal-valid events. solved is counted STRICTLY on
+    rule==challenge_pass, never on any verdict==allow: the clearance cookie
+    fastpaths later requests as rule==cookie_valid (also allow), and counting
+    those would let one solve inflate the numerator (design §single-use)."""
+    issued = sum(1 for e in events
+                 if _is_signal_event(e) and e.get("verdict") == "challenge")
+    solved = sum(1 for e in events
+                 if _is_signal_event(e)
+                 and e.get("verdict") == "allow" and e.get("rule") == "challenge_pass")
+    return issued, solved
+
+
+def solve_signal(issued, solved):
+    """Pure summary of the solve-rate signal. solve_rate is capped at 1.0: on the
+    first load a solved event can fall inside the retention window while its
+    paired issued is just below it (solved>issued); accumulation self-corrects."""
+    rate = min(solved / issued, 1.0) if issued > 0 else 0.0
+    return {"issued": issued, "solved": solved, "solve_rate": rate,
+            "enough": issued >= MIN_CHALLENGE_ISSUED}
+
+
+def _challenge_pass_gate(issued, solved):
+    """The §B2 ladder → 'veto' | 'gray' | 'clear'. issued/solved are lifetime
+    counts (from seen-fps, for scoring/candidates) or counts among staging
+    matches (for find_staging_observation).
+
+    Asymmetry is deliberate: a human's solve VETOES even on small N (protect
+    people), but LIFTING the veto needs enough issued; in between → neither
+    block nor forgive, but observe.
+      issued < MIN  → solved>0: veto (someone solved at low volume — don't risk
+                      promoting); solved==0: clear (this signal doesn't veto —
+                      the volume gate MIN_EVENTS usually filters such fps anyway).
+      issued >= MIN → rate>=HUMAN: veto (real solving → humans/legit browsers);
+                      rate<=LOW:  clear (a bot that doesn't solve → promote OK,
+                                  even after a few stray solves — the fixed bug);
+                      otherwise:  gray (unconvincing → no auto-promote, no hard
+                                  veto → staging observation)."""
+    # issued <= 0 guards a misconfigured MIN_CHALLENGE_ISSUED==0 (the
+    # `issued < MIN` check would not catch issued==0 then → ZeroDivisionError).
+    if issued <= 0 or issued < MIN_CHALLENGE_ISSUED:
+        return "veto" if solved > 0 else "clear"
+    rate = min(solved / issued, 1.0)
+    if rate >= HUMAN_SOLVE_RATE:
+        return "veto"
+    if rate <= LOW_SOLVE_RATE:
+        return "clear"
+    return "gray"
+
+
+def _fp_hard_identity_allow(events_for_fp):
+    """True if the cascade let this fp through on a HARD positive-identity rule —
+    ip_whitelist, policy.ip_whitelist (reputation.lua), cookie_valid (verdict.lua),
+    i.e. any verdict==allow EXCEPT challenge_pass. These stay a binary allowlist
+    veto. challenge_pass is excluded here and handled by _challenge_pass_gate: a
+    solved challenge is no longer a permanent shield (design §B2). We match on
+    verdict (rule names drift, e.g. policy.ip_whitelist) and carve out only the
+    one stable named rule the design depends on."""
+    return any(e.get("verdict") == "allow" and e.get("rule") != "challenge_pass"
+               for e in events_for_fp)
 
 
 def _parse_blocklist_text(text):
@@ -1125,6 +1204,16 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
         score += 1
         reasons.append(f"recon URI: {', '.join(sorted(suspicious_uris)[:3])} +1")
 
+    # D12 challenge solve-rate (lifetime, from state). +2: between impersonator
+    # (+3, dictionary-exact) and weak heuristics (+1) — a strong behavioural
+    # signal, hard to fake. Only ranks; the gate decision is separate (§B1).
+    sig = solve_signal((seen_entry or {}).get("challenge_issued", 0),
+                       (seen_entry or {}).get("challenge_solved", 0))
+    if sig["enough"] and sig["solve_rate"] <= LOW_SOLVE_RATE:
+        score += 2
+        reasons.append(f"challenge не решается (issued={sig['issued']}, "
+                       f"solved={sig['solved']}) +2")
+
     return score, reasons, tags
 
 
@@ -1167,11 +1256,21 @@ def find_blocklist_candidates(events, ip_cache, seen):
         generic_honest_tool = known_tool and not has_impersonator
         intent = has_impersonator or (has_recon and not generic_honest_tool)
 
+        # D12 challenge_pass ladder (§B2), on lifetime issued/solved from state.
+        # "veto" kills the allowlist gate; "gray" passes the gate but blocks
+        # auto-promote (→ staging observation); "clear" imposes no constraint.
+        # Read the counters and the two hard-identity components once so the
+        # gate, the output dict, and the operator message all agree.
+        cl_issued = (seen.get(fp) or {}).get("challenge_issued", 0)
+        cl_solved = (seen.get(fp) or {}).get("challenge_solved", 0)
+        cp_gate = _challenge_pass_gate(cl_issued, cl_solved)
+        wl_hit = any(_ip_in_whitelist(ip, whitelist_nets) for ip in ips)
+        hard_id = _fp_hard_identity_allow(evs)
+
         gates = {
             "purity": hs <= MAX_HUMAN_SHARE,
             "volume": n_lifetime >= MIN_EVENTS and len(ips) >= 1,
-            "allowlist": not any(_ip_in_whitelist(ip, whitelist_nets) for ip in ips)
-                          and not _fp_has_identity_allow(evs),
+            "allowlist": not wl_hit and not hard_id and cp_gate != "veto",
             "dedup": fp not in in_catalog,
         }
         if score >= 5:
@@ -1185,6 +1284,7 @@ def find_blocklist_candidates(events, ip_cache, seen):
             and len(days) >= MIN_DAYS_PROMOTE
             and all(gates.values())
             and intent
+            and cp_gate != "gray"   # gray solve-rate → staging observation, not auto-promote
         )
 
         # Operator-facing one-liner that explains the gate outcome, not just the
@@ -1201,8 +1301,15 @@ def find_blocklist_candidates(events, ip_cache, seen):
         elif tier == "HIGH" and not gates["volume"]:
             suggested_action = (f"HIGH, но мало данных: lifetime {n_lifetime} < {MIN_EVENTS} "
                                 f"или дней {len(days)} < {MIN_DAYS_PROMOTE} — наблюдать")
-        elif tier == "HIGH" and not gates["allowlist"]:
+        elif tier == "HIGH" and (wl_hit or hard_id):
             suggested_action = "HIGH, но в allowlist/verified — не блокировать (жесткое вето)"
+        elif tier == "HIGH" and cp_gate == "veto":
+            suggested_action = (f"HIGH, но challenge решается (issued={cl_issued}, "
+                                f"solved={cl_solved}) — под fp есть люди/легит, не блокировать")
+        elif tier == "HIGH" and cp_gate == "gray":
+            suggested_action = ("HIGH, но challenge solve-rate в серой зоне "
+                                f"({LOW_SOLVE_RATE}–{HUMAN_SOLVE_RATE}) — не авто-промоут, "
+                                "staging-наблюдение")
         elif tier == "HIGH" and not gates["dedup"]:
             suggested_action = "уже в blocklist-каталоге"
         elif tier == "MEDIUM":
@@ -1224,6 +1331,9 @@ def find_blocklist_candidates(events, ip_cache, seen):
             "generic_honest_tool": generic_honest_tool,
             "intent": intent,
             "gates": gates,
+            "challenge_issued": cl_issued,
+            "challenge_solved": cl_solved,
+            "challenge_gate": cp_gate,
             "auto_eligible": auto_eligible,
             "suggested_action": suggested_action,
         })
@@ -1322,14 +1432,32 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
     whitelist_nets = _load_ip_whitelist()
     catalog = _parse_blocklist_yaml()
     staging_fps = [fp for fp, st in catalog.items() if st == "staging"]
+    # Index events by fp once (O(E)) so the per-fp solve-rate count below is a
+    # dict lookup, not another full scan per staging fp (was O(S·E)).
+    events_by_fp = defaultdict(list)
+    for e in events:
+        if e.get("fp"):
+            events_by_fp[e["fp"]].append(e)
     out = []
     for fp in sorted(staging_fps):
         token = "tls_fp_blocklist:" + fp
         matched = [e for e in events if token in (e.get("staging_match") or [])]
         n = len(matched)
         hs = human_share(matched)
-        allowlist_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
-            or _fp_has_identity_allow(matched)
+        # Hard identity (whitelist IP or non-challenge_pass allow) still means
+        # "caught a real client". challenge_pass is judged by solve_rate among
+        # the active matches instead (§B2) — this is where HUMAN_SOLVE_RATE gets
+        # real meaning: many solved challenges → humans → fp_caught.
+        hard_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
+            or _fp_hard_identity_allow(matched)
+        # Count solves by fp, NOT among `matched`: a solved challenge is emitted
+        # by the separate /__challenge/verify endpoint, which never runs the
+        # tls_fp staging stage, so the solve event carries tls_fp (the join key,
+        # set on the verify path) but NOT the staging_match token. Counting only
+        # `matched` (token-keyed) would miss every solve → undercount s_solved →
+        # a real browser fp with many solves could still reach `activate`.
+        s_issued, s_solved = _challenge_counts(events_by_fp.get(fp, []))
+        cp_gate = _challenge_pass_gate(s_issued, s_solved)
         if fp in since_map:
             observed_hours = round((now_utc - since_map[fp]).total_seconds() / 3600, 1)
         else:
@@ -1338,15 +1466,20 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
 
         if n == 0:
             verdict = "observe"  # silent — the stale path will pick it up
-        elif hs > 0 or allowlist_hit:
-            verdict = "fp_caught"  # caught a real browser / allowlisted client
+        elif hs > 0 or hard_hit or cp_gate == "veto":
+            # real browser / hard-allowlisted client / fp actually solves challenges
+            verdict = "fp_caught"
+        elif cp_gate == "gray":
+            verdict = "observe"  # unconvincing solve-rate — keep gathering data
         elif observed_hours >= min_staging_hours and n >= MIN_STAGING_MATCHES:
             verdict = "activate"
         else:
             verdict = "observe"
         out.append({
             "fp": fp, "n_matches": n, "human_share": round(hs, 4),
-            "observed_hours": observed_hours, "allowlist_hit": allowlist_hit,
+            "observed_hours": observed_hours, "allowlist_hit": hard_hit,
+            "challenge_issued": s_issued, "challenge_solved": s_solved,
+            "challenge_gate": cp_gate,
             "verdict": verdict,
         })
     return out
@@ -1857,6 +1990,7 @@ def render_subject(events_24h, seen, sLT, ip_cache, now_utc):
 
 def main() -> int:
     global MAX_HUMAN_SHARE, MIN_EVENTS, MIN_DAYS_PROMOTE, MIN_STAGING_MATCHES
+    global MIN_CHALLENGE_ISSUED, LOW_SOLVE_RATE, HUMAN_SOLVE_RATE
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--html", action="store_true")
@@ -1876,6 +2010,10 @@ def main() -> int:
     ap.add_argument("--max-human-share", type=float, default=MAX_HUMAN_SHARE)
     ap.add_argument("--min-events", type=int, default=MIN_EVENTS)
     ap.add_argument("--min-days-promote", type=int, default=MIN_DAYS_PROMOTE)
+    # D12 challenge solve-rate thresholds (calibration-only; tune on real data).
+    ap.add_argument("--min-challenge-issued", type=int, default=MIN_CHALLENGE_ISSUED)
+    ap.add_argument("--low-solve-rate", type=float, default=LOW_SOLVE_RATE)
+    ap.add_argument("--human-solve-rate", type=float, default=HUMAN_SOLVE_RATE)
     ap.add_argument("--source", choices=("loki", "docker"), default=SOURCE,
                     help="event source (default loki; docker = edge container)")
     ap.add_argument("--hours", type=int, default=None,
@@ -1886,6 +2024,9 @@ def main() -> int:
     MIN_EVENTS = args.min_events
     MIN_DAYS_PROMOTE = args.min_days_promote
     MIN_STAGING_MATCHES = args.min_staging_matches
+    MIN_CHALLENGE_ISSUED = args.min_challenge_issued
+    LOW_SOLVE_RATE = args.low_solve_rate
+    HUMAN_SOLVE_RATE = args.human_solve_rate
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1927,7 +2068,10 @@ def main() -> int:
             "generated_utc": gen,
             "thresholds": {"max_human_share": MAX_HUMAN_SHARE,
                            "min_events": MIN_EVENTS,
-                           "min_days_promote": MIN_DAYS_PROMOTE},
+                           "min_days_promote": MIN_DAYS_PROMOTE,
+                           "min_challenge_issued": MIN_CHALLENGE_ISSUED,
+                           "low_solve_rate": LOW_SOLVE_RATE,
+                           "human_solve_rate": HUMAN_SOLVE_RATE},
             "high": high, "medium": medium, "low": low,
         }, ensure_ascii=False, indent=2) + "\n")
         return 0
@@ -2008,6 +2152,13 @@ def main() -> int:
             days = set(seen[fp].get("days_seen", []))
             days.add(ev_day)
             seen[fp]["days_seen"] = sorted(days)
+        # D12: accumulate the solve-rate signal lifetime per-fp, counting only
+        # active-host, attack-off events (§A). Same watermark dedup as `count`.
+        if _is_signal_event(e):
+            if e.get("verdict") == "challenge":
+                seen[fp]["challenge_issued"] = seen[fp].get("challenge_issued", 0) + 1
+            elif e.get("verdict") == "allow" and e.get("rule") == "challenge_pass":
+                seen[fp]["challenge_solved"] = seen[fp].get("challenge_solved", 0) + 1
         ip = e["remote"]
         if ip in ip_cache and "error" not in ip_cache[ip]:
             ip_cache[ip]["count"] = ip_cache[ip].get("count", 0) + 1

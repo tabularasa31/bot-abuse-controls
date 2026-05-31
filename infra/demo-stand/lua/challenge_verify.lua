@@ -380,6 +380,18 @@ function _M.handle()
     local bac_log = require "bac_log"
     bac_log.init()
     bac_log.set_verdict("verification", "allow", "challenge_pass")
+    -- [D12] Attach the client's TLS fingerprint so the solved (challenge_pass)
+    -- event JOINS to the issued (verdict=challenge) events keyed by tls_fp in
+    -- analyze.py. This endpoint is a carve-out (no access_by_lua), so the L3
+    -- tls_fp stage never ran and ctx.tls_fp is unset — without this the record
+    -- carries only challenge_fp (the browser JS fp) with tls_fp=null, and
+    -- _event_from_bac_line drops it → challenge_solved stays 0 for every fp and
+    -- the solve-rate signal would mislabel solving humans as bots. The verify
+    -- request is the SAME TLS client that was challenged, so its computed fp
+    -- matches the issued challenge's tls_fp (same compute() the cascade uses,
+    -- verdict.lua:176-177).
+    local ja4 = require "ja4_compute"
+    bac_log.set_tls_fp(ja4.compute())
     -- payload.fp пришёл из attacker-controlled JSON (body уже капнут
     -- MAX_BODY_BYTES, но fp как поддерево может занимать почти весь
     -- лимит и при глубокой вложенности завалить cjson.encode в
