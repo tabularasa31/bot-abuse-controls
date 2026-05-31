@@ -55,3 +55,33 @@
 # score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.example, /.env.example.php +1
 # human_share 0.0 · events 119 · review-by 2026-06-13
 "L13i1300_69e852b66fc7_58c7b6d0026c": staging
+
+# promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 41 разных IP +1 / persistent: 3 разных дней +1
+# human_share 0.0 · events 107 · review-by 2026-06-14
+"L13d10h2_cb588a7868d0_3a034d2f4474": staging
+
+# promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.aws/credentials, /.env, /.env.development +1
+# human_share 0.0 · events 120 · review-by 2026-06-14
+"L13d13h1_69e852b66fc7_f390cb5519b9": staging
+
+# promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 4 разных дней +1
+# human_share 0.0 · events 44 · review-by 2026-06-14
+"L13d30h1_bcf826a2cd28_60bdc24aefcc": staging
+
+# promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 15 разных IP +1 / persistent: 3 разных дней +1
+# human_share 0.0 · events 25 · review-by 2026-06-14
+"L13d26h2_9e73a0ed0670_2d5fbeed7632": staging
+
+# promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
+# human_share 0.0 · events 67 · review-by 2026-06-14
+"L13d1300_69e852b66fc7_58c7b6d0026c": staging
+
+# promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 13 разных IP +1 / persistent: 3 разных дней +1
+# human_share 0.0 · events 51 · review-by 2026-06-14
+"L13d3000_bcf826a2cd28_430ec2476535": staging
