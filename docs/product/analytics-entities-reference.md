@@ -22,7 +22,7 @@
 | **signal (сигнал)** | отдельное слагаемое score: impersonator, suspicious cipher, automation UA, DC ASN, multi-IP, persistent, recon URI, headless, version mismatch, behavioral. |
 | **tier (тир)** | категория по score: **HIGH ≥5 · MEDIUM 3–4 · LOW 1–2**. |
 | **impersonator** | UA называет браузер, но хеши отпечатка — из словаря инструментов (маскировка). Самый весомый сигнал (+3); опора гейта «обоснованность» (intent). |
-| **headless** | хеши отпечатка совпали с headless-каталогом (Playwright/Puppeteer/UCD): автоматизация под видом браузера. Словарное совпадение, вес +3. |
+| **headless** | хеши отпечатка совпали с headless-записью в `tls_fp_catalog` (Playwright/Puppeteer/UCD): автоматизация под видом браузера. Словарное совпадение, вес +3. |
 | **version mismatch** | UA называет версию браузера, не совпадающую с версией по позитивному каталогу. Маскировка без словаря инструментов, вес +2. |
 | **automation UA** | UA, который сам по себе инструмент (curl/python/go/okhttp/bot/scanner). |
 | **recon URI** | обращение к типовым разведывательным путям (`/.env`, `/wp-login`, `/admin`, …). |
@@ -81,12 +81,13 @@
 ## 7. Справочники-источники (каталоги)
 
 Отдельные от потока логов справочники, на которые опираются сигналы и гейты.
+Все они **курируемые** (продакт через PR, ADR-006) — слой их только читает; сам слой
+наполняет (draft-PR) лишь блок-лист `tls_fp_blocklist`.
 
 | Справочник | Определение |
 | --- | --- |
-| **словарь инструментов** (`tls_fp_catalog`) | хеши известных инструментов (curl/python/go/okhttp). Опора impersonator (S1), automation UA (S3), обоснованность (G5). |
+| **словарь инструментов** (`tls_fp_catalog`) | хеши известных инструментов автоматизации (curl/python/go/okhttp) и headless-стэков (Playwright/Puppeteer/UCD — отдельного каталога под них нет). Опора impersonator (S1), automation UA (S3), headless (S8), обоснованность (G5). |
 | **позитивный каталог браузеров** (`tls_fp_browser_profiles`) | справочник «известный-хороший»: хеши → семейство (и версия) браузера. Дает genuine-browser проверку (гейт «бот-онли»), known-good (G6) и version mismatch (S9). |
-| **headless-каталог** | справочник отпечатков headless-стэков (Playwright/Puppeteer/undetected-chromedriver). Опора сигнала headless (S8). |
 | **challenge issued/solved** | счетчики выданных/решенных challenge по fp. Опора гейта challenge-solve-rate (G7) и ускорения `staging → active`. |
 
 ## 8. Хранилища

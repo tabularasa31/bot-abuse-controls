@@ -24,7 +24,7 @@
 | S5 | ≥2 разных IP под отпечатком | +1 (multi-IP) | контекст |
 | S6 | отпечаток виден в ≥2 разных календарных дня | +1 (persistent) | контекст |
 | S7 | под отпечатком есть обращения к recon-путям (`/.env`, `/wp-login`, …) | +1 (recon URI) | поведение |
-| S8 | хеши отпечатка совпали с headless-каталогом (Playwright/Puppeteer/UCD) | **+3** (headless) | сигнатура |
+| S8 | хеши отпечатка совпали с headless-записью в `tls_fp_catalog` (Playwright/Puppeteer/UCD) | **+3** (headless) | сигнатура |
 | S9 | UA называет версию браузера, не совпадающую с версией по позитивному каталогу (UA↔fp mismatch) | **+2** (version mismatch) | сигнатура |
 | S10 | ритмичные межзапросные интервалы / навигация по recon, не по ссылкам | +1 (behavioral) | поведение |
 
@@ -62,13 +62,15 @@ Score может быть любым; если хоть один гейт не �
 
 ## 3. Справочники-источники (каталоги)
 
-Скоринг и гейты опираются на справочники, которые слой ведет отдельно от потока логов.
+Скоринг и гейты опираются на справочники. Это **курируемые** входы (продакт через PR,
+ADR-006) — слой их только читает; единственный каталог, который слой наполняет сам
+(draft-PR), — `tls_fp_blocklist`. Headless-отпечатки — записи в том же `tls_fp_catalog`,
+отдельного каталога нет.
 
 | Справочник | Что дает | Кормит |
 | --- | --- | --- |
-| словарь инструментов (`tls_fp_catalog`) | хеши curl/python/go/okhttp | impersonator (S1), automation UA (S3), обоснованность (G5) |
+| словарь инструментов (`tls_fp_catalog`) | хеши инструментов (curl/python/go/okhttp) и headless-стэков (Playwright/Puppeteer/UCD) | impersonator (S1), automation UA (S3), headless (S8), обоснованность (G5) |
 | позитивный каталог браузеров (`tls_fp_browser_profiles`) | хеши → семейство (и версия) браузера | genuine-browser для гейта «бот-онли» (G1), known-good (G6), version mismatch (S9) |
-| headless-каталог | хеши headless-стэков (Playwright/Puppeteer/UCD) | headless-сигнал (S8) |
 | challenge issued/solved | счетчики выданных/решенных challenge по fp | challenge-solve-rate гейт (G7), ускорение `staging → active` |
 
 ---
