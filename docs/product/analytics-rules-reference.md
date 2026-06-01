@@ -73,7 +73,7 @@ Score может быть любым; если хоть один гейт не �
 | --- | --- | --- |
 | словарь инструментов (`tls_fp_catalog`) | хеши инструментов (curl/python/go/okhttp) и headless-стэков (Playwright/Puppeteer/UCD) | impersonator (S1), automation UA (S3), headless (S8), обоснованность (G5) |
 | позитивный каталог браузеров (`tls_fp_browser_known`) | полный fp реальных браузеров → `{семейство, статус}` (белый список) | genuine-browser для гейта «бот-онли» (G1), known-good (G6), version mismatch (S9) |
-| профили cipher_cnt (`tls_fp_browser_profiles`) | семейство → ожидаемое число шифров | грубый suspicious cipher (S2) |
+| профили cipher_cnt (`tls_fp_browser_profiles`) | семейство → ожидаемое число шифров. Текущий грубый предшественник `tls_fp_browser_known`; после него — наблюдательное поле, не основание | грубый suspicious cipher (S2) |
 | challenge issued/solved | счетчики выданных/решенных challenge по fp | challenge-solve-rate гейт (G7), ускорение `staging → active` |
 
 ---

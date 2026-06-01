@@ -89,7 +89,7 @@
 | --- | --- |
 | **словарь инструментов** (`tls_fp_catalog`) | хеши известных инструментов автоматизации (curl/python/go/okhttp) и headless-стэков (Playwright/Puppeteer/UCD — отдельного каталога под них нет). Наполняет харвестер. Опора impersonator (S1), automation UA (S3), headless (S8), обоснованность (G5). |
 | **позитивный каталог браузеров** (`tls_fp_browser_known`) | белый список «известно-хороших»: полный fp реального браузера → `{семейство, статус active\|staging}`. Дает genuine-browser проверку (гейт «бот-онли»), known-good (G6), version mismatch (S9). Наполняет харвестер. У `staging` инвертированная семантика vs blocklist: запись уже доверенная, гасит флаг. |
-| **профили cipher_cnt** (`tls_fp_browser_profiles`) | семейство → ожидаемое число шифров. Грубый сигнал suspicious cipher (S2); точную genuine-проверку делает позитивный каталог. |
+| **профили cipher_cnt** (`tls_fp_browser_profiles`) | семейство → ожидаемое число шифров. Текущий грубый предшественник позитивного каталога (различает браузер лишь по числу шифров). Кормит suspicious cipher (S2); когда появится `tls_fp_browser_known`, решение уходит на полный fp, а `cipher_cnt` остаётся наблюдательным полем (оно и так часть fp). |
 | **харвестер отпечатков** | CI cron-one-shot: гонит реальные браузеры (Chrome/FF/Edge) и инструменты (curl/python/go/okhttp/headless) на `/__fp` → полный fp → draft-PR в `tls_fp_browser_known` (браузеры) и `tls_fp_catalog` (инструменты). Каденс по дрейфу TLS (раз в несколько мажоров). Мерж — человек; чего харвестер не прогоняет (LibreWolf/Tor/mobile/экзотика) и незнакомые отпечатки из логов — ручной PR. |
 | **challenge issued/solved** | счетчики выданных/решенных challenge по fp. Опора гейта challenge-solve-rate (G7) и ускорения `staging → active`. |
 
