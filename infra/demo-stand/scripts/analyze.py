@@ -999,15 +999,17 @@ def _challenge_pass_gate(issued, solved):
 
 
 def _fp_hard_identity_allow(events_for_fp):
-    """True if the cascade let this fp through on a HARD positive-identity rule —
-    ip_whitelist, policy.ip_whitelist (reputation.lua), cookie_valid (verdict.lua),
-    i.e. any verdict==allow EXCEPT challenge_pass. These stay a binary allowlist
-    veto. challenge_pass is excluded here and handled by _challenge_pass_gate: a
-    solved challenge is no longer a permanent shield (design §B2). We match on
-    verdict (rule names drift, e.g. policy.ip_whitelist) and carve out only the
-    one stable named rule the design depends on."""
-    return any(e.get("verdict") == "allow" and e.get("rule") != "challenge_pass"
-               for e in events_for_fp)
+    """List of (ip, rule) pairs for events where the cascade let this fp through
+    on a HARD positive-identity rule — ip_whitelist, policy.ip_whitelist
+    (reputation.lua), cookie_valid (verdict.lua), i.e. any verdict==allow EXCEPT
+    challenge_pass. Non-empty list is truthy so callers testing truthiness work
+    unchanged. challenge_pass is excluded here and handled by _challenge_pass_gate:
+    a solved challenge is no longer a permanent shield (design §B2)."""
+    return [
+        (e.get("remote") or "?", e.get("rule") or "?")
+        for e in events_for_fp
+        if e.get("verdict") == "allow" and e.get("rule") != "challenge_pass"
+    ]
 
 
 def _parse_blocklist_text(text):
@@ -1302,7 +1304,24 @@ def find_blocklist_candidates(events, ip_cache, seen):
             suggested_action = (f"HIGH, но мало данных: lifetime {n_lifetime} < {MIN_EVENTS} "
                                 f"или дней {len(days)} < {MIN_DAYS_PROMOTE} — наблюдать")
         elif tier == "HIGH" and (wl_hit or hard_id):
-            suggested_action = "HIGH, но в allowlist/verified — не блокировать (жесткое вето)"
+            if wl_hit:
+                wl_ips = [ip for ip in ips if _ip_in_whitelist(ip, whitelist_nets)]
+                ip_str = ", ".join(sorted(wl_ips)[:3]) + ("…" if len(wl_ips) > 3 else "")
+                suggested_action = (
+                    f"HIGH, жёсткое вето: IP в ip_whitelist ({ip_str}) — не блокировать"
+                )
+            else:
+                rule_counts = Counter(rule for _, rule in hard_id)
+                hit_ips = sorted({ip for ip, _ in hard_id})
+                rules_str = ", ".join(
+                    f"{r}×{c}" if c > 1 else r for r, c in rule_counts.most_common(3)
+                )
+                ip_str = ", ".join(hit_ips[:2]) + ("…" if len(hit_ips) > 2 else "")
+                suggested_action = (
+                    f"HIGH, жёсткое вето: identity-allow в логе "
+                    f"(rule={rules_str}, IP={ip_str}, {len(hard_id)} событий) — "
+                    f"не блокировать, проверить вручную"
+                )
         elif tier == "HIGH" and cp_gate == "veto":
             suggested_action = (f"HIGH, но challenge решается (issued={cl_issued}, "
                                 f"solved={cl_solved}) — под fp есть люди/легит, не блокировать")
@@ -1449,7 +1468,7 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
         # the active matches instead (§B2) — this is where HUMAN_SOLVE_RATE gets
         # real meaning: many solved challenges → humans → fp_caught.
         hard_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
-            or _fp_hard_identity_allow(matched)
+            or bool(_fp_hard_identity_allow(matched))
         # Count solves by fp, NOT among `matched`: a solved challenge is emitted
         # by the separate /__challenge/verify endpoint, which never runs the
         # tls_fp staging stage, so the solve event carries tls_fp (the join key,
