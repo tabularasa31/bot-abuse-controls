@@ -1006,7 +1006,7 @@ def _fp_hard_identity_allow(events_for_fp):
     unchanged. challenge_pass is excluded here and handled by _challenge_pass_gate:
     a solved challenge is no longer a permanent shield (design §B2)."""
     return [
-        (e.get("remote", "?"), e.get("rule", "?"))
+        (e.get("remote") or "?", e.get("rule") or "?")
         for e in events_for_fp
         if e.get("verdict") == "allow" and e.get("rule") != "challenge_pass"
     ]
