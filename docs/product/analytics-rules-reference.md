@@ -71,7 +71,7 @@ Score может быть любым; если хоть один гейт не �
 | Справочник | Что дает | Кормит |
 | --- | --- | --- |
 | словарь инструментов (`tls_fp_catalog`) | хеши инструментов (curl/python/go/okhttp) и headless-стэков (Playwright/Puppeteer/UCD) | impersonator (S1), automation UA (S3), headless (S8), обоснованность (G5) |
-| позитивный каталог браузеров (`tls_fp_browser_profiles`) | белый список «известно-хороших» браузеров. Сегодня `семейство → число шифров` (грубо); улучшение D13 — обогатить до `полный fp → семейство/версия` (та же сущность, не новый каталог) | сегодня suspicious cipher (S2); после обогащения — genuine-browser/«бот-онли» (G1), known-good (G6), version mismatch (S9) |
+| позитивный каталог браузеров (`tls_fp_browser_profiles`) | белый список «известно-хороших» браузеров. Сегодня `семейство → число шифров` (грубо); планируемое улучшение — обогатить до `полный fp → семейство/версия` (та же сущность, не новый каталог) | сегодня suspicious cipher (S2); после обогащения — genuine-browser/«бот-онли» (G1), known-good (G6), version mismatch (S9) |
 | challenge issued/solved | счетчики выданных/решенных challenge по fp | challenge-solve-rate гейт (G7), ускорение `staging → active` |
 
 ---
