@@ -101,14 +101,15 @@
 "L13i1000_cb588a7868d0_5991909ce85f": staging
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
-# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
+# score 6 (HIGH) · импersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 21 · review-by 2026-06-15
 "L13d17h1_919ce459ba90_60bdc24aefcc": staging
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 15 разных IP +1 / persistent: 4 разных дней +1 / recon URI: /.env +1
 # human_share 0.0 · events 25 · review-by 2026-06-15
-"L13d15h2_1ed0482b9b4c_3a034d2f4474": staging
+#  ↳ auto-activated 2026-06-04: staging observation clean
+"L13d15h2_1ed0482b9b4c_3a034d2f4474": active
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 26 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env +1
