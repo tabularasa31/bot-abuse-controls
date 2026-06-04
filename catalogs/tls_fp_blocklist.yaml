@@ -49,15 +49,15 @@
 # promoted 2026-05-30 (auto) — reason: auto: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 170 · review-by 2026-06-13
-#  ↳ auto-activated 2026-06-03: staging observation clean
+#  ↳ auto-activated 2026-06-02: staging observation clean
 "L13d13h2_69e852b66fc7_3a4d01cc0c80": active
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 6 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.git/config +1
 # human_share 0.0 · events 22 · review-by 2026-06-13
-#  ↳ auto-activated 2026-06-03: staging observation clean
+#  ↳ auto-activated 2026-06-02: staging observation clean
 "L13d2500_68ddea46f551_10d89aa70559": active
 # score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.example, /.env.example.php +1
 # human_share 0.0 · events 119 · review-by 2026-06-13
-#  ↳ auto-activated 2026-06-03: staging observation clean
+#  ↳ auto-activated 2026-06-02: staging observation clean
 "L13i1300_69e852b66fc7_58c7b6d0026c": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
@@ -114,6 +114,11 @@
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 26 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env +1
 # human_share 0.0 · events 148 · review-by 2026-06-15
 "L13d20h2_51b6cc891816_2d5fbeed7632": staging
+
+# promoted 2026-06-02 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 7 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
+# human_share 0.0 · events 1067 · review-by 2026-06-16
+"L13d43h1_14ffb2d78dbd_cc78d80a9016": staging
 
 # promoted 2026-06-03 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 5 разных IP +1 / persistent: 4 разных дней +1
