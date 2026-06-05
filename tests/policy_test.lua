@@ -1,7 +1,7 @@
 -- Unit tests for infra/demo-stand/lua/policy.lua get()/lookup().
 -- Focus: origin_ip routing must survive the mode/strictness enum-guard
 -- fallback (86exrefdz / PR #94 review #1) — a malformed mode must not deroute
--- a registered tenant to the BAC landing.
+-- a registered tenant to the non-tenant 444 drop.
 --
 -- Runs under bare luajit: stub cjson(.safe) + ngx (shared dicts, ctx, log)
 -- before requiring policy, same pattern as catalog_pull_test.lua.
@@ -67,7 +67,7 @@ eq(policy.get("good.example").mode, "active", "valid policy: mode preserved")
 eq(policy.get("good.example").origin_ip, "203.0.113.9", "valid policy: origin_ip preserved")
 
 -- Invalid mode: enforcement falls back to shadow, but origin_ip (routing)
--- MUST survive — otherwise the tenant silently derouts to the BAC landing.
+-- MUST survive — otherwise the tenant silently derouts to the non-tenant 444 drop.
 fresh_request()
 eq(policy.get("badmode.example").mode, "shadow", "invalid mode → shadow fallback")
 eq(policy.get("badmode.example").origin_ip, "203.0.113.10",

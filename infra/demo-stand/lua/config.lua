@@ -95,12 +95,13 @@ function overlay_kill_switch(defaults, parsed)
 end
 
 -- Edge self-protection overlay (defaults.conf [edge_protection]). Same
--- operator-lever semantics as the kill-switch: deny_nontenant flips the
--- $edge_action path in nginx.demo.conf's `location /` from "render landing"
--- to "return 444" for any non-tenant Host (Host: <edge-IP>, garbage, HTTP/1.0
--- without Host), so a flood aimed at the edge's own IP is dropped before the
--- cascade instead of being served a landing page on every request. Tenant
--- traffic ($origin != "") is untouched. Reload-applied, no container recreate.
+-- operator-lever semantics as the kill-switch: deny_nontenant turns ON the
+-- TLS-handshake reject (tls_autossl.reject_unknown_sni) for non-tenant / no-SNI
+-- traffic, so a flood aimed at the edge's own IP is dropped before the cascade
+-- AND before the server-side handshake crypto. (HTTP-layer non-tenant traffic is
+-- already dropped with 444 unconditionally — the edge is tenant-only since the
+-- landing page was removed.) Tenant traffic ($origin != "") is untouched.
+-- Reload-applied, no container recreate.
 function overlay_edge_protection(defaults, parsed)
     local ep = parsed.edge_protection
     if type(ep) ~= "table" or ep.deny_nontenant == nil then return end
@@ -145,12 +146,12 @@ function _M.global_kill(defaults)
 end
 
 -- Edge self-protection predicate (defaults.conf [edge_protection], overridable
--- via kill_switch.local.conf). True → nginx.demo.conf's `location /` drops
--- non-tenant Host traffic with `return 444` before the cascade, instead of
--- rendering the bundled landing. Read per-request from a set_by_lua_block; the
--- value only changes on reload (init_by_lua re-runs config.load), so this is a
--- plain table read, no shared_dict needed. Defaults to false (landing) so the
--- stand still works out-of-box.
+-- via kill_switch.local.conf). True → tls_autossl.reject_unknown_sni aborts the
+-- TLS handshake for non-tenant / no-SNI clients (cheapest disposal, saves the
+-- handshake crypto under a flood). HTTP-layer non-tenant traffic is dropped with
+-- 444 regardless (tenant-only edge). Read once per handshake; the value only
+-- changes on reload (init_by_lua re-runs config.load), so this is a plain table
+-- read, no shared_dict needed. Defaults to false (TLS reject off).
 function _M.edge_deny_nontenant(defaults)
     local ep = (defaults or {}).edge_protection or {}
     return ep.deny_nontenant == true

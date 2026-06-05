@@ -409,7 +409,8 @@ example.com:
   # (multi-tenant routing, 86exrefdz): эдж матчит входящий Host с записью
   # policy и проксирует на этот IP (хостнейм в upstream подменяется на IP,
   # loop-safe; Host/SNI наверх остаются example.com). Пусто = хост не
-  # проксируется (уходит на BAC landing). Без CIDR — это destination одного
+  # тенант и не проксируется (эдж tenant-only: не-тенант отбрасывается
+  # через 444). Без CIDR — это destination одного
   # бэкенда. Схема апстрима — https/443 (per-host scheme/port — отдельный тикет).
   origin_ip: 203.0.113.9
 

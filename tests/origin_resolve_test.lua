@@ -68,7 +68,7 @@ eq(origin_resolve.resolve("https://192.0.2.10", IP, D),
 -- ====================================================================
 eq(origin_resolve.resolve("", IP, D),
    "",
-   "empty origin → empty (bac.example.com landing path)")
+   "empty origin → empty (non-tenant path → 444)")
 
 eq(origin_resolve.resolve(nil, IP, D),
    nil,

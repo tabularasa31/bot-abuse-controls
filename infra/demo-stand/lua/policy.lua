@@ -19,7 +19,7 @@
 -- get(host).origin_ip (multi-tenant routing, 86exrefdz) is available without
 -- a dedicated reader: proxy_target.lua treats a non-empty origin_ip as the
 -- marker of a proxied tenant. POOL_DEFAULT deliberately omits origin_ip
--- (nil → unregistered host is not a tenant → BAC landing).
+-- (nil → unregistered host is not a tenant → dropped with 444).
 --
 -- enforce(status) is the single mode-gate for the cascade. Stages that
 -- want to physically affect the response (status, body) MUST go through
@@ -100,7 +100,7 @@ local VALID_STRICTNESSES  = { standard = true, permissive = true }
 -- misconfiguration is visible. origin_ip is PRESERVED through this fallback:
 -- routing (proxy_target, 86exrefdz) must not depend on mode/strictness
 -- validity, otherwise a forward-compat schema change would silently deroute
--- a tenant to the BAC landing instead of just failing enforcement stale.
+-- a tenant to the non-tenant 444 drop instead of just failing enforcement stale.
 local function decode_entry(raw, host)
     local p, err = cjson.decode(raw)
     if not p or type(p) ~= "table" then

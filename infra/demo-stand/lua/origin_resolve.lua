@@ -50,8 +50,8 @@ local _M = {}
 -- and loop_host for a tenant, so a mismatch only happens on misuse).
 --
 -- If any of the three inputs is empty, the original origin is returned
--- unchanged — that covers $origin = "" (non-tenant / landing path, handled
--- separately upstream) and the non-tenant ("", "") backend() result. The
+-- unchanged — that covers $origin = "" (non-tenant path — dropped with 444
+-- upstream) and the non-tenant ("", "") backend() result. The
 -- substitution is gated on the HOSTNAME INSIDE $origin, not on the incoming
 -- Host header — that distinction is the loop fix from PR #89. Earlier
 -- versions gated on `ngx.var.host == "dashboard.example.com"`, which let

@@ -9,7 +9,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
 | `/` (and any path) | a real browser | 200, origin page | Cascade passes → request proxied to the tenant's origin. The stand is a real edge in front of the origin. |
-| `/` | `curl -k https://<host>/` | 200 (tenant Host) / landing (non-tenant Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | The cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether the verdict actually 403's the request or only logs. A Host that is not a registered tenant gets the bundled landing page. |
+| `/` | `curl -k https://<host>/` | 200 (tenant Host) / 444 (non-tenant Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | For a tenant Host the cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether it 403's or only logs. A Host that is not a registered tenant is dropped with 444 (tenant-only edge — the bundled landing page was removed). |
 | `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, then proxied. |
 | `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in the BAC_LOG stream. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict. The only operational endpoint on the public edge. |
@@ -25,7 +25,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 > API (the edge no longer mutates policy). `/__fp` returns on a controlled
 > measurement surface when the browser farm is built (Phase 4).
 
-**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — falls back to the bundled landing page (the cascade still runs). `/__health` is served locally; every other former `/__*` / `/metrics` path now resolves through `location /` (landing for a non-tenant Host, proxied to origin for a tenant). Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (ClickUp 86exrefdz). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
+**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — is dropped with `444` (the edge is tenant-only; the bundled landing page was removed). `/__health` is the only public local endpoint; every other former `/__*` / `/metrics` path is gone from the public surface (moved to the private `:9090` plane or to Loki). Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (ClickUp 86exrefdz). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
 
 **TLS for tenant custom domains (on-demand certs).** The edge terminates client TLS itself (required — the cascade fingerprints the client handshake, `$ssl_*`/JA4 in `tls_fp.lua`; a TLS-terminating proxy in front would hide it and break bot detection). So when a tenant brings its **own** domain, the edge needs a browser-trusted cert for it. This is handled by `lua-resty-acme` (pure-Lua Let's Encrypt, http-01), wired in `lua/tls_autossl.lua` + `nginx.demo.conf`:
 
@@ -63,7 +63,7 @@ Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO
 **Timing fields** (all milliseconds; reverse-proxy = both request and response transit the edge):
 - `latency_ms` — whole request lifetime (like nginx `$request_time`): cascade + origin round-trip + **delivery to the end user**. For a slow client / large body this is dominated by the download tail, so it is *not* a measure of our overhead.
 - `cascade_ms` — the access-phase antibot overhead only (intake + cascade check), i.e. our work before handing the request to the origin. Exact for `pass`; for `block`/`challenge` (no upstream) it ≈ `latency_ms`.
-- `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / landing).
+- `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / challenge).
 - `proxy_ms` — `cascade_ms + upstream_response_ms`: request arrival → we hold the full origin response ready to send. This is the request's path through the proxy that adds latency, **without** the slow-client delivery tail (which is `latency_ms − proxy_ms`).
 
 `action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` (B11) — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
@@ -113,12 +113,12 @@ REVISION=$(git rev-parse --short HEAD) \
   docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
 
 # Register a tenant so its Host proxies to its backend (Channel C delivers
-# it to the edge in ≤30s). Without a tenant row the Host gets the landing page.
+# it to the edge in ≤30s). Without a tenant row the Host is dropped with 444.
 #   PATCH /antibot/v1/policy/<host> {"mode":"active","origin_ip":"203.0.113.9"}
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # landing page (localhost is not a tenant; cascade still runs)
+curl -k https://localhost/                   # 444 (localhost is not a tenant — tenant-only edge)
 curl -k --resolve <tenant>:443:127.0.0.1 https://<tenant>/   # 200, proxied to the tenant origin_ip
 # Counters / deploy metadata are no longer an HTTP endpoint — they ship to Loki
 # as EDGE_STATS lines (kind="edge_stats"); on the box you can read the latest via:
@@ -458,11 +458,9 @@ infra/demo-stand/
 │   ├── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
 │   └── challenge.lua               [C2] Phase 4 challenge page renderer + nonce issuer (version-pinned)
 ├── CASCADE_VERSION                 [C2] semver, сверяется с meta-тегом шаблона на init
-├── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
-│   ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}}; cascade-version зашит литералом
-│   └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
-└── sites/default-site/
-    └── index.html                  demo landing page (served via content_by_lua)
+└── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
+    ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}}; cascade-version зашит литералом
+    └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
 ```
 
 ## Talking points for a sceptical reviewer

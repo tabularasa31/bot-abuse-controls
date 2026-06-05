@@ -35,9 +35,9 @@ services:
       EDGE_ID: ${EDGE_ID:-stand-bac}
       # Upstream selection is fully Policy-driven (ClickUp 86exrefdz): a tenant
       # is a host whose Policy (Channel C) has a non-empty origin_ip; the edge
-      # proxies the incoming Host to that IP, everything else to the BAC
-      # landing. No ORIGIN_URL / DASHBOARD_* env — add a tenant with one
-      # PATCH /antibot/v1/policy/<host> {"origin_ip": ...}.
+      # proxies the incoming Host to that IP, everything else is dropped with 444
+      # (tenant-only edge). No ORIGIN_URL / DASHBOARD_* env — add a tenant with
+      # one PATCH /antibot/v1/policy/<host> {"origin_ip": ...}.
       # When "on", reputation.lua honours an X-Demo-IP request header to
       # simulate a public client IP for GeoIP lookups (stand testing). Default
       # off → real remote_addr is always used (organic traffic resolves for
@@ -102,7 +102,6 @@ services:
       # at init_by_lua via the `config` Lua module. Editing a file here and
       # restarting the container re-applies it (hot-reload is a separate task).
       - ./config:/etc/nginx/config:ro
-      - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
       # [C2] Phase 4 challenge page asset. Channel A on the demo = file
       # mount (Puppet on prod). Read once in init_by_lua via challenge.lua;
