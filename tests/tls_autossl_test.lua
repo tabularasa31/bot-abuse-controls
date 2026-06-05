@@ -76,5 +76,31 @@ do
     autossl._reset_cache() -- restore default for any later cases
 end
 
+-- sni_known (edge self-protection step 2) — "serve this SNI at all?", the
+-- complement of allow_domain ("ACME this SNI?"). The KEY difference is the base
+-- domain: allow_domain=false (static cert, no ACME) but sni_known=true (it is a
+-- name we legitimately serve and must NOT reject at the handshake).
+eq(autossl.sni_known("dashboard.example.com", opts), true,
+   "sni_known: base-domain host → known (served by static cert)")
+eq(autossl.sni_known("example.com", opts), true, "sni_known: base apex → known")
+eq(autossl.sni_known("bac.example.com", opts), true, "sni_known: bac under base → known")
+-- Tenant (custom domain) → known.
+eq(autossl.sni_known("clientx.com", opts), true, "sni_known: custom-domain tenant → known")
+eq(autossl.sni_known("ClientX.COM", opts), true, "sni_known: case-insensitive → known")
+-- Non-tenant / scanner SNI → unknown (handshake would be rejected).
+eq(autossl.sni_known("evil.example", opts), false, "sni_known: non-tenant → unknown")
+eq(autossl.sni_known("observed.example", opts), false,
+   "sni_known: policy row, empty origin_ip → unknown")
+eq(autossl.sni_known("clientx.com.evil.example", opts), false,
+   "sni_known: suffix-attack → unknown")
+-- nil / empty SNI → unknown (but reject_unknown_sni only acts on a PRESENT SNI;
+-- no-SNI handshakes are left to the HTTP-layer 444).
+eq(autossl.sni_known(nil, opts), false, "sni_known: nil SNI → unknown")
+eq(autossl.sni_known("", opts), false, "sni_known: empty SNI → unknown")
+-- Empty base domain (disabled) → tenant gate only; base host falls through to
+-- the tenant lookup (here a tenant, so known).
+eq(autossl.sni_known("dashboard.example.com", opts_nobase), true,
+   "sni_known: no base domain → tenant under it still known via origin_ip")
+
 io.write(string.format("tls_autossl_test: %d passed, %d failed\n", passed, failed))
 os.exit(failed == 0 and 0 or 1)
