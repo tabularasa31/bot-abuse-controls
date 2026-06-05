@@ -101,6 +101,14 @@ antibot_challenge_invalid_total{reason="no_secret"} %d
 # TYPE antibot_challenge_branch_total counter
 antibot_challenge_branch_total{branch="B"} %d
 antibot_challenge_branch_total{branch="C"} %d
+
+# HELP antibot_edge_nontenant_dropped_total Non-tenant Host requests dropped with 444 by the edge self-protection lever (edge_protection.deny_nontenant). These never reach the cascade, so they are NOT in antibot_requests_total / BAC_LOG — this counter is the only record of dropped volume. 0 when the lever is off (default).
+# TYPE antibot_edge_nontenant_dropped_total counter
+antibot_edge_nontenant_dropped_total %d
+
+# HELP antibot_edge_sni_rejected_total TLS handshakes aborted (ngx.exit(ERROR)) by edge self-protection (step 2) because the SNI was neither a tenant nor a base-domain name. Only fires when edge_protection.deny_nontenant is on and the client sent an SNI; no-SNI / IP-literal floods are disposed by the HTTP-layer 444 (edge_nontenant_dropped_total) instead.
+# TYPE antibot_edge_sni_rejected_total counter
+antibot_edge_sni_rejected_total %d
 ]],
     requests,
     get("verdict_pass_total"),
@@ -135,7 +143,9 @@ antibot_challenge_branch_total{branch="C"} %d
     get("challenge_invalid_bad_method_total"),
     get("challenge_invalid_no_secret_total"),
     get("challenge_branch_b_total"),
-    get("challenge_branch_c_total")))
+    get("challenge_branch_c_total"),
+    get("edge_nontenant_dropped_total"),
+    get("edge_sni_rejected_total")))
 
 -- Per-rule / per-flag / per-tag counters live in the metrics dict under
 -- "rule:<stage>:<rule>", "flag:<flag>" and "tag:<tag>" keys (written by
