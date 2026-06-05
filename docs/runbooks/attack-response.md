@@ -73,12 +73,16 @@ L7-флудом по IP.
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP>
 cd ~/abuse-controls/infra/demo-stand/config
-# создать/дополнить локальный оверрайд (если файла нет — скопировать из .example):
+# Локальный оверрайд (если файла нет — копия из .example, где уже есть секция
+# [edge_protection] с deny_nontenant = false).
 [ -f kill_switch.local.conf ] || cp kill_switch.local.conf.example kill_switch.local.conf
-printf '\n[edge_protection]\ndeny_nontenant = true\n' >> kill_switch.local.conf
+# Правим строку НА МЕСТЕ (идемпотентно), не дописываем в конец — иначе выйдут
+# дубли секций/ключей (парсер last-wins, но файл станет противоречивым). Если
+# строки/секции нет — открой файл руками (nano) и выставь deny_nontenant = true.
+sed -i 's/^deny_nontenant = .*/deny_nontenant = true/' kill_switch.local.conf
 docker exec nginx-demo openresty -s reload
 # Проверить, что включилось: no-SNI рукопожатие теперь должно отвергаться.
-# Выключить после атаки: вернуть deny_nontenant = false (или убрать строку) + reload.
+# Выключить после атаки: тем же sed вернуть `= false` + reload.
 ```
 
 > ⚠️ **Побочка — ломает liveness-пробы.** При включенном рычаге health-проверки
@@ -103,8 +107,12 @@ docker exec nginx-demo openresty -s reload
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP>
 cd ~/abuse-controls/infra/demo-stand/config
+# .example уже содержит [kill_switch.per_stage] со всеми стадиями = false —
+# правим нужную строку НА МЕСТЕ (не дописываем, чтобы не плодить дубли).
+[ -f kill_switch.local.conf ] || cp kill_switch.local.conf.example kill_switch.local.conf
 # напр. потушить только tls_fp:
-printf '\n[kill_switch.per_stage]\ntls_fp = true\n' >> kill_switch.local.conf
+sed -i 's/^tls_fp = .*/tls_fp = true/' kill_switch.local.conf
+# global (крайняя мера): sed -i 's/^enabled = .*/enabled = true/' kill_switch.local.conf
 docker exec nginx-demo openresty -s reload
 # вернуть в false + reload после починки.
 ```
