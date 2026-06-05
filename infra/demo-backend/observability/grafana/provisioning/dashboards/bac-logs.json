@@ -80,7 +80,7 @@
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Maximum per-second request rate observed in the selected time window (peak total RPS across all verdicts).",
+      "description": "Maximum per-second request rate over the last 24 hours (fixed window, independent of the dashboard time picker). Computed as max_over_time of 1-minute rate buckets.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -105,7 +105,7 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["max"],
+          "calcs": ["last"],
           "fields": "",
           "values": false
         },
@@ -117,13 +117,13 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [$__interval]))",
+          "expr": "max_over_time(sum(rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [1m]))[24h:1m])",
           "legendFormat": "total",
-          "queryType": "range",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Peak RPS",
+      "title": "Peak RPS (24h)",
       "type": "stat"
     },
     {
