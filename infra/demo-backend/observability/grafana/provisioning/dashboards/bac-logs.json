@@ -85,6 +85,7 @@
         "defaults": {
           "color": { "mode": "thresholds" },
           "mappings": [],
+          "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
