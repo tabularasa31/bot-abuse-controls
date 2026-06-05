@@ -125,3 +125,13 @@
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 5 разных IP +1 / persistent: 4 разных дней +1
 # human_share 0.0 · events 111 · review-by 2026-06-17
 "L13d19h2_f3fd9e8f6e2b_2d5fbeed7632": staging
+
+# promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 11 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.git/HEAD +1
+# human_share 0.0 · events 100 · review-by 2026-06-19
+"L13d1800_5e3ea1a873f7_9fdfc1ba57c6": staging
+
+# promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 24 разных IP +1 / persistent: 7 разных дней +1
+# human_share 0.0 · events 857 · review-by 2026-06-19
+"L13d14h2_d26ecc671488_2d5fbeed7632": staging
