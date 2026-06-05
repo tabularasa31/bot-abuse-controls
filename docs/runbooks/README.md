@@ -27,7 +27,13 @@ reverse proxy на VM). Это не прод prod-edge: Channel A на стен�
   [blocklist-promotion.md](blocklist-promotion.md). Логика решений —
   [`docs/blocklist-scoring.md`](../blocklist-scoring.md).
 
-## Контракт (источник правды)
+## Атаки / аварийные рычаги
+
+- **Что делать при атаке** — что защищает всегда (444 не-тенанта + каскад), что
+  включать руками под тип атаки (`attack_mode` на клиента, `deny_nontenant`
+  TLS-reject под флудом по IP, kill-switch при сбое каскада), где смотреть
+  (Loki `{kind="bac_log"}` / `{kind="edge_stats"}`), и граница L7 vs L3/L4 →
+  [attack-response.md](attack-response.md).
 
 [`docs/product/vision.md`](../product/vision.md): §«Аварийные рычаги»,
 §«Rollback каталога», §«HMAC secret»/«Ротация», §«Channel C» (продуктовый
