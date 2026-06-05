@@ -124,6 +124,14 @@ scrape_configs:
             # would explode the index within hours (rules-reference.md,
             # vision.md). Those fields stay inside the JSON payload and
             # are queryable via LogQL `| json | <field>="…"`.
+            # Normalize `kind` to lower-case BEFORE labeling: the regex captures
+            # the literal stdout prefixes (BAC_LOG / EDGE_STATS), but the
+            # README/PROGRESS guidance and dashboards query `{kind="bac_log"}` /
+            # `{kind="edge_stats"}`. Without this the documented queries match
+            # nothing (codex review on PR #147).
+            - template:
+                source: kind
+                template: '{{ ToLower .Value }}'
             # `kind` splits the two streams; verdict/stage/mode/action are empty
             # for EDGE_STATS records (they carry counters, not a per-request
             # verdict) — an empty label value is fine and keeps cardinality low.

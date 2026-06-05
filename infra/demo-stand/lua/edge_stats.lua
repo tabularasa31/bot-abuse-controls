@@ -75,15 +75,20 @@ end
 -- read the deployed git sha: prefer the live .revision file (scripts/update.sh
 -- writes it after a hot reload, so it survives reloads that froze REVISION at
 -- container start), fall back to the REVISION env, then "unknown". Mirrors what
--- the removed /__version handler did.
+-- the removed /__version handler did. Cached per worker (gemini review on PR
+-- #147): the value is static for a worker's lifetime — an update/reload spawns
+-- fresh workers — so we read the file at most once instead of every 30s tick.
+local cached_revision
 local function revision()
+    if cached_revision then return cached_revision end
     local f = io.open("/etc/nginx/lua/.revision", "r")
     if f then
         local rev = f:read("*l")
         f:close()
-        if rev and rev ~= "" then return rev end
+        if rev and rev ~= "" then cached_revision = rev; return rev end
     end
-    return os.getenv("REVISION") or "unknown"
+    cached_revision = os.getenv("REVISION") or "unknown"
+    return cached_revision
 end
 
 -- collect() — assemble the full stats table (counters + deploy metadata +
@@ -104,11 +109,20 @@ function _M.collect()
     -- folded in so operators verify "what's deployed / did the secret rotation
     -- take / cascade version" from Loki (or /__stats) instead of an HTTP
     -- endpoint. pcall-guarded — a load hiccup must not stop the dump.
+    -- All three are static for a worker's lifetime (a rotation/deploy = reload =
+    -- fresh workers), so resolve once and cache (gemini review on PR #147).
+    -- `false` sentinel distinguishes "resolved to nil" from "not yet resolved".
     snap.commit = revision()
-    local ok_cv, cv = pcall(function() return require("challenge").template_version() end)
-    snap.cascade_version = ok_cv and cv or nil
-    local ok_fp, fp = pcall(function() return require("challenge_secret").fingerprint() end)
-    snap.challenge_secret_fp = ok_fp and fp or nil
+    if _M._cached_cascade_version == nil then
+        local ok_cv, cv = pcall(function() return require("challenge").template_version() end)
+        _M._cached_cascade_version = (ok_cv and cv) or false
+    end
+    snap.cascade_version = _M._cached_cascade_version or nil
+    if _M._cached_secret_fp == nil then
+        local ok_fp, fp = pcall(function() return require("challenge_secret").fingerprint() end)
+        _M._cached_secret_fp = (ok_fp and fp) or false
+    end
+    snap.challenge_secret_fp = _M._cached_secret_fp or nil
 
     -- Channel C liveness (was /metrics antibot_edge_catalog_staleness_seconds):
     -- seconds since the last successful backend contact per catalog, -1 if never.
@@ -119,11 +133,17 @@ function _M.collect()
         local cp = require "catalog_pull"
         local now = ngx.time()
         local out = {}
-        for name in pairs(cp.catalogs or {}) do
-            -- catalog_pull stamps `catalog_last_pull_ts:<name>` (ngx.time epoch
-            -- seconds) into the metrics dict on every successful 200/304.
-            local ts = m:get("catalog_last_pull_ts:" .. name)
-            out[name] = ts and (now - ts) or -1
+        -- cp.catalogs is a dict keyed by name ({tls_fp_blocklist = {...}}), but
+        -- resolve from key OR value so an array form would also work (gemini
+        -- review on PR #147 — defensive against a future shape change).
+        for k, v in pairs(cp.catalogs or {}) do
+            local name = (type(k) == "string") and k or v
+            if type(name) == "string" then
+                -- catalog_pull stamps `catalog_last_pull_ts:<name>` (ngx.time
+                -- epoch seconds) into the metrics dict on every 200/304.
+                local ts = m:get("catalog_last_pull_ts:" .. name)
+                out[name] = ts and (now - ts) or -1
+            end
         end
         return out
     end)
@@ -149,7 +169,11 @@ function _M.start(opts)
     opts = opts or {}
     local interval = tonumber(opts.interval) or _M.interval
     if ngx.worker.id() ~= 0 then return end
-    local ok, err = ngx.timer.every(interval, function()
+    local ok, err = ngx.timer.every(interval, function(premature)
+        -- `premature` is true when the timer is cancelled on worker reload/
+        -- shutdown — skip the final fire so we don't emit mid-teardown
+        -- (gemini review on PR #147).
+        if premature then return end
         local pok, perr = pcall(_M.emit)
         if not pok then
             ngx.log(ngx.ERR, "edge_stats: emit failed: ", tostring(perr))
