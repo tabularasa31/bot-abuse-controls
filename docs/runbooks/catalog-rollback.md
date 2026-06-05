@@ -30,8 +30,8 @@ rollout, см. [`catalogs/README.md`](../../catalogs/README.md)).
 
 ## Какие каталоги реально тянутся на эдж (важно для выбора объекта демо)
 
-На стенде эдж по Channel C тянет **5** каталогов (`/metrics`
-`antibot_edge_catalog_staleness_seconds{catalog=…}`): `tls_fp_blocklist`,
+На стенде эдж по Channel C тянет **5** каталогов (EDGE_STATS
+`catalog_staleness_seconds.<catalog>`): `tls_fp_blocklist`,
 `tls_fp_catalog`, `tls_fp_browser_profiles`, `verified_bot_ips`, `policy`.
 `ua_blacklist`/`ip_*`/`asn_datacenters` грузятся из локального конфига эджа, по
 Channel C **не** доставляются. Отдельная тонкость `tls_fp_blocklist`: по Channel C
@@ -54,9 +54,10 @@ HIGH-кандидат из дневного анализа (D1, email label `the
 ssh -i ~/.ssh/gpu-key ubuntu@<BACKEND_VM_IP>
 cd ~/abuse-controls
 
-# 0. Блоклист до правки (на эдже): N записей.
+# 0. Блоклист до правки (на эдже): N записей. blocklist_entries — поле в
+#    EDGE_STATS.
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
-  "docker exec nginx-demo curl -ks https://127.0.0.1/__admin -H 'Host: bac.example.com' | grep -oE 'Blocklist \([0-9]+ entries\)'"
+  "docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1 | grep -o '\"blocklist_entries\":[0-9]*'"
 
 # 1. Добавить HIGH-fp как active (формат <fp>: <status>).
 #    FP=… — подставить РЕАЛЬНЫЙ fp из дневного анализа (валидный L-префикс
@@ -64,12 +65,14 @@ ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
 FP='L13d3000_bcf826a2cd28_430ec2476535'    # пример из отчёта 2026-05-28
 printf '\n"%s": active\n' "$FP" >> catalogs/tls_fp_blocklist.yaml
 
-# 2. Backend подхватит ≤5с; эдж — ≤30с. Проверить, что fp доехал.
+# 2. Backend подхватит ≤5с; эдж — ≤30с. Проверить, что fp доехал. Снимок по
+#    требованию — приватный :9090/__stats (loopback, на эдж-VM).
 sleep 38
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
-  "docker exec nginx-demo curl -ks https://127.0.0.1/__admin -H 'Host: bac.example.com' | grep -oE \"Blocklist \([0-9]+ entries\)|$FP\""
-#    → N+1 entries, fp в списке. Запрос с этим fp → verdict=block,rule=tls_fp_blocklist
-#      (403 на active-хосте, would-be block + 200 на shadow).
+  "curl -s http://127.0.0.1:9090/__stats | grep -o '\"blocklist_entries\":[0-9]*'"
+#    → N+1 entries. Запрос с этим fp → verdict=block,rule=tls_fp_blocklist
+#      (403 на active-хосте, would-be block + 200 на shadow); сам fp виден в
+#      Loki {kind="bac_log"}.
 
 # 3. Откат — git checkout (эквивалент revert PR на слое доставки).
 git checkout -- catalogs/tls_fp_blocklist.yaml
@@ -77,13 +80,14 @@ git checkout -- catalogs/tls_fp_blocklist.yaml
 # 4. ≤30с спустя fp исчезает на эдже (atomic swap обратно) → снова N entries.
 sleep 38
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
-  "docker exec nginx-demo curl -ks https://127.0.0.1/__admin -H 'Host: bac.example.com' | grep -oE 'Blocklist \([0-9]+ entries\)'"
+  "curl -s http://127.0.0.1:9090/__stats | grep -o '\"blocklist_entries\":[0-9]*'"
 ```
 
 ## Что наблюдать
 
-- После шага 2: `/__admin` блоклист N→N+1, fp в списке; `verdict=block,rule=tls_fp_blocklist`
-  для запросов с этим fp; `antibot_edge_catalog_staleness_seconds{catalog="tls_fp_blocklist"}`
+- После шага 2: `blocklist_entries` N→N+1 (EDGE_STATS / :9090 `__stats`), fp
+  виден в Loki `{kind="bac_log"}`; `verdict=block,rule=tls_fp_blocklist`
+  для запросов с этим fp; `catalog_staleness_seconds.tls_fp_blocklist`
   остается низкой (контакт с backend жив).
 - После шага 4: блоклист N+1→N, fp ушел — эдж атомарно вернулся к прежней версии.
 - Битый каталог от backend (не проходит валидацию) → эдж **не применяет**,
@@ -101,8 +105,9 @@ ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
 (`L13d3000_bcf826a2cd28_430ec2476535`, `L13d1300_69e852b66fc7_10d89aa70559`)
 добавлены как `active` в `catalogs/tls_fp_blocklist.yaml` на backend:
 
-- Доставка: `/__admin` блоклист **7 → 9**, оба fp в списке на эдже через ~38с
-  (PR-каталог, SLA ≤15м — на стенде ~1мин; `staleness=21с`, контакт жив).
+- Доставка: `blocklist_entries` **7 → 9** (:9090 `__stats`), оба fp в Loki
+  `{kind="bac_log"}` на эдже через ~38с (PR-каталог, SLA ≤15м — на стенде
+  ~1мин; `staleness=21с`, контакт жив).
 - Откат: `git checkout -- catalogs/tls_fp_blocklist.yaml` → блоклист **9 → 7**,
   оба fp исчезли через ~38с (atomic swap обратно). `git status` чист.
 

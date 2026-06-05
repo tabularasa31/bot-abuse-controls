@@ -8,8 +8,10 @@ The hosted demo (`bac.example.com`): a real OpenResty reverse proxy that
 runs the full verdict cascade and proxies to an origin (`ORIGIN_URL`). Runs
 in **shadow** (empty blocklist — computes and logs verdicts, blocks nothing).
 This is the one thing we actually deploy and keep alive. Has its own
-observability (`/__admin`, `/metrics`), structured `BAC_LOG`, analytics
-(`scripts/analyze.py`), and a cron auto-update loop. См.
+observability (counters + deploy metadata as `EDGE_STATS` → Loki
+`{kind="edge_stats"}`, plus a private read-only mgmt plane on `:9090`),
+structured `BAC_LOG`, analytics (`scripts/analyze.py`), and a cron
+auto-update loop. См.
 [`demo-stand/README.md`](demo-stand/README.md).
 
 Источник правды fp-кода ([`lua/ja4_compute.lua`](demo-stand/lua/ja4_compute.lua),

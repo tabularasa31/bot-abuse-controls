@@ -28,10 +28,7 @@ would get <code>403</code>.</p>
 <h2>Why your browser is allowed</h2>
 <p>The pipeline computed a TLS-handshake-derived fingerprint for your connection
 and looked it up in a small seed blocklist. Browser fingerprints are not in the
-seed; default automation tool fingerprints are. The seed entries are visible at
-<a href="/__admin">/__admin</a>.</p>
-
-<p>To see your own fingerprint, visit <a href="/__fp">/__fp</a>.</p>
+seed; default automation tool fingerprints are.</p>
 
 <h2>What to try</h2>
 <table>
@@ -39,11 +36,11 @@ seed; default automation tool fingerprints are. The seed entries are visible at
   <tr><td>Open this page in a browser</td><td><code>200</code> (you just did)</td></tr>
   <tr><td><code>curl -k https://&lt;host&gt;/</code></td><td><code>403</code></td></tr>
   <tr><td><code>python3 -c "import requests; requests.get('https://&lt;host&gt;/', verify=False)"</code></td><td><code>403</code></td></tr>
-  <tr><td>Visit <a href="/__fp">/__fp</a></td><td>Your fp + raw <code>$ssl_*</code> components</td></tr>
-  <tr><td>Visit <a href="/__admin">/__admin</a></td><td>Live counters + blocklist</td></tr>
-  <tr><td>Visit <a href="/metrics">/metrics</a></td><td>Prometheus scrape text</td></tr>
-  <tr><td>Bench <code>wrk -c100 -d10s https://&lt;host&gt;/</code> vs <code>wrk -c100 -d10s https://&lt;host&gt;/baseline/</code></td><td>~32K vs ~40K RPS — the antibot overhead</td></tr>
 </table>
+
+<p>Operational endpoints (counters, per-host policy) are not exposed publicly —
+they live on a private management plane and ship to Loki. Only <code>/__health</code>
+is public.</p>
 
 </body>
 </html>

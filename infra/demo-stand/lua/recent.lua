@@ -1,4 +1,6 @@
--- Recent-requests ring buffer for the /__admin live view. Lua analogue of
+-- Recent-requests ring buffer. (Its /__admin live-view reader was removed in
+-- Phase 1; still written by log_event, retained for a future private mgmt view.)
+-- Lua analogue of
 -- the vanilla sidecar's observe.RecentStore, scoped to what a single edge
 -- can do with a shared_dict (no per-fp aggregation store — that's a bigger
 -- task; this gives the "what's happening right now" sample the thin admin

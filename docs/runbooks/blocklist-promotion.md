@@ -106,7 +106,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 - После merge staging-PR: на эдже `staging_match` для fp растет, `verdict` остается
   прежним (НЕ block); `analyze.py --staging-observation-json` показывает n_matches>0.
-- После merge activate-PR: `/__admin` блоклист +1, запросы с fp → `verdict=block,rule=tls_fp_blocklist`.
+- После merge activate-PR: `blocklist_entries` +1 (EDGE_STATS в Loki / `:9090 /__stats`), запросы с fp → `verdict=block,rule=tls_fp_blocklist` (Loki `{kind="bac_log"}`).
 - После auto-demote: запись уходит из active (молчит >14д), enforcement снимается.
 
 ## Откат
@@ -126,8 +126,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   открыл чистый staging-PR (#106) от main с evidence-паспортом (score 6 HIGH:
   impersonator go-http-client + leakix recon, multi-IP 13, DC, `human_share 0.0`,
   gates ✓); CI зелёный.
-- **Channel C staging-доставка.** После мержа #106 эдж (`/__admin` → Blocklist)
-  показывает `L13d1300_69e852b66fc7_10d89aa70559 → staging:block` — запись доехала
+- **Channel C staging-доставка.** После мержа #106 эдж (тогда — `/__admin` → Blocklist;
+  теперь то же видно в `:9090 /__stats` / EDGE_STATS)
+  показывал `L13d1300_69e852b66fc7_10d89aa70559 → staging:block` — запись доехала
   и загружена как match-but-observe (НЕ 403, в отличие от `active:block`-записей,
   которыми эдж в тот момент блокировал live jitsi-scanner). Подтверждает, что
   staging реально доходит до эджа (разрыв, закрытый 86exrtjpc).

@@ -26,8 +26,9 @@ $EDITOR CASCADE_VERSION            # тот же X.Y.Z
 # 2. Reload — preload сверит версии.
 docker compose -f docker-compose.demo.yml exec nginx-demo openresty -s reload
 
-# 3. Проверить.
-docker exec nginx-demo curl -ks https://127.0.0.1/__version -H 'Host: bac.example.com' | grep cascade_version
+# 3. Проверить. cascade_version — поле в EDGE_STATS-строке логов (reload роняет
+#    свежую).
+docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1 | grep -o '"cascade_version":"[^"]*"'
 ```
 
 ## Что наблюдает pin (negative-тест)
@@ -41,7 +42,7 @@ challenge: cascade/template version mismatch — /etc/nginx/CASCADE_VERSION=0.2.
 
 Важно: при провале reload **старые worker'ы продолжают обслуживать трафик** —
 nginx не применяет битую конфигурацию (reload отвергается на стадии загрузки).
-`/__health` остается `ok`, `/__version` `cascade_version` остается прежним. То
+`/__health` остается `ok`, `cascade_version` в EDGE_STATS остается прежним. То
 есть pin ловит рассинхрон, не уронив стенд.
 
 > `openresty -t` на этой сборке **не** исполняет `init_by_lua_file`, поэтому
@@ -65,6 +66,6 @@ challenge: cascade/template version mismatch — /etc/nginx/CASCADE_VERSION=0.2.
 vs template meta=0.1.0 (bump both sides together; see …/challenge/README.md)
 ```
 
-`/__health` = `ok`, `/__version` `cascade_version` остался `0.1.0` (старые
+`/__health` = `ok`, `cascade_version` в EDGE_STATS остался `0.1.0` (старые
 worker'ы обслуживали) — стенд не упал. Восстановил `0.1.0` → чистый reload,
 `cascade_version: 0.1.0`, `git status` чист.

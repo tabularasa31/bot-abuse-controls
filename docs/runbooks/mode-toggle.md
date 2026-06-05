@@ -55,9 +55,9 @@ curl -ks -X PATCH "$API/antibot/v1/policy/$HOSTQ" -H "$H" \
   origin (запрос проксируется).
 - `mode=active` → тот же `verdict=block`, физически **403**.
 
-Это видно в `/__admin` (ring buffer «Recent requests»: один и тот же
-blocklist-fp дает status 200 на shadow-хосте и 403 на active-хосте) и в
-`antibot_verdict_total{verdict="block"}` / статусах ответов.
+Это видно в Loki `{kind="bac_log"}` (BAC_LOG, отфильтровать по `host` / `mode`:
+один и тот же blocklist-fp дает status 200 на shadow-хосте и 403 на active-хосте)
+и в статусах ответов.
 
 ## Откат
 
@@ -73,7 +73,7 @@ blocklist-fp дает status 200 на shadow-хосте и 403 на active-хо�
   (backend reloader + edge pull, в пределах SLA ≤30с).
 - `PATCH {"mode":"shadow"}` → эдж вернулся к `"mode":"shadow"` через ≤32с.
 - Идемпотентность: повтор `{"mode":"shadow"}` → `{"changed":false,"diff":[]}`.
-- Контраст enforcement (живой трафик, `/__admin` ring buffer): один и тот же
+- Контраст enforcement (живой трафик, Loki `{kind="bac_log"}`): один и тот же
   blocklist-fp `L13d1900_f3fd9e8f6e2b_fac63a6ff214` дал **403** на active
   `dashboard.example.com` и **200** на shadow `bac.example.com`.
 

@@ -23,8 +23,8 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    # REVISION is exposed via /__version. Override with a real git sha
-    # on deployment:
+    # REVISION appears in the EDGE_STATS dump (`commit` field). Override with a
+    # real git sha on deployment:
     #   REVISION=$(git rev-parse --short HEAD) docker compose -f \
     #       infra/demo-stand/docker-compose.demo.yml up -d
     # ${REVISION:-dev} also requires the env-var listing inside nginx
@@ -79,9 +79,12 @@ services:
       # .env so the bind doesn't clash. .env is gitignored.
       - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
       - "${DEMO_BIND_IP:-0.0.0.0}:80:80"   # 80 reserved for ACME http-01 challenge
-      # Private mgmt plane (read-only /__policy + /__stats). Bound to the VM's
-      # 127.0.0.1 ONLY — never the public/floating IP. Operator reaches it via
-      # an SSH tunnel: `ssh -L 9090:127.0.0.1:9090 <vm>` → http://localhost:9090.
+      # Private mgmt plane (read-only /__policy + /__stats). MUST stay bound to
+      # 127.0.0.1 — NEVER ${DEMO_BIND_IP} or the public/floating IP. This bind is
+      # the ONLY access control for the plane (nginx can't ACL it under docker
+      # NAT — see nginx.demo.conf :9090 block); publishing it on a public
+      # interface leaks per-host policy incl. tenant origin_ip. Operator reaches
+      # it via SSH tunnel: `ssh -L 9090:127.0.0.1:9090 <vm>` → http://localhost:9090.
       - "127.0.0.1:9090:9090"
 
     volumes:

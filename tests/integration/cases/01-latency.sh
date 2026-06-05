@@ -60,5 +60,16 @@ if ! echo "$other_body" | grep -q '"mode":"shadow"'; then
 fi
 echo "  pool default OK for unregistered host"
 
+# 4. Wire contract (code-review on PR #147): empty Policy list fields MUST encode
+# as JSON arrays []. The pool-default body above has empty ua_blacklist etc.;
+# policy_view.lua uses an array-preserving cjson so they stay [] not {}. Assert
+# it end-to-end here (real cjson, which the bare-luajit unit runner lacks).
+if ! echo "$other_body" | grep -q '"ua_blacklist":\[\]'; then
+    echo "FAIL: empty Policy list re-encoded as object, not array — dashboard wire contract broken:"
+    echo "    ${other_body}"
+    exit 1
+fi
+echo "  empty-list array contract OK (ua_blacklist:[])"
+
 # Cleanup (revert to shadow) runs from the EXIT trap above.
 exit 0

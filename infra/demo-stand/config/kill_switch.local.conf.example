@@ -43,8 +43,9 @@ verification = false
 #   * HTTP: a request whose Host is NOT a registered tenant (Host: <edge-IP>,
 #     garbage Hosts, HTTP/1.0 без Host, no-SNI) is closed with 444 before the
 #     cascade, instead of being served the bundled landing page.
-# Tenant traffic is untouched; /__health, /__admin, /metrics and ACME stay
-# reachable (their base-domain SNI is allowed through on purpose). Off by
-# default (landing) so the stand works out-of-box.
+# Tenant traffic is untouched; /__health (+ ACME on :80) stays reachable (its
+# base-domain SNI is allowed through on purpose). Other ops live on the private
+# :9090 plane, not public :443. Off by default (landing) so the stand works
+# out-of-box.
 [edge_protection]
 deny_nontenant = false

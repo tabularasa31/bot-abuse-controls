@@ -56,8 +56,10 @@ Other simplifications:
 
 ## Ports (loopback only)
 
-- `https://127.0.0.1:18443` — edge (`/__policy`, `/__health`,
-  `/metrics`, `/__admin`). Self-signed cert; use `curl -k`.
+- `https://127.0.0.1:18443` — edge public surface (`/__health`).
+  Self-signed cert; use `curl -k`.
+- `http://127.0.0.1:19090` — edge private mgmt plane (`/__policy`,
+  `/__stats`); the harness publishes the loopback `:9090` here.
 - `http://127.0.0.1:18080` — backend (`/antibot/v1/policy/...`,
   `/health`).
 

@@ -89,7 +89,8 @@ jobs:
                    luajit tests/policy_test.lua && \
                    luajit tests/tls_autossl_test.lua && \
                    luajit tests/config_edge_test.lua && \
-                   luajit tests/edge_stats_test.lua'
+                   luajit tests/edge_stats_test.lua && \
+                   luajit tests/policy_view_test.lua'
 
   pytest:
     name: Python tests (pytest, analyze.py)
