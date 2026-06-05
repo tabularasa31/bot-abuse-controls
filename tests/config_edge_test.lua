@@ -58,8 +58,9 @@ do
     f:write("deny_nontenant = true\n")
     f:close()
 end
-local parsed = assert(loader.parse_ini(tmp))
-os.remove(tmp)
+local parsed, perr = loader.parse_ini(tmp)
+os.remove(tmp)   -- remove BEFORE asserting so a parse failure doesn't leak the temp file
+assert(parsed, perr)
 eq(type(parsed.edge_protection), "table", "parse: section nests to a table")
 eq(parsed.edge_protection.deny_nontenant, true, "parse: value coerces to boolean true")
 
@@ -70,8 +71,9 @@ do
     f:write("deny_nontenant = false\n")
     f:close()
 end
-local parsed2 = assert(loader.parse_ini(tmp2))
-os.remove(tmp2)
+local parsed2, perr2 = loader.parse_ini(tmp2)
+os.remove(tmp2)   -- remove BEFORE asserting (test hygiene)
+assert(parsed2, perr2)
 eq(parsed2.edge_protection.deny_nontenant, false, "parse: 'false' coerces to boolean false")
 
 -- summary -----------------------------------------------------------------

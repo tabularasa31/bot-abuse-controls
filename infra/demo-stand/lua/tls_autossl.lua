@@ -104,6 +104,13 @@ function _M.sni_known(host, opts)
     -- if/else (not `lookup and lookup(host) or require(...)`): a real non-tenant
     -- makes the injected lookup return nil, and the `or` would then fall through
     -- to require("policy") — defeating the test injection. Mirror allow_domain.
+    --
+    -- require("policy") is deliberately NOT pcall-wrapped here (gemini review on
+    -- PR #146): the only production caller, reject_unknown_sni, already wraps the
+    -- whole decision in a pcall that FAILS OPEN. Catching the error here and
+    -- returning false instead would fail CLOSED (treat the SNI as unknown →
+    -- reject), which could drop a real tenant's handshake on a transient policy
+    -- error — the opposite of the module's "never take HTTPS down" contract.
     local lookup = opts and opts.origin_ip
     local ip
     if lookup then
@@ -129,17 +136,28 @@ end
 -- No per-handshake ngx.log: under a flood this fires on every connection, and a
 -- log line per drop would itself become the bottleneck. The
 -- edge_sni_rejected_total counter is the visible signal instead.
+--
+-- Crash-safety (gemini review on PR #146): this runs in ssl_certificate() BEFORE
+-- its pcall, so a throw here would abort the handshake instead of falling back to
+-- the static cert — violating the module contract ("protection must never take
+-- HTTPS down"). The whole decision (config read, ngx.ssl, policy lookup inside
+-- sni_known) is therefore wrapped in a pcall that FAILS OPEN: any error → do not
+-- reject, serve the static cert. ngx.exit(ngx.ERROR) stays OUTSIDE the pcall —
+-- it raises a control-flow exception that pcall would otherwise swallow, which
+-- would turn a reject into a silent pass. The metrics dict is nil-guarded too.
 function _M.reject_unknown_sni()
-    local config = require "config"
-    if not config.edge_deny_nontenant(config.defaults) then return end
+    local ok, reject = pcall(function()
+        local config = require "config"
+        if not config.edge_deny_nontenant(config.defaults) then return false end
+        local ssl  = require "ngx.ssl"
+        local host = ssl.server_name()   -- nil when the client sent no SNI
+        return host and host ~= "" and not _M.sni_known(host)
+    end)
+    if not ok or not reject then return end
 
-    local ok, ssl = pcall(require, "ngx.ssl")
-    if not ok then return end   -- no ngx.ssl (e.g. unit test) → never reject
-    local host = ssl.server_name()   -- nil when the client sent no SNI
-    if host and host ~= "" and not _M.sni_known(host) then
-        ngx.shared.metrics:incr("edge_sni_rejected_total", 1, 0)
-        return ngx.exit(ngx.ERROR)
-    end
+    local metrics = ngx.shared.metrics
+    if metrics then metrics:incr("edge_sni_rejected_total", 1, 0) end
+    return ngx.exit(ngx.ERROR)
 end
 
 -- setup() — configure lua-resty-acme autossl (call from init_by_lua, master).
