@@ -37,14 +37,14 @@ dash_patch '{"mode":"active","strictness":"standard"}' \
 # shellcheck disable=SC2329
 check_edge_active() {
     local body
-    body="$(edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}")" || return 1
+    body="$(mgmt_curl "${EDGE_MGMT_URL}/__policy?host=${TEST_HOST}")" || return 1
     echo "$body" | grep -q '"mode":"active"'
 }
 
 if ! poll_until 10 check_edge_active; then
     echo "FAIL: edge did not see mode=active within 10s"
     echo "  last /__policy:"
-    last_body="$(edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}")"
+    last_body="$(mgmt_curl "${EDGE_MGMT_URL}/__policy?host=${TEST_HOST}")"
     echo "    ${last_body}"
     exit 1
 fi
@@ -52,7 +52,7 @@ fi
 # 3. Sanity: unregistered host returns pool default (mode=shadow). Same
 # request, different ?host=. Validates that the apply doesn't smear
 # state across hosts.
-other_body="$(edge_curl "${EDGE_URL}/__policy?host=unregistered.example")"
+other_body="$(mgmt_curl "${EDGE_MGMT_URL}/__policy?host=unregistered.example")"
 if ! echo "$other_body" | grep -q '"mode":"shadow"'; then
     echo "FAIL: pool default broken — unregistered host returned:"
     echo "    ${other_body}"

@@ -86,10 +86,14 @@ local function revision()
     return os.getenv("REVISION") or "unknown"
 end
 
-function _M.emit()
+-- collect() — assemble the full stats table (counters + deploy metadata +
+-- Channel C staleness). The single source of truth used by BOTH emit() (push to
+-- stdout → Loki) and the private /__stats handler (pull, for the B13 integration
+-- tests + operator debugging on the :9090 mgmt plane). Reads ngx.shared.metrics;
+-- returns nil if that dict is unavailable.
+function _M.collect()
     local m = ngx.shared.metrics
-    if not m then return end
-    local cjson = require "cjson.safe"
+    if not m then return nil end
     local snap = _M.snapshot(
         function(k) return m:get(k) end,
         ngx.now(),
@@ -97,9 +101,9 @@ function _M.emit()
         os.getenv("EDGE_ID") or "stand-bac")
 
     -- Deploy metadata that used to live behind /__version (removed Phase 1):
-    -- folded into the stats stream so operators verify "what's deployed / did
-    -- the secret rotation take / cascade version" from Loki instead of an HTTP
-    -- endpoint. pcall-guarded — a load hiccup must not stop the counter dump.
+    -- folded in so operators verify "what's deployed / did the secret rotation
+    -- take / cascade version" from Loki (or /__stats) instead of an HTTP
+    -- endpoint. pcall-guarded — a load hiccup must not stop the dump.
     snap.commit = revision()
     local ok_cv, cv = pcall(function() return require("challenge").template_version() end)
     snap.cascade_version = ok_cv and cv or nil
@@ -108,9 +112,9 @@ function _M.emit()
 
     -- Channel C liveness (was /metrics antibot_edge_catalog_staleness_seconds):
     -- seconds since the last successful backend contact per catalog, -1 if never.
-    -- This is the alert signal for a dead pull channel; promtail drops nginx
-    -- error.log lines (only BAC_LOG/EDGE_STATS prefixes survive), so without
-    -- this the staleness WARNs would never reach Loki. pcall-guarded.
+    -- The alert signal for a dead pull channel; promtail drops nginx error.log
+    -- lines (only BAC_LOG/EDGE_STATS prefixes survive), so without this the
+    -- staleness WARNs would never reach Loki. pcall-guarded.
     local ok_st, stale = pcall(function()
         local cp = require "catalog_pull"
         local now = ngx.time()
@@ -125,7 +129,13 @@ function _M.emit()
     end)
     snap.catalog_staleness_seconds = ok_st and stale or nil
 
-    local line = cjson.encode(snap)
+    return snap
+end
+
+function _M.emit()
+    local snap = _M.collect()
+    if not snap then return end
+    local line = require("cjson.safe").encode(snap)
     if not line then return end
     io.stdout:write("EDGE_STATS ", line, "\n")
     io.stdout:flush()

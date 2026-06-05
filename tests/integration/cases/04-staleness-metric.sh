@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # B13 case 4 — staleness gauge grows on backend outage.
 #
-# Contract: antibot_edge_catalog_staleness_seconds{catalog="<name>"} is
-# bumped to 0 on every successful pull (200 or 304); when the backend
-# is unreachable, the gauge grows monotonically. Alerts on the prod-edge
-# side fire on this gauge (config-distribution §"drives alerting").
+# Contract: catalog staleness (seconds since the last successful pull, 200 or
+# 304) resets to ~0 on every successful pull and grows monotonically while the
+# backend is unreachable. Alerts on the prod-edge side fire on this signal
+# (config-distribution §"drives alerting").
 #
-# Test shape: scrape /metrics → record current age → stop backend →
-# wait 5s → scrape again → assert the gauge for the `policy` catalog
-# grew by at least 4s (one-second slack for jitter). Restore backend.
+# Phase 1: the signal moved off the public /metrics Prometheus gauge to the
+# private mgmt plane's /__stats JSON (`catalog_staleness_seconds.<name>`), same
+# value pushed as EDGE_STATS to Loki. Test shape: read /__stats → record the
+# `policy` catalog age → stop backend → wait 5s → read again → assert it grew
+# by at least 3s. Restore backend.
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,12 +24,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# extract_age — print the current age (seconds) from /metrics for the
-# `policy` catalog. Empty output if the line is missing.
+# extract_age — print the current staleness (seconds) for the `policy` catalog
+# from the mgmt plane's /__stats JSON. The field is
+# `catalog_staleness_seconds.policy` — an integer (now - last_pull_ts) or -1 if
+# never pulled. "policy" appears as a JSON key only inside that nested object, so
+# a single grep is unambiguous (no jq dependency, matching the other cases).
+# Empty output if the field is missing.
 extract_age() {
-    edge_curl --max-time 3 "${EDGE_URL}/metrics" \
-        | awk -F'} ' '/antibot_edge_catalog_staleness_seconds\{catalog="policy"\}/ { print $2 }' \
-        | head -n1
+    mgmt_curl --max-time 3 "${EDGE_MGMT_URL}/__stats" \
+        | grep -oE '"policy":-?[0-9]+' \
+        | head -n1 \
+        | sed 's/.*://'
 }
 
 # 1. Baseline: ensure the gauge is healthy (≥0 and small) before we stop
@@ -40,7 +47,7 @@ for _ in 1 2 3 4 5; do
     sleep 1
 done
 if [ -z "$base" ]; then
-    echo "FAIL: gauge antibot_edge_catalog_staleness_seconds{catalog=\"policy\"} missing from /metrics"
+    echo "FAIL: catalog_staleness_seconds.policy missing from /__stats"
     exit 1
 fi
 if [ "$base" -eq -1 ]; then

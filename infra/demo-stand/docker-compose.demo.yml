@@ -79,6 +79,10 @@ services:
       # .env so the bind doesn't clash. .env is gitignored.
       - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
       - "${DEMO_BIND_IP:-0.0.0.0}:80:80"   # 80 reserved for ACME http-01 challenge
+      # Private mgmt plane (read-only /__policy + /__stats). Bound to the VM's
+      # 127.0.0.1 ONLY — never the public/floating IP. Operator reaches it via
+      # an SSH tunnel: `ssh -L 9090:127.0.0.1:9090 <vm>` → http://localhost:9090.
+      - "127.0.0.1:9090:9090"
 
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
