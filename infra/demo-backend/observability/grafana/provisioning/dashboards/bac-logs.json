@@ -106,7 +106,7 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["last"],
+          "calcs": ["max"],
           "fields": "",
           "values": false
         },
@@ -118,9 +118,9 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "max_over_time(sum(rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [1m]))[24h:1m])",
+          "expr": "sum(rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [1m]))",
           "legendFormat": "total",
-          "queryType": "instant",
+          "queryType": "range",
           "refId": "A"
         }
       ],
@@ -478,7 +478,7 @@
       }
     ]
   },
-  "time": { "from": "now-1h", "to": "now" },
+  "time": { "from": "now-24h", "to": "now" },
   "timepicker": {},
   "timezone": "",
   "title": "BAC raw logs",
