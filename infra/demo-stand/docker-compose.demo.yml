@@ -23,8 +23,8 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    # REVISION is exposed via /__version. Override with a real git sha
-    # on deployment:
+    # REVISION appears in the EDGE_STATS dump (`commit` field). Override with a
+    # real git sha on deployment:
     #   REVISION=$(git rev-parse --short HEAD) docker compose -f \
     #       infra/demo-stand/docker-compose.demo.yml up -d
     # ${REVISION:-dev} also requires the env-var listing inside nginx
@@ -35,9 +35,9 @@ services:
       EDGE_ID: ${EDGE_ID:-stand-bac}
       # Upstream selection is fully Policy-driven (ClickUp 86exrefdz): a tenant
       # is a host whose Policy (Channel C) has a non-empty origin_ip; the edge
-      # proxies the incoming Host to that IP, everything else to the BAC
-      # landing. No ORIGIN_URL / DASHBOARD_* env — add a tenant with one
-      # PATCH /antibot/v1/policy/<host> {"origin_ip": ...}.
+      # proxies the incoming Host to that IP, everything else is dropped with 444
+      # (tenant-only edge). No ORIGIN_URL / DASHBOARD_* env — add a tenant with
+      # one PATCH /antibot/v1/policy/<host> {"origin_ip": ...}.
       # When "on", reputation.lua honours an X-Demo-IP request header to
       # simulate a public client IP for GeoIP lookups (stand testing). Default
       # off → real remote_addr is always used (organic traffic resolves for
@@ -58,18 +58,9 @@ services:
       # demo-backend on a side VM). Default unset → catalog_pull keeps
       # ssl_verify=true (production-path).
       ANTIBOT_BACKEND_SSL_VERIFY: ${ANTIBOT_BACKEND_SSL_VERIFY:-}
-      # [C6] Shared M2M secret for backend Policy API (B10). Recovery
-      # endpoint /__admin/recover_ip («Whitelist IP» button) reads this
-      # to authenticate against POST /antibot/v1/policy/<host>/ip_whitelist.
-      # Same secret the backend reads from its DASHBOARD_API_TOKEN env;
-      # set both on the demo host. Unset → recovery refuses with 502.
-      DASHBOARD_API_TOKEN: ${DASHBOARD_API_TOKEN:-}
-      # [C6 security gate] Operator IP allowlist for /__admin/recover_ip.
-      # CSV CIDR. Unset/empty → fail-closed (403 on every POST). Without
-      # this, /__admin being publicly reachable lets any client whitelist
-      # their IP on any protected host. Set to your public IP (or office
-      # /24) in .env. See recovery.lua.
-      ADMIN_ACL_CIDR: ${ADMIN_ACL_CIDR:-}
+      # NOTE: DASHBOARD_API_TOKEN / ADMIN_ACL_CIDR were removed (Phase 1) —
+      # the /__admin recovery endpoint they gated is gone; false-positive
+      # recovery is the dashboard's job via the Policy API.
       # On-demand TLS (lua-resty-auto-ssl) for tenant custom domains.
       #   STAND_BASE_DOMAIN — names at/under it use the static fallback cert,
       #     never ACME (default example.com).
@@ -88,6 +79,13 @@ services:
       # .env so the bind doesn't clash. .env is gitignored.
       - "${DEMO_BIND_IP:-0.0.0.0}:443:443"
       - "${DEMO_BIND_IP:-0.0.0.0}:80:80"   # 80 reserved for ACME http-01 challenge
+      # Private mgmt plane (read-only /__policy + /__stats). MUST stay bound to
+      # 127.0.0.1 — NEVER ${DEMO_BIND_IP} or the public/floating IP. This bind is
+      # the ONLY access control for the plane (nginx can't ACL it under docker
+      # NAT — see nginx.demo.conf :9090 block); publishing it on a public
+      # interface leaks per-host policy incl. tenant origin_ip. Operator reaches
+      # it via SSH tunnel: `ssh -L 9090:127.0.0.1:9090 <vm>` → http://localhost:9090.
+      - "127.0.0.1:9090:9090"
 
     volumes:
       - ./nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
@@ -104,7 +102,6 @@ services:
       # at init_by_lua via the `config` Lua module. Editing a file here and
       # restarting the container re-applies it (hot-reload is a separate task).
       - ./config:/etc/nginx/config:ro
-      - ./sites:/etc/nginx/sites:ro
       - ./certs:/etc/nginx/certs:ro
       # [C2] Phase 4 challenge page asset. Channel A on the demo = file
       # mount (Puppet on prod). Read once in init_by_lua via challenge.lua;

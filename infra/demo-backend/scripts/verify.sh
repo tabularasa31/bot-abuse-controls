@@ -356,21 +356,23 @@ case "${host_only}" in
         ;;
 esac
 
-echo "9. Fail-stale on edge (cross-stack, opt-in via STAND_HOST)"
+echo "9. Edge reachable (cross-stack, opt-in via STAND_HOST)"
 if [ -n "${STAND_HOST:-}" ]; then
-    # Capture the staleness gauge before and after a backend stop. We don't
-    # actually stop containers here — operator does it manually so the test
-    # doesn't accidentally take down a shared backend. Instead, the check
-    # asserts the metric is exported and parseable; the manual scenario is
-    # documented in the README ("Fail-stale verification").
-    if curl -sk --connect-timeout 3 --max-time 5 "https://${STAND_HOST}/metrics" 2>/dev/null \
-            | grep -q '^antibot_edge_catalog_staleness_seconds{'; then
-        pass "antibot_edge_catalog_staleness_seconds exported by edge ${STAND_HOST}"
+    # Phase 1: the catalog-staleness signal moved off the public /metrics
+    # endpoint to the EDGE_STATS stream (Loki, {kind="edge_stats"}
+    # catalog_staleness_seconds) and the edge's PRIVATE :9090 /__stats plane —
+    # neither is reachable cross-host (mgmt is bound to the edge VM's loopback).
+    # So this cross-stack check only asserts the edge is up via its public
+    # liveness endpoint; the staleness assertion itself lives in the edge's own
+    # integration harness (tests/integration/cases/04-staleness-metric.sh).
+    if curl -sk --connect-timeout 3 --max-time 5 "https://${STAND_HOST}/__health" 2>/dev/null \
+            | grep -q '^ok'; then
+        pass "edge ${STAND_HOST} reachable (/__health); staleness now in Loki EDGE_STATS / :9090 /__stats"
     else
-        bad "edge ${STAND_HOST} does not export antibot_edge_catalog_staleness_seconds"
+        bad "edge ${STAND_HOST} not reachable on /__health"
     fi
 else
-    skip "STAND_HOST not set — fail-stale check (manual scenario in README)"
+    skip "STAND_HOST not set — edge reachability check (manual scenario in README)"
 fi
 
 echo

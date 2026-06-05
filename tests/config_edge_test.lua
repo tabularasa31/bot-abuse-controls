@@ -37,7 +37,7 @@ eq(config.edge_deny_nontenant({ edge_protection = { deny_nontenant = true } }),
    true, "deny_nontenant=true → true")
 eq(config.edge_deny_nontenant({ edge_protection = { deny_nontenant = false } }),
    false, "deny_nontenant=false → false")
--- Missing section / key → default off (out-of-box landing behaviour).
+-- Missing section / key → default off (TLS reject disabled).
 eq(config.edge_deny_nontenant({ edge_protection = {} }),
    false, "empty section → false")
 eq(config.edge_deny_nontenant({}), false, "no section → false")

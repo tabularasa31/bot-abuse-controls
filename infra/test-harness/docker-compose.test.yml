@@ -80,10 +80,10 @@ services:
     image: bac-demo-stand:test
     environment:
       EDGE_ID: stand-test
-      # Origin not exercised — tests target admin endpoints (/__policy,
-      # /__health, /metrics). Upstream selection is Policy-driven now (no
-      # ORIGIN_URL env); a non-tenant Host serves the bundled landing page,
-      # so an accidental `/` hit no longer 503s.
+      # Origin not exercised — tests target the read-only mgmt plane on :9090
+      # (/__policy, /__stats) + the public /__health. Upstream selection is
+      # Policy-driven (no ORIGIN_URL env); a non-tenant Host is dropped with 444
+      # (tenant-only edge, no landing), so cases never hit `/`.
       ANTIBOT_BACKEND_URL: "http://backend:8080"
       ANTIBOT_BACKEND_SSL_VERIFY: "false"
       # B11 / D8: override the 30s pull cadence so a PATCH → edge-visible
@@ -102,7 +102,6 @@ services:
     volumes:
       - ../demo-stand/lua:/etc/nginx/lua:ro
       - ../demo-stand/config:/etc/nginx/config:ro
-      - ../demo-stand/sites:/etc/nginx/sites:ro
       - ../demo-stand/geoip:/etc/nginx/geoip:ro
       - ../demo-stand/nginx.demo.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
       # Override the production resolver.conf with a docker-DNS-aware
@@ -120,6 +119,10 @@ services:
       - ../demo-stand/CASCADE_VERSION:/etc/nginx/CASCADE_VERSION:ro
     ports:
       - "127.0.0.1:18443:443"
+      # Private mgmt plane (read-only /__policy + /__stats). Loopback-only on the
+      # runner — the B13 cases read edge state here instead of the (removed)
+      # public /__policy + /metrics. Never bound to a public interface.
+      - "127.0.0.1:19090:9090"
     ulimits:
       nofile: { soft: 65535, hard: 65535 }
     healthcheck:

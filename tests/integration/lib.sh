@@ -2,8 +2,12 @@
 # Shared helpers for integration test cases. Sourced, not executed.
 #
 # Stack endpoints (loopback only — see docker-compose.test.yml):
-#   * backend (Channel C + dashboard API) on http://127.0.0.1:18080
-#   * edge (cascade + /__policy + /metrics)  on https://127.0.0.1:18443
+#   * backend (Channel C + dashboard API)  on http://127.0.0.1:18080
+#   * edge public data plane (cascade)      on https://127.0.0.1:18443
+#   * edge PRIVATE mgmt plane (read-only)   on http://127.0.0.1:19090
+#       /__policy (effective per-host policy) + /__stats (counters + catalog
+#       staleness). Phase 1 moved these off the public :443 onto the :9090 mgmt
+#       listener; the cases read edge state here. Plain HTTP, loopback only.
 #
 # Bearer token is hardcoded — only valid inside this CI harness, never
 # matches production tokens.
@@ -17,6 +21,9 @@ set -u
 BACKEND_URL="${BAC_TEST_BACKEND_URL:-http://127.0.0.1:18080}"
 # shellcheck disable=SC2034
 EDGE_URL="${BAC_TEST_EDGE_URL:-https://127.0.0.1:18443}"
+# Private mgmt plane (read-only /__policy + /__stats), plain HTTP on loopback.
+# shellcheck disable=SC2034
+EDGE_MGMT_URL="${BAC_TEST_EDGE_MGMT_URL:-http://127.0.0.1:19090}"
 DASH_TOKEN="test-token-not-secret"
 
 # Host used by tests when querying /__policy?host=...
@@ -37,6 +44,13 @@ edge_curl() {
     curl --silent --show-error --insecure --max-time 5 \
          --resolve "${TEST_HOST}:18443:127.0.0.1" \
          "$@"
+}
+
+# curl the private mgmt plane (:9090, plain HTTP, loopback). Read-only
+# /__policy + /__stats. No TLS / no --resolve needed (host is irrelevant; the
+# endpoints take ?host= or read shared state). Output STDOUT.
+mgmt_curl() {
+    curl --silent --show-error --max-time 5 "$@"
 }
 
 # Dashboard API PATCH — Bearer-authed, mergepatch+json. Pass JSON body

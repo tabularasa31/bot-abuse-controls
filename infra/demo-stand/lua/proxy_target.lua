@@ -1,23 +1,22 @@
 -- proxy_target — decides where `location /` sends a request, based on the
 -- incoming Host header and per-host Policy (Channel C).
 --
--- Two destinations exist on the demo stand:
+-- The edge is TENANT-ONLY. Two outcomes:
 --   1. A tenant's origin — a protected client backend. Reached when the
 --      incoming Host is a registered tenant: a host whose Policy carries a
 --      non-empty `origin_ip`. The upstream is `https://<host>`, with the
 --      hostname rewritten to `origin_ip` by origin_resolve (bypassing DNS,
 --      loop-safe). Host header / SNI sent upstream stay `<host>`.
---   2. BAC's own surface — the bundled landing page, plus /__admin,
---      /__health, /metrics. Reached for ANY other Host (bac.example.com,
---      unknown / IP-literal / random Hosts that drive-by scanners send, and
---      hosts that have a Policy row but no `origin_ip`).
+--   2. Dropped — ANY other Host (unknown / IP-literal / random Hosts that
+--      drive-by scanners send, and hosts with a Policy row but no `origin_ip`)
+--      gets `return 444` in `location /` (Phase 1: the bundled landing page was
+--      removed; nothing non-tenant is served). origin() returns "" for these.
 --
--- Why a catch-all to BAC instead of proxying everything or returning 421:
---   * Unknown-Host traffic never reaches a tenant backend — no wasted CPU,
---     no polluted per-vhost metrics on someone else's origin.
---   * 421/444 over-blocks (README probes, health checks). The cascade still
---     runs first for the BAC path (access_by_lua), so bad UA / tls-fp / etc.
---     still get 403; scanners just see a normal-looking landing.
+-- Why drop instead of proxying unknowns or returning 421: unknown-Host traffic
+-- is never a real client visit (a client always arrives with its tenant Host),
+-- so it never reaches a tenant backend, and 444 disposes of it cheaply without
+-- polluting per-vhost metrics. The edge_protection.deny_nontenant lever rejects
+-- it one layer earlier at the TLS handshake too.
 --
 -- The tenant set is SOLELY Policy (ClickUp 86exrefdz). There is no env-based
 -- single-tenant fallback: `DASHBOARD_PUBLIC_HOST` / `DASHBOARD_BACKEND_IP` /
@@ -44,8 +43,8 @@ local function origin_ip_for(host, policy_override)
     return require("policy").get(host).origin_ip
 end
 
--- origin(host, policy_override) — the upstream URL to proxy to, or "" for
--- BAC's own surface.
+-- origin(host, policy_override) — the upstream URL to proxy to, or "" for a
+-- non-tenant Host (dropped with 444 by the caller).
 --
 -- host — ngx.var.host (already lowercased by nginx, no port). May be nil/"".
 --
@@ -53,8 +52,7 @@ end
 -- non-empty origin_ip). The network-layer rewrite to origin_ip happens in
 -- $origin_resolve via origin_resolve.resolve(); Host/SNI sent upstream stay
 -- `<host>` (derived from this $origin). Otherwise returns "" — the caller in
--- nginx.demo.conf uses `$origin = ""` to short-circuit to /__landing while
--- still running the cascade via access_by_lua.
+-- nginx.demo.conf sees `$origin = ""` and returns 444 (tenant-only edge).
 function _M.origin(host, policy_override)
     if not host or host == "" then return "" end
     host = string.lower(host)
