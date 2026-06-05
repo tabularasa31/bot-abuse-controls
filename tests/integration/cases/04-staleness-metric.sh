@@ -25,13 +25,16 @@ cleanup() {
 trap cleanup EXIT
 
 # extract_age — print the current staleness (seconds) for the `policy` catalog
-# from the mgmt plane's /__stats JSON. The field is
-# `catalog_staleness_seconds.policy` — an integer (now - last_pull_ts) or -1 if
-# never pulled. "policy" appears as a JSON key only inside that nested object, so
-# a single grep is unambiguous (no jq dependency, matching the other cases).
-# Empty output if the field is missing.
+# from the mgmt plane's /__stats JSON: catalog_staleness_seconds.policy, an
+# integer (now - last_pull_ts) or -1 if never pulled. We FIRST isolate the
+# catalog_staleness_seconds object, THEN grep policy inside it — `policy` also
+# appears as a key under version_mismatch{} when a mismatch has occurred, so an
+# un-anchored grep over the whole document could read the wrong number. The
+# staleness object is flat (int values, no nested braces), so `\{[^}]*\}` captures
+# it exactly. No jq dependency (matching the other cases). Empty if missing.
 extract_age() {
     mgmt_curl --max-time 3 "${EDGE_MGMT_URL}/__stats" \
+        | grep -oE '"catalog_staleness_seconds":\{[^}]*\}' \
         | grep -oE '"policy":-?[0-9]+' \
         | head -n1 \
         | sed 's/.*://'

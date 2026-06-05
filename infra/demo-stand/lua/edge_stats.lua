@@ -1,50 +1,32 @@
 -- edge_stats — periodic aggregate stats dump to stdout (push, not expose).
 --
 -- Replaces the deleted /metrics pull endpoint (Phase 1 edge mgmt-plane cleanup).
--- The counters that have NO other window once /metrics is gone are the ones that
--- bypass the per-request BAC_LOG stream:
---   * edge_nontenant_dropped_total — the HTTP 444 fires before access_by_lua, so
---     no BAC_LOG record is written for the dropped request.
---   * edge_sni_rejected_total — the TLS reject happens in the handshake, before
---     there is any HTTP request to log.
---   * cache hit/miss ratio, fp_unique, blocklist_entries — gauges that only ever
---     lived in the `metrics` shared dict, never in BAC_LOG.
--- A worker-0 timer reads them every `interval` seconds and writes ONE
---   EDGE_STATS {json}
--- line to stdout. promtail (which already tails the container stdout and ships
--- `BAC_LOG` lines to Loki) is extended to also capture the `EDGE_STATS` prefix
--- under a `kind="edge_stats"` label. This is AGGREGATE (one line per interval,
--- not per request), so it adds no per-request log I/O and is safe under a flood.
+-- promtail does not scrape HTTP — it tails the container stdout — so the bridge
+-- to Loki is: print one `EDGE_STATS {json}` line every `interval` seconds, which
+-- promtail already captures (alongside `BAC_LOG`) under a `kind="edge_stats"`
+-- label. AGGREGATE (one line per interval, not per request) → no per-request log
+-- I/O, safe under a flood, and no pull endpoint to scan/flood.
 --
--- NOT dumped here: the per-rule / per-flag / per-tag / staging shared-dict
--- counters (`rule:*`, `flag:*`, `tag:*`, `staging:*`). Those are per-request and
--- fully reconstructable from BAC_LOG in Loki (log_event.lua emits stage/verdict/
--- rule on every record), so they need no separate exporter.
+-- COMPLETENESS (code-review on PR #147): snapshot() ENUMERATES the whole metrics
+-- shared dict — exactly what the deleted metrics.lua did via m:get_keys(0) — so
+-- nothing silently goes dark. A hand-curated allowlist previously dropped the
+-- clearance/challenge security counters and the catalog version-mismatch counter
+-- (still incremented every request, exported nowhere). Enumeration also means a
+-- NEW counter added anywhere ships automatically, no edit here.
+--
+-- Layout: plain scalar counters/gauges go top-level; the dynamic prefixed
+-- families are grouped into nested objects mirroring metrics.lua's labels:
+--   rule:<stage>:<rule>                     -> rules{}
+--   flag:<flag>                             -> flags{}
+--   tag:<tag>                               -> tags{}
+--   staging:<catalog>:<pattern>             -> staging{}   (incl. zero-traffic
+--       staged patterns — these have NO BAC_LOG record, so Loki cannot
+--       reconstruct them; the promotion workflow needs them here)
+--   edge_sidecar_version_mismatch_total:<c> -> version_mismatch{}
+-- start_time and catalog_last_pull_ts:* are internal (used to derive
+-- uptime_seconds / catalog_staleness_seconds) and are not dumped raw.
 
 local _M = { interval = 30 }
-
--- Curated scalar snapshot keys (see module header for why exactly these).
-local KEYS = {
-    "edge_nontenant_dropped_total",
-    "edge_sni_rejected_total",
-    "requests_total",
-    "verdict_pass_total",
-    "verdict_block_total",
-    "verdict_challenge_total",
-    "verdict_allow_total",
-    "cache_hit_total",
-    "cache_miss_total",
-    "fp_unique",
-    "blocklist_entries",
-    -- BAC_LOG shipper health (was /metrics antibot_bac_log_*). shipper_loaded==0
-    -- is the silent-shipper-down alert; ship_failed/dropped show backpressure.
-    "bac_log_enqueued_total",
-    "bac_log_shipped_total",
-    "bac_log_ship_failed_total",
-    "bac_log_dropped_overflow_total",
-    "bac_log_dropped_disabled_total",
-    "bac_log_shipper_loaded",
-}
 
 -- pure: RFC3339 UTC second-precision timestamp for `epoch` seconds. promtail's
 -- timestamp stage parses this with RFC3339Nano (variable fractional digits, so a
@@ -53,16 +35,41 @@ function _M.iso8601(epoch)
     return os.date("!%Y-%m-%dT%H:%M:%S", math.floor(epoch or 0)) .. "Z"
 end
 
--- pure: build the snapshot table. `get(key)` returns the counter value or nil.
--- `now`/`start_time` are epoch seconds (uptime gauge). `edge_id` stamps the
--- record so Loki can split per-edge. Dependencies injected for unit tests.
-function _M.snapshot(get, now, start_time, edge_id)
-    local s = { type = "edge_stats", edge_id = edge_id or "" }
-    for _, k in ipairs(KEYS) do
-        s[k] = get(k) or 0
+-- pure: build the snapshot table from a flat {key=value} map of ALL metrics-dict
+-- entries (collect() fills it via m:get_keys/m:get; tests inject it directly).
+-- `now`/`start_time` are epoch seconds (uptime gauge); `edge_id` stamps the
+-- record. No ngx dep → unit-testable, and the classification is exercised
+-- without an OpenResty harness.
+function _M.snapshot(map, now, start_time, edge_id)
+    local s = {
+        type     = "edge_stats",
+        edge_id  = edge_id or "",
+        rules    = {},
+        flags    = {},
+        tags     = {},
+        staging  = {},
+        version_mismatch = {},
+    }
+    for k, v in pairs(map or {}) do
+        local rule = k:match("^rule:(.+)$")
+        local flag = k:match("^flag:(.+)$")
+        local tag  = k:match("^tag:(.+)$")
+        local stg  = k:match("^staging:(.+)$")
+        local vmis = k:match("^edge_sidecar_version_mismatch_total:(.+)$")
+        -- start_time / catalog_last_pull_ts:* are internal (drive uptime /
+        -- catalog_staleness below) — fall through to no bucket, not dumped raw.
+        local internal = (k == "start_time") or (k:find("^catalog_last_pull_ts:") ~= nil)
+        if rule then s.rules[rule] = v
+        elseif flag then s.flags[flag] = v
+        elseif tag then s.tags[tag] = v
+        elseif stg then s.staging[stg] = v
+        elseif vmis then s.version_mismatch[vmis] = v
+        elseif not internal then s[k] = v   -- plain scalar counter / gauge
+        end
     end
-    local total = s.cache_hit_total + s.cache_miss_total
-    s.cache_hit_ratio = total > 0 and (s.cache_hit_total / total) or 0
+    local hit  = s.cache_hit_total or 0
+    local miss = s.cache_miss_total or 0
+    s.cache_hit_ratio = (hit + miss) > 0 and (hit / (hit + miss)) or 0
     s.uptime_seconds = (now and start_time) and (now - start_time) or 0
     s.timestamp = _M.iso8601(now)
     return s
@@ -99,8 +106,15 @@ end
 function _M.collect()
     local m = ngx.shared.metrics
     if not m then return nil end
+    -- Enumerate the whole dict (like the deleted metrics.lua) so no counter is
+    -- silently dropped. get_keys(0) = all keys; one lock-pass, cheap for the
+    -- counter dict, same cost metrics.lua paid per scrape (now once per tick).
+    local map = {}
+    for _, k in ipairs(m:get_keys(0)) do
+        map[k] = m:get(k)
+    end
     local snap = _M.snapshot(
-        function(k) return m:get(k) end,
+        map,
         ngx.now(),
         m:get("start_time"),
         os.getenv("EDGE_ID") or "stand-bac")

@@ -30,7 +30,10 @@ eq(edge_stats.iso8601(1700000000.9), "2023-11-14T22:13:20Z", "iso8601 floors fra
 eq(edge_stats.iso8601(nil), "1970-01-01T00:00:00Z", "iso8601 nil → epoch 0")
 
 -- snapshot ----------------------------------------------------------------
--- A getter backed by a fixed table; absent keys return nil (→ 0 in snapshot).
+-- snapshot() now ENUMERATES a flat {key=value} map of the whole metrics dict
+-- (collect() fills it via m:get_keys/m:get). Plain scalars go top-level; the
+-- dynamic prefixed families are grouped; start_time / catalog_last_pull_ts:* are
+-- internal and excluded.
 local data = {
     edge_nontenant_dropped_total = 1200,
     edge_sni_rejected_total      = 34,
@@ -40,29 +43,55 @@ local data = {
     cache_miss_total             = 10,
     fp_unique                    = 7,
     blocklist_entries            = 3,
+    -- counter families a curated allowlist previously dropped (the fix — these
+    -- must now appear in the snapshot):
+    clearance_verify_wrong_site_total = 5,
+    challenge_invalid_replay_total    = 9,
+    ["edge_sidecar_version_mismatch_total:policy"] = 1,
+    -- dynamic prefixed families → grouped into nested objects:
+    ["rule:hygiene:ua_blacklist"]      = 11,
+    ["flag:tls_fp_impersonator"]       = 2,
+    ["tag:reputation:asn_dc"]          = 4,
+    ["staging:ua_blacklist:badbot"]    = 6,
+    -- internal → must NOT be dumped raw:
+    start_time                         = 1700000000,
+    ["catalog_last_pull_ts:policy"]    = 1700000900,
 }
-local function get(k) return data[k] end
 
-local s = edge_stats.snapshot(get, 1700001000, 1700000000, "edge-7")
+local s = edge_stats.snapshot(data, 1700001000, 1700000000, "edge-7")
 eq(s.type, "edge_stats", "snapshot: type stamped")
 eq(s.edge_id, "edge-7", "snapshot: edge_id stamped")
 eq(s.edge_nontenant_dropped_total, 1200, "snapshot: drop counter passed through")
 eq(s.edge_sni_rejected_total, 34, "snapshot: sni reject passed through")
 eq(s.requests_total, 5000, "snapshot: requests passed through")
-eq(s.verdict_pass_total, 0, "snapshot: absent key → 0")
+eq(s.verdict_pass_total, nil, "snapshot: absent scalar → absent (not forced to 0)")
+-- the regression fix: enumerated families that the old KEYS allowlist dropped
+eq(s.clearance_verify_wrong_site_total, 5, "snapshot: clearance counter now exported")
+eq(s.challenge_invalid_replay_total, 9, "snapshot: challenge counter now exported")
+eq(s.version_mismatch.policy, 1, "snapshot: version_mismatch grouped by catalog")
+-- dynamic prefixed families grouped, label = remainder after the prefix
+eq(s.rules["hygiene:ua_blacklist"], 11, "snapshot: rule:* grouped into rules{}")
+eq(s.flags["tls_fp_impersonator"], 2, "snapshot: flag:* grouped into flags{}")
+eq(s.tags["reputation:asn_dc"], 4, "snapshot: tag:* grouped into tags{}")
+eq(s.staging["ua_blacklist:badbot"], 6, "snapshot: staging:* grouped into staging{}")
+-- internal keys excluded
+eq(s.start_time, nil, "snapshot: start_time not dumped raw")
+eq(s["catalog_last_pull_ts:policy"], nil, "snapshot: catalog_last_pull_ts:* not dumped raw")
+-- derived
 eq(s.cache_hit_ratio, 0.9, "snapshot: cache ratio = hit/(hit+miss)")
 eq(s.uptime_seconds, 1000, "snapshot: uptime = now - start_time")
 eq(s.timestamp, "2023-11-14T22:30:00Z", "snapshot: timestamp = iso8601(now=1700001000)")
 
--- Empty / nil getter → all zeros, ratio 0 (no div-by-zero), no crash.
-local z = edge_stats.snapshot(function() return nil end, 100, 100, nil)
+-- Empty / nil map → empty buckets, ratio 0 (no div-by-zero), no crash.
+local z = edge_stats.snapshot(nil, 100, 100, nil)
 eq(z.edge_id, "", "snapshot: nil edge_id → empty string")
-eq(z.edge_nontenant_dropped_total, 0, "snapshot: nil getter → 0")
+eq(type(z.rules), "table", "snapshot: rules bucket present even when empty")
+eq(next(z.rules), nil, "snapshot: rules bucket empty for empty map")
 eq(z.cache_hit_ratio, 0, "snapshot: 0 hits+misses → ratio 0 (no div-by-zero)")
 eq(z.uptime_seconds, 0, "snapshot: now==start_time → 0 uptime")
 
 -- Missing now/start_time → uptime 0 (defensive).
-local d = edge_stats.snapshot(get, nil, nil, "e")
+local d = edge_stats.snapshot(data, nil, nil, "e")
 eq(d.uptime_seconds, 0, "snapshot: nil now/start → 0 uptime")
 
 io.write(string.format("\nedge_stats_test: %d passed, %d failed\n", passed, failed))
