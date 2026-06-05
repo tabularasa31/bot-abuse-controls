@@ -80,7 +80,7 @@
     },
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "description": "Maximum per-second request rate over the last 24 hours (fixed window, independent of the dashboard time picker). Computed as max_over_time of 1-minute rate buckets.",
+      "description": "Peak per-second request rate over the selected dashboard time range. Evaluated at 1-minute steps to avoid missing spikes between Grafana's default coarser intervals.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -119,12 +119,13 @@
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "sum(rate({job=\"bac-edge\", edge_id=~\"$edge_id\", host=~\"$host\", verdict=~\"$verdict\", mode=~\"$mode\"} [1m]))",
+          "interval": "1m",
           "legendFormat": "total",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Peak RPS (24h)",
+      "title": "Peak RPS",
       "type": "stat"
     },
     {
