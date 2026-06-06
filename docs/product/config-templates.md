@@ -129,7 +129,7 @@ rules:
       # Полный фастпас (skip L3/L4/L5) — только у bot_verified и ip_whitelist.
       cookie_name: tf_clearance
       secret_source: challenge_secret # см. отдельный файл
-      # Привязка к клиенту: cookie выписывается под TLS-fp + подсеть IP того клиента,
+      # Привязка к клиенту: cookie выписывается под TLS-fp + подсеть IP (/24 для IPv4, /64 для IPv6) того клиента,
       # который прошел challenge, и на L2.1 фастпасит только при их совпадении —
       # украденный или переданный на другой клиент cookie не действует.
       ttl_seconds_normal: 86400       # 24 часа — обычный режим
