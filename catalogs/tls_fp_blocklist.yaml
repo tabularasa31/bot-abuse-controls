@@ -120,12 +120,14 @@
 # promoted 2026-06-02 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 7 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
 # human_share 0.0 · events 1067 · review-by 2026-06-16
-"L13d43h1_14ffb2d78dbd_cc78d80a9016": staging
+#  ↳ auto-activated 2026-06-07: staging observation clean
+"L13d43h1_14ffb2d78dbd_cc78d80a9016": active
 
 # promoted 2026-06-03 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 5 разных IP +1 / persistent: 4 разных дней +1
 # human_share 0.0 · events 111 · review-by 2026-06-17
-"L13d19h2_f3fd9e8f6e2b_2d5fbeed7632": staging
+#  ↳ auto-activated 2026-06-07: staging observation clean
+"L13d19h2_f3fd9e8f6e2b_2d5fbeed7632": active
 
 # promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 11 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.git/HEAD +1
@@ -146,3 +148,8 @@
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 5 разных IP +1 / persistent: 10 разных дней +1 / recon URI: /.env, /wp-admin/admin-ajax.php +1
 # human_share 0.0 · events 532 · review-by 2026-06-20
 "L13d18h1_5e3ea1a873f7_cc78d80a9016": staging
+
+# promoted 2026-06-07 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 9 разных дней +1 / recon URI: /.env +1
+# human_share 0.0 · events 21 · review-by 2026-06-21
+"L13d1000_cb588a7868d0_5991909ce85f": staging
