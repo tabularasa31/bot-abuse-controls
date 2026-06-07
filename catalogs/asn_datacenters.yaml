@@ -6,8 +6,24 @@
 # справочная таблица "какие ASN считаются ДЦ", сам тег ничего не блокирует
 # (блокировка — в per-resource policy).
 
-# Примеры:
-#   - 14061   # DigitalOcean
-#   - 16509   # AWS
-#   - 14618   # AWS
-#   - 32934   # Facebook
+# Amazon Web Services
+- 16509   # Amazon AWS (основной пул, появляется во всех регионах)
+- 14618   # Amazon Data Services (AWS East)
+
+# Google Cloud Platform
+- 396982  # Google Cloud
+
+# Microsoft Azure
+- 8075    # Microsoft Azure
+
+# DigitalOcean
+- 14061   # DigitalOcean
+
+# Hetzner Online
+- 24940   # Hetzner
+
+# Oracle Cloud
+- 31898   # Oracle Cloud Infrastructure
+
+# Linode / Akamai Cloud
+- 63949   # Linode (Akamai)
