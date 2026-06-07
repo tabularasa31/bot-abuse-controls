@@ -120,7 +120,7 @@
 # promoted 2026-06-02 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 7 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
 # human_share 0.0 · events 1067 · review-by 2026-06-16
-#  ↳ auto-activated 2026-06-07: staging observation clean
+#  ↳ auto-activated 2026-06-07: staging observation clean; manual review confirmed: volume outlier — 4974 events/day (57% трафика), burst ×138 vs предыдущий день, 18 IP, 9 дней, .env recon
 "L13d43h1_14ffb2d78dbd_cc78d80a9016": active
 
 # promoted 2026-06-03 (auto) — reason: stable HIGH, gates+intent passed
