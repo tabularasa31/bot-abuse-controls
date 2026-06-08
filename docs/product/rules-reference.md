@@ -63,6 +63,7 @@
 | 10  | Вычисленный TLS-fp запроса есть в каталоге `tls_fp_blocklist`                                                                                                           | `verdict=block, rule=tls_fp_blocklist`                                 | blocking  | Каталог `tls_fp_blocklist` (пуст на старте, PR, staged rollout) | Phase 2 |
 | 11  | UA-семейство утверждает одно (например, Chrome), но `hash_b` TLS-fp совпадает с известной сигнатурой автоматизации (curl/python-requests/Go/okhttp) из `tls_fp_catalog` | накапливает challenge-flag `tls_fp_impersonator` (решение на L5)       | soft      | Каталог `tls_fp_catalog` (PR, staged rollout)                       | Phase 2 |
 | 12  | UA похож на браузер, но `cipher_cnt` TLS-fp не совпадает с ожидаемым для этого семейства браузера (`tls_fp_browser_profiles`: chrome=15, firefox=16, safari=20)         | накапливает challenge-flag `tls_fp_suspicious_ciphers` (решение на L5) | soft      | Каталог `tls_fp_browser_profiles` (PR, staged rollout)              | Phase 2 |
+| 13  | TLS-fp выглядит как браузер (семейство по cipher-профилю), но IP из датацентрового ASN (`asn_datacenters`) — настоящие пользователи не ходят из публичного ДЦ          | накапливает challenge-flag `tls_fp_dc_browser` (решение на L5)         | soft      | L3 fp + каталог `asn_datacenters`                                   | Phase 2 |
 
 
 ---
@@ -149,7 +150,7 @@
 
 ## Информационные теги (НЕ правила — verdict не эмитят)
 
-Накапливаются в поле `tags` лога, влияют на решение только косвенно (комбинируются на L5 / используются в аналитике).
+Накапливаются в поле `tags` лога; на вердикт и верификацию не влияют — нужны для аналитики и интерпретации (со-встречаемость сигналов в логах помогает калибровке правил).
 
 
 | #   | Если…                                                                            | То тег…                | Где | Источник                  | Phase   |
@@ -158,7 +159,6 @@
 | T1  | IP запроса из ASN крупного публичного датацентра (Hetzner/OVH/DO/AWS/GCP/Azure)  | `reputation:asn_dc`    | L2  | Каталог `asn_datacenters` | Phase 1 |
 | T2  | UA содержит явные признаки автоматизации (curl/python-requests и т.п.)           | `tls_fp:automation_ua` | L3  | Lua-проверка UA           | Phase 2 |
 | T3  | Клиент не прислал SNI в TLS-handshake                                            | `tls_fp:no_sni`        | L3  | TLS handshake data        | Phase 2 |
-| T4  | TLS-fp выглядит как браузер, но IP из ДЦ ASN (cross-layer: L3-fp + L2-репутация) | `tls_fp:dc_browser`    | L3  | L3 fp + `asn_datacenters` | Phase 2 |
 
 
 ---
@@ -169,7 +169,7 @@
 | Phase       | Активные правила (rule codes)                                                                                                                                                                                            |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Phase 1** | `method_not_allowed`, `ua_blacklist` (пустой), `ip_whitelist` (системный), `ip_blocklist` (пустой), `geo_blocklist` (системный), `rate_ip`, `rate_ip_ua`, `rate_api`, `rate_scan_urls` + теги `hygiene:header_anomaly`, `reputation:asn_dc`         |
-| **Phase 2** | + `tls_fp_blocklist`, `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `rate_tls_fp` + теги `tls_fp:automation_ua`, `tls_fp:no_sni`, `tls_fp:dc_browser`                                                              |
+| **Phase 2** | + `tls_fp_blocklist`, `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `tls_fp_dc_browser`, `rate_tls_fp` + теги `tls_fp:automation_ua`, `tls_fp:no_sni`                                                              |
 | **Phase 3** | + `cookie_valid`*, `bot_verified`, `bot_verified_pending`, `asn_customer`, per-resource `ip_whitelist`/`geo_blocklist`, кастомные паттерны `ua_blacklist` (rule_source=per_resource), `rate_custom` (клиентские правила) |
 | **Phase 4** | + `non_browser_blocked`, `unchallengeable_request`, ветки challenge A/B/C, verdict `permissive`. `cookie_valid` становится реально работающим вместе с L5                                                                |
 
