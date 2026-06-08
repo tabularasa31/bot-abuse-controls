@@ -153,3 +153,8 @@
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 9 разных дней +1 / recon URI: /.env +1
 # human_share 0.0 · events 21 · review-by 2026-06-21
 "L13d1000_cb588a7868d0_5991909ce85f": staging
+
+# promoted 2026-06-08 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 2 разных IP +1 / persistent: 6 разных дней +1 / recon URI: /.env +1
+# human_share 0.0 · events 60 · review-by 2026-06-22
+"L13d18h1_5e3ea1a873f7_7b489fd5e7ed": staging
