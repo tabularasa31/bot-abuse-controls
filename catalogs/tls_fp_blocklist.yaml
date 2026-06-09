@@ -159,3 +159,9 @@
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 2 разных IP +1 / persistent: 6 разных дней +1 / recon URI: /.env +1
 # human_share 0.0 · events 60 · review-by 2026-06-22
 "L13d18h1_5e3ea1a873f7_7b489fd5e7ed": staging
+
+# promoted 2026-06-09 (manual) — reason: curl mass-scanner, 11662 events/day, 6 IP, ASN 211590 FR
+# double-encoded recon (%252eapplication.properties, %252eenv, %252ebuild.gradle) — URL-filter bypass attempt
+# score 3 (MEDIUM по возрасту, день 1) · automation UA (curl/8.7.1) +1 / multi-IP: 6 разных IP +1 / recon URI: %252eapplication.properties, %252eenv +1
+# human_share 0.0 · events 11662 · review-by 2026-06-23
+"L13d10h2_3a58e2dcd84f_2d5fbeed7632": active
