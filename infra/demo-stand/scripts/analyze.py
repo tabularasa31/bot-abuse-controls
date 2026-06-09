@@ -1634,7 +1634,7 @@ def enriched_label(info):
     return " · ".join(parts)
 
 
-def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc, per_source=None, source=None):
+def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
@@ -1904,7 +1904,7 @@ def html_candidate(c, tier_cls):
     return "".join(parts)
 
 
-def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc, source=None):
+def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
@@ -2148,7 +2148,7 @@ def main() -> int:
     if fetch_hours is None:
         fetch_hours = (max(args.min_staging_hours + 2, FETCH_HOURS_DEFAULT)
                        if args.staging_observation_json else FETCH_HOURS_DEFAULT)
-    events_all, blocklist_size, _init_ts, per_source = fetch_events(args.source, fetch_hours)
+    events_all, blocklist_size, _, _ = fetch_events(args.source, fetch_hours)
     # Loki read-health gate. A failed/partial Loki read must NOT silently render a
     # misleadingly all-zero report (a traffic-burst timeout did exactly that —
     # task 86exwf9gj). Genuine zero traffic (the count query succeeded and
@@ -2300,7 +2300,7 @@ def main() -> int:
     save_ip_cache(ip_cache)
     save_watermark(newest)
 
-    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc, per_source, source=args.source)
+    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc)
     archive = REPORTS_DIR / f"{today_str}.md"
     archive.write_text(md_report)
 
@@ -2312,9 +2312,7 @@ def main() -> int:
         render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
 
     if args.html:
-        # HTML renderer keeps the resty-only signature for now; comparison
-        # info is in the markdown report archived under reports/.
-        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, now_utc, source=args.source))
+        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, now_utc))
     else:
         sys.stdout.write(md_report)
     return 0
