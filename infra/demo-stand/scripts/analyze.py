@@ -172,7 +172,6 @@ SUSPICIOUS_URI_RE = re.compile(
     r"/login\.action|/struts|/jenkins|/actuator|"
     r"/swagger|/graphql|/api/v\d|"
     r"/backup|/dump\b|/database|/db_dump|/sql_dump|"
-    r"/\.well-known/security\.txt|"
     r"/cgi-bin|/shell|/eval|/cmd)",
     re.I,
 )
