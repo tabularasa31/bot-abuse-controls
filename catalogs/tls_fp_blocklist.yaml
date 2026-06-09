@@ -137,7 +137,8 @@
 # promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 24 разных IP +1 / persistent: 7 разных дней +1
 # human_share 0.0 · events 857 · review-by 2026-06-19
-"L13d14h2_d26ecc671488_2d5fbeed7632": staging
+#  ↳ auto-activated 2026-06-09: staging observation clean
+"L13d14h2_d26ecc671488_2d5fbeed7632": active
 
 # promoted 2026-06-06 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 6 разных дней +1 / recon URI: /AdminPage/conf/runCmd, /adminPage/remote/cmdOver +1
