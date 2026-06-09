@@ -1633,32 +1633,18 @@ def enriched_label(info):
     return " · ".join(parts)
 
 
-def _container_start_str(init_ts, source):
-    """Human label for 'container last started'. Under the Loki source the resty
-    init marker (`[demo] tls_fp_blocklist loaded: N`, nginx error_log) is NOT
-    shipped to Loki, so init_ts is None BY DESIGN — say so rather than the
-    alarming '(неизвестно)', which read like a failure (#3)."""
-    if init_ts:
-        return init_ts.astimezone().strftime("%Y-%m-%d %H:%M %Z")
-    if source == "loki":
-        return "n/a (Loki source: init-маркер не шипится в Loki)"
-    return "(неизвестно)"
-
-
-def render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source=None, source=None):
+def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     asn_watch = find_asn_watch_candidates(events_24h, ip_cache)
     now_msk = now_utc.astimezone()
-    init_str = _container_start_str(init_ts, source)
 
     L = []
     L.append(f"# Demo-stand report — {now_msk.strftime('%Y-%m-%d %H:%M %Z')}")
     L.append("")
     L.append("Стенд: https://bac.example.com (resty)")
     L.append(f"Режим: {'SHADOW (без блокировок)' if blocklist_size == 0 else f'ACTIVE — в blocklist {blocklist_size} fps'}")
-    L.append(f"Контейнер последний раз стартовал: {init_str}")
     L.append("")
     L.append("")
     L.append("## Сводка")
@@ -1917,21 +1903,19 @@ def html_candidate(c, tier_cls):
     return "".join(parts)
 
 
-def render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, source=None):
+def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     asn_watch = find_asn_watch_candidates(events_24h, ip_cache)
     now_msk = now_utc.astimezone()
-    init_str = _container_start_str(init_ts, source)
 
     parts = ["<!doctype html><html><head><meta charset='utf-8'>",
              f"<style>{CSS}</style></head><body>"]
     parts.append("<h1>Demo-stand traffic report</h1>")
     parts.append(
         f"<div class='headline'>{h(now_msk.strftime('%Y-%m-%d %H:%M %Z'))} · "
-        f"<a href='https://bac.example.com'>bac.example.com</a> · "
-        f"контейнер последний раз стартовал {h(init_str)}</div>"
+        f"<a href='https://bac.example.com'>bac.example.com</a></div>"
     )
 
     mode_html = (
@@ -2163,7 +2147,7 @@ def main() -> int:
     if fetch_hours is None:
         fetch_hours = (max(args.min_staging_hours + 2, FETCH_HOURS_DEFAULT)
                        if args.staging_observation_json else FETCH_HOURS_DEFAULT)
-    events_all, blocklist_size, init_ts, per_source = fetch_events(args.source, fetch_hours)
+    events_all, blocklist_size, _, _ = fetch_events(args.source, fetch_hours)
     # Loki read-health gate. A failed/partial Loki read must NOT silently render a
     # misleadingly all-zero report (a traffic-burst timeout did exactly that —
     # task 86exwf9gj). Genuine zero traffic (the count query succeeded and
@@ -2315,7 +2299,7 @@ def main() -> int:
     save_ip_cache(ip_cache)
     save_watermark(newest)
 
-    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source, source=args.source)
+    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc)
     archive = REPORTS_DIR / f"{today_str}.md"
     archive.write_text(md_report)
 
@@ -2327,9 +2311,7 @@ def main() -> int:
         render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
 
     if args.html:
-        # HTML renderer keeps the resty-only signature for now; comparison
-        # info is in the markdown report archived under reports/.
-        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, source=args.source))
+        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, now_utc))
     else:
         sys.stdout.write(md_report)
     return 0
