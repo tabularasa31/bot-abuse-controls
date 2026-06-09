@@ -81,7 +81,8 @@
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 15 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 25 · review-by 2026-06-14
-"L13d26h2_9e73a0ed0670_2d5fbeed7632": staging
+#  ↳ auto-activated 2026-06-09: 9 days staging observation clean; human_share 0.0; confirmed impersonator (curl-as-safari); still active in daily report 2026-06-08
+"L13d26h2_9e73a0ed0670_2d5fbeed7632": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
@@ -98,7 +99,8 @@
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 141 · review-by 2026-06-15
-"L13i1000_cb588a7868d0_5991909ce85f": staging
+#  ↳ auto-activated 2026-06-09: 8 days staging observation clean; human_share 0.0; score 6 impersonator (claudebot-as-chrome); 5 consecutive IPs (176.65.139.231-235)
+"L13i1000_cb588a7868d0_5991909ce85f": active
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · импersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
@@ -165,3 +167,7 @@
 # score 3 (MEDIUM по возрасту, день 1) · automation UA (curl/8.7.1) +1 / multi-IP: 6 разных IP +1 / recon URI: %252eapplication.properties, %252eenv +1
 # human_share 0.0 · events 11662 · review-by 2026-06-23
 "L13d10h2_3a58e2dcd84f_2d5fbeed7632": active
+# promoted 2026-06-09 — reason: SNI-variant of active L13i1400_d26ecc671488_fac63a6ff214; same hash_b+hash_c; Go-http-client/1.1, 3 IP (1 DC Azure), 5 дней; impersonator-A fp-family (hash_c=fac63a6ff214); добавлено в staging — hard-block требует human-ревью (общий Go fp)
+# score 4 (MEDIUM) · automation UA (curl/python/go/...) +1 / DC ASN: 1/3 IP +1 / multi-IP: 3 разных IP +1 / persistent: 5 разных дней +1
+# human_share 0.0 · events 21 · review-by 2026-06-23
+"L13d1400_d26ecc671488_fac63a6ff214": staging

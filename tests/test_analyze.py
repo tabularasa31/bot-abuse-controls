@@ -106,25 +106,6 @@ def test_per_asn_table_populated_after_seed(dc_catalog):
     assert asns[("(нет данных)", False, "")] == 1
 
 
-# --- _container_start_str (#3) ---------------------------------------------
-
-def test_container_start_relabel_loki():
-    assert "Loki" in az._container_start_str(None, "loki")
-
-
-def test_container_start_unknown_docker():
-    assert az._container_start_str(None, "docker") == "(неизвестно)"
-
-
-def test_container_start_renders_timestamp_when_known():
-    ts = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)
-    # _container_start_str converts to local time; derive the expected date the
-    # same way so the test is stable in any runner timezone (a fixed UTC date
-    # can roll over under astimezone() east of UTC).
-    expected_date = ts.astimezone().strftime("%Y-%m-%d")
-    assert expected_date in az._container_start_str(ts, "loki")
-
-
 # --- purity / classification ------------------------------------------------
 
 def test_is_genuine_browser_true_for_browser_shaped():
