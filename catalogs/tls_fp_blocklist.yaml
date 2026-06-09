@@ -99,7 +99,7 @@
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 141 · review-by 2026-06-15
-#  ↳ auto-activated 2026-06-09: 8 days staging observation clean; human_share 0.0; score 6 impersonator (claudebot-as-chrome); 3 consecutive IPs (176.65.139.231-235)
+#  ↳ auto-activated 2026-06-09: 8 days staging observation clean; human_share 0.0; score 6 impersonator (claudebot-as-chrome); 5 consecutive IPs (176.65.139.231-235)
 "L13i1000_cb588a7868d0_5991909ce85f": active
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
@@ -162,7 +162,7 @@
 # human_share 0.0 · events 60 · review-by 2026-06-22
 "L13d18h1_5e3ea1a873f7_7b489fd5e7ed": staging
 
-# promoted 2026-06-09 — reason: SNI-variant of active L13i1400_d26ecc671488_fac63a6ff214; same hash_b+hash_c; Go-http-client/1.1, /.well-known/security.txt, 3 IP (1 DC Azure), 5 дней; impersonator-A fp-family (hash_c=fac63a6ff214); добавлено в staging — hard-block требует human-ревью (общий Go fp)
-# score 5 (HIGH) · automation UA (curl/python/go/...) +1 / DC ASN: 1/3 IP +1 / multi-IP: 3 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.well-known/security.txt +1
+# promoted 2026-06-09 — reason: SNI-variant of active L13i1400_d26ecc671488_fac63a6ff214; same hash_b+hash_c; Go-http-client/1.1, 3 IP (1 DC Azure), 5 дней; impersonator-A fp-family (hash_c=fac63a6ff214); добавлено в staging — hard-block требует human-ревью (общий Go fp)
+# score 4 (MEDIUM) · automation UA (curl/python/go/...) +1 / DC ASN: 1/3 IP +1 / multi-IP: 3 разных IP +1 / persistent: 5 разных дней +1
 # human_share 0.0 · events 21 · review-by 2026-06-23
 "L13d1400_d26ecc671488_fac63a6ff214": staging
