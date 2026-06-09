@@ -103,6 +103,25 @@ LOKI_URL = os.environ.get("LOKI_URL", "http://loki:3100")
 FETCH_HOURS_DEFAULT = int(os.environ.get("BAC_FETCH_HOURS", "25"))
 # Loki query_range page size; we paginate forward past this.
 LOKI_PAGE_LIMIT = int(os.environ.get("BAC_LOKI_PAGE_LIMIT", "5000"))
+# Per-request socket timeout (s). With the chunking below each request returns
+# fast, so this is a ceiling, not the steady-state latency. Loki itself severs
+# the connection near 60s, so the cure for a slow window is smaller chunks, NOT
+# a bigger timeout (verified live: a 25h single query died at 20s AND at 90s).
+LOKI_TIMEOUT_S = int(os.environ.get("BAC_LOKI_TIMEOUT_S", "30"))
+# Density pre-count granularity (s) and per-chunk line budget. We count_over_time
+# first (the metric path is instant even over a burst that would time out a raw
+# query_range), then tile the window into chunks each holding ≲ LOKI_CHUNK_TARGET
+# raw lines so no single query_range must return > the page limit — the failure
+# that silently zeroed the daily report under a traffic burst (task 86exwf9gj:
+# 11.7k lines / 30min choked one query while 5-min slices returned in 0.1s).
+LOKI_COUNT_STEP_S = int(os.environ.get("BAC_LOKI_COUNT_STEP_S", "60"))
+LOKI_CHUNK_TARGET = int(os.environ.get("BAC_LOKI_CHUNK_TARGET",
+                                       str(int(LOKI_PAGE_LIMIT * 0.8))))
+
+# Health of the most recent _fetch_loki call. main() reads it to refuse emitting
+# a misleadingly-empty report when the read FAILED, as opposed to genuine zero
+# traffic (count query succeeded and returned nothing). Reset at each call.
+LOKI_HEALTH = {"ok": True, "counted": 0, "fetched": 0, "errors": 0, "detail": ""}
 
 # Resty's init marker (nginx error_log) carries the loaded blocklist size;
 # 0 == shadow. Captured opportunistically — defaults to 0 if outside the
@@ -347,35 +366,73 @@ def _read_archive_events(now_utc):
     return events
 
 
-def _fetch_loki(hours):
-    """Pull BAC_LOG events from Loki over the last `hours`, paginating forward.
+def _loki_get(base, params, timeout):
+    """One Loki HTTP GET → parsed JSON payload. Raises on transport/HTTP error
+    (callers decide whether that's fatal — the old code swallowed it, which is
+    exactly how a read failure became a silent zero report)."""
+    req = urllib.request.Request(
+        base + "?" + urllib.parse.urlencode(params),
+        headers={"User-Agent": "abuse-controls-analytics/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
 
-    Loki stores the bare JSON payload as the line body (promtail `output`
-    stage), so we re-prefix `BAC_LOG ` before reusing _event_from_bac_line. Any
-    connectivity/parse error degrades to an empty list (the report still
-    renders, archives still fold). blocklist_size/init_ts are not derivable from
-    Loki (it carries only BAC_LOG, not the resty init marker) → (events, 0, None);
-    the report's mode line shows SHADOW under the Loki source."""
-    base = LOKI_URL.rstrip("/") + "/loki/api/v1/query_range"
-    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
-    step_start = now_ns - int(hours * 3600 * 1_000_000_000)
+
+def _loki_count_buckets(base, start_ns, end_ns, step_s):
+    """Density of {job="bac-edge"} as [(bucket_end_ns, count), ...] via
+    count_over_time. The metric path doesn't materialize raw lines, so it stays
+    fast even over a burst that would time out a raw query_range — that is what
+    lets us size chunks BEFORE paying for the lines."""
+    payload = _loki_get(base, {
+        "query": 'sum(count_over_time({job="bac-edge"}[%ds]))' % step_s,
+        "start": str(start_ns), "end": str(end_ns), "step": "%ds" % step_s,
+    }, LOKI_TIMEOUT_S)
+    out = []
+    for stream in (payload.get("data") or {}).get("result") or []:
+        for sec, val in stream.get("values", []):
+            try:
+                out.append((int(float(sec)) * 1_000_000_000, int(float(val))))
+            except (ValueError, TypeError):
+                continue
+    out.sort()
+    return out
+
+
+def _plan_loki_chunks(start_ns, end_ns, buckets, target):
+    """Tile [start_ns, end_ns) into contiguous chunks each holding ≲ `target`
+    lines, using the pre-counted density. Chunks abut exactly (no gaps, no
+    overlap), so every ns is covered once. A lone bucket above `target` becomes
+    its own chunk — the in-chunk forward pagination drains the overflow."""
+    if not buckets:
+        return [(start_ns, end_ns)]
+    chunks = []
+    cur_start = start_ns
+    acc = 0
+    prev_end = start_ns
+    for bend_ns, count in buckets:
+        if acc > 0 and acc + count > target:
+            cut = prev_end if prev_end > cur_start else bend_ns
+            chunks.append((cur_start, cut))
+            cur_start, acc = cut, 0
+        acc += count
+        prev_end = bend_ns
+    if cur_start < end_ns:
+        chunks.append((cur_start, end_ns))
+    return chunks
+
+
+def _fetch_loki_window(base, start_ns, end_ns, seen):
+    """Forward-paginate raw BAC_LOG lines in [start_ns, end_ns) into events.
+    `seen` is shared across chunks so a line on a chunk boundary is not double
+    counted. Raises on transport error so the caller can mark the run degraded."""
     events = []
-    seen = set()  # (ts_str, line) — dedup across overlapping pages
-    for _ in range(200):  # pagination safety cap
-        qs = urllib.parse.urlencode({
+    step_start = start_ns
+    for _ in range(200):  # pagination safety cap (per chunk)
+        payload = _loki_get(base, {
             "query": '{job="bac-edge"}',
-            "start": str(step_start), "end": str(now_ns),
+            "start": str(step_start), "end": str(end_ns),
             "limit": str(LOKI_PAGE_LIMIT), "direction": "forward",
-        })
-        req = urllib.request.Request(
-            base + "?" + qs,
-            headers={"User-Agent": "abuse-controls-analytics/1.0"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                payload = json.loads(resp.read())
-        except Exception:
-            break
+        }, LOKI_TIMEOUT_S)
         results = (payload.get("data") or {}).get("result") or []
         if not results:
             break
@@ -406,6 +463,56 @@ def _fetch_loki(hours):
         # the `seen` dedup drops the re-fetched overlap above that boundary.
         nxt = min(stream_maxes) if stream_maxes else step_start
         step_start = nxt if nxt > step_start else step_start + 1
+        if step_start >= end_ns:
+            break
+    return events
+
+
+def _fetch_loki(hours):
+    """Pull BAC_LOG events from Loki over the last `hours`.
+
+    Loki stores the bare JSON payload as the line body (promtail `output`
+    stage), so we re-prefix `BAC_LOG ` before reusing _event_from_bac_line.
+    blocklist_size/init_ts are not derivable from Loki (it carries only BAC_LOG,
+    not the resty init marker) → (events, 0, None); the report's mode line shows
+    SHADOW under the Loki source.
+
+    A single query_range over the whole report window times out once any
+    sub-range exceeds the page limit (Loki splits the range, and one dense
+    interval kills the merge). So we pre-count density cheaply, tile the window
+    into chunks each under the limit, and fetch per chunk. Read health is
+    recorded in LOKI_HEALTH; a failure leaves `ok=False` so main() can refuse to
+    emit a misleadingly-empty report rather than silently mailing zeros."""
+    base = LOKI_URL.rstrip("/") + "/loki/api/v1/query_range"
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    start_ns = now_ns - int(hours * 3600 * 1_000_000_000)
+    LOKI_HEALTH.update({"ok": True, "counted": 0, "fetched": 0,
+                        "errors": 0, "detail": ""})
+
+    try:
+        buckets = _loki_count_buckets(base, start_ns, now_ns, LOKI_COUNT_STEP_S)
+    except Exception as e:
+        # Pre-count failed → Loki unreachable/broken. Nothing trustworthy to say.
+        LOKI_HEALTH.update({"ok": False, "errors": 1,
+                            "detail": "count query failed: %r" % e})
+        return [], 0, None
+    LOKI_HEALTH["counted"] = sum(c for _, c in buckets)
+
+    chunks = _plan_loki_chunks(start_ns, now_ns, buckets, LOKI_CHUNK_TARGET)
+    events = []
+    seen = set()  # (ts_str, line) — dedup across pages AND chunk boundaries
+    for cs, ce in chunks:
+        try:
+            events.extend(_fetch_loki_window(base, cs, ce, seen))
+        except Exception as e:
+            # One chunk failing is partial data, not a clean read — record it so
+            # the run is treated as degraded (better partial than a silent zero,
+            # but main() still won't mail a report built on a broken read).
+            LOKI_HEALTH["errors"] += 1
+            LOKI_HEALTH["detail"] = "chunk [%d,%d) failed: %r" % (cs, ce, e)
+    LOKI_HEALTH["fetched"] = len(events)
+    if LOKI_HEALTH["errors"]:
+        LOKI_HEALTH["ok"] = False
     return events, 0, None
 
 
@@ -2057,6 +2164,20 @@ def main() -> int:
         fetch_hours = (max(args.min_staging_hours + 2, FETCH_HOURS_DEFAULT)
                        if args.staging_observation_json else FETCH_HOURS_DEFAULT)
     events_all, blocklist_size, init_ts, per_source = fetch_events(args.source, fetch_hours)
+    # Loki read-health gate. A failed/partial Loki read must NOT silently render a
+    # misleadingly all-zero report (a traffic-burst timeout did exactly that —
+    # task 86exwf9gj). Genuine zero traffic (the count query succeeded and
+    # returned nothing) is legitimate and still reports. Only a transport/query
+    # failure degrades the run: exit non-zero BEFORE writing anything so the
+    # backend run.sh skips the email and drops the JSON artifacts (no zeros
+    # mailed, no bogus auto-demote PRs from an empty candidates view).
+    if args.source == "loki" and not LOKI_HEALTH.get("ok", True):
+        sys.stderr.write(
+            "[analyze] FATAL Loki read degraded — refusing to emit a "
+            "zero/partial report (%s; counted=%d fetched=%d errors=%d)\n" % (
+                LOKI_HEALTH.get("detail", "?"), LOKI_HEALTH.get("counted", 0),
+                LOKI_HEALTH.get("fetched", 0), LOKI_HEALTH.get("errors", 0)))
+        return 1
     seen = load_seen()
     ip_cache = load_ip_cache()
     # IPs active at load time, BEFORE seeding fills ip_cache with every windowed
