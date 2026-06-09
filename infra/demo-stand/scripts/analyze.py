@@ -389,7 +389,7 @@ def _loki_count_buckets(base, start_ns, end_ns, step_s):
     }, LOKI_TIMEOUT_S)
     out = []
     for stream in (payload.get("data") or {}).get("result") or []:
-        for sec, val in stream.get("values", []):
+        for sec, val in stream.get("values") or []:
             try:
                 out.append((int(float(sec)) * 1_000_000_000, int(float(val))))
             except (ValueError, TypeError):
@@ -440,7 +440,7 @@ def _fetch_loki_window(base, start_ns, end_ns, seen):
         stream_maxes = []
         for stream in results:
             smax = step_start
-            for ts_str, line in stream.get("values", []):
+            for ts_str, line in stream.get("values") or []:
                 n += 1
                 try:
                     ts_ns = int(ts_str)
@@ -505,11 +505,12 @@ def _fetch_loki(hours):
         try:
             events.extend(_fetch_loki_window(base, cs, ce, seen))
         except Exception as e:
-            # One chunk failing is partial data, not a clean read — record it so
-            # the run is treated as degraded (better partial than a silent zero,
-            # but main() still won't mail a report built on a broken read).
+            # One chunk failing makes the whole run degraded (main() refuses to
+            # emit on any error), so fail fast: breaking here avoids compounding
+            # 30s timeouts across the remaining chunks if Loki is down or slow.
             LOKI_HEALTH["errors"] += 1
             LOKI_HEALTH["detail"] = "chunk [%d,%d) failed: %r" % (cs, ce, e)
+            break
     LOKI_HEALTH["fetched"] = len(events)
     if LOKI_HEALTH["errors"]:
         LOKI_HEALTH["ok"] = False
