@@ -105,7 +105,7 @@
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · импersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 21 · review-by 2026-06-15
-#  ↳ auto-activated 2026-06-11: staging observation clean
+#  ↳ auto-activated 2026-06-10: staging observation clean
 "L13d17h1_919ce459ba90_60bdc24aefcc": active
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
@@ -135,7 +135,7 @@
 # promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 11 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.git/HEAD +1
 # human_share 0.0 · events 100 · review-by 2026-06-19
-#  ↳ auto-activated 2026-06-11: staging observation clean
+#  ↳ auto-activated 2026-06-10: staging observation clean
 "L13d1800_5e3ea1a873f7_9fdfc1ba57c6": active
 
 # promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
@@ -152,7 +152,7 @@
 # promoted 2026-06-06 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 5 разных IP +1 / persistent: 10 разных дней +1 / recon URI: /.env, /wp-admin/admin-ajax.php +1
 # human_share 0.0 · events 532 · review-by 2026-06-20
-#  ↳ auto-activated 2026-06-11: staging observation clean
+#  ↳ auto-activated 2026-06-10: staging observation clean
 "L13d18h1_5e3ea1a873f7_cc78d80a9016": active
 
 # promoted 2026-06-07 (auto) — reason: stable HIGH, gates+intent passed
@@ -174,3 +174,8 @@
 # score 4 (MEDIUM) · automation UA (curl/python/go/...) +1 / DC ASN: 1/3 IP +1 / multi-IP: 3 разных IP +1 / persistent: 5 разных дней +1
 # human_share 0.0 · events 21 · review-by 2026-06-23
 "L13d1400_d26ecc671488_fac63a6ff214": staging
+
+# promoted 2026-06-10 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 2 разных дней +1 / recon URI: /.aws/config, /.aws/credentials, /.env +1
+# human_share 0.0 · events 887 · review-by 2026-06-24
+"L13d22h2_79fa833f78d2_3a034d2f4474": staging
