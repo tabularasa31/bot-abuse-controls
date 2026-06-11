@@ -9,17 +9,23 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 | Endpoint | Try with | Expected | What it demonstrates |
 |---|---|---|---|
 | `/` (and any path) | a real browser | 200, origin page | Cascade passes → request proxied to the tenant's origin. The stand is a real edge in front of the origin. |
-| `/` | `curl -k https://<host>/` | 200 (tenant Host) / landing (non-tenant Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | The cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether the verdict actually 403's the request or only logs. A Host that is not a registered tenant gets the bundled landing page. Confirm the fp via `/__fp`. |
+| `/` | `curl -k https://<host>/` | 200 (tenant Host) / 444 (non-tenant Host) / 403 (Host with `mode=active` whose fp is in `tls_fp_blocklist`) | For a tenant Host the cascade computes curl's fp and records the would-be verdict; `policy.mode` decides whether it 403's or only logs. A Host that is not a registered tenant is dropped with 444 (tenant-only edge — the bundled landing page was removed). |
 | `/` | `python3 -c "import requests; requests.get('https://<host>/', verify=False)"` | 200 | Same — fp computed and logged, then proxied. |
-| `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in `/__fp` and the logs. |
-| `/__fp` | anything | text dump | Educational — shows the fp the pipeline computed for *your* client + the raw `$ssl_*` components. |
-| `/__health` | anything | `ok` | Liveness probe; bypasses verdict pipeline. |
-| `/__version` | anything | git sha + uptime | What code is actually deployed. |
-| `/__admin` | a real browser | HTML status page | Mode + counters (requests, pass/block/challenge/allow, unique fp, cache hit ratio, uptime), **rules fired**, a **live ring buffer of recent requests** (verdict/rule/fp/ip/ua), and the blocklist. Read-only, no mutation surface. |
-| `/metrics` | `curl -k https://<host>/metrics` | Prometheus text | Scrape-friendly metrics: `antibot_requests_total`, `antibot_verdict_total{verdict="pass"\|"block"\|"challenge"\|"allow"}`, `antibot_cache_total{outcome="hit"\|"miss"}`, `antibot_cache_hit_ratio`, `antibot_blocklist_entries`, `antibot_uptime_seconds`, `antibot_fp_unique`, `antibot_rule_total{stage,rule}`. **Channel C health (B5/B6):** `antibot_edge_catalog_staleness_seconds{catalog="…"}` — seconds since the last successful **contact** with antibot-backend (200 or 304, both healthy answers), `-1` if no contact has succeeded since worker start. This is a **liveness** signal (alert on dead channel), not a freshness one — see [demo-backend README §Channel C staleness SLA](../demo-backend/README.md#channel-c-staleness-sla). No latency histogram in this stand — cascade task [86exmk0ar](https://app.clickup.com/t/86exmk0ar) adds full `lua-resty-prometheus` with duration buckets. |
-| `/baseline/` | anything | same origin, **no** antibot | Proxies to the same origin but bypasses `access_by_lua`. Hit `/` vs `/baseline/` with `wrk` — the delta is the cascade overhead. |
+| `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in the BAC_LOG stream. |
+| `/__health` | anything | `ok` | Liveness probe; bypasses verdict. The only operational endpoint on the public edge. |
 
-**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — falls back to the bundled landing page (the cascade still runs); `/baseline/` returns `503`. The `/__*` and `/metrics` endpoints are carved out and served locally. Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (ClickUp 86exrefdz). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
+> **Phase 1 — edge surface shrunk.** `/__fp`, `/__version`, `/__admin`,
+> `/__admin/recover_ip`, `/__policy`, `/metrics` and `/baseline/` were removed
+> from the public edge. Observability moved to the **stdout → Loki** streams:
+> per-request records as `BAC_LOG` and aggregate counters (the old `/metrics`
+> set, plus the old `/__version` deploy metadata: `commit` / `cascade_version` /
+> `challenge_secret_fp`) as `EDGE_STATS` every 30s (see [edge_stats.lua](lua/edge_stats.lua)).
+> Query in Grafana/Loki: `{kind="edge_stats"}` for counters, `{kind="bac_log"}`
+> for requests. False-positive recovery is the dashboard's job via the Policy
+> API (the edge no longer mutates policy). `/__fp` returns on a controlled
+> measurement surface when the browser farm is built (Phase 4).
+
+**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — is dropped with `444` (the edge is tenant-only; the bundled landing page was removed). `/__health` is the only public local endpoint; every other former `/__*` / `/metrics` path is gone from the public surface (moved to the private `:9090` plane or to Loki). Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (ClickUp 86exrefdz). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
 
 **TLS for tenant custom domains (on-demand certs).** The edge terminates client TLS itself (required — the cascade fingerprints the client handshake, `$ssl_*`/JA4 in `tls_fp.lua`; a TLS-terminating proxy in front would hide it and break bot detection). So when a tenant brings its **own** domain, the edge needs a browser-trusted cert for it. This is handled by `lua-resty-acme` (pure-Lua Let's Encrypt, http-01), wired in `lua/tls_autossl.lua` + `nginx.demo.conf`:
 
@@ -57,7 +63,7 @@ Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO
 **Timing fields** (all milliseconds; reverse-proxy = both request and response transit the edge):
 - `latency_ms` — whole request lifetime (like nginx `$request_time`): cascade + origin round-trip + **delivery to the end user**. For a slow client / large body this is dominated by the download tail, so it is *not* a measure of our overhead.
 - `cascade_ms` — the access-phase antibot overhead only (intake + cascade check), i.e. our work before handing the request to the origin. Exact for `pass`; for `block`/`challenge` (no upstream) it ≈ `latency_ms`.
-- `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / landing).
+- `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / challenge).
 - `proxy_ms` — `cascade_ms + upstream_response_ms`: request arrival → we hold the full origin response ready to send. This is the request's path through the proxy that adds latency, **without** the slow-client delivery tail (which is `latency_ms − proxy_ms`).
 
 `action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` (B11) — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
@@ -101,22 +107,22 @@ cat >> infra/demo-stand/.env <<EOF
 # ANTIBOT_BACKEND_SSL_VERIFY=false   # only with self-signed backend cert
 EOF
 
-# Bring up. The REVISION env var feeds /__version so reviewers can see
-# what code is actually deployed. Without it the endpoint reports
-# `commit: dev` (the compose default in docker-compose.demo.yml).
+# Bring up. The REVISION env var records the deployed git sha — it shows up in
+# the EDGE_STATS dump (`commit` field) so you can confirm what code is live.
 REVISION=$(git rev-parse --short HEAD) \
   docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
 
 # Register a tenant so its Host proxies to its backend (Channel C delivers
-# it to the edge in ≤30s). Without a tenant row the Host gets the landing page.
+# it to the edge in ≤30s). Without a tenant row the Host is dropped with 444.
 #   PATCH /antibot/v1/policy/<host> {"mode":"active","origin_ip":"203.0.113.9"}
 
 # Smoke from the VM itself.
 curl -k https://localhost/__health           # ok
-curl -k https://localhost/                   # landing page (localhost is not a tenant; cascade still runs)
+curl -k https://localhost/                   # 444 (localhost is not a tenant — tenant-only edge)
 curl -k --resolve <tenant>:443:127.0.0.1 https://<tenant>/   # 200, proxied to the tenant origin_ip
-curl -k https://localhost/__fp               # see your fp
-curl -k https://localhost/metrics            # prometheus text
+# Counters / deploy metadata are no longer an HTTP endpoint — they ship to Loki
+# as EDGE_STATS lines (kind="edge_stats"); on the box you can read the latest via:
+docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1
 ```
 
 ## Updating a running stand
@@ -161,8 +167,9 @@ Add as a **single physical line** (crontab doesn't support `\` line continuation
 ```
 
 With this, your loop is just `git push` to `main` → edge picks it up within
-a minute. Verify what's live with `curl -k https://<host>/__version`, and
-watch the run log at `state/update.log`.
+a minute. Verify what's live via the EDGE_STATS `commit` field
+(`docker logs nginx-demo | grep EDGE_STATS | tail -1`), and watch the run log
+at `state/update.log`.
 
 `update.sh` requires the checkout on the VM to be a real git working copy of
 `main`. If the stand was deployed by copying files (no `.git`), convert it
@@ -241,9 +248,8 @@ base64 (32+ байта энтропии). Bind-mount в контейнер на
 ```
 
 Скрипт пишет файл с правами `600` и печатает 8-hex fingerprint — тот же, что
-стенд показывает после load в `/__version` (`challenge_secret_fp: …`) и в
-`/__admin` (строка «Challenge HMAC secret»). Сам секрет наружу не выводится
-никогда.
+стенд выводит в EDGE_STATS-дампе (`challenge_secret_fp` field, kind="edge_stats"
+в Loki). Сам секрет наружу не выводится никогда.
 
 **Ротация = `openresty -s reload`.** `init_by_lua` перезапускается на каждом
 reload и перечитывает файл; cookie, подписанные старым секретом, перестают
@@ -256,7 +262,7 @@ rm  infra/demo-stand/certs/challenge_secret.key
 ./infra/demo-stand/scripts/generate-challenge-secret.sh
 docker compose -f infra/demo-stand/docker-compose.demo.yml \
     exec nginx-demo openresty -s reload
-curl -k https://<host>/__version | grep challenge_secret_fp   # новый fp
+docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # новый challenge_secret_fp
 ```
 
 **Failure-режим.** Если файла нет — стенд стартует, печатает WARN в
@@ -293,8 +299,8 @@ secret'ом, что и clearance cookie, см. предыдущую секцию
   init_by_lua (mismatch валит nginx старт), `render(host)` / `issue_nonce(host)`
   для C5.
 
-**Verify it took.** После старта `/__version` показывает строку
-`cascade_version: 0.1.0`. Подмена `CASCADE_VERSION` (`echo 0.0.0 > …`) +
+**Verify it took.** После старта EDGE_STATS-дамп показывает поле
+`cascade_version: "0.1.0"`. Подмена `CASCADE_VERSION` (`echo 0.0.0 > …`) +
 `docker compose restart nginx-demo` → контейнер падает с понятной ошибкой
 в `docker logs` (`challenge: cascade/template version mismatch …`).
 
@@ -322,10 +328,10 @@ sudo chown "$USER:$USER" infra/demo-stand/certs/*.pem
 sudo install -m755 infra/demo-stand/scripts/sync-demo-certs.sh \
     /etc/letsencrypt/renewal-hooks/deploy/sync-demo-certs.sh
 
-# Bring up from the new checkout. REVISION feeds /__version.
+# Bring up from the new checkout. REVISION shows up in EDGE_STATS (`commit`).
 REVISION=$(git rev-parse --short HEAD) \
   docker compose -f infra/demo-stand/docker-compose.demo.yml up -d
-curl -k https://localhost/__version
+docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # confirm commit/cascade_version
 ```
 
 The `tls_fp_blocklist` content lives in `catalogs/tls_fp_blocklist.yaml` and
@@ -371,14 +377,18 @@ Tiers: HIGH ≥5 → blocklist candidate · MEDIUM 3-4 → watch · LOW 1-2.
 
 ## Shipping logs to backend Grafana
 
-The stand emits one `BAC_LOG {json}` line per request to `nginx-demo`'s
-stdout (see [`lua/bac_log.lua`](lua/bac_log.lua)). The `observability`
-profile turns on a small **promtail** sidecar that tails the container,
-parses those lines, and pushes them to the **Loki** instance running on
-the antibot-backend VM. A pre-provisioned Grafana dashboard at
-`https://<backend-host>/grafana/d/bac-raw-logs` renders the result with
-filters on `verdict / host / mode / edge_id` — the per-request UI
-`/__admin` is missing.
+The stand emits two structured stdout streams from `nginx-demo`:
+`BAC_LOG {json}` — one line per request ([`lua/bac_log.lua`](lua/bac_log.lua)) —
+and `EDGE_STATS {json}` — an aggregate counter/deploy-metadata dump every 30s
+([`lua/edge_stats.lua`](lua/edge_stats.lua), the replacement for the removed
+`/metrics` and `/__version`). The `observability` profile turns on a small
+**promtail** sidecar that tails the container, parses both prefixes, and pushes
+them to the **Loki** instance on the antibot-backend VM under a `kind` label
+(`bac_log` / `edge_stats`). A pre-provisioned Grafana dashboard at
+`https://<backend-host>/grafana/d/bac-raw-logs` renders requests with filters on
+`verdict / host / mode / edge_id`; query `{kind="edge_stats"}` for the counters
+(edge-deny drops, TLS rejects, cache ratio, fp_unique, commit, cascade_version).
+There is no per-request `/__admin` UI — it was removed (Phase 1).
 
 Reuses existing infra:
 - Push goes through the same LB-nginx mTLS gate as Channel C
@@ -440,32 +450,29 @@ infra/demo-stand/
 │   ├── ja4_compute.lua             fp compute (helpers in ja4_helpers.lua)
 │   ├── blocklist.lua               seed automation fps
 │   ├── init.lua                    load blocklist, init metrics counters
-│   ├── metrics.lua                 /metrics handler (Prometheus text format)
-│   ├── admin.lua                   /__admin HTML status page (counters, rules fired, recent requests, blocklist)
-│   ├── recent.lua                  last-N request ring buffer for /__admin (shared_dict)
-│   ├── probe.lua                   /__fp educational endpoint
+│   ├── edge_stats.lua              EDGE_STATS stdout dump (counters + deploy metadata → Loki; replaces /metrics + /__version)
+│   ├── recent.lua                  last-N request ring buffer (shared_dict; written by log_event)
+│   ├── probe.lua                   TLS-fp dump — UNROUTED (returns on a controlled surface in Phase 4)
 │   ├── bac_log.lua                 Phase 1 structured-log contract (init/set_verdict/add_tag/emit)
 │   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
 │   ├── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
 │   └── challenge.lua               [C2] Phase 4 challenge page renderer + nonce issuer (version-pinned)
 ├── CASCADE_VERSION                 [C2] semver, сверяется с meta-тегом шаблона на init
-├── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
-│   ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}}; cascade-version зашит литералом
-│   └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
-└── sites/default-site/
-    └── index.html                  demo landing page (served via content_by_lua)
+└── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
+    ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}}; cascade-version зашит литералом
+    └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
 ```
 
 ## Talking points for a sceptical reviewer
 
 | Concern | Where to look |
 |---|---|
-| "Is this AI-generated slop?" | `make ci` passes 61 unit tests + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
+| "Is this AI-generated slop?" | `make ci` passes the full unit suite + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
-| "How much overhead per request?" | Hit `/baseline/` vs `/` with `wrk`. PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен). |
+| "How much overhead per request?" | PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен; `/baseline/` passthrough тоже убран в Phase 1). |
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). Per-Host rollback to observe-only is one PATCH against `/antibot/v1/policy/<host>` flipping `mode` back to `shadow` — Channel C delivers the change to the edge in ≤30s without redeploy. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
-| "What do I monitor?" | `/metrics` for Prometheus scrape. Operational procedures (secret rotation, mode toggle, catalog rollback, challenge version pinning) are in [`docs/runbooks/`](../../docs/runbooks/). |
+| "What do I monitor?" | The `EDGE_STATS` stdout dump → Loki (`{kind="edge_stats"}`): edge-deny drops, TLS rejects, cache ratio, fp_unique, catalog staleness, `commit` / `cascade_version`. Per-request detail via `{kind="bac_log"}`. Operational procedures (secret rotation, mode toggle, catalog rollback, challenge version pinning) are in [`docs/runbooks/`](../../docs/runbooks/). |
 
 ## Divergence WARN triage
 

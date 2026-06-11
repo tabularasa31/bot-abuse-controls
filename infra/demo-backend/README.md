@@ -161,7 +161,7 @@ two-backend topology comes back.
 | Backend serves the three function surfaces | `/catalog/<name>` (501 until B3), `POST /v1/logs` (202), `antibot_backend_rdns_ticks_total` in `/metrics` | B2 |
 | Backend not on hot path | edge fail-stale if backend down — see [demo-stand](../demo-stand/) Channel C client | B5/B6 |
 | Channel C auth rejects unauthenticated | loopback passes; empty `allow.list` → 403 (ip-allowlist) / no client cert → 400 (mtls) | B6 |
-| Edge fail-stale on backend outage | `antibot_edge_catalog_staleness_seconds` exported, grows when backend down, edge keeps serving | B6 |
+| Edge fail-stale on backend outage | `catalog_staleness_seconds.*` in EDGE_STATS / `:9090/__stats` grows when backend down, edge keeps serving | B6 |
 
 From the edge VM, verify reach with the real hostname:
 
@@ -225,13 +225,15 @@ through Channel A (Puppet). Rotation without an outage:
 
 ### Channel C staleness SLA
 
-The edge exposes `antibot_edge_catalog_staleness_seconds{catalog="..."}` on
-`/metrics` (B5 — `infra/demo-stand/lua/metrics.lua`).
+The edge ships the per-catalog staleness signal as
+`catalog_staleness_seconds.<catalog>` in its `EDGE_STATS {json}` line (stdout →
+promtail → Loki `{kind="edge_stats"}`; same snapshot on demand from the private
+`:9090/__stats`). B5.
 
-**Semantics**: the gauge is "seconds since the last successful **contact**
+**Semantics**: the value is "seconds since the last successful **contact**
 with antibot-backend" — both `200` (new data landed) and `304` (ETag
 matched, no new data, channel still healthy) reset it. Transport errors,
-non-200/304 statuses, and decode failures leave the gauge growing. **This
+non-200/304 statuses, and decode failures leave the value growing. **This
 is a liveness signal, not a data-freshness one** — the alert fires when
 backend stops answering, not when a PR-merged catalog has been the same
 payload for a week (which is the steady state for `tls_fp_blocklist`,
@@ -246,9 +248,9 @@ Contract per config-distribution §Channel C and the B6 task:
   attack-mode toggle, urgent blocklist additions delivered via the
   dashboard, not via PR).
 
-Whoever scrapes `/metrics` (Prometheus / external observability) writes the
-alertmanager rule against these thresholds; this repo only guarantees the
-metric is exported with the contract above.
+Whoever consumes `{kind="edge_stats"}` in Loki (or scrapes `:9090/__stats`)
+writes the alert rule against these thresholds; this repo only guarantees the
+signal is emitted with the contract above.
 
 ### Fail-stale verification
 
@@ -259,8 +261,9 @@ Manual scenario (two terminals — one on each VM):
 # pull from the edge fails handshake/transport.
 docker compose -f docker-compose.backend.yml stop backend-1 backend-2
 
-# Edge VM (or anywhere with reach): watch the gauge climb in real time.
-watch -n 5 'curl -sk https://<stand-host>/metrics | grep antibot_edge_catalog_staleness_seconds'
+# Edge VM: watch the staleness value climb in real time (private :9090/__stats,
+# loopback on the edge box).
+watch -n 5 'curl -s http://127.0.0.1:9090/__stats | grep -o "catalog_staleness_seconds[^,}]*"'
 
 # Edge keeps serving:
 curl -sk -o /dev/null -w '%{http_code}\n' https://<stand-host>/
@@ -268,7 +271,7 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://<stand-host>/
 
 # Restore:
 docker compose -f docker-compose.backend.yml start backend-1 backend-2
-# Within ~30s the gauge drops back near 0 — staleness reset on first successful pull.
+# Within ~30s the value drops back near 0 — staleness reset on first successful pull.
 ```
 
 ## Secrets

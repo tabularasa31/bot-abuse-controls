@@ -53,7 +53,7 @@ reader() {
     local end=$(( SECONDS + LOAD_DURATION ))
     while [ "$SECONDS" -lt "$end" ]; do
         local body
-        if ! body="$(edge_curl --max-time 2 "${EDGE_URL}/__policy?host=${TEST_HOST}" 2>/dev/null)"; then
+        if ! body="$(mgmt_curl --max-time 2 "${EDGE_MGMT_URL}/__policy?host=${TEST_HOST}" 2>/dev/null)"; then
             failed=$((failed + 1))
             continue
         fi

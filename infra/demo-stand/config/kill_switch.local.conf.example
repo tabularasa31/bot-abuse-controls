@@ -35,3 +35,14 @@ reputation = false
 tls_fp = false
 rate_limits = false
 verification = false
+
+# Edge self-protection. The edge is tenant-only: a non-tenant Host (Host:
+# <edge-IP>, garbage Hosts, HTTP/1.0 without Host) is ALWAYS dropped with 444 in
+# location / (no landing page to serve). This toggle adds an earlier TLS layer:
+# when on, a handshake whose SNI is neither a tenant nor a base-domain name (and
+# no-SNI) is aborted before any HTTP is read — saving the handshake crypto under
+# an L7 flood on the edge IP. Tenant traffic is untouched; /__health (+ ACME on
+# :80) stays reachable (its base-domain SNI is allowed through on purpose). Other
+# ops live on the private :9090 plane. Off by default (TLS reject disabled).
+[edge_protection]
+deny_nontenant = false

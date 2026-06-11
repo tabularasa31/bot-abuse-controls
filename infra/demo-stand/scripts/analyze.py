@@ -103,6 +103,25 @@ LOKI_URL = os.environ.get("LOKI_URL", "http://loki:3100")
 FETCH_HOURS_DEFAULT = int(os.environ.get("BAC_FETCH_HOURS", "25"))
 # Loki query_range page size; we paginate forward past this.
 LOKI_PAGE_LIMIT = int(os.environ.get("BAC_LOKI_PAGE_LIMIT", "5000"))
+# Per-request socket timeout (s). With the chunking below each request returns
+# fast, so this is a ceiling, not the steady-state latency. Loki itself severs
+# the connection near 60s, so the cure for a slow window is smaller chunks, NOT
+# a bigger timeout (verified live: a 25h single query died at 20s AND at 90s).
+LOKI_TIMEOUT_S = int(os.environ.get("BAC_LOKI_TIMEOUT_S", "30"))
+# Density pre-count granularity (s) and per-chunk line budget. We count_over_time
+# first (the metric path is instant even over a burst that would time out a raw
+# query_range), then tile the window into chunks each holding ≲ LOKI_CHUNK_TARGET
+# raw lines so no single query_range must return > the page limit — the failure
+# that silently zeroed the daily report under a traffic burst (task 86exwf9gj:
+# 11.7k lines / 30min choked one query while 5-min slices returned in 0.1s).
+LOKI_COUNT_STEP_S = int(os.environ.get("BAC_LOKI_COUNT_STEP_S", "60"))
+LOKI_CHUNK_TARGET = int(os.environ.get("BAC_LOKI_CHUNK_TARGET",
+                                       str(int(LOKI_PAGE_LIMIT * 0.8))))
+
+# Health of the most recent _fetch_loki call. main() reads it to refuse emitting
+# a misleadingly-empty report when the read FAILED, as opposed to genuine zero
+# traffic (count query succeeded and returned nothing). Reset at each call.
+LOKI_HEALTH = {"ok": True, "counted": 0, "fetched": 0, "errors": 0, "detail": ""}
 
 # Resty's init marker (nginx error_log) carries the loaded blocklist size;
 # 0 == shadow. Captured opportunistically — defaults to 0 if outside the
@@ -172,7 +191,6 @@ SUSPICIOUS_URI_RE = re.compile(
     r"/login\.action|/struts|/jenkins|/actuator|"
     r"/swagger|/graphql|/api/v\d|"
     r"/backup|/dump\b|/database|/db_dump|/sql_dump|"
-    r"/\.well-known/security\.txt|"
     r"/cgi-bin|/shell|/eval|/cmd)",
     re.I,
 )
@@ -347,35 +365,73 @@ def _read_archive_events(now_utc):
     return events
 
 
-def _fetch_loki(hours):
-    """Pull BAC_LOG events from Loki over the last `hours`, paginating forward.
+def _loki_get(base, params, timeout):
+    """One Loki HTTP GET → parsed JSON payload. Raises on transport/HTTP error
+    (callers decide whether that's fatal — the old code swallowed it, which is
+    exactly how a read failure became a silent zero report)."""
+    req = urllib.request.Request(
+        base + "?" + urllib.parse.urlencode(params),
+        headers={"User-Agent": "abuse-controls-analytics/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
 
-    Loki stores the bare JSON payload as the line body (promtail `output`
-    stage), so we re-prefix `BAC_LOG ` before reusing _event_from_bac_line. Any
-    connectivity/parse error degrades to an empty list (the report still
-    renders, archives still fold). blocklist_size/init_ts are not derivable from
-    Loki (it carries only BAC_LOG, not the resty init marker) → (events, 0, None);
-    the report's mode line shows SHADOW under the Loki source."""
-    base = LOKI_URL.rstrip("/") + "/loki/api/v1/query_range"
-    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
-    step_start = now_ns - int(hours * 3600 * 1_000_000_000)
+
+def _loki_count_buckets(base, start_ns, end_ns, step_s):
+    """Density of {job="bac-edge"} as [(bucket_end_ns, count), ...] via
+    count_over_time. The metric path doesn't materialize raw lines, so it stays
+    fast even over a burst that would time out a raw query_range — that is what
+    lets us size chunks BEFORE paying for the lines."""
+    payload = _loki_get(base, {
+        "query": 'sum(count_over_time({job="bac-edge"}[%ds]))' % step_s,
+        "start": str(start_ns), "end": str(end_ns), "step": "%ds" % step_s,
+    }, LOKI_TIMEOUT_S)
+    out = []
+    for stream in (payload.get("data") or {}).get("result") or []:
+        for sec, val in stream.get("values") or []:
+            try:
+                out.append((int(float(sec)) * 1_000_000_000, int(float(val))))
+            except (ValueError, TypeError):
+                continue
+    out.sort()
+    return out
+
+
+def _plan_loki_chunks(start_ns, end_ns, buckets, target):
+    """Tile [start_ns, end_ns) into contiguous chunks each holding ≲ `target`
+    lines, using the pre-counted density. Chunks abut exactly (no gaps, no
+    overlap), so every ns is covered once. A lone bucket above `target` becomes
+    its own chunk — the in-chunk forward pagination drains the overflow."""
+    if not buckets:
+        return [(start_ns, end_ns)]
+    chunks = []
+    cur_start = start_ns
+    acc = 0
+    prev_end = start_ns
+    for bend_ns, count in buckets:
+        if acc > 0 and acc + count > target:
+            cut = prev_end if prev_end > cur_start else bend_ns
+            chunks.append((cur_start, cut))
+            cur_start, acc = cut, 0
+        acc += count
+        prev_end = bend_ns
+    if cur_start < end_ns:
+        chunks.append((cur_start, end_ns))
+    return chunks
+
+
+def _fetch_loki_window(base, start_ns, end_ns, seen):
+    """Forward-paginate raw BAC_LOG lines in [start_ns, end_ns) into events.
+    `seen` is shared across chunks so a line on a chunk boundary is not double
+    counted. Raises on transport error so the caller can mark the run degraded."""
     events = []
-    seen = set()  # (ts_str, line) — dedup across overlapping pages
-    for _ in range(200):  # pagination safety cap
-        qs = urllib.parse.urlencode({
+    step_start = start_ns
+    for _ in range(200):  # pagination safety cap (per chunk)
+        payload = _loki_get(base, {
             "query": '{job="bac-edge"}',
-            "start": str(step_start), "end": str(now_ns),
+            "start": str(step_start), "end": str(end_ns),
             "limit": str(LOKI_PAGE_LIMIT), "direction": "forward",
-        })
-        req = urllib.request.Request(
-            base + "?" + qs,
-            headers={"User-Agent": "abuse-controls-analytics/1.0"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                payload = json.loads(resp.read())
-        except Exception:
-            break
+        }, LOKI_TIMEOUT_S)
         results = (payload.get("data") or {}).get("result") or []
         if not results:
             break
@@ -383,7 +439,7 @@ def _fetch_loki(hours):
         stream_maxes = []
         for stream in results:
             smax = step_start
-            for ts_str, line in stream.get("values", []):
+            for ts_str, line in stream.get("values") or []:
                 n += 1
                 try:
                     ts_ns = int(ts_str)
@@ -406,6 +462,57 @@ def _fetch_loki(hours):
         # the `seen` dedup drops the re-fetched overlap above that boundary.
         nxt = min(stream_maxes) if stream_maxes else step_start
         step_start = nxt if nxt > step_start else step_start + 1
+        if step_start >= end_ns:
+            break
+    return events
+
+
+def _fetch_loki(hours):
+    """Pull BAC_LOG events from Loki over the last `hours`.
+
+    Loki stores the bare JSON payload as the line body (promtail `output`
+    stage), so we re-prefix `BAC_LOG ` before reusing _event_from_bac_line.
+    blocklist_size/init_ts are not derivable from Loki (it carries only BAC_LOG,
+    not the resty init marker) → (events, 0, None); the report's mode line shows
+    SHADOW under the Loki source.
+
+    A single query_range over the whole report window times out once any
+    sub-range exceeds the page limit (Loki splits the range, and one dense
+    interval kills the merge). So we pre-count density cheaply, tile the window
+    into chunks each under the limit, and fetch per chunk. Read health is
+    recorded in LOKI_HEALTH; a failure leaves `ok=False` so main() can refuse to
+    emit a misleadingly-empty report rather than silently mailing zeros."""
+    base = LOKI_URL.rstrip("/") + "/loki/api/v1/query_range"
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    start_ns = now_ns - int(hours * 3600 * 1_000_000_000)
+    LOKI_HEALTH.update({"ok": True, "counted": 0, "fetched": 0,
+                        "errors": 0, "detail": ""})
+
+    try:
+        buckets = _loki_count_buckets(base, start_ns, now_ns, LOKI_COUNT_STEP_S)
+    except Exception as e:
+        # Pre-count failed → Loki unreachable/broken. Nothing trustworthy to say.
+        LOKI_HEALTH.update({"ok": False, "errors": 1,
+                            "detail": "count query failed: %r" % e})
+        return [], 0, None
+    LOKI_HEALTH["counted"] = sum(c for _, c in buckets)
+
+    chunks = _plan_loki_chunks(start_ns, now_ns, buckets, LOKI_CHUNK_TARGET)
+    events = []
+    seen = set()  # (ts_str, line) — dedup across pages AND chunk boundaries
+    for cs, ce in chunks:
+        try:
+            events.extend(_fetch_loki_window(base, cs, ce, seen))
+        except Exception as e:
+            # One chunk failing makes the whole run degraded (main() refuses to
+            # emit on any error), so fail fast: breaking here avoids compounding
+            # 30s timeouts across the remaining chunks if Loki is down or slow.
+            LOKI_HEALTH["errors"] += 1
+            LOKI_HEALTH["detail"] = "chunk [%d,%d) failed: %r" % (cs, ce, e)
+            break
+    LOKI_HEALTH["fetched"] = len(events)
+    if LOKI_HEALTH["errors"]:
+        LOKI_HEALTH["ok"] = False
     return events, 0, None
 
 
@@ -999,15 +1106,17 @@ def _challenge_pass_gate(issued, solved):
 
 
 def _fp_hard_identity_allow(events_for_fp):
-    """True if the cascade let this fp through on a HARD positive-identity rule —
-    ip_whitelist, policy.ip_whitelist (reputation.lua), cookie_valid (verdict.lua),
-    i.e. any verdict==allow EXCEPT challenge_pass. These stay a binary allowlist
-    veto. challenge_pass is excluded here and handled by _challenge_pass_gate: a
-    solved challenge is no longer a permanent shield (design §B2). We match on
-    verdict (rule names drift, e.g. policy.ip_whitelist) and carve out only the
-    one stable named rule the design depends on."""
-    return any(e.get("verdict") == "allow" and e.get("rule") != "challenge_pass"
-               for e in events_for_fp)
+    """List of (ip, rule) pairs for events where the cascade let this fp through
+    on a HARD positive-identity rule — ip_whitelist, policy.ip_whitelist
+    (reputation.lua), cookie_valid (verdict.lua), i.e. any verdict==allow EXCEPT
+    challenge_pass. Non-empty list is truthy so callers testing truthiness work
+    unchanged. challenge_pass is excluded here and handled by _challenge_pass_gate:
+    a solved challenge is no longer a permanent shield (design §B2)."""
+    return [
+        (e.get("remote") or "?", e.get("rule") or "?")
+        for e in events_for_fp
+        if e.get("verdict") == "allow" and e.get("rule") != "challenge_pass"
+    ]
 
 
 def _parse_blocklist_text(text):
@@ -1302,7 +1411,24 @@ def find_blocklist_candidates(events, ip_cache, seen):
             suggested_action = (f"HIGH, но мало данных: lifetime {n_lifetime} < {MIN_EVENTS} "
                                 f"или дней {len(days)} < {MIN_DAYS_PROMOTE} — наблюдать")
         elif tier == "HIGH" and (wl_hit or hard_id):
-            suggested_action = "HIGH, но в allowlist/verified — не блокировать (жесткое вето)"
+            if wl_hit:
+                wl_ips = [ip for ip in ips if _ip_in_whitelist(ip, whitelist_nets)]
+                ip_str = ", ".join(sorted(wl_ips)[:3]) + ("…" if len(wl_ips) > 3 else "")
+                suggested_action = (
+                    f"HIGH, жёсткое вето: IP в ip_whitelist ({ip_str}) — не блокировать"
+                )
+            else:
+                rule_counts = Counter(rule for _, rule in hard_id)
+                hit_ips = sorted({ip for ip, _ in hard_id})
+                rules_str = ", ".join(
+                    f"{r}×{c}" if c > 1 else r for r, c in rule_counts.most_common(3)
+                )
+                ip_str = ", ".join(hit_ips[:2]) + ("…" if len(hit_ips) > 2 else "")
+                suggested_action = (
+                    f"HIGH, жёсткое вето: identity-allow в логе "
+                    f"(rule={rules_str}, IP={ip_str}, {len(hard_id)} событий) — "
+                    f"не блокировать, проверить вручную"
+                )
         elif tier == "HIGH" and cp_gate == "veto":
             suggested_action = (f"HIGH, но challenge решается (issued={cl_issued}, "
                                 f"solved={cl_solved}) — под fp есть люди/легит, не блокировать")
@@ -1449,7 +1575,7 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
         # the active matches instead (§B2) — this is where HUMAN_SOLVE_RATE gets
         # real meaning: many solved challenges → humans → fp_caught.
         hard_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
-            or _fp_hard_identity_allow(matched)
+            or bool(_fp_hard_identity_allow(matched))
         # Count solves by fp, NOT among `matched`: a solved challenge is emitted
         # by the separate /__challenge/verify endpoint, which never runs the
         # tls_fp staging stage, so the solve event carries tls_fp (the join key,
@@ -1507,32 +1633,18 @@ def enriched_label(info):
     return " · ".join(parts)
 
 
-def _container_start_str(init_ts, source):
-    """Human label for 'container last started'. Under the Loki source the resty
-    init marker (`[demo] tls_fp_blocklist loaded: N`, nginx error_log) is NOT
-    shipped to Loki, so init_ts is None BY DESIGN — say so rather than the
-    alarming '(неизвестно)', which read like a failure (#3)."""
-    if init_ts:
-        return init_ts.astimezone().strftime("%Y-%m-%d %H:%M %Z")
-    if source == "loki":
-        return "n/a (Loki source: init-маркер не шипится в Loki)"
-    return "(неизвестно)"
-
-
-def render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source=None, source=None):
+def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     asn_watch = find_asn_watch_candidates(events_24h, ip_cache)
     now_msk = now_utc.astimezone()
-    init_str = _container_start_str(init_ts, source)
 
     L = []
     L.append(f"# Demo-stand report — {now_msk.strftime('%Y-%m-%d %H:%M %Z')}")
     L.append("")
     L.append("Стенд: https://bac.example.com (resty)")
     L.append(f"Режим: {'SHADOW (без блокировок)' if blocklist_size == 0 else f'ACTIVE — в blocklist {blocklist_size} fps'}")
-    L.append(f"Контейнер последний раз стартовал: {init_str}")
     L.append("")
     L.append("")
     L.append("## Сводка")
@@ -1791,21 +1903,19 @@ def html_candidate(c, tier_cls):
     return "".join(parts)
 
 
-def render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, source=None):
+def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     sLT = collect_lifetime_stats(seen, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     asn_watch = find_asn_watch_candidates(events_24h, ip_cache)
     now_msk = now_utc.astimezone()
-    init_str = _container_start_str(init_ts, source)
 
     parts = ["<!doctype html><html><head><meta charset='utf-8'>",
              f"<style>{CSS}</style></head><body>"]
     parts.append("<h1>Demo-stand traffic report</h1>")
     parts.append(
         f"<div class='headline'>{h(now_msk.strftime('%Y-%m-%d %H:%M %Z'))} · "
-        f"<a href='https://bac.example.com'>bac.example.com</a> · "
-        f"контейнер последний раз стартовал {h(init_str)}</div>"
+        f"<a href='https://bac.example.com'>bac.example.com</a></div>"
     )
 
     mode_html = (
@@ -2037,7 +2147,21 @@ def main() -> int:
     if fetch_hours is None:
         fetch_hours = (max(args.min_staging_hours + 2, FETCH_HOURS_DEFAULT)
                        if args.staging_observation_json else FETCH_HOURS_DEFAULT)
-    events_all, blocklist_size, init_ts, per_source = fetch_events(args.source, fetch_hours)
+    events_all, blocklist_size, _, _ = fetch_events(args.source, fetch_hours)
+    # Loki read-health gate. A failed/partial Loki read must NOT silently render a
+    # misleadingly all-zero report (a traffic-burst timeout did exactly that —
+    # task 86exwf9gj). Genuine zero traffic (the count query succeeded and
+    # returned nothing) is legitimate and still reports. Only a transport/query
+    # failure degrades the run: exit non-zero BEFORE writing anything so the
+    # backend run.sh skips the email and drops the JSON artifacts (no zeros
+    # mailed, no bogus auto-demote PRs from an empty candidates view).
+    if args.source == "loki" and not LOKI_HEALTH.get("ok", True):
+        sys.stderr.write(
+            "[analyze] FATAL Loki read degraded — refusing to emit a "
+            "zero/partial report (%s; counted=%d fetched=%d errors=%d)\n" % (
+                LOKI_HEALTH.get("detail", "?"), LOKI_HEALTH.get("counted", 0),
+                LOKI_HEALTH.get("fetched", 0), LOKI_HEALTH.get("errors", 0)))
+        return 1
     seen = load_seen()
     ip_cache = load_ip_cache()
     # IPs active at load time, BEFORE seeding fills ip_cache with every windowed
@@ -2175,7 +2299,7 @@ def main() -> int:
     save_ip_cache(ip_cache)
     save_watermark(newest)
 
-    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, per_source, source=args.source)
+    md_report = render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc)
     archive = REPORTS_DIR / f"{today_str}.md"
     archive.write_text(md_report)
 
@@ -2187,9 +2311,7 @@ def main() -> int:
         render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
 
     if args.html:
-        # HTML renderer keeps the resty-only signature for now; comparison
-        # info is in the markdown report archived under reports/.
-        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, init_ts, now_utc, source=args.source))
+        sys.stdout.write(render_html(events_24h, seen, blocklist_size, ip_cache, now_utc))
     else:
         sys.stdout.write(md_report)
     return 0

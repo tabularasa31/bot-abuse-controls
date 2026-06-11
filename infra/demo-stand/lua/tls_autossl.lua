@@ -83,6 +83,83 @@ function _M.allow_domain(host, opts)
     return type(ip) == "string" and ip ~= ""
 end
 
+-- sni_known(host, opts) — is this SNI a name the edge legitimately serves?
+-- True for (a) the stand base domain and its subdomains (bac/dashboard, served
+-- by the static fallback cert) and (b) a registered tenant (policy origin_ip).
+-- False for everything else (random / scanner SNI, IP-literal SNI). This is the
+-- edge-self-protection counterpart to allow_domain: allow_domain answers "ACME
+-- this?" (base domain → NO, it uses the static cert), whereas sni_known answers
+-- "serve this at all?" (base domain → YES). Same dot-boundary base match and
+-- the same injectable deps (opts.base_domain / opts.origin_ip) for unit tests.
+function _M.sni_known(host, opts)
+    if not host or host == "" then return false end
+    host = string.lower(host)
+
+    local base = opts and opts.base_domain
+    if base == nil then base = DEFAULT_BASE_DOMAIN end
+    if base ~= "" and (host == base or host:sub(-(#base + 1)) == ("." .. base)) then
+        return true
+    end
+
+    -- if/else (not `lookup and lookup(host) or require(...)`): a real non-tenant
+    -- makes the injected lookup return nil, and the `or` would then fall through
+    -- to require("policy") — defeating the test injection. Mirror allow_domain.
+    --
+    -- require("policy") is deliberately NOT pcall-wrapped here (gemini review on
+    -- PR #146): the only production caller, reject_unknown_sni, already wraps the
+    -- whole decision in a pcall that FAILS OPEN. Catching the error here and
+    -- returning false instead would fail CLOSED (treat the SNI as unknown →
+    -- reject), which could drop a real tenant's handshake on a transient policy
+    -- error — the opposite of the module's "never take HTTPS down" contract.
+    local lookup = opts and opts.origin_ip
+    local ip
+    if lookup then
+        ip = lookup(host)
+    else
+        ip = require("policy").origin_ip(host)
+    end
+    return type(ip) == "string" and ip ~= ""
+end
+
+-- reject_unknown_sni() — TLS-layer edge self-protection (step 2). When
+-- edge_protection.deny_nontenant is on, abort the handshake for a PRESENT SNI
+-- that is neither a tenant nor a base-domain name, BEFORE any HTTP is read —
+-- the cheapest disposal the edge can do for an L7 flood that announces a
+-- bogus/foreign SNI. ngx.exit(ngx.ERROR) sends a TLS alert and closes.
+--
+-- No-SNI handshakes (host nil — the common case for a flood hitting the raw
+-- edge IP) are NOT rejected here: there is no name to judge, so we serve the
+-- static fallback cert and let the HTTP-layer `return 444` (step 1) dispose of
+-- the request by its empty $origin. The two layers are complementary — TLS
+-- reject catches wrong-SNI, HTTP 444 catches no-SNI / IP-literal Host.
+--
+-- No per-handshake ngx.log: under a flood this fires on every connection, and a
+-- log line per drop would itself become the bottleneck. The
+-- edge_sni_rejected_total counter is the visible signal instead.
+--
+-- Crash-safety (gemini review on PR #146): this runs in ssl_certificate() BEFORE
+-- its pcall, so a throw here would abort the handshake instead of falling back to
+-- the static cert — violating the module contract ("protection must never take
+-- HTTPS down"). The whole decision (config read, ngx.ssl, policy lookup inside
+-- sni_known) is therefore wrapped in a pcall that FAILS OPEN: any error → do not
+-- reject, serve the static cert. ngx.exit(ngx.ERROR) stays OUTSIDE the pcall —
+-- it raises a control-flow exception that pcall would otherwise swallow, which
+-- would turn a reject into a silent pass. The metrics dict is nil-guarded too.
+function _M.reject_unknown_sni()
+    local ok, reject = pcall(function()
+        local config = require "config"
+        if not config.edge_deny_nontenant(config.defaults) then return false end
+        local ssl  = require "ngx.ssl"
+        local host = ssl.server_name()   -- nil when the client sent no SNI
+        return host and host ~= "" and not _M.sni_known(host)
+    end)
+    if not ok or not reject then return end
+
+    local metrics = ngx.shared.metrics
+    if metrics then metrics:incr("edge_sni_rejected_total", 1, 0) end
+    return ngx.exit(ngx.ERROR)
+end
+
 -- setup() — configure lua-resty-acme autossl (call from init_by_lua, master).
 -- Wrapped by the caller in pcall; on any failure _M._ready stays false and
 -- ssl_certificate() no-ops → static fallback cert. require is done HERE (not at
@@ -119,6 +196,12 @@ end
 -- OpenResty serves the static fallback cert (fullchain.pem) → no HTTPS outage
 -- (gemini high review on PR #95). No-op when auto-ssl isn't active.
 function _M.ssl_certificate()
+    -- Edge self-protection (step 2) runs FIRST, independent of _ready: an
+    -- unknown SNI is dropped at the handshake even when on-demand TLS is
+    -- inactive (static-cert-only stand). If it doesn't reject, fall through to
+    -- per-SNI cert selection. ngx.exit inside reject_unknown_sni ends the phase.
+    _M.reject_unknown_sni()
+
     if not _M._ready then return end
     local ok, err = pcall(function() require("resty.acme.autossl").ssl_certificate() end)
     if not ok then

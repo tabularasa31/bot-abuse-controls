@@ -80,8 +80,14 @@ scrape_configs:
       - match:
           selector: '{container="nginx-demo"}'
           stages:
+            # Capture BOTH structured streams the edge writes to stdout:
+            #   BAC_LOG    — one record per cascade request (bac_log.lua)
+            #   EDGE_STATS — periodic aggregate counters (edge_stats.lua), the
+            #                replacement for the removed /metrics endpoint.
+            # `kind` (BAC_LOG|EDGE_STATS) becomes a label so LogQL can split them:
+            # `{kind="bac_log"}` for requests, `{kind="edge_stats"}` for counters.
             - regex:
-                expression: '^BAC_LOG\s+(?P<payload>\{.*\})\s*$'
+                expression: '^(?P<kind>BAC_LOG|EDGE_STATS)\s+(?P<payload>\{.*\})\s*$'
             # Lines that didn't match the regex have empty payload and get
             # dropped — keeps nginx access/error log noise out of Loki.
             - drop:
@@ -118,7 +124,19 @@ scrape_configs:
             # would explode the index within hours (rules-reference.md,
             # vision.md). Those fields stay inside the JSON payload and
             # are queryable via LogQL `| json | <field>="…"`.
+            # Normalize `kind` to lower-case BEFORE labeling: the regex captures
+            # the literal stdout prefixes (BAC_LOG / EDGE_STATS), but the
+            # README/PROGRESS guidance and dashboards query `{kind="bac_log"}` /
+            # `{kind="edge_stats"}`. Without this the documented queries match
+            # nothing (codex review on PR #147).
+            - template:
+                source: kind
+                template: '{{ ToLower .Value }}'
+            # `kind` splits the two streams; verdict/stage/mode/action are empty
+            # for EDGE_STATS records (they carry counters, not a per-request
+            # verdict) — an empty label value is fine and keeps cardinality low.
             - labels:
+                kind:
                 edge_id:
                 host:
                 verdict:

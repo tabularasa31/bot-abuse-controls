@@ -107,7 +107,7 @@ function _M.mark_cascade_end()
 end
 
 -- sum_upstream_time — parse nginx $upstream_response_time into seconds.
--- The var is nil/""/"-" when no upstream was contacted (blocked, landing), or
+-- The var is nil/""/"-" when no upstream was contacted (blocked, challenge), or
 -- one-or-more numbers separated by ", " (multiple upstream tries) / " : "
 -- (internal redirects); failed tries appear as "-". We sum every numeric
 -- component and ignore the rest. Returns nil when there's no numeric value.
@@ -258,7 +258,7 @@ function _M.emit()
     --   upstream_response_ms — $upstream_response_time: upstream connect → last
     --                 byte of the origin response (origin round-trip incl. the
     --                 origin's own think-time), EXCLUDING delivery to the user.
-    --                 null when no upstream was contacted (blocked / landing).
+    --                 null when no upstream was contacted (blocked / challenge).
     --   proxy_ms    — cascade_ms + upstream_response_ms: request arrival → we
     --                 hold the full origin response ready to hand to the user.
     --                 This is the proxy path that adds overhead, WITHOUT the
@@ -267,7 +267,7 @@ function _M.emit()
     local up_total = sum_upstream_time(ngx.var.upstream_response_time)
     local upstream_response_ms = up_total and up_total * 1000 or nil
     -- proxy_ms is null unless an upstream was actually contacted — for
-    -- blocked/landing requests there's no origin response, so reporting
+    -- blocked/challenge requests there's no origin response, so reporting
     -- proxy_ms == cascade_ms would be misleading (gemini review on PR #97).
     local proxy_ms = (cascade_ms and upstream_response_ms)
         and (cascade_ms + upstream_response_ms) or nil
@@ -292,12 +292,12 @@ function _M.emit()
         edge_id       = EDGE_ID,
         resource_id   = cjson_base.null,   -- backend-enriched on ingest; null on edge
         host          = ngx.var.host or cjson_base.null,
-        -- $request_uri preserves the ORIGINAL request path through
-        -- internal rewrites (the catch-all-to-BAC model uses
-        -- `rewrite ^ /__landing last` for unknown Hosts; without this
-        -- $uri-vs-$request_uri swap, every unknown-Host record would
-        -- log path=/__landing and we'd lose visibility into what
-        -- scanners actually asked for). Query string is stripped so
+        -- $request_uri preserves the ORIGINAL request path through internal
+        -- redirects — e.g. the @challenge_page ngx.exec on the L5 challenge
+        -- path; without this $uri-vs-$request_uri swap those records would log
+        -- the internal target instead of what the client asked for. (Non-tenant
+        -- Hosts no longer reach here at all — they're dropped with 444 before the
+        -- cascade since the /__landing page was removed.) Query string is stripped so
         -- the field stays comparable to its pre-change shape — the
         -- sink already has separate observability for query patterns
         -- if needed.

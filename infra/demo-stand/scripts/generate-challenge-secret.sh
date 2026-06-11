@@ -56,12 +56,13 @@ if [ -z "$raw" ]; then
 fi
 # No trailing newline: challenge_secret.lua trims whitespace before hashing,
 # so a `>` redirect (which appends `\n`) would print a fingerprint that
-# disagrees with /__version. printf '%s' guarantees byte-for-byte match.
+# disagrees with EDGE_STATS challenge_secret_fp. printf '%s' guarantees
+# byte-for-byte match.
 printf '%s' "$raw" > "$dest"
 chmod 600 "$dest"
 
 # 8-hex fingerprint = first 4 bytes of sha256(secret), same shape as
-# challenge_secret.lua reports via /__version and /__admin so the operator
+# challenge_secret.lua reports via EDGE_STATS challenge_secret_fp so the operator
 # can cross-check what the stand loaded after reload. `openssl dgst -r`
 # prints "<hex>  <name>" (coreutils-style), works on both OpenSSL 1.1+ and
 # LibreSSL — verified on the alpine base image the stand runs on.

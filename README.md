@@ -4,10 +4,6 @@ Bot & Abuse Controls v1 для the platform (продукт на инфраст�
 
 Реализует архитектурное решение из [RFC edge Lua vs Go sidecar](docs/architecture/edge-lua-vs-sidecar.md) + [config-distribution.md](docs/architecture/config-distribution.md): фильтрация — на edge через OpenResty/Lua, control plane (каталоги, dashboard, rDNS, log sink) — централизованный Go-сервис [`antibot-backend/`](antibot-backend/). Per-edge sidecar отменён (см. config-distribution §"What was rejected").
 
-## Связь с antibot-lab
-
-Phase 1 PoC (модули JA3/JA4 для nginx, выбор FoxIO ja4-nginx-module) выполнен в [../antibot-lab](../antibot-lab) — этот репо остаётся как Phase 1 артефакт.
-
 ## Структура
 
 - `infra/demo-stand/` — long-running демо-эдж (cascade, B-серия)

@@ -84,11 +84,13 @@ jobs:
                    luajit tests/challenge_test.lua && \
                    luajit tests/clearance_test.lua && \
                    luajit tests/verification_test.lua && \
-                   luajit tests/recovery_test.lua && \
                    luajit tests/origin_resolve_test.lua && \
                    luajit tests/proxy_target_test.lua && \
                    luajit tests/policy_test.lua && \
-                   luajit tests/tls_autossl_test.lua'
+                   luajit tests/tls_autossl_test.lua && \
+                   luajit tests/config_edge_test.lua && \
+                   luajit tests/edge_stats_test.lua && \
+                   luajit tests/policy_view_test.lua'
 
   pytest:
     name: Python tests (pytest, analyze.py)

@@ -59,9 +59,23 @@ local function apply_toggle(dst, key, v, where)
     end
 end
 
-local function overlay_kill_switch(defaults)
+-- Forward declarations so overlay_local can reference these as upvalues; the
+-- `function name()` definitions below bind to these locals (not globals).
+local overlay_kill_switch, overlay_edge_protection
+
+-- Apply the operator override file (KILL_SWITCH_LOCAL) onto the git-tracked
+-- defaults. Parsed ONCE here and fed to both the kill-switch overlay and the
+-- edge-protection overlay — the file is the single operator lever surface on
+-- the stand (Channel A = file/mount), so a new operational toggle rides the
+-- same parse + same `nginx -s reload` lifecycle as the kill-switch.
+local function overlay_local(defaults)
     local parsed = loader.parse_ini(path(KILL_SWITCH_LOCAL))
     if not parsed then return end
+    overlay_kill_switch(defaults, parsed)
+    overlay_edge_protection(defaults, parsed)
+end
+
+function overlay_kill_switch(defaults, parsed)
     local ks = parsed.kill_switch
     if type(ks) ~= "table" then return end
 
@@ -80,9 +94,25 @@ local function overlay_kill_switch(defaults)
     end
 end
 
+-- Edge self-protection overlay (defaults.conf [edge_protection]). Same
+-- operator-lever semantics as the kill-switch: deny_nontenant turns ON the
+-- TLS-handshake reject (tls_autossl.reject_unknown_sni) for non-tenant / no-SNI
+-- traffic, so a flood aimed at the edge's own IP is dropped before the cascade
+-- AND before the server-side handshake crypto. (HTTP-layer non-tenant traffic is
+-- already dropped with 444 unconditionally — the edge is tenant-only since the
+-- landing page was removed.) Tenant traffic ($origin != "") is untouched.
+-- Reload-applied, no container recreate.
+function overlay_edge_protection(defaults, parsed)
+    local ep = parsed.edge_protection
+    if type(ep) ~= "table" or ep.deny_nontenant == nil then return end
+    defaults.edge_protection = defaults.edge_protection or {}
+    apply_toggle(defaults.edge_protection, "deny_nontenant",
+        ep.deny_nontenant, "edge_protection.deny_nontenant")
+end
+
 function _M.load()
     _M.defaults                = load_or_die(loader.parse_ini,  "defaults.conf")
-    overlay_kill_switch(_M.defaults)
+    overlay_local(_M.defaults)
     _M.whitelist_ip            = load_or_die(loader.parse_list, "whitelist_ip.conf")
     _M.blocklist_ip            = load_or_die(loader.parse_list, "blocklist_ip.conf")
     _M.ua_blacklist            = load_or_die(loader.parse_list, "ua_blacklist.conf")
@@ -113,6 +143,18 @@ end
 function _M.global_kill(defaults)
     local ks = (defaults or {}).kill_switch or {}
     return (ks.global or {}).enabled == true
+end
+
+-- Edge self-protection predicate (defaults.conf [edge_protection], overridable
+-- via kill_switch.local.conf). True → tls_autossl.reject_unknown_sni aborts the
+-- TLS handshake for non-tenant / no-SNI clients (cheapest disposal, saves the
+-- handshake crypto under a flood). HTTP-layer non-tenant traffic is dropped with
+-- 444 regardless (tenant-only edge). Read once per handshake; the value only
+-- changes on reload (init_by_lua re-runs config.load), so this is a plain table
+-- read, no shared_dict needed. Defaults to false (TLS reject off).
+function _M.edge_deny_nontenant(defaults)
+    local ep = (defaults or {}).edge_protection or {}
+    return ep.deny_nontenant == true
 end
 
 return _M

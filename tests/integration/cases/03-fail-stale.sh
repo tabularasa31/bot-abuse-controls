@@ -47,7 +47,7 @@ dash_patch '{"mode":"active","strictness":"permissive"}' \
 # shellcheck disable=SC2329
 check_edge_settled() {
     local body
-    body="$(edge_curl "${EDGE_URL}/__policy?host=${TEST_HOST}")" || return 1
+    body="$(mgmt_curl "${EDGE_MGMT_URL}/__policy?host=${TEST_HOST}")" || return 1
     echo "$body" | grep -q '"mode":"active"' && \
         echo "$body" | grep -q '"strictness":"permissive"'
 }
@@ -67,7 +67,7 @@ compose_stop_svc backend
 echo "Verifying edge keeps last-good policy without backend..."
 for i in 1 2 3 4 5; do
     sleep 1
-    body="$(edge_curl --max-time 3 "${EDGE_URL}/__policy?host=${TEST_HOST}")" || {
+    body="$(mgmt_curl --max-time 3 "${EDGE_MGMT_URL}/__policy?host=${TEST_HOST}")" || {
         echo "FAIL: /__policy curl error on probe $i — edge may be blocking on dead backend"
         exit 1
     }

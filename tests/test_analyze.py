@@ -106,25 +106,6 @@ def test_per_asn_table_populated_after_seed(dc_catalog):
     assert asns[("(нет данных)", False, "")] == 1
 
 
-# --- _container_start_str (#3) ---------------------------------------------
-
-def test_container_start_relabel_loki():
-    assert "Loki" in az._container_start_str(None, "loki")
-
-
-def test_container_start_unknown_docker():
-    assert az._container_start_str(None, "docker") == "(неизвестно)"
-
-
-def test_container_start_renders_timestamp_when_known():
-    ts = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)
-    # _container_start_str converts to local time; derive the expected date the
-    # same way so the test is stable in any runner timezone (a fixed UTC date
-    # can roll over under astimezone() east of UTC).
-    expected_date = ts.astimezone().strftime("%Y-%m-%d")
-    assert expected_date in az._container_start_str(ts, "loki")
-
-
 # --- purity / classification ------------------------------------------------
 
 def test_is_genuine_browser_true_for_browser_shaped():
@@ -447,11 +428,15 @@ def test_challenge_pass_gate_no_zero_division_when_min_zero(monkeypatch):
 
 
 def test_hard_identity_allow_excludes_challenge_pass():
-    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="cookie_valid")]) is True
-    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="ip_whitelist")]) is True
+    # Returns a list — truthy when non-empty, falsy when empty.
+    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="cookie_valid")])
+    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="ip_whitelist")])
     # challenge_pass is no longer a hard veto — it goes through the ladder.
-    assert az._fp_hard_identity_allow([_ev(verdict="allow", rule="challenge_pass")]) is False
-    assert az._fp_hard_identity_allow([_ev(verdict="pass")]) is False
+    assert not az._fp_hard_identity_allow([_ev(verdict="allow", rule="challenge_pass")])
+    assert not az._fp_hard_identity_allow([_ev(verdict="pass")])
+    # Content: each hit is an (ip, rule) pair.
+    hits = az._fp_hard_identity_allow([_ev(verdict="allow", rule="cookie_valid", remote="1.2.3.4")])
+    assert hits == [("1.2.3.4", "cookie_valid")]
 
 
 def _staging_events(fp, issued, solved, **kw):

@@ -43,45 +43,139 @@
 # promoted 2026-05-29 — reason: go-http-client impersonator + leakix-scanner recon (multi-IP, DC ASN, 142 lifetime events)
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 13 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 142 · review-by 2026-06-12
-"L13d1300_69e852b66fc7_10d89aa70559": staging
+#  ↳ auto-activated 2026-06-03: staging observation clean
+"L13d1300_69e852b66fc7_10d89aa70559": active
 
 # promoted 2026-05-30 (auto) — reason: auto: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 170 · review-by 2026-06-13
-"L13d13h2_69e852b66fc7_3a4d01cc0c80": staging
+#  ↳ auto-activated 2026-06-02: staging observation clean
+"L13d13h2_69e852b66fc7_3a4d01cc0c80": active
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 6 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.git/config +1
 # human_share 0.0 · events 22 · review-by 2026-06-13
-"L13d2500_68ddea46f551_10d89aa70559": staging
+#  ↳ auto-activated 2026-06-02: staging observation clean
+"L13d2500_68ddea46f551_10d89aa70559": active
 # score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.example, /.env.example.php +1
 # human_share 0.0 · events 119 · review-by 2026-06-13
-"L13i1300_69e852b66fc7_58c7b6d0026c": staging
+#  ↳ auto-activated 2026-06-02: staging observation clean
+"L13i1300_69e852b66fc7_58c7b6d0026c": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 41 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 107 · review-by 2026-06-14
-"L13d10h2_cb588a7868d0_3a034d2f4474": staging
+#  ↳ auto-activated 2026-06-03: staging observation clean
+"L13d10h2_cb588a7868d0_3a034d2f4474": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.aws/credentials, /.env, /.env.development +1
 # human_share 0.0 · events 120 · review-by 2026-06-14
-"L13d13h1_69e852b66fc7_f390cb5519b9": staging
+#  ↳ auto-activated 2026-06-03: staging observation clean
+"L13d13h1_69e852b66fc7_f390cb5519b9": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 4 разных дней +1
 # human_share 0.0 · events 44 · review-by 2026-06-14
-"L13d30h1_bcf826a2cd28_60bdc24aefcc": staging
+#  ↳ auto-activated 2026-06-03: staging observation clean
+"L13d30h1_bcf826a2cd28_60bdc24aefcc": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 15 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 25 · review-by 2026-06-14
-"L13d26h2_9e73a0ed0670_2d5fbeed7632": staging
+#  ↳ auto-activated 2026-06-09: 9 days staging observation clean; human_share 0.0; confirmed impersonator (curl-as-safari); still active in daily report 2026-06-08
+"L13d26h2_9e73a0ed0670_2d5fbeed7632": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 67 · review-by 2026-06-14
-"L13d1300_69e852b66fc7_58c7b6d0026c": staging
+#  ↳ auto-activated 2026-06-03: staging observation clean
+"L13d1300_69e852b66fc7_58c7b6d0026c": active
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 13 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 51 · review-by 2026-06-14
-"L13d3000_bcf826a2cd28_430ec2476535": staging
+#  ↳ auto-activated 2026-06-03: staging observation clean
+"L13d3000_bcf826a2cd28_430ec2476535": active
+
+# promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
+# human_share 0.0 · events 141 · review-by 2026-06-15
+#  ↳ auto-activated 2026-06-09: 8 days staging observation clean; human_share 0.0; score 6 impersonator (claudebot-as-chrome); 5 consecutive IPs (176.65.139.231-235)
+"L13i1000_cb588a7868d0_5991909ce85f": active
+
+# promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · импersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
+# human_share 0.0 · events 21 · review-by 2026-06-15
+#  ↳ auto-activated 2026-06-10: staging observation clean
+"L13d17h1_919ce459ba90_60bdc24aefcc": active
+
+# promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 15 разных IP +1 / persistent: 4 разных дней +1 / recon URI: /.env +1
+# human_share 0.0 · events 25 · review-by 2026-06-15
+#  ↳ auto-activated 2026-06-04: staging observation clean
+"L13d15h2_1ed0482b9b4c_3a034d2f4474": active
+
+# promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 26 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env +1
+# human_share 0.0 · events 148 · review-by 2026-06-15
+#  ↳ auto-activated 2026-06-06: staging observation clean
+"L13d20h2_51b6cc891816_2d5fbeed7632": active
+
+# promoted 2026-06-02 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 7 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
+# human_share 0.0 · events 1067 · review-by 2026-06-16
+#  ↳ auto-activated 2026-06-07: staging observation clean; manual review confirmed: volume outlier — 4974 events/day (57% трафика), burst ×138 vs предыдущий день, 18 IP, 9 дней, .env recon
+"L13d43h1_14ffb2d78dbd_cc78d80a9016": active
+
+# promoted 2026-06-03 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 5 разных IP +1 / persistent: 4 разных дней +1
+# human_share 0.0 · events 111 · review-by 2026-06-17
+#  ↳ auto-activated 2026-06-07: staging observation clean
+"L13d19h2_f3fd9e8f6e2b_2d5fbeed7632": active
+
+# promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 11 разных IP +1 / persistent: 5 разных дней +1 / recon URI: /.git/HEAD +1
+# human_share 0.0 · events 100 · review-by 2026-06-19
+#  ↳ auto-activated 2026-06-10: staging observation clean
+"L13d1800_5e3ea1a873f7_9fdfc1ba57c6": active
+
+# promoted 2026-06-05 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 24 разных IP +1 / persistent: 7 разных дней +1
+# human_share 0.0 · events 857 · review-by 2026-06-19
+#  ↳ auto-activated 2026-06-09: staging observation clean
+"L13d14h2_d26ecc671488_2d5fbeed7632": active
+
+# promoted 2026-06-06 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 6 разных дней +1 / recon URI: /AdminPage/conf/runCmd, /adminPage/remote/cmdOver +1
+# human_share 0.0 · events 39 · review-by 2026-06-20
+"L13i2500_68ddea46f551_10d89aa70559": staging
+
+# promoted 2026-06-06 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 5 разных IP +1 / persistent: 10 разных дней +1 / recon URI: /.env, /wp-admin/admin-ajax.php +1
+# human_share 0.0 · events 532 · review-by 2026-06-20
+#  ↳ auto-activated 2026-06-10: staging observation clean
+"L13d18h1_5e3ea1a873f7_cc78d80a9016": active
+
+# promoted 2026-06-07 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 3 разных IP +1 / persistent: 9 разных дней +1 / recon URI: /.env +1
+# human_share 0.0 · events 21 · review-by 2026-06-21
+"L13d1000_cb588a7868d0_5991909ce85f": staging
+
+# promoted 2026-06-08 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 2 разных IP +1 / persistent: 6 разных дней +1 / recon URI: /.env +1
+# human_share 0.0 · events 60 · review-by 2026-06-22
+"L13d18h1_5e3ea1a873f7_7b489fd5e7ed": staging
+
+# promoted 2026-06-09 (manual) — reason: curl mass-scanner, 11662 events/day, 6 IP, ASN 211590 FR
+# double-encoded recon (%252eapplication.properties, %252eenv, %252ebuild.gradle) — URL-filter bypass attempt
+# score 3 (MEDIUM по возрасту, день 1) · automation UA (curl/8.7.1) +1 / multi-IP: 6 разных IP +1 / recon URI: %252eapplication.properties, %252eenv +1
+# human_share 0.0 · events 11662 · review-by 2026-06-23
+"L13d10h2_3a58e2dcd84f_2d5fbeed7632": active
+# promoted 2026-06-09 — reason: SNI-variant of active L13i1400_d26ecc671488_fac63a6ff214; same hash_b+hash_c; Go-http-client/1.1, 3 IP (1 DC Azure), 5 дней; impersonator-A fp-family (hash_c=fac63a6ff214); добавлено в staging — hard-block требует human-ревью (общий Go fp)
+# score 4 (MEDIUM) · automation UA (curl/python/go/...) +1 / DC ASN: 1/3 IP +1 / multi-IP: 3 разных IP +1 / persistent: 5 разных дней +1
+# human_share 0.0 · events 21 · review-by 2026-06-23
+"L13d1400_d26ecc671488_fac63a6ff214": staging
+
+# promoted 2026-06-10 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 2 разных дней +1 / recon URI: /.aws/config, /.aws/credentials, /.env +1
+# human_share 0.0 · events 887 · review-by 2026-06-24
+"L13d22h2_79fa833f78d2_3a034d2f4474": staging

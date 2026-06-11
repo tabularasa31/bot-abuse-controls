@@ -11,8 +11,8 @@ reverse proxy на VM). Это не прод prod-edge: Channel A на стен�
 
 ## Phase 4 readiness — чеклист перед `mode=active` на пилоте
 
-- [ ] **HMAC secret** сгенерирован, fingerprint виден в `/__version`, ротация
-  проверена → [secret-rotation.md](secret-rotation.md)
+- [ ] **HMAC secret** сгенерирован, fingerprint виден в EDGE_STATS
+  (`challenge_secret_fp`), ротация проверена → [secret-rotation.md](secret-rotation.md)
 - [ ] **Challenge-страница** version-pinned к каскаду; рассинхрон валит старт →
   [challenge-version-pinning.md](challenge-version-pinning.md)
 - [ ] **Mode toggle** ресурса shadow↔active доезжает на эдж ≤30с →
@@ -27,7 +27,13 @@ reverse proxy на VM). Это не прод prod-edge: Channel A на стен�
   [blocklist-promotion.md](blocklist-promotion.md). Логика решений —
   [`docs/blocklist-scoring.md`](../blocklist-scoring.md).
 
-## Контракт (источник правды)
+## Атаки / аварийные рычаги
+
+- **Что делать при атаке** — что защищает всегда (444 не-тенанта + каскад), что
+  включать руками под тип атаки (`attack_mode` на клиента, `deny_nontenant`
+  TLS-reject под флудом по IP, kill-switch при сбое каскада), где смотреть
+  (Loki `{kind="bac_log"}` / `{kind="edge_stats"}`), и граница L7 vs L3/L4 →
+  [attack-response.md](attack-response.md).
 
 [`docs/product/vision.md`](../product/vision.md): §«Аварийные рычаги»,
 §«Rollback каталога», §«HMAC secret»/«Ротация», §«Channel C» (продуктовый
@@ -43,11 +49,19 @@ reverse proxy на VM). Это не прод prod-edge: Channel A на стен�
 IP-адреса — **текущие VM стенда** (если VM пересоздаются/меняют IP — обнови эту
 таблицу; это единственное место с адресами). Ключ — `~/.ssh/gpu-key`. Контейнер
 `nginx-demo` слушает на LAN-IP
-(`192.168.10.208:443`), поэтому curl к эндпоинтам идет через контейнер:
+(`192.168.10.208:443`), поэтому curl к публичным эндпоинтам идет через контейнер:
 
 ```sh
-docker exec nginx-demo curl -ks https://127.0.0.1/__version -H 'Host: bac.example.com'
+docker exec nginx-demo curl -ks https://127.0.0.1/__health -H 'Host: bac.example.com'
 ```
+
+Счетчики и deploy-метаданные эджа (commit, cascade_version, challenge_secret_fp,
+blocklist_entries, catalog_staleness_seconds.*) больше не на публичном :443 —
+они идут строкой `EDGE_STATS {json}` в stdout → promtail → Loki
+(`{kind="edge_stats"}`), на VM: `docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1`.
+Снимок по требованию — приватный read-only mgmt-план на :9090 (loopback):
+`ssh -L 9090:127.0.0.1:9090 ubuntu@<EDGE_VM_IP>`, затем
+`curl -s http://localhost:9090/__stats` или `/__policy?host=<host>`.
 
 Backend читает медленные каталоги из git-чекаута `~/abuse-controls/catalogs`
 (монтируется `:/catalogs:ro`); Policy API живет за `antibot-lb:443`
