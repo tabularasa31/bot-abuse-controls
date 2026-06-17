@@ -306,12 +306,12 @@ Fingerprint — это короткая строка из двух частей:
 1. **fp клиента есть в каталоге `tls_fp_blocklist`** (категория blocking) → `verdict=block, rule=tls_fp_blocklist`. Туда попадают fp, которые мы уже знаем как боты, по результатам анализа аналитики.
 2. **UA-family ↔ fp mismatch.** В каталоге `tls_fp_catalog` указано, какие cipher-hash соответствуют каким известным семействам автоматизации (python-requests, curl, Go, okhttp). Если в UA «Chrome», а fp совпадает с hash python-requests — это impersonator. Категория soft → `verdict=challenge, rule=tls_fp_impersonator`.
 3. **Cipher count выпадает из browser-profile.** В каталоге `tls_fp_browser_profiles` хранятся ожидаемые `cipher_cnt` для семейств браузеров (Chrome: 15, Firefox: 16, Safari: 20). Если UA похож на Chrome, но cipher_cnt=11 — это подозрительно. Категория soft → `verdict=challenge, rule=tls_fp_suspicious_ciphers`.
+4. **Браузерный fp из датацентра.** fp выглядит как браузер (семейство по cipher-профилю), но IP относится к датацентровому ASN (`asn_datacenters`) — аномалия: настоящие пользователи не ходят из публичного ДЦ. Категория soft → `verdict=challenge, rule=tls_fp_dc_browser`. Срабатывает после allow-фастпасов L2, поэтому verified-bot и зарегистрированные клиентом IP-whitelist (легитимные облачные интеграции, S2S) его не задевают. Детект headless-движка внутри настоящего браузера и поведенческий анализ сессий — post-MVP (L6, см. сравнение с Cloudflare).
 
 **Информационные теги L3** (не правила, не приводят к verdict, нужны для аналитики):
 
 - `tls_fp:automation_ua` — в UA явные признаки автоматизации;
-- `tls_fp:no_sni` — клиент пришел без SNI;
-- `tls_fp:dc_browser` — fp выглядит как браузер, но IP относится к датацентровому ASN (комбинация L3-fp + L2-репутации).
+- `tls_fp:no_sni` — клиент пришел без SNI.
 
 Все теги (со всех слоев) попадают в одно поле лога `tags` с namespace-префиксом — см. JSON-схему в Этапе 8.
 
@@ -379,7 +379,7 @@ Fingerprint — это короткая строка из двух частей:
 
 **Где мы в каскаде.** Это финальный слой каскада: запрос прошел все identity-проверки (L1–L3, плюс пассивные allow-правила на L2) и behavior-проверки (L4). Сюда доходит, только если ничего его не отбило сразу как `block` и ничего не дало `allow`-фастпас. По пути могли накопиться challenge-flags — от soft-категории правил:
 
-- `tls_fp_impersonator`, `tls_fp_suspicious_ciphers` (Этап 3) — soft
+- `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `tls_fp_dc_browser` (Этап 3) — soft
 - L4 client rules с `action=challenge` (Этап 4) — soft
 
 L5 — это исполнитель: единая точка, где смотрят на накопленные challenge-flags + attack_mode + Strictness, и решают что выдать клиенту. Никакие предыдущие слои сами challenge не выдают — они только выставляют флаги.
@@ -395,13 +395,13 @@ L5 — это исполнитель: единая точка, где смотр
 Решение, нужна ли активная верификация сейчас, принимает `should_challenge()`. Это вычисляемая на L5 функция: L5 считает ее на каждый запрос из трех входов:
 
 1. **Тоггл `attack_mode`** для этого хоста (per-host). Если включен — каждый запрос, дошедший до L5, требует верификации независимо от всех остальных сигналов. См. ниже про Under Attack mode.
-2. **Накопленные challenge-flags** с предыдущих слоев (tls_fp_impersonator / tls_fp_suspicious_ciphers с L3, rate-rules с action=challenge с L4). Запрос дошел до L5 → значит хотя бы один flag уже сработал.
+2. **Накопленные challenge-flags** с предыдущих слоев (tls_fp_impersonator / tls_fp_suspicious_ciphers / tls_fp_dc_browser с L3, rate-rules с action=challenge с L4). Запрос дошел до L5 → значит хотя бы один flag уже сработал.
 3. Что делать дальше — определяет тоггл Strictness в дашборде, бинарный:
 
 
 | Strictness                                        | Что делает L5 при накопленных challenge-flags                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Standard** *(дефолт для всех новых клиентов)*   | Любой системный challenge-flag (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, L4 rate-rules с action=challenge) → выдаем challenge. Стандартное поведение для сайтов без специфики.                                                                                                                                                                                                                                                                 |
+| **Standard** *(дефолт для всех новых клиентов)*   | Любой системный challenge-flag (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `tls_fp_dc_browser`, L4 rate-rules с action=challenge) → выдаем challenge. Стандартное поведение для сайтов без специфики.                                                                                                                                                                                                                                                                 |
 | **Permissive** *(включается клиентом в дашборде)* | Системные challenge-flags не триггерят challenge — клиент через L5 проходит, физически запрос идет дальше в prod-edge-flow. В лог пишется `verdict=permissive, rule=<имя последнего soft-флага>` — отдельный verdict нужен, чтобы в аналитике сразу было видно «здесь сработало бы на Standard, но Permissive подавил». Профиль для доменов, где легитимный не-браузерный трафик не поддается точечному перечислению (см. ниже «Зачем Permissive существует»). |
 
 
@@ -536,7 +536,7 @@ Strictness — доменный тоггл (в Bot & Abuse Controls подклю
   "ua": "...",
   "tls_fp": "L13d15h2_1ed0482b9b4c_b50336ab2a86",
   "tls_cipher_count": 15, "tls_alpn": "h2", "tls_sni_present": true,
-  "tags": ["reputation:asn_dc", "tls_fp:dc_browser"],  // объединенный массив тегов со всех слоев с namespace-префиксом
+  "tags": ["reputation:asn_dc"],  // объединенный массив тегов со всех слоев с namespace-префиксом
   "flags": ["tls_fp_impersonator"],  // все накопленные по пути challenge-флаги (soft-правила, что сработали). Пустой если флагов не было
   "stage": "rate_limits",       // на каком этапе финальное правило сработало
   "verdict": "block",           // pass | block | challenge | allow | permissive
@@ -551,7 +551,7 @@ Strictness — доменный тоггл (в Bot & Abuse Controls подклю
 
 **Но всё, что сработало по пути, не теряется — оно в массивах.** Каскад короткозамыкается только на терминальном (блокирующем/allow) правиле; до этого soft-флаги и теги накапливаются и логируются целиком:
 
-- `flags` — все накопленные challenge-флаги (soft-правила: `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, клиентские rate-rule с `action=challenge`).
+- `flags` — все накопленные challenge-флаги (soft-правила: `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `tls_fp_dc_browser`, клиентские rate-rule с `action=challenge`).
 - `tags` — все сработавшие информационные теги.
 
 Пример: сработали `tls_fp_impersonator` (soft) на L3 и затем `rate_ip` (blocking) на L4. В логе: `verdict=block, rule=rate_ip` (терминальное), `flags=["tls_fp_impersonator"]` (накопленный флаг сохранён для аналитики). Логировать правила, которые не выполнились из-за короткого замыкания (например, L5 после блока на L4), нельзя — они физически не отработали.

@@ -164,6 +164,10 @@ rules:
       stage: tls_fp
       source: tls_fp_browser_profiles.conf
 
+    tls_fp_dc_browser:                # Phase 2+
+      stage: tls_fp
+      source: built-in                 # cross-layer: L3 fp + asn_datacenters.conf
+
 # Информационные теги (не правила, не эмитят verdict)
 tags:
   - id: hygiene:header_anomaly
@@ -181,10 +185,6 @@ tags:
   - id: tls_fp:no_sni                # Phase 2+
     stage: tls_fp
     source: built-in                 # из TLS handshake данных
-
-  - id: tls_fp:dc_browser            # Phase 2+
-    stage: tls_fp
-    source: built-in                 # cross-layer: L3 fp + asn_datacenters.conf
 
 # Kill-switch — выключатели на случай инцидентов
 kill_switch:

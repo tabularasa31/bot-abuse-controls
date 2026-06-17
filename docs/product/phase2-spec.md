@@ -88,6 +88,7 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 | `tls_fp_blocklist` | Fp клиента есть в `tls_fp_blocklist.conf`. | blocking |
 | `tls_fp_impersonator` | UA-семейство утверждает X (например, Chrome), `hash_b` совпадает с известной сигнатурой автоматизации Y. Каталог сигнатур — в `tls_fp_catalog.conf`. | soft |
 | `tls_fp_suspicious_ciphers` | UA похож на браузер, но `cipher_cnt` не совпадает с ожидаемым для этого браузера. Профили — в `tls_fp_browser_profiles.conf`. | soft |
+| `tls_fp_dc_browser` | TLS-fp выглядит как браузер (семейство по cipher-профилю), но IP из датацентрового ASN (`asn_datacenters.conf`) — настоящие пользователи не ходят из публичного ДЦ. | soft |
 
 Категории `blocking`, `allow`, `soft` — те же, что в Phase 1 (см. раздел «Концепция: правила, категории, логи» в постановке Phase 1).
 
@@ -95,7 +96,6 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 
 - `tls_fp:automation_ua` — в UA явные признаки автоматизации (то же, что будет ловить `ua_blacklist` на этапе hygiene, когда каталог наполнится). В Phase 1/2 `ua_blacklist` пуст, поэтому этот тег — первичный сигнал автоматизации UA до наполнения `ua_blacklist`. Кроме того, дублирование удобно для фильтрации логов по TLS-полям.
 - `tls_fp:no_sni` — клиент пришел без SNI.
-- `tls_fp:dc_browser` — fp выглядит как браузер, но IP относится к DC ASN (комбинация L3-fp + L2-репутации).
 
 **Примеры** (в MVP физически с запросом ничего не происходит, только запись в лог):
 
@@ -183,7 +183,7 @@ Phase 2 закрывает этот пробел через TLS-fingerprinting: 
 - `tls_cipher_count` — количество cipher'ов после strip GREASE. Полезно для аналитики «новых версий браузеров».
 - `tls_alpn` — negotiated ALPN (`h2`, `http/1.1`).
 - `tls_sni_present` — `true|false`, был ли SNI.
-- `tags` — массив тегов со всех слоев с общим namespace-префиксом (`tls_fp:automation_ua`, `tls_fp:no_sni`, `tls_fp:dc_browser` плюс теги других слоев, например `reputation:asn_dc`). Пустой, если ни один тег не сработал.
+- `tags` — массив тегов со всех слоев с общим namespace-префиксом (`tls_fp:automation_ua`, `tls_fp:no_sni` плюс теги других слоев, например `reputation:asn_dc`). Пустой, если ни один тег не сработал.
 - `staging_match` — массив сработавших staging-паттернов (см. предыдущий раздел). Пустой если ничего не сматчилось в staging.
 - `flags` — массив накопленных challenge-флагов. В Phase 2 это soft-правила tls_fp (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`). Отличие от `rule`: `rule` — одно терминальное правило, `flags` — все soft-сигналы по пути, для аналитики. Пустой если флагов не было.
 

@@ -16,7 +16,7 @@ flowchart TD
     TLS[TLS handshake<br/>nginx получает handshake-данные]
     L1{L1 Hygiene<br/>method whitelist, ua_blacklist}
     L2{L2 Reputation<br/>cookie / bot_verified / ip /<br/>asn / geo + теги}
-    L3{L3 TLS-fingerprint<br/>fp_blocklist, impersonator,<br/>suspicious_ciphers + теги}
+    L3{L3 TLS-fingerprint<br/>fp_blocklist, impersonator,<br/>suspicious_ciphers, dc_browser + теги}
     L4{L4 Rate-limits<br/>системные + клиентские правила}
     L5{L5 Active verification<br/>консолидирует challenge-flags}
     Cache[Отдача контента:<br/>из кэша, если есть<br/>иначе с origin клиента]
@@ -39,7 +39,7 @@ flowchart TD
     L2 -->|идем дальше<br/>+ теги в лог| L3
     L2 -->|ip_blocklist / asn_customer /<br/>geo_blocklist| Block
     L3 -->|fp в tls_fp_blocklist| Block
-    L3 -->|impersonator / suspicious_ciphers<br/>+ challenge-flag| L4
+    L3 -->|impersonator / suspicious_ciphers /<br/>dc_browser + challenge-flag| L4
     L3 -->|идем дальше<br/>+ tls_fp:* теги в лог| L4
     L4 -->|rate-limit exceeded,<br/>action=block| Block
     L4 -->|rate-rule с action=challenge<br/>+ challenge-flag| L5
