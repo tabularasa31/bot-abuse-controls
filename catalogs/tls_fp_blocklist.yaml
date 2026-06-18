@@ -97,13 +97,6 @@
 "L13d3000_bcf826a2cd28_430ec2476535": active
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
-# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 2 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
-# human_share 0.0 · events 141 · review-by 2026-06-15
-#  ↳ auto-activated 2026-06-09: 8 days staging observation clean; human_share 0.0; score 6 impersonator (claudebot-as-chrome); 5 consecutive IPs (176.65.139.231-235)
-#  ↳ auto-demoted 2026-06-17: silent > ttl
-"L13i1000_cb588a7868d0_5991909ce85f": staging
-
-# promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · импersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1
 # human_share 0.0 · events 21 · review-by 2026-06-15
 #  ↳ auto-activated 2026-06-10: staging observation clean
@@ -207,3 +200,8 @@
 # score 6 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / DC ASN: 5/8 IP +1 / multi-IP: 8 разных IP +1 / persistent: 17 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 414 · review-by 2026-07-01
 "L13d31h1_53c4c6ca514d_cc78d80a9016": staging
+
+# promoted 2026-06-18 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · suspicious cipher count vs UA +1 / DC ASN: 2/2 IP +1 / multi-IP: 2 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
+# human_share 0.0 · events 705 · review-by 2026-07-02
+"L13d4900_547c671b2a38_9fdfc1ba57c6": staging
