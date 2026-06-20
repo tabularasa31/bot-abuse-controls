@@ -20,13 +20,16 @@
 #   "L12i14h1_ghi_jkl_222": staging
 
 # Флагман кампании, 10 IP, recon /.env
-"L13i1900_f3fd9e8f6e2b_fac63a6ff214": active
+#  ↳ auto-demoted 2026-06-20: silent > ttl
+"L13i1900_f3fd9e8f6e2b_fac63a6ff214": staging
 
 # unknown-impersonator-A, 1 IP (45.148.10.67), только /
-"L13i1400_d26ecc671488_fac63a6ff214": active
+#  ↳ auto-demoted 2026-06-20: silent > ttl
+"L13i1400_d26ecc671488_fac63a6ff214": staging
 
 # Actuator, Exchange, autodiscover - zgrab/CyberOK scanner
-"L12i1300_f610f019e565_2d5d451aa175": active
+#  ↳ auto-demoted 2026-06-20: silent > ttl
+"L12i1300_f610f019e565_2d5d451aa175": staging
 
 # leakix-scanner, 6 IP, только /
 "L13i1300_69e852b66fc7_10d89aa70559": active
@@ -38,7 +41,8 @@
 "L13i1300_69e852b66fc7_1bb3b57910c1": active
 
 # curl as Chrome+Firefox (dual UA), 3 IP
-"L13i19h2_f3fd9e8f6e2b_2d5fbeed7632": active
+#  ↳ auto-demoted 2026-06-20: silent > ttl
+"L13i19h2_f3fd9e8f6e2b_2d5fbeed7632": staging
 
 # promoted 2026-05-29 — reason: go-http-client impersonator + leakix-scanner recon (multi-IP, DC ASN, 142 lifetime events)
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 13 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
@@ -58,7 +62,8 @@
 # score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.example, /.env.example.php +1
 # human_share 0.0 · events 119 · review-by 2026-06-13
 #  ↳ auto-activated 2026-06-02: staging observation clean
-"L13i1300_69e852b66fc7_58c7b6d0026c": active
+#  ↳ auto-demoted 2026-06-20: silent > ttl
+"L13i1300_69e852b66fc7_58c7b6d0026c": staging
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 41 разных IP +1 / persistent: 3 разных дней +1
@@ -139,11 +144,6 @@
 "L13d14h2_d26ecc671488_2d5fbeed7632": active
 
 # promoted 2026-06-06 (auto) — reason: stable HIGH, gates+intent passed
-# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 6 разных дней +1 / recon URI: /AdminPage/conf/runCmd, /adminPage/remote/cmdOver +1
-# human_share 0.0 · events 39 · review-by 2026-06-20
-"L13i2500_68ddea46f551_10d89aa70559": staging
-
-# promoted 2026-06-06 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / multi-IP: 5 разных IP +1 / persistent: 10 разных дней +1 / recon URI: /.env, /wp-admin/admin-ajax.php +1
 # human_share 0.0 · events 532 · review-by 2026-06-20
 #  ↳ auto-activated 2026-06-10: staging observation clean
@@ -179,7 +179,8 @@
 # promoted 2026-06-14 (auto) — reason: stable HIGH, gates+intent passed
 # score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / DC ASN: 3/3 IP +1 / multi-IP: 3 разных IP +1 / persistent: 15 разных дней +1
 # human_share 0.0 · events 123 · review-by 2026-06-28
-"L13d11h2_6e5920975fda_277525798c1f": staging
+#  ↳ auto-activated 2026-06-20: staging observation clean
+"L13d11h2_6e5920975fda_277525798c1f": active
 
 # promoted 2026-06-14 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / DC ASN: 2/2 IP +1 / multi-IP: 2 разных IP +1 / persistent: 6 разных дней +1 / recon URI: /.git/config +1
@@ -199,7 +200,8 @@
 # promoted 2026-06-17 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · suspicious cipher count vs UA +1 / automation UA (curl/python/go/...) +1 / DC ASN: 5/8 IP +1 / multi-IP: 8 разных IP +1 / persistent: 17 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
 # human_share 0.0 · events 414 · review-by 2026-07-01
-"L13d31h1_53c4c6ca514d_cc78d80a9016": staging
+#  ↳ auto-activated 2026-06-20: staging observation clean
+"L13d31h1_53c4c6ca514d_cc78d80a9016": active
 
 # promoted 2026-06-18 (auto) — reason: stable HIGH, gates+intent passed
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / DC ASN: 2/2 IP +1 / multi-IP: 2 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
