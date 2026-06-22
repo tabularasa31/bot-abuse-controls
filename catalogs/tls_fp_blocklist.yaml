@@ -19,18 +19,6 @@
 #   "L13i17h2_abc_def_111": active
 #   "L12i14h1_ghi_jkl_222": staging
 
-# Флагман кампании, 10 IP, recon /.env
-#  ↳ auto-demoted 2026-06-20: silent > ttl
-"L13i1900_f3fd9e8f6e2b_fac63a6ff214": staging
-
-# unknown-impersonator-A, 1 IP (45.148.10.67), только /
-#  ↳ auto-demoted 2026-06-20: silent > ttl
-"L13i1400_d26ecc671488_fac63a6ff214": staging
-
-# Actuator, Exchange, autodiscover - zgrab/CyberOK scanner
-#  ↳ auto-demoted 2026-06-20: silent > ttl
-"L12i1300_f610f019e565_2d5d451aa175": staging
-
 # leakix-scanner, 6 IP, только /
 "L13i1300_69e852b66fc7_10d89aa70559": active
 
@@ -39,10 +27,6 @@
 
 # go-http-client as Chrome/78, Atlassian recon (actuator, confluence, Jira API)
 "L13i1300_69e852b66fc7_1bb3b57910c1": active
-
-# curl as Chrome+Firefox (dual UA), 3 IP
-#  ↳ auto-demoted 2026-06-20: silent > ttl
-"L13i19h2_f3fd9e8f6e2b_2d5fbeed7632": staging
 
 # promoted 2026-05-29 — reason: go-http-client impersonator + leakix-scanner recon (multi-IP, DC ASN, 142 lifetime events)
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 13 разных IP +1 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.bak +1
@@ -59,11 +43,6 @@
 # human_share 0.0 · events 22 · review-by 2026-06-13
 #  ↳ auto-activated 2026-06-02: staging observation clean
 "L13d2500_68ddea46f551_10d89aa70559": active
-# score 7 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 3 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.example, /.env.example.php +1
-# human_share 0.0 · events 119 · review-by 2026-06-13
-#  ↳ auto-activated 2026-06-02: staging observation clean
-#  ↳ auto-demoted 2026-06-20: silent > ttl
-"L13i1300_69e852b66fc7_58c7b6d0026c": staging
 
 # promoted 2026-05-31 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / automation UA (curl/python/go/...) +1 / multi-IP: 41 разных IP +1 / persistent: 3 разных дней +1
@@ -207,3 +186,8 @@
 # score 5 (HIGH) · suspicious cipher count vs UA +1 / DC ASN: 2/2 IP +1 / multi-IP: 2 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env, /.env.backup, /.env.backup1 +1
 # human_share 0.0 · events 705 · review-by 2026-07-02
 "L13d4900_547c671b2a38_9fdfc1ba57c6": staging
+
+# promoted 2026-06-22 (auto) — reason: stable HIGH, gates+intent passed
+# score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.local +1
+# human_share 0.0 · events 42 · review-by 2026-07-06
+"L13d0500_1e846e243f04_10d89aa70559": staging
