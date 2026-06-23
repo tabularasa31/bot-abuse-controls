@@ -191,3 +191,8 @@
 # score 5 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / persistent: 2 разных дней +1 / recon URI: /.env, /.env.backup, /.env.local +1
 # human_share 0.0 · events 42 · review-by 2026-07-06
 "L13d0500_1e846e243f04_10d89aa70559": staging
+
+# promoted 2026-06-23 (auto) — reason: stable HIGH, gates+intent passed
+# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / DC ASN: 2/2 IP +1 / multi-IP: 2 разных IP +1 / persistent: 16 разных дней +1
+# human_share 0.0 · events 26 · review-by 2026-07-07
+"L13d13h2_69e852b66fc7_1b27e3b43a50": staging
