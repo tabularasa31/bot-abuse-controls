@@ -172,7 +172,7 @@ apply_all() {
   [ "${UNKNOWN:-0}" != 0 ] && { echo; echo "_$UNKNOWN catalog entr(y/ies) without observation history left for human review (not demoted)._"; } >> "$BODY"
   if [ "${HELD:-0}" != 0 ]; then
     { echo; echo "### Held (silent, but hash_b family still live under a rotated hash_c)";
-      printf '%s\n' "$HELD_LINES" | sed 's/^/- `/; s/ — /` — /';
+      printf '%s\n' "$HELD_LINES" | sed 's/^/- /';
       echo; echo "_Not auto-demoted — review whether the family needs a hash_b entry in tls_fp_catalog._"; } >> "$BODY"
   fi
   echo >> "$BODY"; echo "🤖 Generated with [Claude Code](https://claude.com/claude-code)" >> "$BODY"
