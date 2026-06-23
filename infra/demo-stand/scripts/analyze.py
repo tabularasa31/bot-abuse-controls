@@ -1511,13 +1511,40 @@ def _parse_day(day_str):
         return None
 
 
+def _family_freshness(seen):
+    """Index the freshest observation per hash_b (the sorted-cipher hash, the
+    JA4 a+b part) across ALL seen fps → {hash_b: (last_seen_date, fp)}.
+
+    A single full-fp blocklist entry can look "silent" while the SAME automation
+    family keeps attacking under a rotated hash_c (the JA4 extension hash, which
+    bots trivially vary via GREASE/extension order). Keying staleness on the full
+    fp alone then auto-demotes the live signature the moment the bot rotates —
+    re-opening the very gap it rotated around (incident 2026-06-23: cipher family
+    1ed0482b9b4c, WordPress/xmlrpc brute-force, 4 hash_c variants)."""
+    fresh = {}
+    for sfp, sentry in seen.items():
+        hb, _ = parse_hashes(sfp)
+        if not hb:
+            continue
+        ls = _parse_day(_fp_last_seen(sentry))
+        if ls is None:
+            continue
+        cur = fresh.get(hb)
+        if cur is None or ls > cur[0]:
+            fresh[hb] = (ls, sfp)
+    return fresh
+
+
 def find_stale_blocklist_entries(seen, now_utc, ttl_days):
     """Blocklist entries that have gone silent > ttl_days → auto-demote
     candidates. "last seen" = max(days_seen) from the seen-fps accumulator
     (persists beyond Loki's 7d window). An entry with no observations in state
     is reported as a candidate too, flagged `unknown` so the autopilot can be
-    cautious."""
+    cautious. An entry whose hash_b family is still live under a different hash_c
+    is flagged `held` (stale=False) so the autopilot holds it for a human rather
+    than auto-demoting a signature the bot merely rotated around."""
     today = now_utc.astimezone().date()
+    fam_fresh = _family_freshness(seen)
     out = []
     for fp, status in sorted(_parse_blocklist_yaml().items()):
         entry = seen.get(fp) or {}
@@ -1535,6 +1562,25 @@ def find_stale_blocklist_entries(seen, now_utc, ttl_days):
             continue
         days_silent = (today - last_seen).days
         if days_silent > ttl_days:
+            # Family guard: before demoting, check whether a sibling fp sharing
+            # this hash_b was seen within ttl. If so the family is still live and
+            # this is hash_c rotation, not a dead signature — hold for a human.
+            hb, _ = parse_hashes(fp)
+            fam = fam_fresh.get(hb)
+            if fam and fam[1] != fp and (today - fam[0]).days <= ttl_days:
+                out.append({"fp": fp, "status": status,
+                            "last_seen": last_seen.isoformat(),
+                            "days_silent": days_silent,
+                            "lifetime": entry.get("count", 0),
+                            "unknown": False, "stale": False, "held": True,
+                            "family_hash_b": hb,
+                            "family_last_seen": fam[0].isoformat(),
+                            "family_active_fp": fam[1],
+                            "reason": (f"молчит {days_silent}д, но семейство "
+                                       f"hash_b={hb} активно ({fam[1]} видели "
+                                       f"{fam[0].isoformat()}) — ротация hash_c, "
+                                       f"нужен человек, не авто-демоут")})
+                continue
             out.append({"fp": fp, "status": status,
                         "last_seen": last_seen.isoformat(),
                         "days_silent": days_silent, "lifetime": entry.get("count", 0),
