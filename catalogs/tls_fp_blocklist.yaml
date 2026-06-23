@@ -92,6 +92,14 @@
 #  ↳ auto-activated 2026-06-04: staging observation clean
 "L13d15h2_1ed0482b9b4c_3a034d2f4474": active
 
+# manual 2026-06-23 — JA4_c-варианты того же семейства (hash_b 1ed0482b9b4c,
+# python-requests под видом Chrome cipher_cnt=15). Кампания WordPress/xmlrpc-
+# брутфорса 06-22→06-23: 1145 запросов мимо tls_fp (exact-match по полному fp
+# не покрывал эти hash_c), DC ASN, recon /wp-login.php + /xmlrpc.php. Активный
+# _3a034d2f4474 затих и ушел бы в demote — бот просто ротировал hash_c.
+"L13d15h2_1ed0482b9b4c_b50336ab2a86": active
+"L13d15h2_1ed0482b9b4c_0facc199223c": active
+
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 26 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env +1
 # human_share 0.0 · events 148 · review-by 2026-06-15
