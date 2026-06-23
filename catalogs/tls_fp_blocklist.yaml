@@ -86,19 +86,19 @@
 #  ↳ auto-activated 2026-06-10: staging observation clean
 "L13d17h1_919ce459ba90_60bdc24aefcc": active
 
-# promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
-# score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 15 разных IP +1 / persistent: 4 разных дней +1 / recon URI: /.env +1
-# human_share 0.0 · events 25 · review-by 2026-06-15
-#  ↳ auto-activated 2026-06-04: staging observation clean
-"L13d15h2_1ed0482b9b4c_3a034d2f4474": active
-
-# manual 2026-06-23 — JA4_c-варианты того же семейства (hash_b 1ed0482b9b4c,
-# python-requests под видом Chrome cipher_cnt=15). Кампания WordPress/xmlrpc-
-# брутфорса 06-22→06-23: 1145 запросов мимо tls_fp (exact-match по полному fp
-# не покрывал эти hash_c), DC ASN, recon /wp-login.php + /xmlrpc.php. Активный
-# _3a034d2f4474 затих и ушел бы в demote — бот просто ротировал hash_c.
-"L13d15h2_1ed0482b9b4c_b50336ab2a86": active
-"L13d15h2_1ed0482b9b4c_0facc199223c": active
+# REMOVED 2026-06-23 — все семейство hash_b=1ed0482b9b4c снято из active.
+# Это настоящий браузерный TLS-стек, а не fp автоматизатора. По Loki за 7 дней
+# все наблюдаемые hash_c этого hash_b дают 100% browser-UA с резидентных и
+# мобильных ASN (Chrome/Safari/Android), трафик на / и /favicon.ico. JA4 здесь
+# не отделяет живой Chrome от python-requests, который точно сымитировал Chrome
+# ClientHello (cipher_cnt=15) — поэтому _b50336ab2a86 ловил одновременно людей
+# (вкл. оператора, ASN 64512) и WordPress/xmlrpc-брутфорс, давая ложные 403 на
+# mode=active хостах (напр. dashboard.example.com → /login, /favicon.ico).
+#   - _b50336ab2a86: 926 ev/7д, 178 IP / 73 ASN, пути / + favicon + wp-login/xmlrpc — смешанный
+#   - _3a034d2f4474: 43 ev/7д, 37 IP / 16 ASN, почти чистый / (вкл. iPhone/Mac) — люди
+#   - _0facc199223c: 0 ev/7д
+# Кампанию 06-22→06-23 надо перекрывать по DC-ASN + URI (/wp-login.php,
+# /xmlrpc.php) + rate, а не по Chrome-коллизионному JA4 (follow-up).
 
 # promoted 2026-06-01 (auto) — reason: stable HIGH, gates+intent passed
 # score 6 (HIGH) · impersonator-маскировка (UA браузер, fp автоматизатор) +3 / multi-IP: 26 разных IP +1 / persistent: 3 разных дней +1 / recon URI: /.env +1
