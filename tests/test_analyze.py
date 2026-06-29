@@ -487,3 +487,61 @@ def test_staging_gray_solve_rate_observes(staging_catalog):
     now = datetime(2026, 5, 10, tzinfo=timezone.utc)
     evs = _staging_events("FP_STAGE", issued=100, solved=30)
     assert _staging_verdict(evs, now) == "observe"
+
+
+# ---------------------------------------------------------------------------
+# Family-aware staleness (auto-demote guard against JA4 hash_c rotation).
+# A silent full-fp entry must NOT be auto-demoted while a sibling fp sharing its
+# hash_b is still live — the bot just rotated hash_c (incident 2026-06-23).
+# ---------------------------------------------------------------------------
+
+def test_stale_demotes_silent_when_family_dead(monkeypatch):
+    monkeypatch.setattr(az, "_parse_blocklist_yaml",
+                        lambda: {"L13d15h2_aaaa_cccc": "active"})
+    seen = {"L13d15h2_aaaa_cccc": {"days_seen": [_day(20)], "count": 5}}
+    now = datetime.now(timezone.utc)
+    out = az.find_stale_blocklist_entries(seen, now, ttl_days=14)
+    assert len(out) == 1
+    assert out[0]["stale"] is True and not out[0].get("held")
+
+
+def test_stale_holds_when_family_live_under_rotated_hash_c(monkeypatch):
+    # Blocklisted fp went silent 20d ago, but a sibling sharing hash_b=aaaa was
+    # seen yesterday → hold for human, do not auto-demote.
+    monkeypatch.setattr(az, "_parse_blocklist_yaml",
+                        lambda: {"L13d15h2_aaaa_3a03": "active"})
+    seen = {
+        "L13d15h2_aaaa_3a03": {"days_seen": [_day(20)], "count": 5},
+        "L13d15h2_aaaa_b503": {"days_seen": [_day(1)], "count": 99},
+    }
+    now = datetime.now(timezone.utc)
+    out = az.find_stale_blocklist_entries(seen, now, ttl_days=14)
+    assert len(out) == 1
+    e = out[0]
+    assert e["stale"] is False and e["held"] is True
+    assert e["family_hash_b"] == "aaaa"
+    assert e["family_active_fp"] == "L13d15h2_aaaa_b503"
+
+
+def test_stale_self_is_not_a_live_family_member(monkeypatch):
+    # The entry's own observation must not count as a live sibling: a silent fp
+    # with no other family member is stale, not held.
+    monkeypatch.setattr(az, "_parse_blocklist_yaml",
+                        lambda: {"L13d15h2_aaaa_3a03": "active"})
+    seen = {"L13d15h2_aaaa_3a03": {"days_seen": [_day(20)], "count": 5}}
+    now = datetime.now(timezone.utc)
+    out = az.find_stale_blocklist_entries(seen, now, ttl_days=14)
+    assert out[0]["stale"] is True and not out[0].get("held")
+
+
+def test_stale_family_sibling_also_silent_demotes(monkeypatch):
+    # Sibling exists but is ALSO silent past ttl → family is dead, demote.
+    monkeypatch.setattr(az, "_parse_blocklist_yaml",
+                        lambda: {"L13d15h2_aaaa_3a03": "active"})
+    seen = {
+        "L13d15h2_aaaa_3a03": {"days_seen": [_day(20)], "count": 5},
+        "L13d15h2_aaaa_b503": {"days_seen": [_day(30)], "count": 9},
+    }
+    now = datetime.now(timezone.utc)
+    out = az.find_stale_blocklist_entries(seen, now, ttl_days=14)
+    assert out[0]["stale"] is True and not out[0].get("held")

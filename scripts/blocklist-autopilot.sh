@@ -86,14 +86,19 @@ PROMOTE="$(_fps "$CANDIDATES" "[c['fp'] for c in d.get('high',[]) if c.get('auto
 ACTIVATE="$(_fps "$STAGING_OBS" "[o['fp'] for o in d.get('observations',[]) if o.get('verdict')=='activate']")"
 DEMOTE="$(_pairs "$STALE_JSON" "[[s['fp'], s.get('status','active')] for s in d.get('stale',[]) if s.get('stale') and s.get('fp')]")"
 UNKNOWN="$(_fps "$STALE_JSON" "[s['fp'] for s in d.get('stale',[]) if s.get('unknown')]" | grep -c . || true)"
+# `held` = silent past ttl, but the hash_b family is still live under a rotated
+# hash_c. Not auto-demoted (the bot just moved to a sibling fp) — held for human.
+HELD_LINES="$(_fps "$STALE_JSON" "['%s — %s' % (s['fp'], s.get('reason','')) for s in d.get('stale',[]) if s.get('held')]")"
+HELD="$(printf '%s' "$HELD_LINES" | grep -c . || true)"
 n_p="$(printf '%s' "$PROMOTE" | grep -c . || true)"
 n_a="$(printf '%s' "$ACTIVATE" | grep -c . || true)"
 n_d="$(printf '%s' "$DEMOTE" | grep -c . || true)"
-echo "eligible: promote=$n_p activate=$n_a demote=$n_d (unknown skipped=$UNKNOWN)"
+echo "eligible: promote=$n_p activate=$n_a demote=$n_d (unknown skipped=$UNKNOWN, held=$HELD)"
 
 if [ -z "${PROMOTE}${ACTIVATE}${DEMOTE}" ]; then
   echo "autopilot: nothing eligible — no PR"
   [ "${UNKNOWN:-0}" != 0 ] && echo "note: $UNKNOWN entr(y/ies) without observation history — left for human review"
+  [ "${HELD:-0}" != 0 ] && { echo "note: $HELD silent entr(y/ies) held — hash_b family still live under a rotated hash_c:"; printf '%s\n' "$HELD_LINES" | sed 's/^/  - /'; }
   exit 0
 fi
 
@@ -165,6 +170,11 @@ apply_all() {
     done <<< "$DEMOTE"
   fi
   [ "${UNKNOWN:-0}" != 0 ] && { echo; echo "_$UNKNOWN catalog entr(y/ies) without observation history left for human review (not demoted)._"; } >> "$BODY"
+  if [ "${HELD:-0}" != 0 ]; then
+    { echo; echo "### Held (silent, but hash_b family still live under a rotated hash_c)";
+      printf '%s\n' "$HELD_LINES" | sed 's/^/- /';
+      echo; echo "_Not auto-demoted — review whether the family needs a hash_b entry in tls_fp_catalog._"; } >> "$BODY"
+  fi
   echo >> "$BODY"; echo "🤖 Generated with [Claude Code](https://claude.com/claude-code)" >> "$BODY"
 }
 

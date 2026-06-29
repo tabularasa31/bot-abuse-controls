@@ -18,9 +18,15 @@
 # трафиком (curl/python/go) и фиксирует соответствие.
 
 # Примеры (раскомментируйте при добавлении):
-#   "1ed0482b9b4c":
-#     family: python-requests
-#     status: active
 #   "a1b2c3d4e5f6":
 #     family: curl
 #     status: staging
+
+# manual 2026-06-23 — python-requests под видом Chrome (cipher_cnt=15). Матч по
+# hash_b ловит все варианты JA4_c этого семейства разом (impersonator → challenge),
+# в отличие от tls_fp_blocklist, где exact-match по полному fp пропускал ротацию
+# hash_c. Кампания WordPress/xmlrpc-брутфорса 06-22→06-23 (4 варианта hash_c,
+# 100% UA-браузер, DC ASN, recon /wp-login.php + /xmlrpc.php).
+"1ed0482b9b4c":
+  family: python-requests
+  status: active
