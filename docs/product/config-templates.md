@@ -40,9 +40,14 @@ policy/<host>.yaml       ← per-resource policy (Phase 3+, приходит и�
 # L1 Hygiene
 hygiene:
   method_whitelist:
+    # Standard REST verbs — tenants behind the edge serve mutating APIs.
+    # TRACE/CONNECT are intentionally excluded (blocked).
     - GET
     - HEAD
     - POST
+    - PUT
+    - PATCH
+    - DELETE
     - OPTIONS
   api_path_patterns:
     # Что считать «API-эндпоинтом» для правила rate_api
