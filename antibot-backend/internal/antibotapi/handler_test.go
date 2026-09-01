@@ -1,18 +1,18 @@
-// Integration-тесты handler+store против реального PostgreSQL.
-// Гейтятся POSTGRES_TEST_DSN — паттерн из internal/dbloader/dbloader_test.go.
-// Без DSN тест SkipNow'ит (локальная разработка без БД не ломается).
+// Integration tests of the handler plus the store against a real PostgreSQL.
+// Gated on POSTGRES_TEST_DSN — the pattern from internal/dbloader/dbloader_test.go.
+// Without a DSN the test calls SkipNow (local development without a database is not broken).
 //
-// Покрытие из плана B10:
+// The coverage from the B10 plan:
 //   - auth: bad token → 401, missing → 401, valid → 200
-//   - PATCH attack_mode: new site → row создан с PoolDefault + patch;
-//     existing → UPSERT; idempotent повтор → updated_at не дёргается;
-//     невалидный mode → 400 без записи; unknown ключ → 400 strict-decode
-//   - PATCH multi-field: оба применяются атомарно; ошибка в одном — ни одно
-//     поле не записано
-//   - JSONB array append/delete: dedup, 404 на отсутствующий, валидация
-//   - GET policy: 404 для нового host'a, эквивалентность с PoolDefault
-//     после первого PATCH
-//   - logs sink не сюда: API не пишет audit-таблицу (см. план B10).
+//   - PATCH attack_mode: a new site → the row is created with PoolDefault plus the patch;
+//     an existing one → an UPSERT; an idempotent repeat → updated_at is not touched;
+//     an invalid mode → 400 with no write; an unknown key → 400 from the strict decode
+//   - PATCH multi-field: both apply atomically; an error in one means no
+//     field is written
+//   - JSONB array append/delete: dedup, 404 on a missing element, validation
+//   - GET policy: 404 for a new host, equivalence with PoolDefault
+//     after the first PATCH
+//   - the logs sink is out of scope here: the API writes no audit table (see the B10 plan).
 package antibotapi_test
 
 import (
@@ -52,10 +52,10 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Чистая схема — DROP+Migrate. Тесты не должны зависеть от соседей.
+	// A clean schema — DROP plus Migrate. The tests must not depend on their neighbours.
 	tables := []string{
-		// PR-62 audit: legacy DB-таблица — `fp_blocklist` (из 0001_init.sql),
-		// НЕ `tls_fp_blocklist` (file-system имя из PR-62 rename).
+		// From audit: the legacy DB table is `fp_blocklist` (from 0001_init.sql),
+		// NOT `tls_fp_blocklist` (the file-system name from the rename).
 		"catalog_version", "fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
 		"verified_bot_ips", "policy", "logs",
@@ -79,8 +79,8 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string) {
 	return ts, pool, "s3cret"
 }
 
-// do — авторизованный (если token!="") HTTP-запрос. Возвращает status и
-// raw body для последующего json.Unmarshal в конкретные структуры.
+// do — an authorised (when token!="") HTTP request. It returns the status and the
+// raw body for a later json.Unmarshal into concrete structures.
 func do(t *testing.T, ts *httptest.Server, method, path, token, body string) (int, []byte) {
 	t.Helper()
 	var rdr io.Reader
@@ -115,7 +115,7 @@ func TestAuth(t *testing.T) {
 	}{
 		{"missing", "", http.StatusUnauthorized},
 		{"bad", "wrong", http.StatusUnauthorized},
-		{"valid", tok, http.StatusNotFound}, // GET на несуществующий site = 404, но auth прошёл
+		{"valid", tok, http.StatusNotFound}, // a GET for a non-existent site is 404, but auth passed
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,7 +141,7 @@ func TestPatchAttackMode_NewSite(t *testing.T) {
 	if !r.Changed || len(r.Diff) != 1 || r.Diff[0] != "attack_mode" {
 		t.Errorf("unexpected response: %+v (body=%s)", r, body)
 	}
-	// Row создан с PoolDefault + патч.
+	// The row is created with PoolDefault plus the patch.
 	var mode, strictness string
 	var attack bool
 	if err := pool.QueryRow(context.Background(),
@@ -156,7 +156,7 @@ func TestPatchAttackMode_NewSite(t *testing.T) {
 
 func TestPatchIdempotent_UpdatedAtPreserved(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
-	// Первый PATCH — создаёт row.
+	// The first PATCH creates the row.
 	if status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/foo.example", tok, `{"attack_mode":true}`); status != http.StatusOK {
 		t.Fatalf("first patch: %d", status)
 	}
@@ -166,10 +166,10 @@ func TestPatchIdempotent_UpdatedAtPreserved(t *testing.T) {
 	).Scan(&ts1); err != nil {
 		t.Fatalf("select1: %v", err)
 	}
-	// Небольшая пауза, чтобы NOW() гарантированно отличался при write.
+	// A short pause, so that NOW() is guaranteed to differ on the write.
 	time.Sleep(50 * time.Millisecond)
 
-	// Повтор того же патча.
+	// A repeat of the same patch.
 	status, body := do(t, ts, http.MethodPatch, "/antibot/v1/policy/foo.example", tok, `{"attack_mode":true}`)
 	if status != http.StatusOK {
 		t.Fatalf("second patch: %d body=%s", status, body)
@@ -211,8 +211,8 @@ func TestPatch_InvalidMode_NotWritten(t *testing.T) {
 
 func TestPatch_MultiField_AtomicValidation(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
-	// attack_mode=true валиден, но mode=invalid — handler должен 400 и
-	// НЕ применять attack_mode.
+	// attack_mode=true is valid, but mode=invalid — the handler must return 400 and
+	// NOT apply attack_mode.
 	status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/foo.example", tok,
 		`{"attack_mode":true,"mode":"invalid"}`)
 	if status != http.StatusBadRequest {
@@ -250,18 +250,18 @@ func TestUABlacklist_AppendDedupDelete(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(string(body), `"changed":false`) {
 		t.Errorf("dedup: status=%d body=%s", status, body)
 	}
-	// GET array — содержит элемент.
+	// GET array — it contains the element.
 	status, body = do(t, ts, http.MethodGet, "/antibot/v1/policy/foo.example/ua_blacklist", tok, "")
 	if status != http.StatusOK || !strings.Contains(string(body), `curl/[0-9]`) {
 		t.Errorf("get: status=%d body=%s", status, body)
 	}
-	// Delete существующий.
+	// Delete an existing one.
 	status, _ = do(t, ts, http.MethodDelete, "/antibot/v1/policy/foo.example/ua_blacklist", tok,
 		`{"pattern":"curl/[0-9]"}`)
 	if status != http.StatusOK {
 		t.Errorf("delete: status=%d", status)
 	}
-	// Delete несуществующий → 404.
+	// Delete a non-existent one → 404.
 	status, _ = do(t, ts, http.MethodDelete, "/antibot/v1/policy/foo.example/ua_blacklist", tok,
 		`{"pattern":"curl/[0-9]"}`)
 	if status != http.StatusNotFound {
@@ -312,7 +312,7 @@ func TestGetPolicy_AfterPatch(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("get: status=%d body=%s", status, body)
 	}
-	// Ожидаем PoolDefault + attack_mode=true.
+	// We expect PoolDefault plus attack_mode=true.
 	want := []string{`"mode":"shadow"`, `"strictness":"standard"`, `"attack_mode":true`}
 	for _, sub := range want {
 		if !strings.Contains(string(body), sub) {
@@ -386,8 +386,8 @@ func TestPatchOriginIP_Invalid_NotWritten(t *testing.T) {
 }
 
 func TestASNBlock_MissingAsnField_400(t *testing.T) {
-	// PR-58 review #4: пустой body `{}` → asn=0 без явного required-check
-	// молча мутировал ASN 0. Теперь *int64-указатель + nil-check.
+	// From review: an empty body `{}` → asn=0 without an explicit required check
+	// silently mutated ASN 0. Now it is an *int64 pointer plus a nil check.
 	ts, pool, tok := newTestServer(t)
 	cases := []struct{ name, body string }{
 		{"empty object", `{}`},
@@ -409,7 +409,7 @@ func TestASNBlock_MissingAsnField_400(t *testing.T) {
 			}
 		})
 	}
-	// Ни одного row после серии bad-request'ов — site нетронут.
+	// Not a single row after the series of bad requests — the site is untouched.
 	var count int
 	_ = pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM policy WHERE host='foo.example'`,
@@ -423,22 +423,22 @@ func TestDeletePolicy_RoundTrip(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
 	const site = "del-me.example"
 
-	// Создаём host первой мутацией.
+	// We create the host with the first mutation.
 	if status, body := do(t, ts, http.MethodPatch, "/antibot/v1/policy/"+site, tok,
 		`{"attack_mode":true}`); status != http.StatusOK {
 		t.Fatalf("seed patch: status=%d body=%s", status, body)
 	}
-	// GET видит его.
+	// GET sees it.
 	if status, _ := do(t, ts, http.MethodGet, "/antibot/v1/policy/"+site, tok, ""); status != http.StatusOK {
 		t.Fatalf("get before delete: status=%d, want 200", status)
 	}
 
-	// DELETE целого host'а.
+	// DELETE the whole host.
 	status, body := do(t, ts, http.MethodDelete, "/antibot/v1/policy/"+site, tok, "")
 	if status != http.StatusOK || !strings.Contains(string(body), `"changed":true`) {
 		t.Fatalf("delete: status=%d body=%s", status, body)
 	}
-	// Строка физически исчезла из БД.
+	// The row physically disappeared from the database.
 	var count int
 	if err := pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM policy WHERE host=$1`, site,
@@ -448,7 +448,7 @@ func TestDeletePolicy_RoundTrip(t *testing.T) {
 	if count != 0 {
 		t.Errorf("row still present after delete: count=%d", count)
 	}
-	// GET теперь 404.
+	// GET is now 404.
 	if status, _ := do(t, ts, http.MethodGet, "/antibot/v1/policy/"+site, tok, ""); status != http.StatusNotFound {
 		t.Errorf("get after delete: status=%d, want 404", status)
 	}
@@ -462,10 +462,10 @@ func TestDeletePolicy_Absent_404(t *testing.T) {
 	}
 }
 
-// doNoFatal — concurrency-safe HTTP-хелпер: НЕ вызывает t.Fatalf
-// (testing.T.FailNow семейство — UB вне test goroutine, см. Go testing docs).
-// Возвращает только err; status в concurrency-тестах нас не интересует —
-// конечное состояние ассертится через SELECT из БД после Wait'а.
+// doNoFatal — a concurrency-safe HTTP helper: it does NOT call t.Fatalf
+// (the testing.T.FailNow family is undefined behaviour outside the test goroutine, see the Go testing docs).
+// It returns only err; the status does not interest us in concurrency tests —
+// the final state is asserted through a SELECT from the database after the Wait.
 func doNoFatal(ts *httptest.Server, method, path, token, body string) error {
 	var rdr io.Reader
 	if body != "" {
@@ -490,11 +490,11 @@ func doNoFatal(ts *httptest.Server, method, path, token, body string) error {
 	return nil
 }
 
-// TestPatchScalars_ConcurrentDifferentFields покрывает PR-58 review #1:
-// два concurrent PATCH на РАЗНЫЕ скаляры не должны затирать друг друга.
-// До фикса `UPDATE ... SET mode=$2, strictness=$3, attack_mode=$4` молча
-// откатывал чужое поле; теперь UPSERT-with-lock сериализует PATCHes,
-// loser видит обновлённое состояние и сохраняет уже-применённое.
+// TestPatchScalars_ConcurrentDifferentFields covers review finding #1:
+// two concurrent PATCHes to DIFFERENT scalars must not clobber each other.
+// Before the fix, `UPDATE ... SET mode=$2, strictness=$3, attack_mode=$4` silently
+// rolled back the other field; now the UPSERT-with-lock serialises the PATCHes, the
+// loser sees the updated state and preserves what was already applied.
 func TestPatchScalars_ConcurrentDifferentFields(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
 	const site = "concurrent.example"
@@ -532,8 +532,8 @@ func TestPatchScalars_ConcurrentDifferentFields(t *testing.T) {
 	).Scan(&mode, &strictness); err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	// Финальное состояние: ОБЕ мутации должны быть применены (any winner
-	// между mode=active и strictness=permissive).
+	// The final state: BOTH mutations must be applied (either winner
+	// between mode=active and strictness=permissive).
 	if mode != "active" {
 		t.Errorf("mode=%q, want active (concurrent strictness PATCH overwrote it — lost-update regression)", mode)
 	}
@@ -542,15 +542,15 @@ func TestPatchScalars_ConcurrentDifferentFields(t *testing.T) {
 	}
 }
 
-// TestRemoveASN_ConcurrentAppendNotLost покрывает PR-58 review #2:
-// concurrent AppendASN, успевший закоммитить между CTE snapshot и UPDATE
-// в старой реализации, молча терялся. После фикса (new_arr подзапросом
-// в SET) операция атомарна.
+// TestRemoveASN_ConcurrentAppendNotLost covers review finding #2:
+// a concurrent AppendASN that committed between the CTE snapshot and the UPDATE
+// was silently lost in the old implementation. After the fix (new_arr as a subquery
+// in the SET) the operation is atomic.
 func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
 	const site = "remove-race.example"
 
-	// Засеваем начальное состояние.
+	// Seed the initial state.
 	if status, _ := do(t, ts, http.MethodPost,
 		"/antibot/v1/policy/"+site+"/asn_block", tok, `{"asn":100}`); status != http.StatusOK {
 		t.Fatalf("seed 100: %d", status)
@@ -560,8 +560,8 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 		t.Fatalf("seed 200: %d", status)
 	}
 
-	// Параллельно: DELETE 100 и POST 300. Если RemoveASN использует
-	// stale snapshot, 300 потеряется (asn_block станет [200] вместо [200,300]).
+	// In parallel: DELETE 100 and POST 300. If RemoveASN uses a
+	// stale snapshot, 300 is lost (asn_block becomes [200] instead of [200,300]).
 	errCh := make(chan error, 2)
 	done := make(chan struct{}, 2)
 	go func() {
@@ -592,8 +592,8 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 		t.Fatalf("select: %v", err)
 	}
 	got := string(raw)
-	// Финал должен содержать 200 и 300; 100 — может ИЛИ нет, в зависимости
-	// от commit-порядка DELETE vs POST 300, но 300 должен ТОЧНО быть.
+	// The final state must contain 200 and 300; 100 may or may not be there, depending
+	// on the commit order of DELETE versus POST 300, but 300 must DEFINITELY be.
 	if !strings.Contains(got, "200") {
 		t.Errorf("asn_block=%s, lost 200", got)
 	}
@@ -602,28 +602,28 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 	}
 }
 
-// TestDeletePolicy_ConcurrentAppend — smoke-тест: DELETE целого host'а и
-// POST-append к тому же host'у бегут параллельно и не должны паниковать /
-// рвать транзакции / оставлять строку с записанным, но «дырявым» состоянием.
-// Проверяемый инвариант: «строка есть ⟹ значение записано».
+// TestDeletePolicy_ConcurrentAppend — a smoke test: a DELETE of the whole host and a
+// POST append to that same host run in parallel and must not panic,
+// tear transactions apart, or leave a row written in a "holed" state.
+// The invariant checked: "the row exists ⟹ the value was written".
 //
-// ВНИМАНИЕ — это НЕ регрессионный сторож на silent-loss баг из PR-99 review.
-// Настоящая гарантия — row lock в ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`,
-// см. store.go), а не этот тест. Тот баг проявлялся как «append вернул 200
-// changed:false, а строка в итоге удалена»; под багованным кодом КАЖДЫЙ
-// возможный interleaving давал либо «строки нет», либо «строка есть И с
-// паттерном» — никогда «строка есть, паттерна нет». Финальный SELECT-инвариант
-// этого теста зелёный и на багованном коде тоже (исход «строки нет» тут
-// трактуется как проход), поэтому регрессию он не отличает. Детерминированно
-// поймать silent-loss через состояние БД после гонки нельзя — это про вранье
-// HTTP-ответа, а не про конечное состояние. Оставляем как защиту от грубых
-// поломок конкурентного пути.
+// NOTE — this is NOT a regression guard for the silent-loss bug from review.
+// The real guarantee is the row lock in ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`,
+// see store.go), not this test. That bug showed up as "the append returned 200
+// changed:false while the row ended up deleted"; under the buggy code EVERY
+// possible interleaving produced either "no row" or "a row WITH the
+// pattern" — never "a row without the pattern". This test's final SELECT invariant
+// is green on the buggy code too (the "no row" outcome is treated here
+// as a pass), so it does not distinguish the regression. Catching silent loss
+// deterministically through the database state after a race is impossible — it is about a lying
+// HTTP response rather than the final state. We keep it as protection against gross
+// breakage of the concurrent path.
 func TestDeletePolicy_ConcurrentAppend(t *testing.T) {
 	ts, pool, tok := newTestServer(t)
 	const site = "del-append-race.example"
 	const pattern = "curl/[0-9]"
 
-	// Засеваем строку первой мутацией, чтобы append попал в ensure-конфликт.
+	// We seed the row with the first mutation, so that the append hits the ensure conflict.
 	if status, _ := do(t, ts, http.MethodPatch, "/antibot/v1/policy/"+site, tok,
 		`{"attack_mode":true}`); status != http.StatusOK {
 		t.Fatalf("seed: %d", status)
@@ -651,14 +651,14 @@ func TestDeletePolicy_ConcurrentAppend(t *testing.T) {
 		t.Errorf("concurrent request transport error: %v", err)
 	}
 
-	// Инвариант: если строка существует — она ДОЛЖНA содержать append'нутый
-	// паттерн. «Строка есть, но значения нет» = silent-loss регрессия.
+	// The invariant: if the row exists, it MUST contain the appended
+	// pattern. "The row exists but the value does not" is a silent-loss regression.
 	var raw []byte
 	err := pool.QueryRow(context.Background(),
 		`SELECT ua_blacklist::text FROM policy WHERE host=$1`, site,
 	).Scan(&raw)
 	if err != nil {
-		// Строки нет — DELETE победил. Допустимый исход.
+		// There is no row — the DELETE won. An acceptable outcome.
 		return
 	}
 	if !strings.Contains(string(raw), pattern) {
