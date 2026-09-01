@@ -212,24 +212,17 @@ func TestSink_SpillToDiskOnInsertError(t *testing.T) {
 
 	s.Submit(goodLine(t, "spilled"))
 
+	// spill renames the file into place before bumping the counter, so the file
+	// appearing does not yet mean the metric has moved. Wait for both.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		ents, _ := os.ReadDir(dir)
-		hasBatch := false
-		for _, e := range ents {
-			if filepath.Ext(e.Name()) == ".ndjson" {
-				hasBatch = true
-			}
-		}
-		if hasBatch {
-			if promCounterValue(t, s.spooledFiles) < 1 {
-				t.Fatalf("spooledFiles metric not bumped")
-			}
+		if countSpoolFiles(t, dir) > 0 && promCounterValue(t, s.spooledFiles) >= 1 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("spool file not produced after insert error")
+	t.Fatalf("spool file not produced after insert error: files=%d, spooledFiles=%v",
+		countSpoolFiles(t, dir), promCounterValue(t, s.spooledFiles))
 }
 
 func TestSink_DrainerRecoversSpool(t *testing.T) {
@@ -249,28 +242,18 @@ func TestSink_DrainerRecoversSpool(t *testing.T) {
 
 	s.Submit(goodLine(t, "drain-me"))
 
+	// drainOnce inserts, then removes the file, then bumps the metric. Waiting on
+	// the rows alone would observe the middle of that sequence, so poll until
+	// every effect is visible and only then decide.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if w.totalRows() == 1 {
-			// the file must disappear.
-			ents, _ := os.ReadDir(dir)
-			leftover := 0
-			for _, e := range ents {
-				if filepath.Ext(e.Name()) == ".ndjson" {
-					leftover++
-				}
-			}
-			if leftover != 0 {
-				t.Fatalf("spool not cleaned: %d files", leftover)
-			}
-			if got := promCounterValue(t, s.drained); got < 1 {
-				t.Fatalf("drained metric not bumped: %v", got)
-			}
+		if w.totalRows() == 1 && countSpoolFiles(t, dir) == 0 && promCounterValue(t, s.drained) >= 1 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("drain did not recover spooled batch, inserted=%d", w.totalRows())
+	t.Fatalf("drain did not recover the spooled batch: rows=%d, leftover files=%d, drained=%v",
+		w.totalRows(), countSpoolFiles(t, dir), promCounterValue(t, s.drained))
 }
 
 func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
@@ -371,6 +354,22 @@ func TestSink_ParseErrorSkippedNotSpilled(t *testing.T) {
 			t.Fatalf("unexpected spool file %s after parse error", e.Name())
 		}
 	}
+}
+
+// countSpoolFiles counts the batch files currently visible in dir.
+func countSpoolFiles(t *testing.T, dir string) int {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range ents {
+		if filepath.Ext(e.Name()) == ".ndjson" {
+			n++
+		}
+	}
+	return n
 }
 
 func promCounterValue(t *testing.T, c prometheus.Counter) float64 {
