@@ -1,126 +1,126 @@
-# Аналитика и блок-лист — словарь сущностей
+# Analytics and the blocklist — entity reference
 
-Канонический словарь сущностей, полей и перечислений слоя аналитики. Контракт
-поведения — [analytics-spec.md](analytics-spec.md); правила —
+The canonical vocabulary of the analytics layer's entities, fields and enumerations. The
+behaviour contract is [analytics-spec.md](analytics-spec.md); the rules are in
 [analytics-rules-reference.md](analytics-rules-reference.md).
 
 ---
 
-## 1. Отпечаток и его свойства
+## 1. The fingerprint and its properties
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **fp (отпечаток)** | строка-идентификатор TLS-ClientHello клиента (порядок шифров/расширений/версий), фиксированного формата. Ключ всей агрегации слоя. Формирует эдж, слой получает готовым в логе. |
-| **cipher_count** | число шифров в рукопожатии; **фиксировано внутри одного fp** (часть токена). Браузерное значение — из узкого набора (по наблюдениям `{15,16,20}`). |
-| **hashes** | хеш-компоненты токена; фиксированы внутри fp. Сверяются со словарем инструментов (`tls_fp_catalog`, вкл. headless-стэки) и с позитивным каталогом браузеров. |
+| **fp (the fingerprint)** | The identifier string of a client's TLS ClientHello (the order of ciphers, extensions and versions), in a fixed format. The key to all of the layer's aggregation. The edge forms it, and the layer receives it ready-made in the log. |
+| **cipher_count** | The number of ciphers in the handshake; **fixed within one fingerprint** (it is part of the token). A browser value comes from a narrow set (empirically `{15,16,20}`). |
+| **hashes** | The hash components of the token; fixed within a fingerprint. They are compared against the tool dictionary (`tls_fp_catalog`, including the headless stacks) and against the positive browser catalog. |
 
-## 2. Скоринг
+## 2. Scoring
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **score** | аддитивная сумма сигналов (§ rules S1–S11). **Только ранжирует**, ничего не блокирует. |
-| **signal (сигнал)** | отдельное слагаемое score: impersonator, suspicious cipher, automation UA, DC ASN, multi-IP, persistent, recon URI, headless, version mismatch, behavioral, volume burst. |
-| **tier (тир)** | категория по score: **CRITICAL ≥8 · HIGH 5–7 · MEDIUM 3–4 · LOW 1–2**. CRITICAL недостижим без сигнатурной улики (S1/S8/S9) → прямой `active` минуя `staging` (см. rules L0). |
-| **impersonator** | UA называет браузер, но хеши отпечатка — из словаря инструментов (маскировка). Самый весомый сигнал (+3); опора гейта «обоснованность» (intent). |
-| **headless** | хеши отпечатка совпали с headless-записью в `tls_fp_catalog` (Playwright/Puppeteer/UCD): автоматизация под видом браузера. Словарное совпадение, вес +3. |
-| **version mismatch** | UA называет версию браузера, не совпадающую с версией по позитивному каталогу. Маскировка без словаря инструментов, вес +2. |
-| **automation UA** | UA, который сам по себе инструмент (curl/python/go/okhttp/bot/scanner). |
-| **recon URI** | обращение к типовым разведывательным путям (`/.env`, `/wp-login`, `/admin`, …). |
-| **behavioral (поведенческий)** | ритмичные межзапросные интервалы, отсутствие человеческого разброса, навигация по recon/sitemap, а не по ссылкам. Вес +1. |
-| **volume burst (всплеск объема)** | аномально большая доля сигнатуры в суточном потоке (`≥ share_min`) ИЛИ резкий рост день-к-дню (`≥ burst_factor`× к медиане прошлых дней окна), при суточном минимуме событий. Считается по окну Loki, а не по lifetime-счетчику. Вес +1: добивает до HIGH, сам по себе не блокирует. |
+| **score** | The additive sum of the signals (§rules S1–S11). It **only ranks**, it blocks nothing. |
+| **signal** | One addend of the score: impersonator, suspicious cipher, automation UA, DC ASN, multi-IP, persistent, recon URI, headless, version mismatch, behavioural, volume burst. |
+| **tier** | The category by score: **CRITICAL ≥8 · HIGH 5–7 · MEDIUM 3–4 · LOW 1–2**. CRITICAL is unreachable without signature evidence (S1/S8/S9) → straight to `active`, bypassing `staging` (see rules L0). |
+| **impersonator** | The UA claims a browser but the fingerprint's hashes come from the tool dictionary (a disguise). The heaviest signal (+3); the basis of the justification (intent) gate. |
+| **headless** | The fingerprint's hashes matched a headless entry in `tls_fp_catalog` (Playwright/Puppeteer/UCD): automation posing as a browser. A dictionary match, weight +3. |
+| **version mismatch** | The UA names a browser version that does not match the version in the positive catalog. A disguise without the tool dictionary, weight +2. |
+| **automation UA** | A UA that is itself a tool (curl/python/go/okhttp/bot/scanner). |
+| **recon URI** | A request to a typical reconnaissance path (`/.env`, `/wp-login`, `/admin`, …). |
+| **behavioural** | Rhythmic inter-request intervals, the absence of human jitter, navigation over recon/sitemap paths rather than links. Weight +1. |
+| **volume burst** | An anomalously large share of the daily stream for a signature (`≥ share_min`) OR a sharp day-over-day rise (`≥ burst_factor`× against the median of the window's earlier days), subject to a daily event minimum. Computed over the Loki window, not from the lifetime counter. Weight +1: it tops up to HIGH and never blocks by itself. |
 
-## 3. Гейты и связанные понятия
+## 3. The gates and related concepts
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **gate (гейт)** | порог допуска к блокировке: про безопасность блока (не заденет ли невиновных под тем же fp), а не про то, бот ли это. Гейты НЕ складываются и НЕ компенсируют друг друга и живут в решении автомата (на каталог гейтов нет — человек правит блок-лист сам). Вето (доверенные/known-good/решение челленджей) охраняют живых людей и легит-трафик: автомат их не обходит, а пройти мимо вручную = заблокировать невиновных — красная черта, так не делают (технически человека ничто не держит). Объём/дубль — про качество данных: лишь придерживают авто-промоут, человек на ревью может осознанно пропустить. |
-| **настоящий браузер** | сигнатура, чей fp есть в каталоге настоящих браузеров (`tls_fp_browser_profiles`). Единственный признак «под отпечатком живые люди»: отпечаток задаётся стеком, блокировка идёт по точному fp, поэтому отдельной «доли живых» не нужно. |
-| **volume** | гейт: достаточно событий за время жизни (порядка 20). Отсекает шум. |
-| **allowlist (вето)** | гейт: ни одного allow-вердикта под fp И ни одного IP в whitelist (verified-bot/whitelist/валидный clearance). |
-| **dedup** | гейт: fp еще нет в каталоге. |
-| **обоснованность (intent, вето)** | гейт: `impersonator ИЛИ (recon И НЕ generic_honest_tool)`. Закрывает риск «заблокировали общий отпечаток инструмента». |
-| **known-good (вето)** | гейт: fp есть в каталоге настоящих браузеров → **никогда** не блокировать (реальный браузер, под ним живые люди). Единственная проверка «не живой ли это браузер». |
-| **challenge-solve-rate (вето)** | гейт: под fp челленджи решаются → вето (под отпечатком люди). Низкая доля решений при достаточном числе выданных, наоборот, ускоряет `staging → active`. Двусторонний. Счет только по событиям с хоста в режиме `active` и attack-off: под attack mode эдж челленджит всех подряд, доля решений теряет смысл. |
-| **generic_honest_tool** | известный честный инструмент, не являющийся impersonator (например, обычный curl без браузерного UA). Его общий fp — у миллионов легитимных клиентов. |
-| **auto_eligible** | пригоден к авто-промоуту: HIGH (5–7) И достаточно дней И все гейты И обоснованность (intent). Тир CRITICAL вместо промоута идет в прямой `activate` (см. `direct-activate`). |
-| **direct-activate (прямой active)** | для тира CRITICAL фаза `staging` пропускается: PR сразу со статусом `active`. Основание — CRITICAL требует сигнатурной улики (факт справочника, не вывод из трафика). Гейты применяются как обычно; мерж — человек (rules L0). |
+| **gate** | The admission threshold for blocking: about the safety of a block (will it hit the innocent under the same fingerprint), not about whether this is a bot. Gates do NOT add up and do NOT compensate for one another, and they live in the autopilot's decision (there are no gates on the catalog — a human edits the blocklist themselves). The vetoes (trusted / known-good / challenge solving) guard real people and legitimate traffic: the autopilot never bypasses them, and bypassing one by hand means blocking the innocent — a red line, not something one does (technically nothing stops a human). Volume and duplicate are about data quality: they only hold back an automatic promotion, and a human at review may deliberately let them through. |
+| **a real browser** | A signature whose fingerprint is in the catalog of real browsers (`tls_fp_browser_profiles`). The only marker of "there are real people behind the fingerprint": the fingerprint is set by the stack and blocking goes by the exact fingerprint, so no separate "share of real people" is needed. |
+| **volume** | A gate: enough lifetime events (on the order of 20). It cuts noise. |
+| **allowlist (veto)** | A gate: not a single allow verdict under the fingerprint AND not a single whitelisted IP (a verified bot / a whitelist entry / a valid clearance). |
+| **dedup** | A gate: the fingerprint is not in the catalog yet. |
+| **justification (intent, veto)** | A gate: `impersonator OR (recon AND NOT generic_honest_tool)`. It closes the "we blocked a shared tool fingerprint" risk. |
+| **known-good (veto)** | A gate: the fingerprint is in the catalog of real browsers → **never** block (a real browser, with real people behind it). The only "is this a live browser" check. |
+| **challenge solve rate (veto)** | A gate: challenges are being solved under the fingerprint → a veto (there are people behind it). A low solve share with enough issued, conversely, accelerates `staging → active`. Two-sided. Counted only from events on a host in `active` mode with attack mode off: under attack the edge challenges everyone and the solve share loses its meaning. |
+| **generic_honest_tool** | A known honest tool that is not an impersonator (an ordinary curl with no browser UA, say). Its shared fingerprint belongs to millions of legitimate clients. |
+| **auto_eligible** | Fit for automatic promotion: HIGH (5–7) AND enough days AND every gate AND justification (intent). The CRITICAL tier goes to a direct `activate` instead of a promotion (see `direct-activate`). |
+| **direct-activate** | For the CRITICAL tier the `staging` phase is skipped: the PR carries the `active` status immediately. The grounds: CRITICAL requires signature evidence (a fact from reference data, not an inference from traffic). The gates apply as usual; a human merges (rules L0). |
 
-## 4. Каталожная запись и жизненный цикл
+## 4. A catalog entry and the lifecycle
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **catalog entry (запись блок-листа)** | пара `fp → status` в каталоге блок-листа + комментарий-паспорт над ней. |
-| **status** | `staging` (match-but-observe, НЕ блокирует) \| `active` (enforce, блокировка 403). |
-| **паспорт** | комментарий над записью: action, причина, score/тир, evidence chain, дата ревизии, план жизненного цикла. Аудит-след. |
-| **promote** | переход candidate → `staging` (PR). |
-| **activate** | переход в `active` (PR): из `staging` по подтверждению наблюдением, либо напрямую из candidate для тира CRITICAL (см. `direct-activate`). |
-| **demote** | переход `active → staging` (снятие enforcement) или удаление. |
-| **remove** | удаление записи из каталога. |
-| **TTL (порог неактивности)** | срок молчания, после которого fp — кандидат на снятие. **Не** enforced-протухание на эдже, а порог авто-детектора. |
+| **catalog entry** | A `fp → status` pair in the blocklist catalog plus the passport comment above it. |
+| **status** | `staging` (match-but-observe, does NOT block) \| `active` (enforce, a 403 block). |
+| **the passport** | The comment above an entry: the action, the reason, the score and tier, the evidence chain, the review-by date and the lifecycle plan. The audit trail. |
+| **promote** | The candidate → `staging` transition (a PR). |
+| **activate** | The transition into `active` (a PR): from `staging` on confirmation by observation, or directly from candidate for the CRITICAL tier (see `direct-activate`). |
+| **demote** | The `active → staging` transition (lifting enforcement), or removal. |
+| **remove** | Deleting the entry from the catalog. |
+| **TTL (the inactivity threshold)** | The period of silence after which a fingerprint becomes a retirement candidate. **Not** an enforced expiry on the edge, but the automatic detector's threshold. |
 
-## 5. Наблюдение
+## 5. Observation
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **staging_match** | пометка в потоке вердиктов: staged-паттерн fp сматчился в observe-only (не заблокировал). Наземная правда для `staging → active`. |
-| **observation verdict** | итог наблюдения за staging-записью: **activate** (чисто → активировать) \| **fp_caught** (поймал легит → снять) \| **observe** (мало данных → ждать). |
-| **окно наблюдения** | минимальные часы + минимум матчей, нужные чтобы судить об активации. |
+| **staging_match** | A marker in the verdict stream: a staged fingerprint pattern matched in observe-only mode (it blocked nothing). The ground truth for `staging → active`. |
+| **observation verdict** | The outcome of observing a staging entry: **activate** (clean → activate) \| **fp_caught** (it caught something legitimate → retire) \| **observe** (too little data → wait). |
+| **the observation window** | The minimum hours plus the minimum matches needed to judge activation. |
 
-## 6. Суточный прогон, кандидаты, артефакты, состояние
+## 6. The daily run, candidates, artifacts and state
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **суточный прогон** | один раз в сутки по расписанию: ротация состояния → скоринг (отчет + артефакты) → автомат (draft-PR). Все решения слоя принимаются в нем; реального времени у слоя нет. |
-| **candidate (кандидат)** | fp с посчитанными score/тиром/гейтами/`auto_eligible`, попавший в отчет/артефакт. |
-| **stale entry** | каталожная запись, молчащая дольше TTL — кандидат на снятие. |
-| **артефакты решений** | машинно-читаемые срезы прогона: кандидаты, наблюдение за staging, кандидаты на снятие. Несут метку времени генерации. |
-| **freshness guard** | защита автомата: если артефакты старше порога — не действовать. |
-| **аккумулятор состояния (холодное)** | персистентный per-fp срез того, что лог-хранилище за свой горизонт не помнит: накопленный объем событий и «последний раз виден». JSON-файлы (`seen-fps.json`, кеш по IP). |
-| **ротация состояния** | ограничение роста аккумулятора (архивация старого в помесячные шарды, отбрасывание low-signal, lazy-restore). **Исключение:** fp из каталога блок-листа от архивации освобождены. |
+| **the daily run** | Once a day, on schedule: state rotation → scoring (the report plus the artifacts) → the autopilot (a draft PR). Every decision of the layer is taken there; the layer has no real-time path. |
+| **candidate** | A fingerprint with its score, tier, gates and `auto_eligible` computed, which landed in the report or an artifact. |
+| **stale entry** | A catalog entry silent for longer than the TTL — a retirement candidate. |
+| **decision artifacts** | Machine-readable slices of the run: the candidates, the staging observation, the retirement candidates. They carry a generation timestamp. |
+| **freshness guard** | The autopilot's protection: if the artifacts are older than the threshold, it does not act. |
+| **the state accumulator (cold)** | A persistent per-fingerprint slice of what the log store does not remember beyond its horizon: the accumulated event volume and "last seen". JSON files (`seen-fps.json`, an IP cache). |
+| **state rotation** | Bounding the accumulator's growth (archiving old data into monthly shards, discarding low-signal entries, lazy restore). **The exception:** fingerprints from the blocklist catalog are exempt from archival. |
 
-## 7. Справочники-источники (каталоги)
+## 7. Reference data sources (the catalogs)
 
-Отдельные от потока логов справочники, на которые опираются сигналы и гейты.
-`tls_fp_browser_profiles` (браузеры) и `tls_fp_catalog` (инструменты) наполняет харвестер
-отпечатков (см. ниже); хеши не пишут руками. Сам слой наполняет (draft-PR) лишь блок-лист
-`tls_fp_blocklist`.
+Reference data separate from the log stream, which the signals and gates rely on.
+`tls_fp_browser_profiles` (browsers) and `tls_fp_catalog` (tools) are populated by the
+fingerprint harvester (below); hashes are never written by hand. The layer itself populates
+(through draft PRs) only the `tls_fp_blocklist`.
 
-| Справочник | Определение |
+| Reference data | Definition |
 | --- | --- |
-| **словарь инструментов** (`tls_fp_catalog`) | хеши известных инструментов автоматизации (curl/python/go/okhttp) и headless-стэков (Playwright/Puppeteer/UCD — отдельного каталога под них нет). Наполняет харвестер. Опора impersonator (S1), automation UA (S3), headless (S8), обоснованность (G4). |
-| **позитивный каталог браузеров** (`tls_fp_browser_profiles`) | белый список реальных браузеров: `полный fp → {семейство, версия}`. Кормит known-good / настоящий браузер (G5) и version mismatch (S9). `staging` инвертирован: запись = «уже доверяем», сразу гасит флаг. |
-| **харвестер отпечатков** | CI cron-one-shot: гонит реальные браузеры (Chrome/FF/Edge) и инструменты (curl/python/go/okhttp/headless) на `/__fp` → полный fp → draft-PR в `tls_fp_browser_profiles` (браузеры) и `tls_fp_catalog` (инструменты). Каденс по дрейфу TLS (раз в несколько мажоров). Мерж — человек; чего харвестер не прогоняет (LibreWolf/Tor/mobile/экзотика) и незнакомые отпечатки из логов — ручной PR. |
-| **challenge issued/solved** | счетчики выданных/решенных challenge по fp. Опора гейта challenge-solve-rate (G6) и ускорения `staging → active`. |
+| **the tool dictionary** (`tls_fp_catalog`) | The hashes of known automation tools (curl/python/go/okhttp) and headless stacks (Playwright/Puppeteer/UCD — there is no separate catalog for them). Populated by the harvester. It underpins impersonator (S1), automation UA (S3), headless (S8) and justification (G4). |
+| **the positive browser catalog** (`tls_fp_browser_profiles`) | A whitelist of real browsers: `the full fp → {family, version}`. It feeds known-good / a real browser (G5) and version mismatch (S9). `staging` is inverted here: an entry means "already trusted" and immediately suppresses the flag. |
+| **the fingerprint harvester** | A CI cron one-shot: it drives real browsers (Chrome/FF/Edge) and tools (curl/python/go/okhttp/headless) at `/__fp` → the full fingerprint → a draft PR to `tls_fp_browser_profiles` (browsers) and `tls_fp_catalog` (tools). The cadence follows TLS drift (once every few major versions). A human merges; what the harvester does not drive (LibreWolf/Tor/mobile/exotica) and unfamiliar fingerprints from the logs go in through a manual PR. |
+| **challenge issued/solved** | The issued and solved challenge counters per fingerprint. They underpin the challenge solve rate gate (G6) and the acceleration of `staging → active`. |
 
-## 8. Хранилища
+## 8. Storage
 
-| Сущность | Определение |
+| Entity | Definition |
 | --- | --- |
-| **лог-хранилище (горячее)** | Loki: полный поток логов от эджей, окно хранения ~7 дней (retention), дальше запись вычищается. Рабочий материал скоринга. Приём: на каждом эдже promtail пушит строки `BAC_LOG` в центральный Loki на backend (через lb, путь записи); наружу Loki не опубликован, на чтение доступен только воркеру внутри сети. Конфиг/порты — в инфра-runbook. |
-| **накопитель состояния (холодное)** | JSON-файлы состояния рядом со слоем (см. §6). Живет дольше окна Loki — для решений за его горизонтом (например, снятие по 14-дневной неактивности). |
+| **the log store (hot)** | Loki: the full log stream from the edges, with a retention window of ~7 days, after which a record is cleaned up. The scoring's working material. Ingest: on every edge, promtail pushes the `BAC_LOG` lines to the central Loki on the backend (through the load balancer, along the write path); Loki is not published externally and is readable only by the worker from inside the network. The config and ports live in the infrastructure runbook. |
+| **the state accumulator (cold)** | JSON state files next to the layer (see §6). It outlives the Loki window — for decisions beyond that horizon (retirement after 14 days of inactivity, for instance). |
 
-## 9. Перечисления
+## 9. Enumerations
 
-| Перечисление | Значения |
+| Enumeration | Values |
 | --- | --- |
 | **tier** | `CRITICAL` (≥8) · `HIGH` (5–7) · `MEDIUM` (3–4) · `LOW` (1–2) |
 | **status** | `staging` · `active` |
 | **observation verdict** | `activate` · `fp_caught` · `observe` |
 | **gate verdict** | `pass` · `veto` |
 
-## 10. Константы и ручки (контрактные пороги)
+## 10. Constants and knobs (contractual thresholds)
 
-Конкретные значения — параметры реализации; контракт фиксирует их смысл и
-направление.
+The concrete values are implementation parameters; the contract fixes their meaning and
+direction.
 
-| Параметр | Смысл | Ориентир |
+| Parameter | Meaning | Ballpark |
 | --- | --- | --- |
-| минимум событий (volume) | сколько событий за время жизни нужно | порядка десятков (≈20) |
-| share_min (всплеск объема) | минимальная доля суточного потока для правила «доминирование» (S11) | 6% |
-| burst_factor (всплеск объема) | кратность роста день-к-дню для правила «рост» (S11) | ×10 |
-| суточный минимум событий (всплеск объема) | нижняя граница событий за сутки для обоих правил S11 (отсекает доли и кратности на крошечных числах) | 50 |
-| дней до входа в staging | минимум разных дней до promote | низкий (вход дешев — наблюдение на staging) |
-| окно наблюдения staging | минимум часов в staging до активации | не меньше суток-двух (разный суточный трафик) |
-| минимум матчей staging | сколько staging_match нужно для суждения | порядка десятка |
-| TTL auto-demote | порог молчания для снятия | порядка двух недель (больше горизонта лог-хранилища) |
-| порог свежести артефактов | при каком возрасте автомат не действует | порядка суток |
+| the minimum events (volume) | how many lifetime events are needed | tens (≈20) |
+| share_min (volume burst) | the minimum share of the daily stream for the "dominance" rule (S11) | 6% |
+| burst_factor (volume burst) | the day-over-day growth multiple for the "growth" rule (S11) | ×10 |
+| the daily event minimum (volume burst) | the lower bound of daily events for both S11 rules (it cuts shares and multiples computed on tiny numbers) | 50 |
+| days before entering staging | the minimum distinct days before a promote | low (entry is cheap — observation in staging) |
+| the staging observation window | the minimum hours in staging before activation | at least a day or two (to see traffic across times of day) |
+| the minimum staging matches | how many staging_match events are needed to judge | on the order of ten |
+| the auto-demote TTL | the silence threshold for retirement | on the order of two weeks (longer than the log store's horizon) |
+| the artifact freshness threshold | at what age the autopilot stops acting | on the order of a day |
