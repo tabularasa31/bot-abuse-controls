@@ -1,14 +1,14 @@
-// Интеграционные тесты dbloader идут через реальный PostgreSQL: эмулировать
-// pgxpool слой надёжно нечем (sqlmock не покрывает pgx-протокол). Гейтятся
-// переменной POSTGRES_TEST_DSN; в CI или при `make test-it` поднимается
-// postgres:16-alpine через docker и DSN экспортируется.
+// The dbloader integration tests run against a real PostgreSQL: there is nothing reliable
+// to emulate the pgxpool layer with (sqlmock does not cover the pgx protocol). They are gated on
+// the POSTGRES_TEST_DSN variable; in CI or under `make test-it` a
+// postgres:16-alpine is brought up through docker and the DSN is exported.
 //
-// Если DSN не задан — тесты SkipNow'ятся, локальная разработка без БД
-// не ломается.
+// When the DSN is unset the tests call SkipNow, so local development without a database
+// is not broken.
 //
-// После ADR-006 dbloader отвечает только за runtime-таблицы; slow-каталоги
-// тестируются в internal/filesource. Reloader-тесты ниже используют пустой
-// seed-каталог (только version), чтобы изолировать DB-часть.
+// After ADR-006 dbloader is responsible only for the runtime tables; the slow catalogs are
+// tested in internal/filesource. The reloader tests below use an empty
+// seed catalog (version only), to isolate the DB part.
 package dbloader_test
 
 import (
@@ -45,18 +45,18 @@ func openPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	return pool
 }
 
-// resetSchema — DROP всех потенциально существующих таблиц (включая
-// исторические, дропнутые миграцией 0004) и повторное Migrate. Используем
-// вместо TRUNCATE, чтобы любые ALTER'ы из будущих миграций не "залипали"
-// между тестами.
+// resetSchema — DROPs every potentially existing table (including the
+// historical ones dropped by migration 0004) and runs Migrate again. We use it
+// instead of TRUNCATE, so that any ALTERs from future migrations do not "stick"
+// between tests.
 func resetSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	tables := []string{
-		// Текущие runtime-таблицы.
+		// The current runtime tables.
 		"verified_bot_ips", "policy", "logs",
-		// Дропнуты 0004, но возможны в старых БД — IF EXISTS защищает.
-		// PR-62 audit: имя legacy DB-таблицы — `fp_blocklist` (из 0001),
-		// НЕ `tls_fp_blocklist` (это file-system / wire-имя из PR-62 rename).
+		// Dropped by 0004, but possible in older databases — IF EXISTS protects us.
+		// From audit: the legacy DB table name is `fp_blocklist` (from 0001),
+		// NOT `tls_fp_blocklist` (that is the file-system / wire name from the rename).
 		"catalog_version", "fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
 	}
@@ -70,9 +70,9 @@ func resetSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// seedCatalogs создаёт минимально валидный каталог-репо для filesource:
-// пустые YAML-файлы + version. Возвращает Loader. Тесты, которые проверяют
-// чисто DB-часть, кладут сюда пустые seed'ы — slow-слой в merge будет пустым.
+// seedCatalogs creates a minimally valid catalog repo for filesource:
+// empty YAML files plus a version. It returns the Loader. Tests that check
+// purely the DB part put empty seeds here — the slow layer in the merge will be empty.
 func seedCatalogs(t *testing.T) *filesource.Loader {
 	t.Helper()
 	dir := t.TempDir()
@@ -97,9 +97,9 @@ func TestMigrate_Idempotent(t *testing.T) {
 	defer cancel()
 	pool := openPool(t, ctx)
 	resetSchema(t, ctx, pool)
-	// Re-apply без DROP — миграции идемпотентны (IF NOT EXISTS на 0001/0002/0003
-	// и IF EXISTS на 0004). После двух прогонов schema должна совпадать:
-	// runtime-таблицы есть, slow-таблицы (включая catalog_version) — нет.
+	// A re-apply without a DROP — the migrations are idempotent (IF NOT EXISTS on 0001/0002/0003
+	// and IF EXISTS on 0004). After two runs the schema must match:
+	// the runtime tables exist and the slow tables (catalog_version included) do not.
 	if err := dbloader.Migrate(ctx, pool); err != nil {
 		t.Fatalf("re-migrate: %v", err)
 	}
@@ -150,8 +150,8 @@ func TestLoadRuntime_RoundTripPolicy(t *testing.T) {
 	pool := openPool(t, ctx)
 	resetSchema(t, ctx, pool)
 
-	// Insert: один host с богатым набором полей, чтобы покрыть все JSONB-
-	// колонки и тайповые поля (mode/strictness/attack_mode).
+	// Insert: one host with a rich field set, to cover every JSONB
+	// column and typed field (mode/strictness/attack_mode).
 	_, err := pool.Exec(ctx, `
 		INSERT INTO policy (host, mode, strictness, attack_mode,
 		                    ua_blacklist, ip_whitelist, ip_blocklist,
@@ -192,10 +192,10 @@ func TestLoadRuntime_RoundTripPolicy(t *testing.T) {
 }
 
 func TestLoadRuntime_RejectsInvalidPolicyRegex(t *testing.T) {
-	// Slow-каталоги переехали в файлы; здесь проверяем per-host policy:
-	// оператор может записать битый regex через antibotapi → reloader
-	// должен поймать его до Store.Replace, иначе combined regex положит
-	// UA-стадию на эджах.
+	// The slow catalogs moved into files; here we check the per-host policy:
+	// an operator can write a broken regex through antibotapi → the reloader
+	// must catch it before Store.Replace, otherwise the combined regex takes the
+	// UA stage down across the edges.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool := openPool(t, ctx)
@@ -206,7 +206,7 @@ func TestLoadRuntime_RejectsInvalidPolicyRegex(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := dbloader.LoadRuntime(ctx, pool); err == nil {
-		t.Fatal("LoadRuntime: per-host битый regex должен валить загрузку")
+		t.Fatal("LoadRuntime: a broken per-host regex must fail the load")
 	}
 }
 
@@ -222,14 +222,14 @@ func TestLoadRuntime_RejectsInvalidPolicyCIDR(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := dbloader.LoadRuntime(ctx, pool); err == nil {
-		t.Fatal("LoadRuntime: per-host битый CIDR должен валить загрузку")
+		t.Fatal("LoadRuntime: a broken per-host CIDR must fail the load")
 	}
 }
 
 func TestLoadRuntime_NormalizesJSONBNull(t *testing.T) {
-	// jsonb-null в JSONB-колонке policy.* приходил как nil-slice; normalize
-	// в Store.Replace должен coerce'нить nil → []T{}, чтобы payload эджа
-	// был стабильным (без `null` в JSON).
+	// A jsonb null in a policy.* JSONB column arrived as a nil slice; normalize
+	// in Store.Replace must coerce nil → []T{}, so that the edge payload
+	// is stable (with no `null` in the JSON).
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool := openPool(t, ctx)
@@ -249,8 +249,8 @@ func TestLoadRuntime_NormalizesJSONBNull(t *testing.T) {
 		t.Fatalf("LoadRuntime: %v", err)
 	}
 
-	// Прогон через Merge → Store.Replace вызывает normalize(); проверяем
-	// итоговый payload, не сырое значение из LoadRuntime.
+	// A run through Merge → Store.Replace calls normalize(); we check the
+	// final payload rather than the raw value from LoadRuntime.
 	store := catalog.NewStore()
 	store.Replace(catalog.Merge(nil, r))
 	snap, err := store.Snapshot("policy", "shop.example.com")
@@ -264,31 +264,31 @@ func TestLoadRuntime_NormalizesJSONBNull(t *testing.T) {
 	} {
 		nullForm := `"` + field + `":null`
 		if strings.Contains(body, nullForm) {
-			t.Errorf("payload содержит %q — normalize не coerce'нул jsonb-null в []: %s",
+			t.Errorf("the payload contains %q — normalize did not coerce the jsonb null into []: %s",
 				nullForm, body)
 		}
 	}
 }
 
 func TestNewReloader_RejectsZeroInterval(t *testing.T) {
-	// Defense-in-depth: альтернативный caller с interval=0 раньше повесил
-	// бы Bootstrap на already-expired ctx и `time.NewTicker(0)` запаниковал
-	// бы в Run. Сейчас NewReloader явно отказывает.
+	// Defence in depth: an alternative caller with interval=0 used to hang
+	// Bootstrap on an already-expired ctx, and `time.NewTicker(0)` would panic
+	// in Run. NewReloader now refuses explicitly.
 	fl := seedCatalogs(t)
 	if _, err := dbloader.NewReloader(nil, catalog.NewStore(), fl, 0, discardLogger(t), discardReg()); err == nil {
-		t.Fatal("NewReloader: ожидалась ошибка при interval=0")
+		t.Fatal("NewReloader: an error was expected with interval=0")
 	}
 	if _, err := dbloader.NewReloader(nil, catalog.NewStore(), fl, -1, discardLogger(t), discardReg()); err == nil {
-		t.Fatal("NewReloader: ожидалась ошибка при interval<0")
+		t.Fatal("NewReloader: an error was expected with interval<0")
 	}
 }
 
 func TestNewReloader_RejectsNilFileLoader(t *testing.T) {
-	// После ADR-006 fileLoader обязателен — без него merge выдал бы пустые
-	// slow-каталоги, эдж бы получил «успешный» payload без записей,
-	// которые продакт уже добавил в catalogs/ (silent regression).
+	// After ADR-006 the fileLoader is mandatory — without it the merge would produce empty
+	// slow catalogs and the edge would get a "successful" payload missing the records
+	// product had already added to catalogs/ (a silent regression).
 	if _, err := dbloader.NewReloader(nil, catalog.NewStore(), nil, 5*time.Second, discardLogger(t), discardReg()); err == nil {
-		t.Fatal("NewReloader: ожидалась ошибка при fileLoader=nil")
+		t.Fatal("NewReloader: an error was expected with fileLoader=nil")
 	}
 }
 
@@ -310,16 +310,16 @@ func TestReloader_BootstrapAndTick(t *testing.T) {
 	if !store.IsLoaded() {
 		t.Fatal("Store not marked loaded after Bootstrap")
 	}
-	// Version приходит из файла version (1.0.0).
+	// The version comes from the version file (1.0.0).
 	snap, err := store.Snapshot("policy", "")
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	if snap.Version != "1.0.0" {
-		t.Errorf("Snapshot.Version=%q want 1.0.0 (из catalogs/version)", snap.Version)
+		t.Errorf("Snapshot.Version=%q want 1.0.0 (from catalogs/version)", snap.Version)
 	}
 
-	// Запускаем Run в фоне и мутируем БД — следующий тик должен подхватить
+	// We start Run in the background and mutate the database — the next tick must pick it up
 	// new policy row.
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
@@ -331,7 +331,7 @@ func TestReloader_BootstrapAndTick(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Polling: ждём до 2с появления policy[shop] в Store.
+	// Polling: we wait up to 2 s for policy[shop] to appear in the Store.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		snap, err := store.Snapshot("policy", "shop.example.com")

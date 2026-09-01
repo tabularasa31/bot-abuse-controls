@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// seed создаёт временную папку с минимально валидным набором каталогов.
-// Возвращает её путь. Тесты могут потом переписать любой файл и заново
-// вызвать Load.
+// seed creates a temporary directory with a minimally valid set of catalogs.
+// It returns its path. Tests can then rewrite any file and call
+// Load again.
 func seed(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -52,7 +52,7 @@ func TestLoad_EmptySeed(t *testing.T) {
 		len(s.IPBlocklist) != 0 || len(s.IPWhitelist) != 0 ||
 		len(s.ASNDatacenters) != 0 ||
 		len(s.TLSFPCatalog) != 0 || len(s.TLSFPBrowserProfiles) != 0 {
-		t.Errorf("ожидался пустой slow-слой, получили: %+v", s)
+		t.Errorf("expected an empty slow layer, got: %+v", s)
 	}
 }
 
@@ -79,7 +79,7 @@ firefox:
 		t.Fatalf("Load: %v", err)
 	}
 	if got := len(s.TLSFPCatalog); got != 2 {
-		t.Errorf("tls_fp_catalog len=%d want 2 (active+staging оба остаются)", got)
+		t.Errorf("tls_fp_catalog len=%d want 2 (active+staging both stay)", got)
 	}
 	if s.TLSFPCatalog["1ed0482b9b4c"].Family != "python-requests" ||
 		s.TLSFPCatalog["1ed0482b9b4c"].Status != "active" {
@@ -104,7 +104,7 @@ func TestLoad_TLSFPCatalogInvalidStatus(t *testing.T) {
   status: rolled-out
 `)
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для status=rolled-out в tls_fp_catalog")
+		t.Fatal("an error was expected for status=rolled-out in tls_fp_catalog")
 	}
 }
 
@@ -116,7 +116,7 @@ func TestLoad_TLSFPCatalogEmptyFamily(t *testing.T) {
   status: active
 `)
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для пустого family в tls_fp_catalog")
+		t.Fatal("an error was expected for an empty family in tls_fp_catalog")
 	}
 }
 
@@ -128,18 +128,18 @@ chrome:
   status: active
 `)
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для expected_cipher_cnt=0")
+		t.Fatal("an error was expected for expected_cipher_cnt=0")
 	}
 }
 
 func TestLoad_PopulatedActiveAndStaging(t *testing.T) {
 	dir := seed(t)
-	// tls_fp_blocklist: один active, один staging.
+	// tls_fp_blocklist: one active, one staging.
 	write(t, dir, "tls_fp_blocklist.yaml", `
 "L13i17h2_aaa_bbb": active
 "L12i14h1_ccc_ddd": staging
 `)
-	// ua_blacklist: тоже active+staging.
+	// ua_blacklist: active plus staging too.
 	write(t, dir, "ua_blacklist.yaml", `
 "curl/.*": active
 "python-requests/.*": active
@@ -150,12 +150,12 @@ func TestLoad_PopulatedActiveAndStaging(t *testing.T) {
 "203.0.113.0/24": active
 "198.51.100.42/32": staging
 `)
-	// ip_whitelist: без status.
+	// ip_whitelist: no status.
 	write(t, dir, "ip_whitelist.yaml", `
 - 10.0.0.5/32
 - 198.51.100.5
 `)
-	// asn_datacenters: без status.
+	// asn_datacenters: no status.
 	write(t, dir, "asn_datacenters.yaml", `
 - 14061
 - 16509
@@ -166,7 +166,7 @@ func TestLoad_PopulatedActiveAndStaging(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if got, want := len(s.TLSFPBlocklist), 2; got != want {
-		t.Errorf("tls_fp_blocklist len=%d want %d (active+staging оба сохраняются)", got, want)
+		t.Errorf("tls_fp_blocklist len=%d want %d (active+staging are both preserved)", got, want)
 	}
 	if s.TLSFPBlocklist["L13i17h2_aaa_bbb"] != "active" {
 		t.Errorf("tls_fp_blocklist active status missing: %+v", s.TLSFPBlocklist)
@@ -200,7 +200,7 @@ func TestLoad_MissingVersionFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для отсутствующего version")
+		t.Fatal("an error was expected for a missing version")
 	}
 }
 
@@ -208,7 +208,7 @@ func TestLoad_EmptyVersionFile(t *testing.T) {
 	dir := seed(t)
 	write(t, dir, "version", "   \n  \n")
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для пустого version")
+		t.Fatal("an error was expected for an empty version")
 	}
 }
 
@@ -218,7 +218,7 @@ func TestLoad_MissingCatalogFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для отсутствующего файла каталога")
+		t.Fatal("an error was expected for a missing catalog file")
 	}
 }
 
@@ -226,16 +226,16 @@ func TestLoad_InvalidStatus(t *testing.T) {
 	dir := seed(t)
 	write(t, dir, "tls_fp_blocklist.yaml", `"L13i17h2_aaa_bbb": rolled-out`)
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для status=rolled-out")
+		t.Fatal("an error was expected for status=rolled-out")
 	}
 }
 
 func TestLoad_InvalidRegex(t *testing.T) {
 	dir := seed(t)
-	// Битый regex — Compile должен упасть, Load возвращает ошибку.
+	// A broken regex — Compile must fail and Load must return an error.
 	write(t, dir, "ua_blacklist.yaml", `"bot[a-z": active`)
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для битого regex")
+		t.Fatal("an error was expected for a broken regex")
 	}
 }
 
@@ -243,13 +243,13 @@ func TestLoad_InvalidCIDR(t *testing.T) {
 	dir := seed(t)
 	write(t, dir, "ip_blocklist.yaml", `"999.0.0.0/33": active`)
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для битого CIDR в ip_blocklist")
+		t.Fatal("an error was expected for a broken CIDR in ip_blocklist")
 	}
 
 	dir2 := seed(t)
 	write(t, dir2, "ip_whitelist.yaml", `- not-a-cidr`)
 	if _, err := New(dir2).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для битого CIDR в ip_whitelist")
+		t.Fatal("an error was expected for a broken CIDR in ip_whitelist")
 	}
 }
 
@@ -257,13 +257,13 @@ func TestLoad_ASNOutOfRange(t *testing.T) {
 	dir := seed(t)
 	write(t, dir, "asn_datacenters.yaml", "- -1\n")
 	if _, err := New(dir).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для отрицательного ASN")
+		t.Fatal("an error was expected for a negative ASN")
 	}
 
 	dir2 := seed(t)
 	write(t, dir2, "asn_datacenters.yaml", "- 4294967296\n") // > uint32 max
 	if _, err := New(dir2).Load(); err == nil {
-		t.Fatal("ожидалась ошибка для ASN > uint32 max")
+		t.Fatal("an error was expected for an ASN > uint32 max")
 	}
 }
 
@@ -271,38 +271,38 @@ func TestChanged_InitialTrueThenFalseThenTrue(t *testing.T) {
 	dir := seed(t)
 	l := New(dir)
 	if !l.Changed() {
-		t.Error("Changed на пустом кеше должна быть true")
+		t.Error("Changed on an empty cache must be true")
 	}
 	if _, err := l.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if l.Changed() {
-		t.Error("Changed после успешного Load должна быть false, файлы не менялись")
+		t.Error("Changed after a successful Load must be false; the files did not change")
 	}
-	// Меняем один файл — Changed должна снова стать true.
-	// Используем os.Chtimes, чтобы mtime гарантированно отличался от
-	// предыдущего (на быстрых FS rewrite в той же секунде может дать
-	// тот же mtime, флакает тест).
+	// We change one file — Changed must become true again.
+	// We use os.Chtimes so that the mtime is guaranteed to differ from the
+	// previous one (on fast filesystems a rewrite within the same second can give
+	// the same mtime and make the test flaky).
 	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(filepath.Join(dir, "ua_blacklist.yaml"), future, future); err != nil {
 		t.Fatal(err)
 	}
 	if !l.Changed() {
-		t.Error("Changed после изменения mtime должна стать true")
+		t.Error("Changed after an mtime change must become true")
 	}
 }
 
 func TestLoad_AtomicMtimeUpdate(t *testing.T) {
-	// Регрессия: если Load упал на середине (например, ua_blacklist битый),
-	// mtime-cache НЕ должен обновляться частично — иначе на следующем тике
-	// Changed() вернёт false, и reloader пропустит исправленный файл.
+	// A regression: if Load failed halfway (with a broken ua_blacklist, say),
+	// the mtime cache must NOT be updated partially — otherwise on the next tick
+	// Changed() returns false and the reloader skips the fixed file.
 	dir := seed(t)
 	l := New(dir)
-	// Изначально успешный Load.
+	// An initially successful Load.
 	if _, err := l.Load(); err != nil {
-		t.Fatalf("первый Load: %v", err)
+		t.Fatalf("the first Load: %v", err)
 	}
-	// Ломаем один файл, переписываем второй.
+	// We break one file and rewrite the second.
 	future := time.Now().Add(2 * time.Second)
 	write(t, dir, "ua_blacklist.yaml", `"bot[a-z": active`)
 	write(t, dir, "ip_whitelist.yaml", "- 10.0.0.5\n")
@@ -313,10 +313,10 @@ func TestLoad_AtomicMtimeUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := l.Load(); err == nil {
-		t.Fatal("ожидалась ошибка от Load с битым regex")
+		t.Fatal("an error was expected from Load with a broken regex")
 	}
-	// Теперь Changed должна оставаться true — кеш не сдвигался.
+	// Changed must now stay true — the cache did not move.
 	if !l.Changed() {
-		t.Error("Changed после неудачного Load должна оставаться true (cache не обновлён)")
+		t.Error("Changed after a failed Load must stay true (the cache was not updated)")
 	}
 }
