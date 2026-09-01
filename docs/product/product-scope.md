@@ -1,104 +1,116 @@
-# Рамка продукта — на что замахиваемся (post-post-MVP)
+# Product frame — how far we are aiming (post-post-MVP)
 
-> **Статус: СТРАТЕГИЯ / горизонт.** Это документ о **потолке амбиции** продукта, не
-> план задач и не контракт поведения. Ничего из ниже **НЕ реализовано** и не
-> обещано к ближайшей реализации — за актуальным статусом смотри
-> [PROGRESS.md](../../PROGRESS.md). Конкретный roadmap по WAF/DDoS —
+> **Status: STRATEGY / horizon.** This document is about the **ceiling of ambition**
+> for the product, not a task plan and not a behavioural contract. Nothing below is
+> **implemented** or promised for near-term implementation — for the current status
+> see [PROGRESS.md](../../PROGRESS.md). The concrete WAF/DDoS roadmap is
 > [research/waf-ddos-roadmap.md](../research/waf-ddos-roadmap.md).
 
-## Где это на временно́й шкале продукта
+## Where this sits on the product timeline
 
 ```
-MVP                       →  post-MVP                →  post-post-MVP (этот документ)
-vision.md / phase1+2      D-серия (скоринг,           WAF, L7/L3-DDoS, API/account
-challenge-каскад          blocklist-цикл,             protection — новые ОСИ продукта,
-(C-серия закрыта)         поведенческие сигналы)      соседние дисциплины
-[сделано]                 [в процессе]                [горизонт / решаем, куда расти]
+MVP                       →  post-MVP                →  post-post-MVP (this document)
+vision.md / phase1+2      the D series (scoring,      WAF, L7/L3 DDoS, API/account
+the challenge cascade     the blocklist cycle,        protection — new AXES of the
+(C series closed)         behavioural signals)        product, adjacent disciplines
+[done]                    [in progress]               [horizon / deciding where to grow]
 ```
 
-- **MVP — это [vision.md](vision.md) + phase1/phase2 + C-серия.** Каскад L1→L5,
-  challenge, clearance, Channel C, policy. Закрыто (см. PROGRESS.md «ЕСТЬ СЕЙЧАС»).
-- **post-MVP — D-серия.** Углубление детектора: скоринг + blocklist-цикл (D1),
-  challenge-solve-rate, subnet-единица, anti-poisoning, threat-intel, поведенческие
-  сигналы. Это **то же ядро** (bot management), сделанное умнее. Идёт сейчас.
-- **post-post-MVP — этот документ.** Не «детектор умнее», а **новые дисциплины
-  рядом**: WAF, анти-DDoS, API/account protection. Другая ось, не продолжение D.
+- **The MVP is [vision.md](vision.md) plus phase1/phase2 plus the C series.** The
+  L1→L5 cascade, the challenge, clearance, Channel C, the policy. Closed (see
+  PROGRESS.md "IN PLACE TODAY").
+- **post-MVP is the D series.** Deepening the detector: scoring plus the blocklist
+  cycle (D1), challenge solve rate, the subnet unit, anti-poisoning, threat intel,
+  behavioural signals. This is the **same core** (bot management), done more
+  intelligently. It is what we are doing now.
+- **post-post-MVP is this document.** Not "a smarter detector" but **new disciplines
+  alongside**: WAF, anti-DDoS, API/account protection. A different axis, not a
+  continuation of D.
 
-Этот документ отвечает на вопрос «на что вообще можно замахиваться», чтобы post-post-MVP
-выбирался осознанно, а не дрейфовал.
+This document answers "what can we credibly aim at at all", so that post-post-MVP is
+chosen deliberately rather than drifted into.
 
-## 1. Что мы есть архитектурно (и почему это определяет потолок)
+## 1. What we are architecturally (and why that sets the ceiling)
 
-Продукт — **программируемый L7-edge безопасности**: reverse-proxy на OpenResty,
-который **терминирует TLS** и прогоняет каскад вердиктов, с Go-бэкендом
-(`antibot-backend`), доставкой каталогов через Channel C (ADR-005/006) и
-shadow→staging→active-воркфлоу.
+The product is a **programmable L7 security edge**: an OpenResty reverse proxy that
+**terminates TLS** and runs a verdict cascade, with a Go backend
+(`antibot-backend`), catalog delivery over Channel C (ADR-005/006) and a
+shadow→staging→active workflow.
 
-Главное следствие — **где мы физически сидим, то и определяет границу амбиции**:
+The main consequence is that **where we physically sit determines the boundary of the
+ambition**:
 
-1. **Всё, что решаемо из HTTP-запроса после TLS-хендшейка — наше поле.**
-   Фингерпринт клиента (JA4 — мы его уже считаем), заголовки, тело, поведение,
-   репутация IP/ASN, частота, исход challenge. Это огромная территория.
-2. **Всё, что ниже — пакетный/волюметрический флуд (SYN, UDP, амплификация) — НЕ наше
-   в одиночку.** К моменту, когда трафик дошёл до nginx, хендшейк уже состоялся.
-   Это сетевой уровень (eBPF/XDP, anycast-scrubbing, BGP) — зона сетевой инфры.
+1. **Anything decidable from the HTTP request after the TLS handshake is our field.**
+   The client fingerprint (JA4 — we already compute it), headers, body, behaviour,
+   IP/ASN reputation, frequency, challenge outcome. That is an enormous territory.
+2. **Anything below that — packet-level and volumetric floods (SYN, UDP,
+   amplification) — is NOT ours alone.** By the time traffic reaches nginx the
+   handshake has already happened. That is the network layer (eBPF/XDP, anycast
+   scrubbing, BGP) — the territory of network infrastructure.
 
-> **Компас на каждое «а можем ли мы…»:** *«это решаемо из запроса?»* →
-> да = можем взять; нет = мы поставщик сигналов для сетевого уровня, не исполнитель.
+> **The compass for every "could we do…":** *"is this decidable from the request?"* →
+> yes, we can take it on; no, we are a signal supplier to the network layer, not the
+> one that acts.
 
-## 2. Категории, которые мы можем credibly взять
+## 2. Categories we can credibly take on
 
-Каскад + Channel C + shadow/active + кросс-тенант почти без переизобретения
-растягиваются на соседние дисциплины:
+The cascade plus Channel C plus shadow/active plus cross-tenancy stretch into adjacent
+disciplines with almost nothing reinvented:
 
-| Категория | Близость | Что переиспользуем |
+| Category | Proximity | What we reuse |
 |---|---|---|
-| **Bot management** | ✅ это и есть продукт | весь каскад |
-| **L7 anti-DDoS** (application flood) | ✅ полпути пройдено | `rate_limit` (A7/A10) + `attack_mode` (C7) + challenge (C5) |
-| **WAF** (SQLi/XSS/path-traversal/…) | 🟡 зелёное поле, архитектура готова | Channel C, `policy.enforce`, `bac_log`, staged rollout |
-| **API security** (abuse эндпоинтов, схема) | 🟡 естественное расширение | `rate_api`, per-host policy |
-| **Account protection** (credential stuffing, brute-force) | 🟡 близко | reputation + rate + challenge + fp |
-| **Anti-scraping / контент** | 🟡 близко | fp + поведение + verified-bots |
-| **Threat-intel сеть** (сетевой эффект между тенантами) | 🟡 уже спроектировано | [cross-tenant-threat-intel-design](../research/cross-tenant-threat-intel-design.md) |
+| **Bot management** | ✅ this is the product | the whole cascade |
+| **L7 anti-DDoS** (application flood) | ✅ half the way there | `rate_limit` (A7/A10) plus `attack_mode` (C7) plus the challenge (C5) |
+| **WAF** (SQLi/XSS/path traversal/…) | 🟡 greenfield, the architecture is ready | Channel C, `policy.enforce`, `bac_log`, staged rollout |
+| **API security** (endpoint abuse, schema) | 🟡 a natural extension | `rate_api`, per-host policy |
+| **Account protection** (credential stuffing, brute force) | 🟡 close | reputation plus rate plus challenge plus fingerprint |
+| **Anti-scraping / content** | 🟡 close | fingerprint plus behaviour plus verified bots |
+| **A threat-intel network** (the network effect between tenants) | 🟡 already designed | [cross-tenant-threat-intel-design](../research/cross-tenant-threat-intel-design.md) |
 
-**Реалистичный потолок** = «L7-security-edge для своей ниши тенантов»: bot management +
-WAF + L7-DDoS + API/account protection под одним движком вердиктов и одним каталожным
-воркфлоу. Это не «стать новым Cloudflare целиком», а занять его L7-security-слой для
-своих клиентов.
+**The realistic ceiling** is "an L7 security edge for our niche of tenants": bot
+management plus WAF plus L7 DDoS plus API/account protection, under one verdict engine
+and one catalog workflow. Not "become the next Cloudflare wholesale", but occupy its L7
+security layer for our own customers.
 
-## 3. Где мы бы переоценили силы (нужен партнёр / это не мы)
+## 3. Where we would overreach (needs a partner / is not us)
 
-- **Волюметрика L3/L4** — только в связке с сетевым уровнем (сетевая инфра).
-  OpenResty это не закрывает в одиночку. Наша роль — **поставщик сигналов**
-  (edge-ACL feed: «дропни этот источник на firewall»), не исполнитель дропа.
-- **Глобальный anycast / scrubbing-центры** — инфраструктура оператора, не наш Lua.
-- **Сам CDN-кеш / доставка контента** — соседняя дисциплина. Мы security-слой *поверх*
-  CDN, не замена CDN.
+- **Volumetric L3/L4** — only in combination with the network layer (network
+  infrastructure). OpenResty does not close this alone. Our role is a **signal
+  supplier** (an edge-ACL feed: "drop this source at the firewall"), not the one
+  executing the drop.
+- **Global anycast / scrubbing centres** — operator infrastructure, not our Lua.
+- **The CDN cache and content delivery itself** — an adjacent discipline. We are a
+  security layer *on top of* a CDN, not a replacement for one.
 
-По [CLAUDE.md](../../CLAUDE.md) всё из этого пункта — **reality-level 3** (зона
-сетевых/инфра-админов, прод-доступа нет). Не выдумывать как сделанное; понадобится прод-сеть —
-отдельная фаза с доступом, **спросить**.
+Per [CLAUDE.md](../../CLAUDE.md), everything in this section is **reality level 3**
+(the territory of network and infrastructure admins, with no production access). Do not
+present it as done; if a production network becomes necessary, that is a separate phase
+with access — **ask**.
 
-## 4. Наш moat — на чём строить амбицию, а не догонять
+## 4. Our moat — what to build the ambition on, rather than playing catch-up
 
-Не «ещё один WAF» — на голых сигнатурах обгонят зрелые движки. Уникальное у нас:
+Not "yet another WAF" — on bare signatures, mature engines will outrun us. What is
+distinctive here:
 
-1. **TLS/JA4-фингерпринт + поведение.** Большинство WAF этого не делают; мы уже считаем
-   fp на эдже (ADR-002/004). Ловит ботов, которых сигнатуры не видят.
-2. **Channel C + git-каталоги + shadow→staging→active** (ADR-006). Операционная зрелость
-   доставки правил «из коробки» — редкость. WAF-сигнатуры лягут в тот же воркфлоу.
-3. **Кросс-тенантный threat-intel.** Атака на одного тенанта = иммунитет для остальных.
-   Сильный и редкий рычаг (репутация глобальная, поза энфорсмента — пер-тенант).
+1. **TLS/JA4 fingerprinting plus behaviour.** Most WAFs do not do this; we already
+   compute the fingerprint at the edge (ADR-002/004). It catches bots signatures never
+   see.
+2. **Channel C plus git catalogs plus shadow→staging→active** (ADR-006). Operational
+   maturity in rule delivery, out of the box, is rare. WAF signatures drop into the same
+   workflow.
+3. **Cross-tenant threat intel.** An attack on one tenant is immunity for the rest. A
+   strong and rare lever (reputation is global, the enforcement stance is per tenant).
 
-**Вывод:** замахиваться стоит на «программируемый L7-security-edge» с дифференциатором
-на fingerprint + threat-intel, а не на «заменить сеть/CDN/scrubbing», где мы поставщик
-сигналов, а не исполнитель.
+**Conclusion:** it is worth aiming at a "programmable L7 security edge" differentiated
+by fingerprinting plus threat intel, rather than at "replacing the network/CDN/scrubbing",
+where we are a signal supplier rather than the one that acts.
 
-## 5. Как этот документ соотносится с остальными
+## 5. How this document relates to the others
 
-- [vision.md](vision.md) — поведенческий контракт MVP (что эдж делает с запросом). Этот
-  документ — **горизонт за пределами vision**, не переопределяет его.
-- [research/waf-ddos-roadmap.md](../research/waf-ddos-roadmap.md) — конкретные фазы и
-  тикеты по первым двум post-post-MVP-осям (WAF, DDoS).
+- [vision.md](vision.md) — the behavioural contract of the MVP (what the edge does with
+  a request). This document is the **horizon beyond vision**, and does not override it.
+- [research/waf-ddos-roadmap.md](../research/waf-ddos-roadmap.md) — the concrete phases
+  and tickets for the first two post-post-MVP axes (WAF, DDoS).
 - [research/bot-detector-roadmap.md](../research/bot-detector-roadmap.md) — post-MVP
-  (углубление детектора, D-серия). Этот документ — **следующий слой амбиции** над ним.
+  (deepening the detector, the D series). This document is the **next layer of ambition**
+  above it.
