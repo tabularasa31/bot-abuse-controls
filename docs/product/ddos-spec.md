@@ -1,266 +1,271 @@
-# DDoS-защита — спецификация (пост-MVP)
+# DDoS protection — specification (post-MVP)
 
-**Версия:** v1.0 · Статус: проектный контракт (целевое поведение) · слой пост-MVP
+**Version:** v1.0 · Status: a design contract (target behaviour) · a post-MVP layer
 
-Этот документ описывает целевое поведение DDoS-защиты как отдельный слой поверх каскада. Каскад принимает решение по каждому *запросу*; а DDoS-слой имеет дело с тем, что лежит до и рядом с запросом: частотой и формой нагрузки, поведением соединений и протокола, объемом на сетевом уровне.
+This document describes the target behaviour of DDoS protection as a separate layer on
+top of the cascade. The cascade decides about each *request*; the DDoS layer deals with
+what lies before and around the request: the frequency and shape of the load, the
+behaviour of connections and the protocol, and volume at the network level.
 
-**Сопутствующие материалы:**
+**Related material:**
 
- [ddos-rules-reference.md](ddos-rules-reference.md) — правила и сигналы в формате
-«если условие → действие»; [ddos-entities-reference.md](ddos-entities-reference.md)
-— словарь сущностей (директивы, зоны, теги, поля лога, перечисления, контракты).
-
----
-
-## 1. Что это
-
-DDoS у этого продукта распадается на три слоя разной природы, каждый со своим
-механизмом защиты. Это не три отдельных подсистемы, а три фронта одной задачи —
-сохранить доступность origin под злонамеренной нагрузкой:
-
-
-| Слой                                  | Что                                                                         | Где живет защита                                                       |
-| ------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **L7 application-layer (rate-based)** | флуд по частоте HTTP-запросов; адаптивная реакция на «плохой» трафик        | каскад (rate-limit + challenge + attack_mode) + аналитика репутации    |
-| **Connection/protocol-level**         | slow-attacks (slowloris / slow POST / slow read) и HTTP/2 DoS (Rapid Reset) | nginx-директивы + версия билда; наблюдение в Lua                       |
-| **Волюметрика L3/L4**                 | SYN/UDP-флуд, амплификация — насыщение канала/стека до рукопожатия          | сетевой слой вне периметра прокси; прокси только поставляет кандидатов |
-
-
-Сквозная нить всех трех — общий сток репутации: повторные нарушители (по IP, по
-/24-подсети, по ASN) накапливаются в едином репутационном артефакте, который
-повышает строгость на L7 и, в пределе, эскалируется в сетевой ACL-feed.
-
-## 2. Принцип в одном экране
-
-- **Foundation уже в каскаде.** Per-request rate-limit (GCRA-профили), challenge и
-per-host `attack_mode` — это базовая защита L7 из vision. DDoS-слой добавляет к ней
-**адаптивность и память**: авто-детект атаки, репутацию подсетей, кросс-тенантный
-обмен сигналами.
-- **Не все ловится в каскаде.** Slow-клиент и сброшенный HTTP/2-стрим не доходят до
-фазы решения каскада. Их митигирует nginx (директивы/версия билда), а слой
-только наблюдает и кормит репутацию. Здесь защита — не новая стадия каскада.
-- **Волюметрика — вне прокси.** Насыщение канала происходит до рукопожатия; прокси
-физически не точка митигации. Максимум слоя — поставить подтвержденных
-нарушителей в сетевой ACL-feed.
-- **Глобальная репутация, локальный enforcement.** Репутация атакующего
-(fp/subnet/ASN) — общая для всех тенантов; поза enforcement (challenge/drop) —
-per-tenant, включается под атакой конкретного тенанта.
-- **Адаптивность с гистерезисом и приоритетом человека.** Авто-режим атаки
-включается по «плохому» трафику (не голому объему), снимается с гистерезисом;
-ручная установка режима всегда имеет приоритет над авто.
+[ddos-rules-reference.md](ddos-rules-reference.md) — the rules and signals in
+"if condition → action" form; [ddos-entities-reference.md](ddos-entities-reference.md) —
+the entity vocabulary (directives, zones, tags, log fields, enumerations, contracts).
 
 ---
 
-## 3. Слой L7 application-layer (rate-based)
+## 1. What it is
 
-Защита от флуда по частоте HTTP-запросов. База — каскад; слой добавляет адаптивность.
+DDoS splits into three layers of a different nature for this product, each with its own
+protection mechanism. These are not three separate subsystems but three fronts of one
+task — keeping the origin available under malicious load:
 
-### 3.1 База (каскад)
+| Layer | What | Where the protection lives |
+| --- | --- | --- |
+| **L7 application layer (rate-based)** | a flood by HTTP request frequency; an adaptive response to "bad" traffic | the cascade (rate limits + challenge + attack_mode) plus reputation analytics |
+| **Connection/protocol level** | slow attacks (slowloris / slow POST / slow read) and HTTP/2 DoS (Rapid Reset) | nginx directives plus the build version; observation in Lua |
+| **Volumetric L3/L4** | SYN/UDP floods, amplification — saturating the link or stack before the handshake | the network layer outside the proxy's perimeter; the proxy only supplies candidates |
 
-- **Per-request rate-limit (GCRA).** Профили по разным ключам (IP, IP+UA, API-путь,
-TLS-отпечаток, recon-URL) со скользящими окнами. Превышение → challenge или отказ
-по политике.
-- **Challenge.** Под нагрузкой challenge работает фильтром: человек проходит, дешевый
-флуд-бот — нет.
-- **attack_mode (per-host).** Тумблер повышенной строгости для конкретного хоста:
-ниже пороги, агрессивнее challenge.
+The thread running through all three is a shared reputation sink: repeat offenders (by IP,
+by /24 subnet, by ASN) accumulate in a single reputation artifact that raises strictness at
+L7 and, ultimately, escalates into a network ACL feed.
 
-### 3.2 Адаптивность (этот слой)
+## 2. The principle on one screen
 
-- **Авто-attack-mode.** Атака детектируется не по голому объему, а по «плохому»
-трафику относительно базлайна хоста: доля ботов, доля нерешенных challenge
-(solve-rate ≈ 0 при многих выданных), рост латентности origin. Превышение →
-авто-взвод `attack_mode`; снятие — с гистерезисом (чтобы не дребезжал).
-**Ручная установка режима приоритетна** над авто. Флаг авто-режима — per-host.
-- **Subnet/IP-репутация.** Повторные нарушители агрегируются по /24-подсети и
-ASN (особенно datacenter-пулы). Репутация — глобальный артефакт (не per-host):
-один и тот же атакующий пул виден всем тенантам. Soft-сигнал: повышает score и
-строгость, не блокирует сам по себе.
-- **Transient subnet challenge→drop.** Под атакой (`attack_mode` хоста) подсеть с
-плохой репутацией и solve-rate ≈ 0 может временно эскалироваться от challenge до
-drop. Реактивные per-/24 счетчики на эдже, TTL + авто-снятие после спада атаки,
-прайор из глобальной репутации.
-- **Кросс-тенантный hot-list (быстрый tier).** Атака на одного тенанта — разведка для
-защиты остальных. Активные атакующие (fp/subnet) авто-публикуются в short-TTL
-hot-list, пред-взводящий все эджи: при пивоте ботнета с тенанта A на B остальные
-реагируют за секунды (challenge-first, ниже порог). Высокий порог промоута в
-hot-list (ложный hot-list бьет всех → усиливает требования к anti-poisoning).
-Медленный tier (PR-gated глобальные каталоги) остается для устойчивых нарушителей.
-
-### 3.3 solve-rate как сигнал бота под флудом
-
-Доля решенных challenge по отпечатку/источнику — near-ground-truth метка под флудом:
-источник, который массово получает challenge и почти не решает его при достаточном
-числе выданных, — почти наверняка бот. Сигнал питает и авто-attack-mode (3.2), и
-score детектора (см. [analytics-spec.md](analytics-spec.md)).
+- **The foundation is already in the cascade.** Per-request rate limits (the GCRA
+  profiles), the challenge and the per-host `attack_mode` are the baseline L7 protection
+  from the vision. The DDoS layer adds **adaptivity and memory** on top: automatic attack
+  detection, subnet reputation, cross-tenant signal exchange.
+- **Not everything is catchable in the cascade.** A slow client and a reset HTTP/2 stream
+  never reach the cascade's decision phase. nginx mitigates them (directives, the build
+  version) while the layer only observes and feeds reputation. Protection here is not a new
+  cascade stage.
+- **Volumetric attacks are outside the proxy.** Link saturation happens before the
+  handshake; the proxy is physically not the point of mitigation. The most the layer can do
+  is put confirmed offenders into a network ACL feed.
+- **Global reputation, local enforcement.** The attacker's reputation
+  (fingerprint/subnet/ASN) is shared across all tenants; the enforcement stance
+  (challenge/drop) is per tenant and engages during an attack on that specific tenant.
+- **Adaptivity with hysteresis and human priority.** Automatic attack mode engages on "bad"
+  traffic (not raw volume) and lifts with hysteresis; a manual setting always outranks the
+  automatic one.
 
 ---
 
-## 4. Слой connection/protocol-level
+## 3. The L7 application layer (rate-based)
 
-Защита от атак, которые не сводятся к частоте HTTP-запросов и потому невидимы для
-rate-limit-слоя. Два семейства:
+Protection against floods by HTTP request frequency. The base is the cascade; this layer
+adds adaptivity.
 
-- **Slow-attacks** (slowloris / slow POST / slow read) — атака на уровне TCP-соединения:
-много соединений, которые медленно или никогда не завершают передачу, выедая слоты
-воркеров.
-- **HTTP/2 DoS** (Rapid Reset, CVE-2023-44487 и родня) — атака на уровне HTTP/2-фреймов:
-дешевое для клиента создание + отмена стримов, дорогое для сервера.
+### 3.1 The base (the cascade)
 
-### 4.1 Почему каскад этого не ловит
+- **Per-request rate limits (GCRA).** Profiles across different keys (IP, IP+UA, API path,
+  TLS fingerprint, recon URLs) with sliding windows. Exceeding one leads to a challenge or a
+  refusal, per the policy.
+- **The challenge.** Under load the challenge works as a filter: a human passes, a cheap
+  flood bot does not.
+- **attack_mode (per host).** A toggle for heightened strictness on a specific host: lower
+  thresholds, a more aggressive challenge.
 
-Каскад исполняется в фазе решения после того, как сервер распарсил строку запроса
-и заголовки. Атаки этого класса живут ниже этой точки:
+### 3.2 Adaptivity (this layer)
 
+- **Automatic attack mode.** An attack is detected not by raw volume but by "bad" traffic
+  relative to the host's baseline: the share of bots, the share of unsolved challenges (a
+  solve rate ≈ 0 with many issued), rising origin latency. Exceeding the thresholds raises
+  `attack_mode` automatically; lifting it uses hysteresis (so it does not chatter). **A
+  manual setting outranks** the automatic one. The automatic-mode flag is per host.
+- **Subnet/IP reputation.** Repeat offenders are aggregated by /24 subnet and ASN
+  (especially datacenter pools). The reputation is a global artifact (not per host): the
+  same attacking pool is visible to every tenant. It is a soft signal: it raises the score
+  and the strictness without blocking by itself.
+- **Transient subnet challenge→drop.** During an attack (the host's `attack_mode`), a
+  subnet with bad reputation and a solve rate ≈ 0 may temporarily escalate from a challenge
+  to a drop. Reactive per-/24 counters on the edge, a TTL plus automatic lifting once the
+  attack subsides, with a prior from the global reputation.
+- **A cross-tenant hot list (the fast tier).** An attack on one tenant is reconnaissance
+  protecting the rest. Active attackers (fingerprint/subnet) are auto-published to a
+  short-TTL hot list that pre-arms every edge: when a botnet pivots from tenant A to B, the
+  others react within seconds (challenge-first, a lower threshold). The bar for promotion
+  into the hot list is high (a false hot list hits everyone, which raises the requirements
+  on anti-poisoning). The slow tier (PR-gated global catalogs) remains for persistent
+  offenders.
 
-| Атака          | Почему мимо каскада                                                                  |
-| -------------- | ------------------------------------------------------------------------------------ |
-| slowloris      | заголовки не дослал → фаза решения для соединения толком не запускается              |
-| slow POST/read | мало запросов, много idle-соединений → счетчик частоты их не видит                   |
-| Rapid Reset    | стрим сброшен на frame-уровне до HTTP-семантики → per-request механизмы его не видят |
+### 3.3 Solve rate as a bot signal under a flood
 
+The share of solved challenges per fingerprint or source is a near-ground-truth label under
+a flood: a source that receives challenges en masse and almost never solves them, with
+enough issued, is almost certainly a bot. The signal feeds both the automatic attack mode
+(3.2) and the detector's score (see [analytics-spec.md](analytics-spec.md)).
 
-Дополнительно: challenge против такого клиента бесполезен — он не завершает запрос,
-страница challenge до него не доходит.
+---
 
-### 4.2 Архитектурный принцип: nginx митигирует → Lua наблюдает → репутация эскалирует
+## 4. The connection/protocol level
 
-Это не новая стадия каскада. Slow-клиент и сброшенный стрим не доходят до фазы
-решения, поэтому добавлять туда нечего. Паттерн для всего класса:
+Protection against attacks that do not reduce to HTTP request frequency and are therefore
+invisible to the rate-limit layer. Two families:
+
+- **Slow attacks** (slowloris / slow POST / slow read) — an attack at the TCP connection
+  level: many connections that finish transmitting slowly or never, eating worker slots.
+- **HTTP/2 DoS** (Rapid Reset, CVE-2023-44487 and relatives) — an attack at the HTTP/2
+  frame level: creating and cancelling streams is cheap for the client and expensive for
+  the server.
+
+### 4.1 Why the cascade does not catch this
+
+The cascade runs in the decision phase, after the server has parsed the request line and
+the headers. Attacks of this class live below that point:
+
+| Attack | Why it misses the cascade |
+| --- | --- |
+| slowloris | the headers were never finished → the decision phase barely starts for that connection |
+| slow POST/read | few requests, many idle connections → a frequency counter never sees them |
+| Rapid Reset | the stream is reset at the frame level, before HTTP semantics → per-request mechanisms never see it |
+
+On top of that, a challenge against such a client is useless — it never finishes the
+request, so the challenge page never reaches it.
+
+### 4.2 The architectural principle: nginx mitigates → Lua observes → reputation escalates
+
+This is not a new cascade stage. A slow client and a reset stream never reach the decision
+phase, so there is nothing to add there. The pattern for the whole class:
 
 ```
-nginx/билд   →  МИТИГИРУЕТ (директивы, пропатченная версия)   ← реальная защита
-   Lua       →  НАБЛЮДАЕТ (log-фаза → лог-событие)             ← слой наблюдения
-репутация    →  ЭСКАЛИРУЕТ (subnet/IP → enforcement/ACL-feed)  ← общий сток DDoS
+nginx/build  →  MITIGATES (directives, a patched version)      ← the real protection
+   Lua       →  OBSERVES (the log phase → a log event)          ← the observation layer
+reputation   →  ESCALATES (subnet/IP → enforcement/ACL feed)    ← the shared DDoS sink
 ```
 
-Вклад слоя здесь — не блокировка (ее делает nginx), а превращение nginx-дропов в
-наблюдаемый, репутационно-питающий сигнал и его эскалация в общий DDoS-механизм.
+The layer's contribution here is not blocking (nginx does that) but turning nginx's drops
+into an observable signal that feeds reputation, and escalating it into the shared DDoS
+mechanism.
 
-### 4.3 Slow-attacks — митигация (директивы)
+### 4.3 Slow attacks — mitigation (directives)
 
-Чистый nginx-конфиг, 0 Lua, дает основную часть эффекта; полностью обратимо:
+Pure nginx config, zero Lua, delivering most of the effect; fully reversible:
 
-- `client_header_timeout` / `client_body_timeout` — срезать до 10–15s: рвут
-соединения, не завершающие заголовки/тело (отказ `408`). `send_timeout` (slow read)
-— обрывает соединение при медленном вычитывании ответа (без `408`).
-- `limit_conn` по `$binary_remote_addr` — cap одновременных соединений на IP;
-`limit_conn_status` для кода отказа (`503`).
-- `keepalive_requests` / `keepalive_timeout` — ограничить удержание idle-keepalive.
-- `large_client_header_buffers`, осознанный `client_max_body_size` для прокси-путей.
+- `client_header_timeout` / `client_body_timeout` — cut them to 10–15 s: they tear down
+  connections that never finish their headers or body (a `408` refusal). `send_timeout`
+  (slow read) closes the connection when the response is read too slowly (with no `408`).
+- `limit_conn` by `$binary_remote_addr` — a cap on simultaneous connections per IP;
+  `limit_conn_status` for the refusal code (`503`).
+- `keepalive_requests` / `keepalive_timeout` — limit how long idle keepalives are held.
+- `large_client_header_buffers`, and a deliberate `client_max_body_size` for proxied paths.
 
-Гарантия: легитимные клиенты проходят с запасом (типовой запрос — единицы КБ).
+The guarantee: legitimate clients pass with room to spare (a typical request is a few KB).
 
-### 4.4 Slow-attacks — наблюдение
+### 4.4 Slow attacks — observation
 
-Lua-хук в log-фазе читает `$status` и длительность `$request_time` (пишется в лог как
-`latency_ms` — тот же канонический lat-field, что у каскада). Таймаут заголовков/тела
-(`408`) и отказ `limit_conn` (`503`) → лог-событие с тегом `slow_client` / `conn_flood`
-→ дашборд + счетчик по IP / /24. Ограничение: видно только то, что nginx отдает в
-log-фазе; slow read (`send_timeout`) обрывает соединение без `408` — наблюдается
-лишь как connection-close, не как тег `slow_client`.
+A Lua hook in the log phase reads `$status` and the duration `$request_time` (written to
+the log as `latency_ms`, the same canonical latency field the cascade uses). A header or
+body timeout (`408`) and a `limit_conn` refusal (`503`) → a log event tagged `slow_client`
+/ `conn_flood` → the dashboard plus counters by IP and /24. The limitation: only what nginx
+exposes in the log phase is visible; slow read (`send_timeout`) closes the connection
+without a `408`, so it appears only as a connection close, not as a `slow_client` tag.
 
-### 4.5 Slow-attacks — policy-ручка (опционально)
+### 4.5 Slow attacks — a policy knob (optional)
 
-Под `attack_mode` / повышенной строгостью — более жесткая зона `limit_conn` / ниже
-таймауты. Честное ограничение: nginx-директивы нельзя менять per-request из Lua.
-Реализация — `map`-driven выбор зоны per-host или грубый global-toggle, не плавная
-per-request подстройка. Может не делаться, если базовые директивы + наблюдение
-закрывают риск.
+Under `attack_mode` or heightened strictness: a stricter `limit_conn` zone and lower
+timeouts. The honest limitation: nginx directives cannot be changed per request from Lua.
+The implementation is a `map`-driven zone selection per host, or a coarse global toggle —
+not smooth per-request tuning. It may not be built at all if the base directives plus
+observation already cover the risk.
 
-### 4.6 HTTP/2 DoS — митигация (билд + директивы)
+### 4.6 HTTP/2 DoS — mitigation (build plus directives)
 
-- Версия билда, считающая сброшенные-без-завершения стримы и рвущая соединение при
-превышении (Rapid Reset): OpenResty/nginx ≥ 1.25.3.
-- `http2_max_concurrent_streams` — затюнить; пороги CONTINUATION/PING/SETTINGS flood
-по версии билда; осознанный `keepalive_requests` для h2.
+- A build version that counts streams reset before completion and tears down the connection
+  when the count is exceeded (Rapid Reset): OpenResty/nginx ≥ 1.25.3.
+- `http2_max_concurrent_streams` — tune it; the CONTINUATION/PING/SETTINGS flood thresholds
+  come with the build version; a deliberate `keepalive_requests` for h2.
 
-### 4.7 HTTP/2 DoS — h2-abuse как сигнал (опционально)
+### 4.7 HTTP/2 DoS — h2 abuse as a signal (optional)
 
-Если доступна идентификация HTTP/2-клиента (HTTP/2 fingerprint), аномальные
-SETTINGS/stream-паттерны можно использовать как сигнал в репутацию/score, даже
-когда frame-митигация остается в nginx. Детект-ассист, не митигация.
+If HTTP/2 client identification (an HTTP/2 fingerprint) is available, anomalous
+SETTINGS/stream patterns can be used as a signal into reputation and the score, even while
+frame mitigation stays in nginx. Detection assistance, not mitigation.
 
-> HTTP/2 DoS-mitigation (Rapid Reset) и HTTP/2 fingerprint (идентификация
-> клиента, анти-ротация отпечатка) — разные задачи; первое — этот слой, второе —
-> сигнал детектора (см. [analytics-spec.md](analytics-spec.md)).
-
----
-
-## 5. Слой волюметрики L3/L4
-
-SYN/UDP-флуд и амплификация насыщают канал и сетевой стек до TLS-рукопожатия —
-прокси к этому моменту еще не вовлечен и физически не точка митигации.
-
-- **Граница.** Сама митигация волюметрики — задача сетевого слоя (scrubbing,
-anycast, провайдерский фильтр), вне периметра прокси.
-- **Вклад слоя.** Прокси поставляет подтвержденных нарушителей (IP / /24,
-накопленные из L7 и connection/protocol сигналов) в edge-ACL feed — контракт
-эскалации в сетевой слой. Решение о сетевом дропе принимает сетевой слой.
+> HTTP/2 DoS mitigation (Rapid Reset) and HTTP/2 fingerprinting (client identification,
+> anti-fingerprint-rotation) are different tasks; the first belongs to this layer, the
+> second is a detector signal (see [analytics-spec.md](analytics-spec.md)).
 
 ---
 
-## 6. Общий сток репутации
+## 5. The volumetric L3/L4 layer
 
-Все три слоя кормят один артефакт репутации:
+SYN/UDP floods and amplification saturate the link and the network stack before the TLS
+handshake — at that moment the proxy is not yet involved and is physically not the point of
+mitigation.
+
+- **The boundary.** Mitigating volumetric attacks is the network layer's job (scrubbing,
+  anycast, a provider filter), outside the proxy's perimeter.
+- **The layer's contribution.** The proxy supplies confirmed offenders (IPs and /24s
+  accumulated from the L7 and connection/protocol signals) into an edge-ACL feed — the
+  contract for escalating into the network layer. The decision to drop at the network level
+  belongs to the network layer.
+
+---
+
+## 6. The shared reputation sink
+
+All three layers feed one reputation artifact:
 
 ```
-L7 (плохой трафик/solve-rate) ─┐
-connection/protocol (408/503) ─┼─► subnet/IP/ASN репутация ─► enforcement (per-tenant)
-                               │                            └─► edge-ACL feed (сеть)
-HTTP/2 abuse (опц. сигнал) ────┘
+L7 (bad traffic / solve rate) ─┐
+connection/protocol (408/503) ─┼─► subnet/IP/ASN reputation ─► enforcement (per tenant)
+                               │                             └─► edge-ACL feed (network)
+HTTP/2 abuse (optional signal) ┘
 ```
 
-Репутация — глобальная (артефакт виден всем тенантам), enforcement — per-tenant
-(включается под атакой конкретного тенанта). Это дает сетевой эффект (атака на одного
-защищает остальных), не наказывая тенантов чужими порогами.
+The reputation is global (the artifact is visible to every tenant) while enforcement is per
+tenant (it engages during an attack on that specific tenant). This gives the network effect
+(an attack on one protects the rest) without punishing tenants with someone else's
+thresholds.
 
 ---
 
-## 7. Что переиспользуется из каскада
+## 7. What is reused from the cascade
 
-- **Лог-контракт** — connection/protocol-сигналы пишутся тем же лог-событием, что и
-стадии каскада, без новой стадии решения.
-- **Счетчики/метрики** — инкременты `slow_client` / `conn_flood` по IP / /24.
-- **`attack_mode` и строгость (policy)** — для policy-ручки и адаптивности.
-- **Каталоги и их доставка** — медленный tier репутации едет тем же путем доставки
-каталогов, что и блок-листы.
-
----
-
-## 8. Технические гарантии и границы
-
-- **Адаптивность L7 — с гистерезисом и приоритетом человека.** Авто-attack-mode не
-дребезжит и всегда уступает ручной установке.
-- **Connection/protocol — реальная защита у nginx.** Lua не блокирует, только
-наблюдает; недоступность слоя наблюдения не влияет на саму митигацию.
-- **Per-request адаптивных лимитов соединений нет.** nginx-директивы статичны на
-конфиг; policy-ручка переключает зоны грубо (per-host / global), не per-request.
-- **Волюметрика L3/L4 — вне прокси.** Максимум слоя — контракт edge-ACL feed; сетевую
-митигацию выполняет внешний слой.
-- **Глобальная репутация требует anti-poisoning.** Кросс-тенантный hot-list бьет
-всех при ошибке → высокий порог промоута и устойчивость к загрязнению обязательны
-(см. [analytics-spec.md](analytics-spec.md)).
+- **The log contract** — connection/protocol signals are written with the same log event as
+  the cascade stages, with no new decision stage.
+- **Counters and metrics** — `slow_client` / `conn_flood` increments by IP and /24.
+- **`attack_mode` and strictness (the policy)** — for the policy knob and adaptivity.
+- **The catalogs and their delivery** — the slow tier of reputation travels the same
+  delivery path as the blocklists.
 
 ---
 
-## 9. Зоны ответственности
+## 8. Technical guarantees and boundaries
 
+- **L7 adaptivity comes with hysteresis and human priority.** Automatic attack mode does not
+  chatter and always yields to a manual setting.
+- **At the connection/protocol level the real protection is nginx's.** Lua does not block,
+  only observes; if the observation layer is unavailable, the mitigation itself is
+  unaffected.
+- **There are no per-request adaptive connection limits.** nginx directives are static per
+  config; the policy knob switches zones coarsely (per host or globally), not per request.
+- **Volumetric L3/L4 is outside the proxy.** The most the layer offers is the edge-ACL feed
+  contract; the network mitigation is performed by an external layer.
+- **Global reputation requires anti-poisoning.** A cross-tenant hot list hits everyone when
+  it is wrong → a high promotion bar and resistance to poisoning are mandatory (see
+  [analytics-spec.md](analytics-spec.md)).
 
-| Кто                                 | Что делает                                                                    |
-| ----------------------------------- | ----------------------------------------------------------------------------- |
-| **nginx / билд**                    | реальная митигация slow-attacks (директивы) и HTTP/2 DoS (версия + директивы) |
-| **Слой наблюдения (Lua, log-фаза)** | превращает nginx-дропы в лог-сигналы, кормит репутацию                        |
-| **Каскад**                          | base L7: rate-limit, challenge, attack_mode                                   |
-| **Аналитика репутации**             | subnet/IP/ASN-репутация, авто-attack-mode, hot-list, anti-poisoning           |
-| **Сетевой слой (вне прокси)**       | митигация волюметрики L3/L4 по edge-ACL feed                                  |
+---
 
+## 9. Areas of responsibility
 
-## 10. Что не входит
+| Who | What they do |
+| --- | --- |
+| **nginx / the build** | the real mitigation of slow attacks (directives) and HTTP/2 DoS (version plus directives) |
+| **The observation layer (Lua, the log phase)** | turns nginx's drops into log signals and feeds reputation |
+| **The cascade** | the L7 base: rate limits, the challenge, attack_mode |
+| **Reputation analytics** | subnet/IP/ASN reputation, automatic attack mode, the hot list, anti-poisoning |
+| **The network layer (outside the proxy)** | mitigating volumetric L3/L4 from the edge-ACL feed |
 
-- Митигация волюметрики L3/L4 на самом прокси (физически невозможно — вне периметра).
-- Плавные per-request лимиты соединений (ограничение nginx-директив).
-- Идентификация клиента по HTTP/2-отпечатку как самостоятельная задача — это сигнал
-детектора, а не митигация (см. [analytics-spec.md](analytics-spec.md)).
-- Контентная инспекция (SQLi/XSS/…) — соседний слой WAF со своей спецификацией.
+## 10. What is not included
 
+- Mitigating volumetric L3/L4 on the proxy itself (physically impossible — outside the
+  perimeter).
+- Smooth per-request connection limits (an nginx directive limitation).
+- Client identification by HTTP/2 fingerprint as a task in its own right — that is a
+  detector signal, not mitigation (see [analytics-spec.md](analytics-spec.md)).
+- Content inspection (SQLi/XSS/…) — the adjacent WAF layer, with its own specification.
