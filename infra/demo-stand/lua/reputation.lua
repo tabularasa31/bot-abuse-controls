@@ -1,83 +1,23 @@
--- L2 reputation stage — system IP lists (rules-reference L2, vision §2.3–2.4).
+-- L2 reputation: source IP, ASN and geo.
 --
--- Two source-IP checks via lua-resty-ipmatcher (CIDR-aware, IPv4 + IPv6):
---   1. ip_whitelist (category allow)    — our monitoring / check services.
---   2. ip_blocklist (category blocking) — known-bad IPs/CIDRs.
--- Whitelist is checked FIRST (vision §2.3 before §2.4): a whitelisted IP wins
--- and the blocklist is not consulted.
+-- Allow rules run before blocking ones — a whitelisted IP wins and the
+-- blocklist is never consulted. The blocking side records the verdict and goes
+-- through policy.enforce; the allow side deliberately does not short-circuit
+-- the cascade on the stand, so a later fingerprint block still shows up in the
+-- log.
 --
--- Runs AFTER hygiene, BEFORE tls_fp (cascade order hygiene → reputation →
--- tls_fp → rate_limits → verification).
+-- The system lists (ip_whitelist, ip_blocklist, asn_datacenters) are compiled
+-- from local config at startup and then swapped to the Channel C snapshot on a
+-- generation flip. Blocklist entries with status=staging compile into a
+-- parallel matcher that only records staging_match and never blocks.
 --
--- Mode-gated enforcement (B11 / 86exr05q7). The block-side rules
--- (ip_blocklist and the dormant geo_blocklist) record the would-be
--- verdict via bac_log and then call policy.enforce(403). For a host
--- with policy.mode=active that means ngx.exit(403) right here (cascade
--- dies, later stages do not run). For mode=shadow (pool default) the
--- enforce is a no-op: run returns true, verdict.lua keeps going to
--- tls_fp / rate_limit so their would-be verdicts and tags still
--- accumulate. Last-writer-wins on the verdict matches phase1-spec
--- "the final rule that fired" (a later tls_fp block can still
--- overwrite the reputation rule in the shadow log).
+-- Each request is also matched against the host's own policy lists. Rule names
+-- are namespaced (`ip_blocklist` versus `policy.ip_blocklist`) so hits stay
+-- attributable to the right source.
 --
--- The allow-side (ip_whitelist match, verified_bots verified/pending)
--- still does NOT short-circuit the cascade — in either mode. Production
--- would fastpass past L3-L5 here, but the stand keeps going so a later
--- tls_fp block can still demonstrate (and so an active-mode whitelisted
--- IP can't accidentally skip a real tls_fp_blocklist hit downstream).
--- Switching the allow-side to a real fastpass is a separate task (paired
--- with per-host policy.ip_whitelist application, 86exr05xt).
---
--- Data. ip_whitelist, ip_blocklist and asn_datacenters all follow the
--- production Channel C model: build() compiles the cold-start matcher/set from
--- the local conf (whitelist_ip.conf / blocklist_ip.conf / asn_datacenters.conf),
--- init.lua seeds gen 0 into the matching shared_dict, and a per-request,
--- gen-cached refresh swaps to the Channel C snapshot (gen 1+, sourced from
--- catalogs/*.yaml):
---   * ip_blocklist     — refresh()           (A11, 86exrtjpc; active + staging).
---   * ip_whitelist     — refresh_whitelist()  (B12, 86ext2zb4; flat allow list,
---                        no status → no staging matcher).
---   * asn_datacenters  — refresh_asn()        (B12, 86ext2zb4; membership set
---                        behind the reputation:asn_dc tag, flat list).
--- The rule names, stage, category and log contract are unchanged — only the
--- data source changes. The per-host policy.{ip_whitelist,ip_blocklist} are
--- separate catalogs applied via policy_matchers and are unaffected.
---
--- Staging (A11, 86exrtjpc): blocklist entries with status=staging are excluded
--- from the active matcher and compiled into a parallel staging matcher
--- (blocklist_staging, value-map so match returns the CIDR). run() records
--- staging_match: ["ip_blocklist:<cidr>"] for them and NEVER blocks — pure
--- observation for the staging→active promotion workflow, symmetric with
--- hygiene's ua_blacklist staging and tls_fp's blocklist staging.
---
--- A6 additions (geo/ASN, rules-reference L2 #9 + tag T1):
---   * geo_country / asn log fields — filled every request from a GeoLite2
---     lookup (geoip.lua) via bac_log.set_source.
---   * reputation:asn_dc — informational TAG (not a rule, emits no verdict):
---     request ASN is in asn_datacenters.conf. Accumulates in `tags` like
---     hygiene:header_anomaly, independent of the verdict.
---   * geo_blocklist — blocking rule, country NOT in the allowed-countries
---     whitelist. Source is per-resource policy[host].geo_whitelist; there
---     is no system-wide country list (geo-allow is a per-resource choice).
---     Live as of 86exr05xt — fires when the host's policy has a non-empty
---     geo_whitelist and the request country is outside it.
---
--- Per-host policy lists (86exr05xt). For each request the stage also
--- matches against policy[host].{ip_whitelist, ip_blocklist, asn_block,
--- geo_whitelist} pulled from antibot_policy shared_dict and compiled
--- through policy_matchers.lua (lrucache by (host, gen) — see that
--- module's header). Rule names in the log are namespaced so analytics
--- can split per-host hits from system-list hits:
---   * `ip_whitelist`        / `policy.ip_whitelist`
---   * `ip_blocklist`        / `policy.ip_blocklist`
---   * (no system asn rule)  / `policy.asn_block`
---   * (no system geo rule)  / `policy.geo_blocklist`
--- Empty per-host lists (pool default, untouched dashboard) are the
--- backwards-compatible no-op: policy_matchers returns the EMPTY
--- sentinel and every per-host check short-circuits at the first guard.
--- The verified-bot fastpath (B8) lives in verified_bots.lua and is
--- invoked inline below between the whitelist allow-checks and the
--- blocklist block-checks.
+-- reputation:asn_dc is a tag rather than a rule: it marks datacenter traffic
+-- and emits no verdict. geo_blocklist is per-host only — there is no
+-- system-wide country list, since geo gating is a customer choice.
 
 local policy          = require "policy"
 local policy_matchers = require "policy_matchers"
@@ -93,11 +33,7 @@ local _M = {
     demo_geo_header = false, -- honour X-Demo-IP override (stand testing); env-gated
 }
 
--- pure: array of `value` strings from a parsed list (config_loader.parse_list
--- output: { { value = "<ip-or-cidr>", attrs = { status = ... } }, ... }),
--- excluding status=staging entries. Returns {} when the list is nil/empty/
--- all-staging. No ngx / ipmatcher dependency so it is unit-testable under bare
--- luajit (tests/reputation_test.lua).
+-- The active values of a parsed list, with staged entries excluded.
 function _M.active_values(list)
     local out = {}
     for _, e in ipairs(list or {}) do
@@ -136,24 +72,17 @@ function _M.to_set(values)
     return set
 end
 
--- pure: geo_blocklist decision. Block when an allowed-countries whitelist is
--- configured AND the request country is known AND it is NOT in the whitelist
--- (rules-reference #9 inverted logic). An empty/absent whitelist (the Phase 1
--- stand reality — no per-resource policy yet) or an unknown country never
--- blocks. No ngx dependency — unit-tested.
+-- Blocks only when a whitelist is configured and the country is known and
+-- outside it. An absent whitelist or an unknown country never blocks.
 function _M.country_blocked(allow, cc)
     if not allow or not next(allow) then return false end
     if not cc or cc == "" then return false end
     return not allow[cc]
 end
 
--- IP used for the GeoLite2 lookup only. Production: the real remote_addr.
--- Stand testing: when BAC_DEMO_GEO_HEADER=on, an X-Demo-IP request header
--- overrides it so a reviewer can simulate a public IP (a local/private client
--- IP has no GeoIP entry). The toggle defaults off, so on a live VM the header
--- is inert. The override applies ONLY to geo enrichment — the ip_whitelist /
--- ip_blocklist matchers always use the real remote_addr, so a caller-supplied
--- header can never rewrite a reputation verdict or skew rule metrics.
+-- For the geo lookup only. A header override is available for testing behind a
+-- toggle that is off by default; the IP matchers always use the real
+-- remote_addr, so a caller-supplied header can never move a verdict.
 local function geo_lookup_ip(remote_addr)
     if _M.demo_geo_header then
         local override = ngx.var.http_x_demo_ip
@@ -162,23 +91,11 @@ local function geo_lookup_ip(remote_addr)
     return remote_addr
 end
 
--- Called once in init_by_lua, after config.load(). Compiles the on-disk IP
--- lists into the per-process ipmatcher objects the request path reads.
+-- Compiles the on-disk lists into the matchers the request path reads.
 --
--- Empty active list => nil matcher (run() skips it); an empty blocklist is the
--- Phase 1 default and must not error.
---
--- A malformed IP/CIDR is FATAL, not fail-open: ipmatcher.new returns nil on a
--- bad entry, and we error out of init_by_lua (aborting the start) rather than
--- log-and-nil the whole list. Silently disabling all of ip_whitelist or
--- ip_blocklist on one bad line is a hard-to-notice protection gap; failing
--- loudly on a config typo matches config.lua's load-or-die contract ("fail
--- loudly rather than run a half-configured cascade").
---
--- A rule can also be disabled via defaults.conf ([blocking.ip_blocklist] /
--- [allow.ip_whitelist] enabled=false) — a runtime toggle for rollback /
--- incident handling, mirroring how hygiene.lua honours blocking.ua_blacklist.
--- A disabled rule yields a nil matcher (count 0); absent flag means enabled.
+-- A malformed CIDR aborts the start rather than nilling the list: one bad line
+-- silently disabling the whole whitelist or blocklist is a protection gap
+-- nobody would notice.
 function _M.build(config)
     local ipmatcher = require "resty.ipmatcher"
     local defaults  = config.defaults or {}
@@ -200,22 +117,14 @@ function _M.build(config)
         return m, #values
     end
 
-    -- Toggle flags are stored separately from the matchers because the
-    -- per-host equivalents (policy[host].ip_whitelist / ip_blocklist
-    -- via policy_matchers) must also honour the kill-switch — an
-    -- operator disabling ip_blocklist for incident rollback expects no
-    -- IP-based blocking ANYWHERE, system or per-host (codex P1 on PR
-    -- #71). matcher-nil collapses "disabled" and "no entries"; we can't
-    -- distinguish them in run() without the explicit flag.
+    -- Kept separate from the matchers, which cannot distinguish "disabled"
+    -- from "no entries". The per-host lists honour the same switch: disabling
+    -- the rule during an incident must stop all IP blocking.
     _M.ip_whitelist_enabled = rule_enabled("allow", "ip_whitelist")
     _M.ip_blocklist_enabled = rule_enabled("blocking", "ip_blocklist")
 
-    -- Staging matcher (A11): value-map (cidr → cidr) so match() returns the
-    -- matched CIDR, needed for the staging_match pattern_id
-    -- (["ip_blocklist:<cidr>"]). Gated on the same ip_blocklist_enabled
-    -- kill-switch as the active matcher — disabling the rule for rollback
-    -- silences observe-only staging too. A malformed staged CIDR is FATAL
-    -- (same load-or-die contract as the active matcher).
+    -- A value map, so a match returns the CIDR that matched — that is the
+    -- identifier recorded in staging_match.
     local function staging_matcher(list, label, enabled)
         if not enabled then return nil, {} end
         local values = _M.staging_values(list)
@@ -255,13 +164,8 @@ function _M.build(config)
     -- kill_switch; defaults.conf [kill_switch.*]).
     _M.enabled = require("config").stage_enabled(defaults, "reputation")
 
-    -- Per-worker gen caches for the Channel C refreshes. nil = "first refresh
-    -- rebuilds from current gen". The matchers/set above (from the local conf)
-    -- are the cold-start state; the refreshes take over once init.lua seeds gen 0
-    -- (conf) and Channel C lands gen 1+ (yaml):
-    --   * _cached_gen_ip  — ip_blocklist active + staging matcher (A11, 86exrtjpc)
-    --   * _cached_gen_wl  — ip_whitelist allow matcher (B12, 86ext2zb4)
-    --   * _cached_gen_asn — asn_datacenters membership set (B12, 86ext2zb4)
+    -- nil means the first refresh rebuilds. The matchers above are the
+    -- cold-start state until the catalog lands.
     _M._cached_gen_ip  = nil
     _M._cached_gen_wl  = nil
     _M._cached_gen_asn = nil
@@ -269,14 +173,9 @@ function _M.build(config)
     return _M, wl_n, bl_n
 end
 
--- refresh — gen-cached rebuild of the active + staging ip_blocklist matchers
--- from the Channel C snapshot (A11, 86exrtjpc). antibot_ip_blocklist holds
--- `<cidr>:<gen>` → "<status>:block"; on a gen flip we scan the current gen,
--- split active vs staging, and rebuild the two ipmatcher objects. Cheap in
--- steady state (one meta:get + int compare). Honours the ip_blocklist
--- kill-switch. Fail-soft: a matcher that fails to rebuild keeps the previous
--- one (backend validates CIDRs, so this is defence-in-depth). When the gen key
--- is absent (catalog never seeded/pulled) it keeps the build()-time conf state.
+-- Rebuilds the active and staging matchers on a generation flip; in steady
+-- state this is one dict read and an integer compare. Fail-soft: a rebuild that
+-- fails keeps the previous matcher.
 function _M.refresh()
     if not ngx or not ngx.shared then return end
     local meta = ngx.shared.meta
@@ -346,15 +245,8 @@ function _M.refresh()
     staging_metrics.reconcile("ip_blocklist", prev, _M.blocklist_staging_values)
 end
 
--- refresh_whitelist — gen-cached rebuild of the ip_whitelist allow matcher from
--- the Channel C snapshot (B12, 86ext2zb4). antibot_ip_whitelist holds
--- `<cidr>:<gen>` → "1" (flat list, no status → no staging matcher, unlike
--- ip_blocklist). On a gen flip we scan the current gen and rebuild the single
--- ipmatcher. Cheap in steady state (one meta:get + int compare). Honours the
--- ip_whitelist kill-switch. Fail-soft: a matcher that fails to rebuild keeps
--- the previous one (backend validates CIDRs — defence-in-depth). When the gen
--- key is absent (catalog never seeded/pulled) it keeps the build()-time conf
--- state.
+-- Same as refresh, for the whitelist. A flat list with no status, so there is
+-- no staging matcher here.
 function _M.refresh_whitelist()
     if not ngx or not ngx.shared then return end
     local meta = ngx.shared.meta
@@ -394,13 +286,8 @@ function _M.refresh_whitelist()
     _M._cached_gen_wl = gen
 end
 
--- refresh_asn — gen-cached rebuild of the asn_datacenters membership set from
--- the Channel C snapshot (B12, 86ext2zb4). antibot_asn_datacenters holds
--- `<asn>:<gen>` → "1". On a gen flip we scan the current gen and rebuild the
--- lookup set behind the reputation:asn_dc tag. Keys are stored as strings so
--- they match the geoip.lookup asn (also a string). The tag has no kill-switch
--- of its own (the stage-level kill-switch in run() covers it). When the gen key
--- is absent it keeps the build()-time conf set.
+-- Same as refresh, for the datacenter ASN set behind the asn_dc tag. Keys are
+-- strings, matching what the geo lookup returns.
 function _M.refresh_asn()
     if not ngx or not ngx.shared then return end
     local meta = ngx.shared.meta
@@ -425,22 +312,11 @@ function _M.refresh_asn()
     _M._cached_gen_asn = gen
 end
 
--- Called per request from verdict.lua, after bac_log.init(). Records the
--- would-be verdict via bac_log; on a block-side match (ip_blocklist /
--- geo_blocklist) it then calls policy.enforce(403), which 403s the
--- request for mode=active hosts and is a no-op for mode=shadow. The
--- allow-side (ip_whitelist, verified_bots verified/pending) stays
--- non-short-circuiting in either mode — see the header comment. The
--- boolean return (true when any rule matched, including allow) is
--- informational only; verdict.lua does not branch on it.
+-- The boolean return is informational; the caller does not branch on it.
 function _M.run()
     if not _M.enabled then return false end
 
-    -- Pull the latest Channel C snapshots. Cheap in steady state (gen compare);
-    -- each rebuilds only on its own gen flip:
-    --   * refresh()           — ip_blocklist active + staging matchers (A11)
-    --   * refresh_whitelist()  — ip_whitelist allow matcher (B12)
-    --   * refresh_asn()        — asn_datacenters membership set (B12)
+    -- Each rebuilds only on its own generation flip.
     _M.refresh()
     _M.refresh_whitelist()
     _M.refresh_asn()
@@ -454,31 +330,21 @@ function _M.run()
     local bac_log = package.loaded["bac_log"] or require "bac_log"
     local geoip   = package.loaded["geoip"]   or require "geoip"
 
-    -- Source enrichment + asn_dc tag run for EVERY request, independent of the
-    -- verdict (tags accumulate even when a blocking rule fires; the log fields
-    -- must be populated regardless). geo is fail-open: nil cc/asn just leaves
-    -- the fields null and the tag unset. The lookup IP may be an X-Demo-IP
-    -- override (stand testing); the matchers below still use the real ip.
+    -- Runs for every request: the log fields must be populated whatever the
+    -- verdict. Fail-open — an unresolved lookup just leaves them null.
     local cc, asn = geoip.lookup(geo_lookup_ip(ip))
     bac_log.set_source(asn, cc)
     if asn and _M.asn_dc_set[asn] then
         bac_log.add_tag("reputation:asn_dc")
     end
 
-    -- Per-host policy matchers (86exr05xt). Compiled once per (host, gen)
-    -- and lru-cached; the call below is a constant-time dictionary lookup
-    -- after the first hit per worker. EMPTY sentinel means the host has
-    -- no per-host lists at all — every `if pm.x then ...` guard then
-    -- short-circuits and the stage runs at pre-PR cost.
+    -- A constant-time lookup after the first hit per worker. The empty sentinel
+    -- means the host has no lists, and every guard below short-circuits.
     local host = ngx.var.host
     local pm   = policy_matchers.get(host)
 
-    -- Verdict rules, first match wins within the stage (allow before blocking,
-    -- vision §2.3 → §2.4 → geo). A match returns so a later same-stage rule
-    -- doesn't overwrite it under bac_log's last-writer-wins. System lists
-    -- are checked alongside per-host lists in each category — rule name
-    -- distinguishes them in the log (`ip_whitelist` vs `policy.ip_whitelist`)
-    -- so analytics can attribute hits to the right source.
+    -- First match wins, allow before blocking. Each match returns, so a later
+    -- rule in the same stage cannot overwrite it.
     if _M.whitelist and _M.whitelist:match(ip) then
         bac_log.set_verdict("reputation", "allow", "ip_whitelist")
         return true
@@ -488,25 +354,14 @@ function _M.run()
         return true
     end
 
-    -- B8 verified-bot fastpath (rules-reference rules 4 + 5). Runs AFTER
-    -- ip_whitelist (rule 2) per the rules-reference order, BEFORE
-    -- ip_blocklist (rule 6) so a "verified" / "pending" allow always wins
-    -- over a block on the same stage. "rejected" emits no verdict and we
-    -- fall through to ip_blocklist (and the rest of the cascade) — that
-    -- 3-state behaviour is the whole point of the catalog. Like
-    -- ip_whitelist above, the stand stays observe-only: production would
-    -- short-circuit L3-L5 here, but on the stand we keep going so a later
-    -- tls_fp block can still demonstrate (last-writer-wins on the log).
+    -- Placed between the whitelist and the blocklist, so a verified or pending
+    -- bot outranks a block in this stage, while a rejected one falls through to
+    -- the blocklist and the rest of the cascade.
     local verified_bots = package.loaded["verified_bots"]
                          or require "verified_bots"
     local vb_outcome = verified_bots.run(ip, ngx.var.http_user_agent)
-    -- Use the SHORT_CIRCUIT set rather than a literal `vb_outcome ==
-    -- "verified" or "pending"` chain so a future outcome added to
-    -- verified_bots cannot accidentally short-circuit by being copy-pasted
-    -- into this condition (review #3 on PR #55). "rejected" is deliberately
-    -- absent from SHORT_CIRCUIT: rejected IPs must continue through
-    -- ip_blocklist / tls_fp / rate_limits / L5 — that is the entire point
-    -- of the 3-state catalog.
+    -- The set rather than an inline comparison, so a new outcome cannot
+    -- short-circuit by being copy-pasted into this condition.
     if verified_bots.SHORT_CIRCUIT[vb_outcome] then
         return true
     end
@@ -534,11 +389,8 @@ function _M.run()
         return true
     end
 
-    -- geo_blocklist. Per vision.md geo gating is per-resource — there is
-    -- no system-wide country whitelist (geo-allow is a client choice).
-    -- When pm.geo_whitelist is nil the rule never fires; when set, any
-    -- country not in the set blocks. The `_M.geo_enabled` toggle stays as
-    -- a master kill-switch (incident rollback for the whole rule).
+    -- Per-host only: with no whitelist the rule never fires, and with one any
+    -- country outside it blocks.
     if _M.geo_enabled and pm.geo_whitelist then
         if _M.country_blocked(pm.geo_whitelist, cc) then
             bac_log.set_verdict("reputation", "block", "policy.geo_blocklist")
@@ -547,12 +399,8 @@ function _M.run()
         end
     end
 
-    -- Staged ip_blocklist CIDRs (A11, 86exrtjpc). Observe-only: matched with
-    -- the same predicate as the active matcher but records only staging_match
-    -- (["ip_blocklist:<cidr>"]) — never a verdict, never a 403, never a
-    -- short-circuit. Reached only when no allow/block rule matched above
-    -- (those return), so it records what WOULD fire after promotion to active.
-    -- new_with_value returns the matched CIDR, which is the pattern_id.
+    -- Observe-only, and only reached when nothing above matched — so it records
+    -- what promotion to active would have done.
     if _M.blocklist_staging then
         local cidr = _M.blocklist_staging:match(ip)
         if cidr then
