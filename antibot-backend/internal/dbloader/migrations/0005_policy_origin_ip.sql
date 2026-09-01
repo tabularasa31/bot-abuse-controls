@@ -1,4 +1,4 @@
--- 0005_policy_origin_ip.sql — per-host origin_ip on policy (ClickUp 86exrefdz).
+-- 0005_policy_origin_ip.sql — per-host origin_ip on policy.
 --
 -- Multi-tenant routing: the edge picks the upstream by the incoming Host,
 -- proxying to the tenant's origin_ip (bare IPv4/IPv6). A host without a

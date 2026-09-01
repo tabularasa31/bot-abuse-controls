@@ -1,11 +1,11 @@
-// Package health serves the /health endpoint the B1 LB round-robins on.
+// Package health serves the /health endpoint the load balancer round-robins on.
 //
 // The contract is compatible with the previous placeholder (200 plus JSON with "instance"), but
 // it now does honest readiness: when a pinger (pgxpool) is set and the database does not answer within
 // pingTimeout, we return 503 with a reason. The LB removes the instance from rotation itself,
 // without waiting for TCP-level timeouts.
 //
-// We do not split liveness from readiness on the skeleton: one endpoint, and the B1 substrate
+// We do not split liveness from readiness: one endpoint, and the B1 substrate
 // already holds depends_on=service_healthy before the backend starts.
 package health
 

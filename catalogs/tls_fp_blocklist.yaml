@@ -9,8 +9,7 @@
 #     staging → the edge matches and writes staging_match into bac_log, does NOT block.
 #
 # Promoting staging → active is a separate PR that changes the status. That gives us
-# two review points and an explicit moment of enforcement (see [A11], staged
-# rollout in docs/product/phase2-spec.md §6).
+# two review points and an explicit moment of enforcement.
 #
 # An empty file means an empty catalog. The cascade blocks nobody at this layer
 # until product adds the first entry through a PR.
