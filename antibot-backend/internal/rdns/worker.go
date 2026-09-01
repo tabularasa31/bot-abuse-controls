@@ -1,33 +1,33 @@
-// Package rdns — reverse-DNS воркер antibot-backend ([B7]).
+// Package rdns — the antibot-backend reverse-DNS worker ([B7]).
 //
-// Единственная активная вычислительная задача backend по ADR-005. Не на
-// hot-path edge'а: edge на L2.2 (B8) только читает каталог
-// bot_verification_status, наполненный этим воркером.
+// The backend's only active computational task per ADR-005. It is not on the
+// edge hot path: at L2.2 (B8) the edge only reads the
+// bot_verification_status catalog this worker populates.
 //
-// Триггер — поток логов: receiver видит запись с IP и поисковым UA
-// (Googlebot/bingbot/YandexBot/DuckDuckBot) и зовёт Enqueue. Воркер
-// проверяет PTR → forward DNS (оба шага должны сойтись на официальный
-// домен поисковика) и пишет результат в таблицу verified_bot_ips:
+// The trigger is the log stream: the receiver sees a record with an IP and a search engine UA
+// (Googlebot/bingbot/YandexBot/DuckDuckBot) and calls Enqueue. The worker
+// checks PTR → forward DNS (both steps must resolve to the search engine's official
+// domain) and writes the result into the verified_bot_ips table:
 //
-//   - verified — оба DNS-этапа сошлись, IP — реальный бот, TTL 1ч.
-//   - rejected — PTR не вернулся / не из официальной зоны / forward DNS
-//     не указал на исходный IP, IP — impersonator, TTL 1ч симметрично
-//     с verified.
+//   - verified — both DNS steps agreed, the IP is a real bot, TTL 1 h.
+//   - rejected — no PTR / it is not in the official zone / forward DNS
+//     did not point back at the original IP; the IP is an impersonator, TTL 1 h symmetric
+//     with verified.
 //
-// Симметричный TTL — фикс v0.6 vision.md (Шаг 2.2). При 5м для rejected
-// один impersonator-IP получал ~288 бесплатных provisional-проходов в
-// сутки между ре-проверками; 1ч это закрывает.
+// The symmetric TTL is a v0.6 vision.md fix (stage 2.2). At 5 min for rejected,
+// one impersonator IP got ~288 free provisional passes per
+// day between re-checks; 1 h closes that.
 //
-// Reactive (не превентивный перебор): воркер ходит в DNS только когда
-// receiver увидел новый IP с поисковым UA. Дедуп — через catalog.Store
-// (если IP уже в каталоге — не дёргаем DNS повторно) и in-flight set
-// (если IP уже в очереди — не плодим параллельные DNS-запросы за тот же
-// результат).
+// Reactive (not a pre-emptive sweep): the worker touches DNS only when the
+// receiver has seen a new IP with a search engine UA. Deduplication happens through catalog.Store
+// (if the IP is already in the catalog we do not touch DNS again) and an in-flight set
+// (if the IP is already queued we do not spawn parallel DNS lookups for the same
+// result).
 //
-// Concurrency: N резолверов читают одну очередь; queue-overflow роняет
-// задачу в метрику, edge продолжит выдавать provisional (это самый
-// мягкий деградационный сценарий). GC-горутина периодически удаляет
-// протухшие строки.
+// Concurrency: N resolvers read one queue; a queue overflow drops the
+// task into a metric and the edge keeps issuing provisional passes (the mildest
+// degradation scenario). A GC goroutine periodically deletes
+// expired rows.
 package rdns
 
 import (
@@ -44,19 +44,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// VerificationTTL — время жизни записи verified_bot_ips, симметрично
-// для verified и rejected. См. vision.md §Шаг 2.2 (v0.6).
+// VerificationTTL — the lifetime of a verified_bot_ips record, symmetric
+// for verified and rejected. See vision.md §Stage 2.2 (v0.6).
 const VerificationTTL = time.Hour
 
-// dbWriteTimeout — budget на UpsertVerifiedBot после того как parent ctx
-// уже мог быть cancel'нут (graceful shutdown). UPSERT по PK + индекс
-// миллисекунды; 5с с запасом, чтобы выдержать busy postgres под нагрузкой
-// и не задушить shutdown в случае если pgxpool занят.
+// dbWriteTimeout — the budget for UpsertVerifiedBot after the parent ctx
+// may already have been cancelled (a graceful shutdown). An UPSERT by PK plus an index takes
+// milliseconds; 5 s leaves room to survive a busy postgres under load
+// without strangling the shutdown if the pgxpool is occupied.
 const dbWriteTimeout = 5 * time.Second
 
-// Канонические семейства поисковых ботов. Edge различает их по значению
-// в каталоге ("<status>:<family>"); ключевые слова — те же четыре,
-// что в config-distribution.md §"The 'catalog' concept".
+// The canonical search engine bot families. The edge tells them apart by the value
+// in the catalog ("<status>:<family>"); the keywords are the same four
+// as in config-distribution.md §"The 'catalog' concept".
 const (
 	FamilyGoogle = "google"
 	FamilyBing   = "bing"
@@ -64,16 +64,16 @@ const (
 	FamilyDDG    = "ddg"
 )
 
-// ptrSuffixes — официальные DNS-зоны, на которые должен сойтись PTR
-// чтобы IP считался реальным ботом. Источник — публичные documentation
-// каждого поисковика; имена нормализуем без trailing dot.
+// ptrSuffixes — the official DNS zones a PTR must resolve into
+// for the IP to count as a real bot. The source is each search engine's public
+// documentation; we normalise the names without a trailing dot.
 //
-// google: googlebot.com и google.com — оба валидны (Googlebot, Google
-// Image, Google StoreBot живут в смеси этих зон).
-// bing: search.msn.com — каноничная зона Bingbot.
-// yandex: yandex.com / yandex.net / yandex.ru — Yandex'ы публикуют
-// разные суффиксы для разных регионов crawler'ов.
-// ddg: duckduckgo.com — единственная официальная зона DuckDuckBot.
+// google: googlebot.com and google.com are both valid (Googlebot, Google
+// Image and Google StoreBot live across both zones).
+// bing: search.msn.com is Bingbot's canonical zone.
+// yandex: yandex.com / yandex.net / yandex.ru — Yandex publishes
+// different suffixes for the crawlers of different regions.
+// ddg: duckduckgo.com is DuckDuckBot's only official zone.
 var ptrSuffixes = map[string][]string{
 	FamilyGoogle: {".googlebot.com", ".google.com"},
 	FamilyBing:   {".search.msn.com"},
@@ -81,21 +81,21 @@ var ptrSuffixes = map[string][]string{
 	FamilyDDG:    {".duckduckgo.com"},
 }
 
-// Resolver — DNS-зависимости, заинжекчены для тестов (production:
-// rdns.NetResolver{} оборачивает net.Resolver). Контракт совпадает с
-// net.Resolver.LookupAddr/LookupHost — те же имена, чтобы тестовая
-// заглушка не требовала адаптера.
+// Resolver — the DNS dependencies, injected for tests (in production
+// rdns.NetResolver{} wraps net.Resolver). The contract matches
+// net.Resolver.LookupAddr/LookupHost — the same names, so that a test
+// stub needs no adapter.
 type Resolver interface {
 	LookupAddr(ctx context.Context, addr string) ([]string, error)
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
-// NetResolver — production-резолвер на base net.Resolver. PreferGo=true,
-// чтобы pure-Go резолвер использовал контекст для отмены (cgo-резолвер
-// игнорирует ctx). Это критично: shutdown воркера должен быть быстрым.
+// NetResolver — the production resolver on top of net.Resolver. PreferGo=true,
+// so that the pure-Go resolver uses the context for cancellation (the cgo resolver
+// ignores ctx). That matters: the worker's shutdown must be fast.
 //
-// Один общий *net.Resolver на весь воркер: методы thread-safe, новый
-// инстанс на каждый запрос — пустая нагрузка на аллокатор. PR #53
+// One shared *net.Resolver for the whole worker: the methods are thread-safe, and a new
+// instance per request is pure load on the allocator. From review.
 // gemini review.
 type NetResolver struct{}
 
@@ -109,47 +109,47 @@ func (NetResolver) LookupHost(ctx context.Context, host string) ([]string, error
 	return sharedResolver.LookupHost(ctx, host)
 }
 
-// CatalogStore — read-side каталога: воркер по этому интерфейсу проверяет,
-// есть ли уже verdict для IP, чтобы не дублировать DNS-работу. Реализуется
-// catalog.Store через адаптер в app.go.
+// CatalogStore — the catalog's read side: through this interface the worker checks
+// whether a verdict for an IP already exists, so as not to duplicate DNS work. It is implemented by
+// catalog.Store through an adapter in app.go.
 type CatalogStore interface {
 	HasVerifiedBotIP(ip string) bool
 }
 
-// DB — write-side: воркер пишет результат и периодически удаляет
-// протухшие записи. Реализуется поверх pgxpool.Pool в writer.go.
+// DB — the write side: the worker writes the result and periodically deletes
+// expired records. Implemented on top of pgxpool.Pool in writer.go.
 type DB interface {
 	UpsertVerifiedBot(ctx context.Context, ip, family, status string, expiresAt time.Time) error
 	DeleteExpired(ctx context.Context) (int64, error)
 }
 
-// Config — настройки воркера. Дефолты под dev-стенд; в продакшен
-// прокидываются через env (см. config.Config).
+// Config — the worker's settings. The defaults suit a dev stand; in production they
+// come through env (see config.Config).
 type Config struct {
-	// QueueSize — буфер reactive-очереди. Переполнение = receiver
-	// получает Enqueue в дроп (метрика dropped_total), edge продолжит
-	// выдавать provisional до следующего нового лога с этим IP.
+	// QueueSize — the reactive queue buffer. An overflow means the receiver
+	// gets its Enqueue dropped (the dropped_total metric) and the edge keeps
+	// issuing provisional passes until the next new log from that IP.
 	QueueSize int
-	// Workers — параллельных DNS-резолверов. DNS ходит по сети,
-	// но мы не хотим завалить апстрим-резолвер — держим скромно.
+	// Workers — the number of parallel DNS resolvers. DNS goes over the network,
+	// and we do not want to swamp the upstream resolver — so we keep it modest.
 	Workers int
-	// DNSTimeout — потолок на одну итерацию проверки IP. Защита от
-	// зависшего DNS-резолвера; rejected-исход всё равно даст fastpath
-	// для legit-ботов на следующий тик, провальный таймаут — это
-	// rejected на 1ч, что аккуратно: реальный Googlebot никогда не
-	// должен таймаутить, а медленный impersonator пусть рассасывается.
+	// DNSTimeout — the ceiling on one IP check iteration. Protection from a
+	// hung DNS resolver; a rejected outcome still gives legitimate bots a fastpath
+	// on the next tick, and a failed timeout means
+	// rejected for 1 h, which is fine: a real Googlebot should never
+	// time out, and a slow impersonator can wait it out.
 	DNSTimeout time.Duration
-	// GCInterval — как часто удаляем строки с expires_at <= NOW().
-	// dbloader.Load уже фильтрует протухшие на чтении, GC только
-	// чтобы таблица не пухла; час — сильно реже чем TTL, нагрузки нет.
+	// GCInterval — how often we delete rows with expires_at <= NOW().
+	// dbloader.Load already filters expired ones on read; the GC only
+	// keeps the table from bloating. An hour is far rarer than the TTL, so there is no load.
 	GCInterval time.Duration
-	// PostWriteHold — сколько держим IP в inFlight ПОСЛЕ успешного
-	// upsert'a. Между моментом «воркер записал» и моментом «reloader
-	// положил свежий каталог в Store» проходит CatalogReloadInterval
-	// (5с по дефолту); без hold'а в это окно каждый новый лог с тем же
-	// hot IP проходил бы HasVerifiedBotIP=false и плодил повторные
-	// DNS/UPSERT. Дефолт 0 = моментальное снятие (старое поведение);
-	// app.New передаёт CatalogReloadInterval + 2с. PR #53 follow-up.
+	// PostWriteHold — how long we keep an IP in inFlight AFTER a successful
+	// upsert. Between "the worker wrote it" and "the reloader
+	// put a fresh catalog into the Store" lies CatalogReloadInterval
+	// (5 s by default); without the hold, every new log from that same
+	// hot IP during that window would see HasVerifiedBotIP=false and spawn repeat
+	// DNS/UPSERTs. The default of 0 means immediate release (the old behaviour);
+	// app.New passes CatalogReloadInterval + 2 s. A follow-up from review.
 	PostWriteHold time.Duration
 }
 
@@ -177,17 +177,17 @@ type Worker struct {
 
 	queue chan task
 
-	// inFlight — IP, для которых уже идёт проверка. Receiver проверяет
-	// catalog.HasVerifiedBotIP перед enqueue, но между моментом «нет
-	// в каталоге» и моментом «воркер дописал в каталог + reloader тикнул»
-	// есть окно секунд-десятков-секунд — без inFlight мы плодили бы
-	// один и тот же DNS-lookup сотни раз для популярного нового IP.
+	// inFlight — the IPs already being checked. The receiver checks
+	// catalog.HasVerifiedBotIP before enqueuing, but between "it is not
+	// in the catalog" and "the worker wrote it into the catalog and the reloader ticked"
+	// lies a window of seconds to tens of seconds — without inFlight we would spawn
+	// the same DNS lookup hundreds of times for a popular new IP.
 	inFlight sync.Map // ip → struct{}
 
-	// Метрики.
+	// The metrics.
 	enqueued  prometheus.Counter
 	dropped   prometheus.Counter
-	skipped   prometheus.Counter // уже в каталоге / уже in-flight
+	skipped   prometheus.Counter // already in the catalog / already in flight
 	verified  prometheus.Counter
 	rejected  prometheus.Counter
 	dnsErr    prometheus.Counter
@@ -197,8 +197,8 @@ type Worker struct {
 	queueLen  prometheus.GaugeFunc
 }
 
-// New собирает воркера. resolver/catalog/db инжектятся, чтобы тесты
-// могли подменить DNS и DB без поднятия Postgres/сети.
+// New assembles the worker. resolver/catalog/db are injected so that tests
+// can substitute DNS and the DB without standing up Postgres or a network.
 func New(
 	reg prometheus.Registerer,
 	logger *slog.Logger,
@@ -275,17 +275,17 @@ func New(
 	return w
 }
 
-// Enqueue — точка входа из receiver'а. Non-blocking: при переполнении
-// очереди дроп + метрика; edge продолжит провизионально пропускать
-// этот IP, на следующем логе с него попробуем снова.
+// Enqueue — the entry point from the receiver. Non-blocking: on a queue
+// overflow it drops plus a metric; the edge keeps letting that IP through
+// provisionally, and we try again on its next log line.
 //
-// Параметры:
-//   - ip — клиентский IP в строковом виде (то, что edge видит как
-//     remote_addr; то же, что net.Resolver.LookupAddr принимает).
-//   - claimedFamily — что клиент назвал в UA (см. FamilyOfUA). Это
-//     ключ для выбора официальной DNS-зоны: если PTR ушёл не в ту
-//     зону, что заявлена в UA, мы пишем rejected с claimedFamily —
-//     полезно в аналитике («IP представлялся Googlebot, но PTR в
+// The parameters:
+//   - ip — the client IP as a string (what the edge sees as
+//     remote_addr; the same thing net.Resolver.LookupAddr accepts).
+//   - claimedFamily — what the client called itself in its UA (see FamilyOfUA). That is the
+//     key for choosing the official DNS zone: if the PTR went to a different
+//     zone than the UA claimed, we write rejected with claimedFamily —
+//     useful in analytics ("the IP claimed to be Googlebot, but its PTR points into
 //     .yandex.com»).
 func (w *Worker) Enqueue(ip, claimedFamily string) {
 	if ip == "" || claimedFamily == "" {
@@ -295,10 +295,10 @@ func (w *Worker) Enqueue(ip, claimedFamily string) {
 		w.skipped.Inc()
 		return
 	}
-	// LoadOrStore — атомарный «положи если нет». Если уже in-flight —
-	// получили loaded=true, дроп задачи. Без этого популярный новый
-	// Googlebot-IP дал бы N параллельных DNS-запросов за один и тот
-	// же результат, мы бы их все писали поочерёдно в DB.
+	// LoadOrStore — an atomic "store if absent". If it is already in flight,
+	// we get loaded=true and drop the task. Without that, a popular new
+	// Googlebot IP would produce N parallel DNS lookups for one and the
+	// same result, and we would write them all into the DB in turn.
 	if _, loaded := w.inFlight.LoadOrStore(ip, struct{}{}); loaded {
 		w.skipped.Inc()
 		return
@@ -307,16 +307,16 @@ func (w *Worker) Enqueue(ip, claimedFamily string) {
 	case w.queue <- task{ip: ip, claimedFamily: claimedFamily}:
 		w.enqueued.Inc()
 	default:
-		// Очередь переполнена — снимаем in-flight, дроп задачи. Без снятия
-		// этот IP заблокировался бы навсегда (LoadOrStore вернёт loaded
-		// на каждом следующем Enqueue, очередь так и не получит задачу).
+		// The queue is full — we clear in-flight and drop the task. Without clearing it,
+		// that IP would be blocked forever (LoadOrStore would return loaded
+		// on every later Enqueue and the queue would never receive the task).
 		w.inFlight.Delete(ip)
 		w.dropped.Inc()
 	}
 }
 
-// Run блокирует до ctx.Done(). Запускает N consumer-горутин и одну
-// GC-горутину. Все они корректно завершаются по ctx.
+// Run blocks until ctx.Done(). It starts N consumer goroutines and one
+// GC goroutine. All of them terminate cleanly on ctx.
 func (w *Worker) Run(ctx context.Context) {
 	w.logger.Info("rdns worker started",
 		"workers", w.cfg.Workers,
@@ -353,9 +353,9 @@ func (w *Worker) consume(ctx context.Context) {
 }
 
 func (w *Worker) processSafely(ctx context.Context, t task) {
-	// Снятие inFlight откладываем до process(): успешный upsert ставит
-	// AfterFunc(PostWriteHold), все остальные пути (skipped, dbErr, panic)
-	// снимают сразу — иначе IP залип бы до GC.
+	// Clearing inFlight is deferred to process(): a successful upsert sets an
+	// AfterFunc(PostWriteHold), while every other path (skipped, dbErr, panic)
+	// clears it immediately — otherwise the IP would stay stuck until the GC.
 	defer func() {
 		if rec := recover(); rec != nil {
 			w.panics.Inc()
@@ -371,11 +371,11 @@ func (w *Worker) processSafely(ctx context.Context, t task) {
 	w.process(ctx, t)
 }
 
-// releaseInFlight снимает t.ip из inFlight: сразу, если hold==0
-// (deprecated/тестовый путь), либо через PostWriteHold time.AfterFunc —
-// нужно перекрыть окно «воркер записал, но reloader ещё не положил
-// свежий Data в Store», иначе следующий лог с тем же hot IP опять
-// проходит HasVerifiedBotIP=false и плодит повторный DNS/UPSERT.
+// releaseInFlight clears t.ip from inFlight: immediately when hold==0
+// (the deprecated/test path), or through a PostWriteHold time.AfterFunc —
+// which has to cover the window "the worker wrote it, but the reloader has not yet put a
+// fresh Data into the Store", otherwise the next log from that same hot IP again
+// sees HasVerifiedBotIP=false and spawns a repeat DNS/UPSERT.
 // PR #53 follow-up.
 func (w *Worker) releaseInFlight(ip string) {
 	if w.cfg.PostWriteHold <= 0 {
@@ -388,12 +388,12 @@ func (w *Worker) releaseInFlight(ip string) {
 }
 
 func (w *Worker) process(ctx context.Context, t task) {
-	// Sanitize: net.Resolver.LookupAddr ждёт чистый IP-литерал. Если
-	// в логе пришло "1.2.3.4:54321", "[::1]:443" или что-то ещё с
-	// артефактами эмиттера — lookup провалится, и легитимный бот-IP
-	// получил бы rejected:family на час (HasVerifiedBotIP заблокировал
-	// бы re-check). Лучше тихо дропнуть задачу с метрикой —
-	// следующий лог-event с этого IP попробует снова. PR #53 review.
+	// Sanitize: net.Resolver.LookupAddr expects a clean IP literal. If
+	// the log carried "1.2.3.4:54321", "[::1]:443" or anything else with
+	// emitter artefacts, the lookup fails and a legitimate bot IP
+	// would get rejected:family for an hour (HasVerifiedBotIP would block
+	// the re-check). Better to drop the task quietly with a metric —
+	// the next log event from that IP will try again. From review.
 	if net.ParseIP(t.ip) == nil {
 		w.skipped.Inc()
 		w.logger.Debug("rdns: skip task with unparseable ip",
@@ -402,21 +402,21 @@ func (w *Worker) process(ctx context.Context, t task) {
 		return
 	}
 
-	// Per-task deadline. На зависшем DNS воркер бы съел consumer-слот
-	// до родительского shutdown'a — это убивало бы throughput для
-	// нормальных задач после первого зависшего IP.
+	// A per-task deadline. On hung DNS the worker would eat a consumer slot
+	// until the parent shutdown — which would kill throughput for
+	// normal tasks after the first hung IP.
 	taskCtx, cancel := context.WithTimeout(ctx, w.cfg.DNSTimeout)
 	defer cancel()
 
 	status, family := w.classify(taskCtx, t)
 
-	// Shutdown-induced rejected — НЕ персистим. classify не различает
-	// authoritative-NXDOMAIN от ctx.Canceled, оба превращаются в rejected.
-	// Без этой проверки in-flight Googlebot/Bingbot, для которого parent
-	// ctx отменился во время DNS, записался бы как rejected:google с TTL
-	// 1ч; HasVerifiedBotIP блокировал бы re-check; легитимный бот терял
-	// бы fastpath на час после каждого деплоя. Verified-вердикт не
-	// затрагиваем — он получен ДО ctx.Err() и валиден. PR #53 follow-up.
+	// A shutdown-induced rejected is NOT persisted. classify cannot tell an
+	// authoritative NXDOMAIN from ctx.Canceled; both turn into rejected.
+	// Without this check, an in-flight Googlebot/Bingbot whose parent
+	// ctx was cancelled during DNS would be written as rejected:google with a TTL of
+	// 1 h; HasVerifiedBotIP would block the re-check; and a legitimate bot would lose
+	// its fastpath for an hour after every deploy. A verified verdict is left
+	// alone — it was obtained BEFORE ctx.Err() and is valid. A follow-up from review.
 	if status == "rejected" && ctx.Err() != nil {
 		w.skipped.Inc()
 		w.logger.Debug("rdns: skip persist of shutdown-induced rejected",
@@ -426,21 +426,21 @@ func (w *Worker) process(ctx context.Context, t task) {
 	}
 	expiresAt := w.now().Add(VerificationTTL)
 
-	// DB-write: родительский ctx уже cancel'нут при graceful shutdown
-	// (app.shutdown зовёт cancelWorkers() ДО wg.Wait). Если использовать
-	// этот ctx — UpsertVerifiedBot вернёт context.Canceled для каждого
-	// task'a, успевшего пройти classify до cancel, dbErr спайкает на
-	// каждом деплое. Отрываем cancellation через context.WithoutCancel,
-	// ставим короткий собственный deadline — тот же приём, что в
-	// dbloader.Migrate для pg_advisory_unlock. PR #53 review.
+	// The DB write: the parent ctx is already cancelled during a graceful shutdown
+	// (app.shutdown calls cancelWorkers() BEFORE wg.Wait). Using
+	// that ctx would make UpsertVerifiedBot return context.Canceled for every
+	// task that made it through classify before the cancel, spiking dbErr on
+	// every deploy. We detach the cancellation through context.WithoutCancel and
+	// set a short deadline of our own — the same trick as in
+	// dbloader.Migrate for pg_advisory_unlock. From review.
 	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), dbWriteTimeout)
 	defer writeCancel()
 	if err := w.db.UpsertVerifiedBot(writeCtx, t.ip, family, status, expiresAt); err != nil {
 		w.dbErr.Inc()
 		w.logger.Error("rdns: db upsert failed",
 			"ip", t.ip, "family", family, "status", status, "err", err)
-		// Снимаем inFlight сразу — без записи в БД следующий лог должен
-		// иметь возможность ретраить.
+		// Clear inFlight immediately — with no DB write, the next log must
+		// be able to retry.
 		w.inFlight.Delete(t.ip)
 		return
 	}
@@ -450,9 +450,9 @@ func (w *Worker) process(ctx context.Context, t task) {
 	case "rejected":
 		w.rejected.Inc()
 	}
-	// Hold inFlight на PostWriteHold (≈ CatalogReloadInterval + buffer):
-	// до того как reloader положит свежий Data в Store, hot IP получал
-	// бы HasVerifiedBotIP=false и плодил повторные DNS/UPSERT.
+	// Hold inFlight for PostWriteHold (≈ CatalogReloadInterval + a buffer):
+	// until the reloader puts a fresh Data into the Store, a hot IP would see
+	// HasVerifiedBotIP=false and spawn repeat DNS/UPSERTs.
 	w.releaseInFlight(t.ip)
 	w.logger.Debug("rdns verdict",
 		"ip", t.ip, "claim", t.claimedFamily,
@@ -460,39 +460,39 @@ func (w *Worker) process(ctx context.Context, t task) {
 	)
 }
 
-// classify — ядро решения. Возвращает status ∈ {verified, rejected} и
-// family (для verified — реально подтверждённое; для rejected —
-// claimedFamily, чтобы аналитика видела «что представлялся»).
+// classify — the core of the decision. It returns status ∈ {verified, rejected} and
+// the family (for verified the genuinely confirmed one; for rejected the
+// claimedFamily, so that analytics can see what it claimed to be).
 //
-// Логика:
-//  1. PTR на IP. Пусто/ошибка → rejected.
-//  2. Хотя бы один PTR должен оканчиваться на официальный суффикс
-//     заявленной семьи (claimedFamily). Если PTR ушёл в чужую зону —
-//     это уже не тот бот, что в UA → rejected.
-//  3. forward DNS на найденное имя. Среди A/AAAA должен быть исходный
-//     IP. Если нет — DNS-mismatch (PTR можно подделать без forward'а)
+// The logic:
+//  1. A PTR on the IP. Empty or an error → rejected.
+//  2. At least one PTR must end with an official suffix of the
+//     claimed family (claimedFamily). If the PTR went into a foreign zone,
+//     this is not the bot the UA claims → rejected.
+//  3. Forward DNS on the name found. The original IP must be among the A/AAAA
+//     records. If not, that is a DNS mismatch (a PTR can be forged without a forward record)
 //     → rejected.
-//  4. Иначе — verified.
+//  4. Otherwise — verified.
 func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 	suffixes, ok := ptrSuffixes[t.claimedFamily]
 	if !ok {
-		// Незнакомая family — receiver не должен такое пропускать; защита.
+		// An unknown family — the receiver should never let this through; a guard.
 		return "rejected", t.claimedFamily
 	}
-	// dnsErr — per-task флаг, инкрементим максимум один раз. До PR #53
-	// review мы инкрементили на каждую неудачную LookupAddr/LookupHost,
-	// и task с 3 PTR + 3 неудачами LookupHost давал dnsErr=4 — ломая
-	// rate-метрики (dnsErr/enqueued > 100%).
+	// dnsErr — a per-task flag, incremented at most once. Before
+	// review we incremented it on every failed LookupAddr/LookupHost,
+	// so a task with 3 PTRs plus 3 LookupHost failures gave dnsErr=4 — breaking
+	// the rate metrics (dnsErr/enqueued > 100%).
 	dnsTrouble := false
 	ptrs, err := w.resolver.LookupAddr(ctx, t.ip)
 	if err != nil || len(ptrs) == 0 {
 		w.dnsErr.Inc()
 		return "rejected", t.claimedFamily
 	}
-	// net.IP.Equal сравнивает по байтам нормализованного IP — для IPv6
-	// это критично: "2001:db8::1" и "2001:0db8:0000:0000:0000:0000:0000:0001"
-	// один и тот же адрес, но разные строки. LookupHost может вернуть
-	// любую форму. Парсим target один раз вне цикла. PR #53 gemini review.
+	// net.IP.Equal compares the bytes of the normalised IP — which is critical for IPv6:
+	// "2001:db8::1" and "2001:0db8:0000:0000:0000:0000:0000:0001" are
+	// the same address but different strings. LookupHost can return
+	// either form. We parse the target once outside the loop. From review.
 	targetIP := net.ParseIP(t.ip)
 	for _, ptr := range ptrs {
 		name := normalizePTR(ptr)
@@ -539,8 +539,8 @@ func (w *Worker) gcOnce(ctx context.Context) {
 	}()
 	n, err := w.db.DeleteExpired(ctx)
 	if err != nil {
-		// Не критично: dbloader.Load всё равно фильтрует expires_at > NOW(),
-		// edge не увидит протухшие записи. Логируем для оператора.
+		// Not critical: dbloader.Load filters expires_at > NOW() anyway, so
+		// the edge never sees expired records. We log it for the operator.
 		if !errors.Is(err, context.Canceled) {
 			w.logger.Warn("rdns: gc delete-expired failed", "err", err)
 		}
@@ -552,10 +552,10 @@ func (w *Worker) gcOnce(ctx context.Context) {
 	}
 }
 
-// FamilyOfUA — каноничное семейство, заявленное в UA. Возвращает "" если
-// UA не содержит ни одного из известных search-bot-маркеров. Сравнение
-// case-insensitive: реальный Googlebot пишет "Googlebot/2.1", но
-// impersonator может намеренно ломать кейс.
+// FamilyOfUA — the canonical family claimed in the UA. It returns "" if
+// the UA contains none of the known search-bot markers. The comparison is
+// case-insensitive: a real Googlebot writes "Googlebot/2.1", but an
+// impersonator may deliberately break the case.
 func FamilyOfUA(ua string) string {
 	if ua == "" {
 		return ""
@@ -574,9 +574,9 @@ func FamilyOfUA(ua string) string {
 	return ""
 }
 
-// normalizePTR — убирает trailing dot и приводит к нижнему регистру.
-// LookupAddr возвращает FQDN с точкой ("crawl-66-249-66-1.googlebot.com.");
-// для сравнения с суффиксами и для повторного LookupHost нужно без неё.
+// normalizePTR — strips the trailing dot and lowercases. LookupAddr
+// returns an FQDN with a dot ("crawl-66-249-66-1.googlebot.com.");
+// comparing against the suffixes and re-running LookupHost needs it without.
 func normalizePTR(s string) string {
 	s = strings.TrimSuffix(s, ".")
 	return strings.ToLower(s)
@@ -591,7 +591,7 @@ func matchesAnySuffix(name string, suffixes []string) bool {
 	return false
 }
 
-// String — короткая диагностика воркера для health-endpoint'a (B14).
+// String — a short diagnostic of the worker for the health endpoint (B14).
 func (w *Worker) String() string {
 	return fmt.Sprintf("rdns(queue=%d/%d, workers=%d)",
 		len(w.queue), w.cfg.QueueSize, w.cfg.Workers)
