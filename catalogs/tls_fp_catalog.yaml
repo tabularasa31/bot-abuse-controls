@@ -1,32 +1,32 @@
-# tls_fp_catalog.yaml — каталог сигнатур автоматизации по TLS-fp (Phase 2+).
+# tls_fp_catalog.yaml — the catalog of automation signatures by TLS fp (Phase 2+).
 #
-# Используется правилом tls_fp_impersonator (категория soft): если UA
-# заявляет браузер, но hash_b TLS-fp совпадает с известной сигнатурой
-# автоматизации — challenge. См. docs/product/phase2-spec.md §"tls_fp_*".
+# Used by the tls_fp_impersonator rule (soft category): if the UA
+# claims a browser but the TLS fp hash_b matches a known automation
+# signature — challenge. See docs/product/phase2-spec.md §"tls_fp_*".
 #
-# Формат: map hash_b -> { family, status }.
-#   - hash_b — 12-символьный hex-фрагмент TLS-fp (см. ja4_compute.lua).
-#   - family — короткое имя автоматизации (`python-requests`, `curl`,
-#     `go-http-client`, `okhttp`, etc.). По нему ищется ua_family и эмитится
+# Format: map hash_b -> { family, status }.
+#   - hash_b — the 12-character hex fragment of the TLS fp (see ja4_compute.lua).
+#   - family — the short automation name (`python-requests`, `curl`,
+#     `go-http-client`, `okhttp`, etc.). It is what ua_family is looked up by and what is emitted
 #     verdict.
 #   - status — active | staging.
-#     active  → правило tls_fp_impersonator может выписать challenge.
-#     staging → эдж матчит, пишет staging_match в bac_log, не блокирует.
+#     active  → the tls_fp_impersonator rule may issue a challenge.
+#     staging → the edge matches, writes staging_match into bac_log, does not block.
 #
-# Пустой файл = ничего не матчим. Наполняется через PR по результатам
-# анализа логов: продакт сопоставляет наблюдаемый hash_b с эталонным
-# трафиком (curl/python/go) и фиксирует соответствие.
+# An empty file means nothing matches. It is filled through PRs based on
+# log analysis: product maps an observed hash_b against reference
+# traffic (curl/python/go) and records the correspondence.
 
-# Примеры (раскомментируйте при добавлении):
+# Examples (uncomment when adding):
 #   "a1b2c3d4e5f6":
 #     family: curl
 #     status: staging
 
-# manual 2026-06-23 — python-requests под видом Chrome (cipher_cnt=15). Матч по
-# hash_b ловит все варианты JA4_c этого семейства разом (impersonator → challenge),
-# в отличие от tls_fp_blocklist, где exact-match по полному fp пропускал ротацию
-# hash_c. Кампания WordPress/xmlrpc-брутфорса 06-22→06-23 (4 варианта hash_c,
-# 100% UA-браузер, DC ASN, recon /wp-login.php + /xmlrpc.php).
+# manual 2026-06-23 — python-requests disguised as Chrome (cipher_cnt=15). Matching on
+# hash_b catches every JA4_c variant of this family at once (impersonator → challenge),
+# unlike tls_fp_blocklist, where an exact match on the full fp missed the rotation of
+# hash_c. The WordPress/xmlrpc brute-force campaign of 06-22→06-23 (4 hash_c variants,
+# 100% browser UA, DC ASN, recon /wp-login.php + /xmlrpc.php).
 "1ed0482b9b4c":
   family: python-requests
   status: active

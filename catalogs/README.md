@@ -1,61 +1,61 @@
-# catalogs/ — медленные каталоги Channel C
+# catalogs/ — the slow Channel C catalogs
 
-Этот каталог — **единственный источник истины** для медленных каталогов,
-которые ведёт продакт. Backend читает его на каждом тике reloader'а
-(default 5с), отдаёт эджу через `/catalog/<name>`. SLA от мержа PR до
-применения на пуле эджей — **≤ 15 минут** (см. [vision.md](../docs/product/vision.md)
-§"Обновление каталогов на proxy").
+This directory is the **single source of truth** for the slow catalogs
+product maintains. The backend reads it on every reloader tick
+(5 s by default) and serves it to the edge through `/catalog/<name>`. The SLA from a PR merge to
+application across the edge pool is **≤ 15 minutes** (see [vision.md](../docs/product/vision.md)
+§"Refreshing the catalogs on the proxy").
 
-См. также [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
-о том, почему медленные каталоги лежат в git, а не в БД.
+See also [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
+on why the slow catalogs live in git rather than in the database.
 
-## Файлы
+## The files
 
-| Файл                              | Что внутри                                              |
+| File                              | What is inside                                          |
 |-----------------------------------|---------------------------------------------------------|
-| `version`                         | semver схемы payload, идёт в `X-Catalog-Version`.       |
-| `tls_fp_blocklist.yaml`           | TLS fingerprints → status. `verdict=block` для active.  |
-| `ua_blacklist.yaml`               | RE2-regex по User-Agent → status. Складывается в combined regex. |
-| `ip_blocklist.yaml`               | CIDR → status. `verdict=block` для active.              |
-| `ip_whitelist.yaml`               | CIDR (без status). Системный allow-list.                |
-| `asn_datacenters.yaml`            | uint32 ASN. Справочник для тега `reputation:asn_dc`.    |
-| `tls_fp_catalog.yaml`             | hash_b → { family, status }. Правило tls_fp_impersonator. |
-| `tls_fp_browser_profiles.yaml`    | family → { expected_cipher_cnt, status }. Правило tls_fp_suspicious_ciphers. |
+| `version`                         | the payload schema semver, sent in `X-Catalog-Version`. |
+| `tls_fp_blocklist.yaml`           | TLS fingerprints → status. `verdict=block` for active.  |
+| `ua_blacklist.yaml`               | RE2 regexes over the User-Agent → status. Folded into a combined regex. |
+| `ip_blocklist.yaml`               | CIDR → status. `verdict=block` for active.              |
+| `ip_whitelist.yaml`               | CIDR (no status). The system allow list.                |
+| `asn_datacenters.yaml`            | uint32 ASNs. The reference for the `reputation:asn_dc` tag. |
+| `tls_fp_catalog.yaml`             | hash_b → { family, status }. The tls_fp_impersonator rule. |
+| `tls_fp_browser_profiles.yaml`    | family → { expected_cipher_cnt, status }. The tls_fp_suspicious_ciphers rule. |
 
-Что **не** здесь:
-- `policy/<host>` — клиентские настройки, живут в БД, правятся через дашборд.
-- `verified_bot_ips` — runtime state от rDNS-воркера, живёт в БД.
+What is **not** here:
+- `policy/<host>` — customer settings; they live in the database and are edited through the dashboard.
+- `verified_bot_ips` — runtime state from the rDNS worker; it lives in the database.
 
-## Как вносить изменения
+## How to make a change
 
-1. **Создайте feature-branch** (никогда не правьте `main` напрямую).
-2. **Откройте PR** с правкой соответствующего файла. CODEOWNERS требует
-   ревью продакта.
-3. **CI валидирует**: regex компилируется (`regexp.Compile`), CIDR парсится,
-   ASN в диапазоне uint32, status ∈ `{active, staging}`. Одна битая запись
-   — fail-stale, backend не подхватывает (Store не обновляется,
-   `antibot_backend_catalog_reload_failures_total` тикает).
-4. **После мержа** — backend подхватывает в течение `CATALOG_RELOAD_INTERVAL`
-   (5с), эдж — в течение `+30с` (Channel C poll). Суммарно ≤ ~1 минуты на
-   стенде; продуктовый SLA `≤ 15 мин` оставляет запас.
+1. **Create a feature branch** (never edit `main` directly).
+2. **Open a PR** amending the relevant file. CODEOWNERS requires a
+   product review.
+3. **CI validates**: the regex compiles (`regexp.Compile`), the CIDR parses, the
+   ASN is within uint32 range, and status ∈ `{active, staging}`. One broken record
+   means fail-stale and the backend does not pick it up (the Store is not updated and
+   `antibot_backend_catalog_reload_failures_total` ticks).
+4. **After the merge** the backend picks it up within `CATALOG_RELOAD_INTERVAL`
+   (5 s) and the edge within `+30 s` (the Channel C poll). Around a minute in total on the
+   stand; the product SLA of `≤ 15 min` leaves plenty of room.
 
 ## Staged rollout
 
-Для каталогов со status (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`)
-работает A11 staged rollout:
+For the catalogs with a status (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`)
+the A11 staged rollout applies:
 
-1. **PR-1**: добавить запись со `status: staging`. Эдж матчит, пишет
-   `staging_match: ["<catalog>:<pattern>"]` в bac_log, **не блокирует**.
-2. **Наблюдение** (24–48ч): проверьте, что запись срабатывает только
-   на ожидаемом трафике (нет ложных матчей по легитимным клиентам).
-3. **PR-2**: смените `status: staging` → `status: active`. Эдж начинает
-   эмитить `verdict=block`.
+1. **PR 1**: add the entry with `status: staging`. The edge matches it and writes
+   `staging_match: ["<catalog>:<pattern>"]` into bac_log, and **does not block**.
+2. **Observation** (24–48 h): confirm the entry fires only
+   on the expected traffic (no false matches on legitimate clients).
+3. **PR 2**: change `status: staging` → `status: active`. The edge starts
+   emitting `verdict=block`.
 
-Откат — `git revert` PR в течение того же SLA.
+To roll back, `git revert` the PR within the same SLA.
 
-## Формат YAML
+## The YAML format
 
-Файлы парсятся через `gopkg.in/yaml.v3` в strict-режиме (`KnownFields(true)`).
-Опечатка в имени поля валит загрузку, не молча игнорируется.
+The files are parsed through `gopkg.in/yaml.v3` in strict mode (`KnownFields(true)`).
+A typo in a field name fails the load rather than being silently ignored.
 
-Пустой файл / только комментарии = пустой каталог.
+An empty file, or one holding only comments, means an empty catalog.

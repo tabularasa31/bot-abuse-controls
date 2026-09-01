@@ -1,13 +1,13 @@
-# asn_datacenters.yaml — ASN-номера датацентров. Каскад на L2.3 тегирует
-# запросы с ASN из этого списка как reputation:asn_dc; дальше per-resource
-# policy[host].asn_block решает, эмитить ли verdict=block.
+# asn_datacenters.yaml — datacenter ASNs. At L2.3 the cascade tags
+# requests whose ASN is in this list as reputation:asn_dc; the per-resource
+# policy[host].asn_block then decides whether to emit verdict=block.
 #
-# Формат: список uint32 (RFC 6793 32-bit ASN). Без status — это
-# справочная таблица "какие ASN считаются ДЦ", сам тег ничего не блокирует
-# (блокировка — в per-resource policy).
+# Format: a list of uint32 (RFC 6793 32-bit ASN). No status — this is
+# a reference table of "which ASNs count as datacenters"; the tag itself blocks
+# nothing (blocking lives in the per-resource policy).
 
 # Amazon Web Services
-- 16509   # Amazon AWS (основной пул, появляется во всех регионах)
+- 16509   # Amazon AWS (the main pool, shows up in every region)
 - 14618   # Amazon Data Services (AWS East)
 
 # Google Cloud Platform

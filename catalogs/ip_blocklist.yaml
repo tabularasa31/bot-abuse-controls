@@ -1,17 +1,17 @@
-# ip_blocklist.yaml — системный IP-blocklist (кураторский, не клиентский).
+# ip_blocklist.yaml — the system IP blocklist (curated, not per-customer).
 #
-# Формат: <cidr>: <status>.
-#   - cidr   — IP-адрес или префикс. Принимаем подмножество, симметричное
-#     lua-resty-ipmatcher: голый IP без /N трактуется как /32 (v4) или /128
-#     (v6); CIDR с заданными host-битами (10.0.0.5/8) допустим, ipmatcher
-#     маскирует. Невалидные CIDR валят загрузку.
+# Format: <cidr>: <status>.
+#   - cidr   — an IP address or prefix. We accept the subset symmetric with
+#     lua-resty-ipmatcher: a bare IP with no /N is read as /32 (v4) or /128
+#     (v6); a CIDR with host bits set (10.0.0.5/8) is allowed, ipmatcher
+#     masks it. An invalid CIDR fails the load.
 #   - status — active | staging.
 #     active  → verdict=block, rule=ip_blocklist.
-#     staging → staging_match в bac_log, не блокирует.
+#     staging → staging_match in bac_log, does not block.
 #
-# Per-resource IP-blocklist клиента живёт в policy[host].ip_blocklist в БД
-# (правится через дашборд), сюда не дублируется.
+# A customer's per-resource IP blocklist lives in policy[host].ip_blocklist in the
+# database (edited through the dashboard); it is not duplicated here.
 
-# Примеры:
+# Examples:
 #   "203.0.113.0/24": active
 #   "198.51.100.42": staging

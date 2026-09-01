@@ -1,18 +1,18 @@
-# ip_whitelist.yaml — системный IP-whitelist (мониторинг, чек-сервисы,
-# доверенные системные клиенты).
+# ip_whitelist.yaml — the system IP whitelist (monitoring, check services,
+# trusted system clients).
 #
-# Формат: список строк-CIDR. Без status — whitelist всегда active; staging
-# для allow-list бессмыслен (если запись ошибочна, легитимный трафик
-# просто продолжит идти по обычному каскаду, а не "тише" блокируется).
+# Format: a list of CIDR strings. No status — a whitelist is always active; staging
+# is meaningless for an allow list (if an entry is wrong, legitimate traffic
+# simply keeps going through the normal cascade rather than being blocked "more quietly").
 #
-# Per-resource IP-whitelist клиента (CIDR из дашборда) живёт в
-# policy[host].ip_whitelist в БД, сюда не дублируется.
+# A customer's per-resource IP whitelist (CIDRs from the dashboard) lives in
+# policy[host].ip_whitelist in the database; it is not duplicated here.
 
-# Примеры:
-#   - 198.51.100.5/32   # системный мониторинг
-#   - 2001:db8::1       # bare IPv6 — ipmatcher принимает как /128
+# Examples:
+#   - 198.51.100.5/32   # system monitoring
+#   - 2001:db8::1       # bare IPv6 — ipmatcher reads it as /128
 
-# NB: в текущем стенде allow-side НЕ делает fastpass — whitelist-IP, попавший
-# в tls_fp_blocklist, все равно режется downstream (verdict.lua, задача
-# 86exr05xt). Запись ниже станет реальным обходом блока, когда fastpass заедет.
-- 203.0.113.10/32   # оператор (El M), ASN 64512 — 2026-06-23
+# NB: in the current stand the allow side does NOT fastpass — a whitelisted IP that also
+# lands in tls_fp_blocklist is still cut downstream (verdict.lua, task
+# 86exr05xt). The entry below becomes a real bypass once fastpass lands.
+- 203.0.113.10/32   # operator, ASN 64512 — 2026-06-23

@@ -1,21 +1,21 @@
-# tls_fp_browser_profiles.yaml — ожидаемые cipher_cnt для семейств браузеров
+# tls_fp_browser_profiles.yaml — the expected cipher_cnt per browser family
 # (Phase 2+).
 #
-# Используется правилом tls_fp_suspicious_ciphers (категория soft): если UA
-# похож на браузер, но cipher_cnt не совпадает с ожидаемым для семейства —
-# challenge. См. docs/product/phase2-spec.md.
+# Used by the tls_fp_suspicious_ciphers rule (soft category): if the UA
+# looks like a browser but cipher_cnt does not match what the family should have —
+# challenge. See docs/product/phase2-spec.md.
 #
-# Формат: map family -> { expected_cipher_cnt, status }.
-#   - family — короткое имя браузерного семейства, как его эмитит парсер UA
+# Format: map family -> { expected_cipher_cnt, status }.
+#   - family — the short browser-family name as the UA parser emits it
 #     (`chrome`, `firefox`, `safari`, `edge`, …).
-#   - expected_cipher_cnt — ожидаемое число cipher'ов в TLS-handshake.
+#   - expected_cipher_cnt — the expected number of ciphers in the TLS handshake.
 #   - status — active | staging.
-#     active  → правило tls_fp_suspicious_ciphers сравнивает observed vs expected.
-#     staging → staging_match в bac_log, не challenge'ит.
+#     active  → the tls_fp_suspicious_ciphers rule compares observed vs expected.
+#     staging → staging_match in bac_log, does not challenge.
 #
-# Стартовый набор — текущие наблюдения по основным браузерам. При сдвиге
-# у новой мажорной версии браузера сначала PR со status=staging рядом со
-# старым, потом промоут после калибровки.
+# The starting set reflects current observations of the major browsers. When a new
+# major browser version shifts the count, first land a PR with status=staging alongside
+# the old entry, then promote after calibration.
 
 chrome:
   expected_cipher_cnt: 15
@@ -29,7 +29,7 @@ safari:
   expected_cipher_cnt: 20
   status: active
 
-# Edge на Blink обычно совпадает с Chrome.
+# Edge on Blink normally matches Chrome.
 edge:
   expected_cipher_cnt: 15
   status: active
