@@ -1,30 +1,30 @@
-// Package filesource — git-репо каталогов как источник медленных
-// каталогов Channel C (ADR-006).
+// Package filesource — the catalogs git repo as the source of the slow
+// Channel C catalogs (ADR-006).
 //
-// Контракт совпадает с тем, что раньше делал dbloader для медленных
-// таблиц: на каждом тике reloader'а Load возвращает *catalog.SlowData;
-// reloader мерджит её с runtime-частью (verified_bot_ips, policy) из
-// БД и публикует в Store. Валидация regex/CIDR — та же, что в dbloader:
-// одна битая запись валит весь Load (fail-stale), Store не трогаем.
+// The contract matches what dbloader used to do for the slow
+// tables: on every reloader tick, Load returns a *catalog.SlowData;
+// the reloader merges it with the runtime part (verified_bot_ips, policy) from
+// the database and publishes it into the Store. Regex/CIDR validation is the same as in dbloader:
+// one broken record fails the whole Load (fail-stale) and the Store is left alone.
 //
-// Структура файлов:
+// The file layout:
 //
-//	<dir>/version                 — singleton semver (text, одна строка).
+//	<dir>/version                 — a singleton semver (text, one line).
 //	<dir>/tls_fp_blocklist.yaml   — map(fp → "active"|"staging").
 //	<dir>/ua_blacklist.yaml       — map(pattern → "active"|"staging").
 //	<dir>/ip_blocklist.yaml       — map(cidr → "active"|"staging").
-//	<dir>/ip_whitelist.yaml       — sequence of cidr (без status).
-//	<dir>/asn_datacenters.yaml    — sequence of uint32 (без status).
+//	<dir>/ip_whitelist.yaml       — a sequence of cidr (no status).
+//	<dir>/asn_datacenters.yaml    — a sequence of uint32 (no status).
 //
-// `status` для каталогов с поддержкой staged rollout (A11): и "active", и
-// "staging" попадают в SlowData с сохранённым статусом. Сериализация в Channel
-// C несёт статус в payload ("<status>:block" для fp/ip; отдельный staging
-// combined regex для ua), эдж сам разводит active vs staging: active →
-// verdict=block, staging → staging_match без блокировки. (Раньше staging
-// фильтровался здесь — теперь доставляется, см. store.go build*-функции.)
+// `status` for the catalogs supporting staged rollout (A11): both "active" and
+// "staging" land in SlowData with the status preserved. Serialisation into Channel
+// C carries the status in the payload ("<status>:block" for fp/ip; a separate staging
+// combined regex for ua), and the edge separates active from staging itself: active →
+// verdict=block, staging → staging_match with no block. (Staging used to be
+// filtered out here — now it is delivered, see the build* functions in store.go.)
 //
-// Пустой файл / только комментарии = пустой каталог. Отсутствующий файл —
-// ошибка (защита от опечатки в имени).
+// An empty file, or one holding only comments, means an empty catalog. A missing file is
+// an error (protection from a typo in the name).
 package filesource
 
 import (
@@ -42,8 +42,8 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 )
 
-// Список файлов, которые мы трекаем для mtime-cache. Если добавляется новый
-// каталог — добавь сюда и в Load().
+// The list of files we track for the mtime cache. When a new catalog is added,
+// add it here and in Load().
 var trackedFiles = []string{
 	"version",
 	"tls_fp_blocklist.yaml",
@@ -55,8 +55,8 @@ var trackedFiles = []string{
 	"tls_fp_browser_profiles.yaml",
 }
 
-// validStatuses — что считаем валидным значением status. Любое другое
-// значение в файле валит Load: симметрично DB-схеме (CHECK (status IN
+// validStatuses — what counts as a valid status value. Any other
+// value in a file fails the Load: symmetrically with the DB schema (CHECK (status IN
 // ('active','staging'))).
 var validStatuses = map[string]struct{}{
 	"active":  {},
@@ -68,9 +68,9 @@ type Loader struct {
 	mtimes map[string]time.Time
 }
 
-// New создаёт Loader, привязанный к каталогу dir. dir может ещё не
-// существовать на момент New — проверка отложена до Load(), чтобы
-// конструктор оставался дешёвым и не имел error-возврата.
+// New creates a Loader bound to the directory dir. dir need not yet
+// exist at the time of New — the check is deferred to Load(), so that the
+// constructor stays cheap and needs no error return.
 func New(dir string) *Loader {
 	return &Loader{
 		dir:    dir,
@@ -78,13 +78,13 @@ func New(dir string) *Loader {
 	}
 }
 
-// Dir возвращает корневую папку каталогов. Полезно для логов / health-checks.
+// Dir returns the catalogs' root directory. Useful for logs and health checks.
 func (l *Loader) Dir() string { return l.dir }
 
-// Changed возвращает true, если mtime хотя бы одного файла отличается от
-// закешированного, ЛИБО кеш ещё пуст (первый вызов). Чтение mtime не
-// валит ошибку — пропавший файл попадёт в Load как явный fail-stale там,
-// reloader увидит ошибку, оператор увидит её в логах + reload_failures.
+// Changed returns true when at least one file's mtime differs from the
+// cached one, OR the cache is still empty (the first call). Reading the mtime does not
+// raise an error — a missing file reaches Load as an explicit fail-stale there,
+// the reloader sees the error, and the operator sees it in the logs plus reload_failures.
 func (l *Loader) Changed() bool {
 	if len(l.mtimes) == 0 {
 		return true
@@ -93,8 +93,8 @@ func (l *Loader) Changed() bool {
 		path := filepath.Join(l.dir, name)
 		info, err := os.Stat(path)
 		if err != nil {
-			// Файл пропал между тиками — это изменение, пусть Load его
-			// поймает и вернёт ошибку (fail-stale + видимая причина).
+			// The file vanished between ticks — that is a change; let Load
+			// catch it and return an error (fail-stale with a visible cause).
 			return true
 		}
 		if cached, ok := l.mtimes[name]; !ok || !info.ModTime().Equal(cached) {
@@ -104,27 +104,27 @@ func (l *Loader) Changed() bool {
 	return false
 }
 
-// Load читает все каталоги, валидирует и возвращает *catalog.SlowData с
-// активными записями. На любой ошибке (IO, parse, validate) возвращает
-// её — caller (reloader) НЕ трогает Store, эдж продолжает работать с
-// предыдущим хорошим payload'ом. Обновляет mtime-cache только при успехе:
-// частичный успех (например, version прочли, ua_blacklist упал) не
-// должен «потерять» сигнал об изменении на следующем тике.
+// Load reads every catalog, validates it and returns a *catalog.SlowData with the
+// active records. On any error (IO, parse, validate) it returns
+// it — the caller (the reloader) does NOT touch the Store and the edge keeps working from the
+// previous good payload. It updates the mtime cache only on success:
+// a partial success (version was read but ua_blacklist failed) must not
+// "lose" the change signal on the next tick.
 //
-// Blast radius (PR-62 audit): Load атомарен по всему slow-слою — одна
-// битая запись в любом из 8 файлов валит публикацию ВСЕХ slow-каталогов
-// (ua/ip/asn/fp/tls_fp_*) одновременно. Runtime-слой (policy,
-// verified_bot_ips) НЕ страдает, dbloader.LoadRuntime — независимый
-// путь. Это сознательно: per-каталог-загрузка дала бы окно частичной
-// консистентности, когда ETag разных файлов меняется в разном порядке —
-// эдж видел бы то старую UA-blacklist + новую IP-blacklist, то наоборот.
-// Лучше явный fail-stale: оператор видит `antibot_backend_catalog_reload_failures_total`
-// + log error, fix в одном PR, на эдже всё остаётся в последнем хорошем
-// состоянии.
+// Blast radius (from audit): Load is atomic across the whole slow layer — one
+// broken record in any of the 8 files fails the publication of ALL the slow catalogs
+// (ua/ip/asn/fp/tls_fp_*) at once. The runtime layer (policy,
+// verified_bot_ips) is NOT affected; dbloader.LoadRuntime is an independent
+// path. That is deliberate: per-catalog loading would create a window of partial
+// consistency where the ETags of different files change in a different order —
+// the edge would see an old UA blacklist with a new IP blacklist, or the reverse.
+// Better an explicit fail-stale: the operator sees `antibot_backend_catalog_reload_failures_total`
+// plus a log error, fixes it in one PR, and on the edge everything stays in the last good
+// state.
 func (l *Loader) Load() (*catalog.SlowData, error) {
 	mtimes := make(map[string]time.Time, len(trackedFiles))
 
-	// version: текстовый файл, не YAML. Trim — допустим trailing newline.
+	// version: a text file, not YAML. Trim — a trailing newline is acceptable.
 	versionRaw, vmtime, err := readFile(l.dir, "version")
 	if err != nil {
 		return nil, fmt.Errorf("version: %w", err)
@@ -147,8 +147,8 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		TLSFPBrowserProfiles: map[string]catalog.BrowserProfile{},
 	}
 
-	// tls_fp_blocklist: map(fp → status). И active, и staging → fp: status
-	// в SlowData (A11); сериализатор кодирует "<status>:block" в payload.
+	// tls_fp_blocklist: map(fp → status). Both active and staging → fp: status
+	// in SlowData (A11); the serialiser encodes "<status>:block" into the payload.
 	if mt, err := loadStatusMap(l.dir, "tls_fp_blocklist.yaml", func(entries map[string]string) error {
 		for fp, status := range entries {
 			slow.TLSFPBlocklist[fp] = status
@@ -161,7 +161,7 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	}
 
 	// ua_blacklist: map(pattern → status). active → UABlacklist, staging →
-	// UABlacklistStaging (A11); сериализатор отдаёт два combined regex.
+	// UABlacklistStaging (A11); the serialiser emits two combined regexes.
 	if mt, err := loadStatusMap(l.dir, "ua_blacklist.yaml", func(entries map[string]string) error {
 		for pat, status := range entries {
 			if status == "staging" {
@@ -177,8 +177,8 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		mtimes["ua_blacklist.yaml"] = mt
 	}
 
-	// ip_blocklist: map(cidr → status). И active, и staging → cidr: status
-	// (A11); сериализатор кодирует "<status>:block".
+	// ip_blocklist: map(cidr → status). Both active and staging → cidr: status
+	// (A11); the serialiser encodes "<status>:block".
 	if mt, err := loadStatusMap(l.dir, "ip_blocklist.yaml", func(entries map[string]string) error {
 		for cidr, status := range entries {
 			slow.IPBlocklist[cidr] = status
@@ -190,7 +190,7 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 		mtimes["ip_blocklist.yaml"] = mt
 	}
 
-	// ip_whitelist: top-level sequence of strings (без status).
+	// ip_whitelist: a top-level sequence of strings (no status).
 	wl, mt, err := loadStringSlice(l.dir, "ip_whitelist.yaml")
 	if err != nil {
 		return nil, err
@@ -198,7 +198,7 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	slow.IPWhitelist = wl
 	mtimes["ip_whitelist.yaml"] = mt
 
-	// asn_datacenters: top-level sequence of uint32 (без status).
+	// asn_datacenters: a top-level sequence of uint32 (no status).
 	asns, mt, err := loadASNs(l.dir, "asn_datacenters.yaml")
 	if err != nil {
 		return nil, err
@@ -207,8 +207,8 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	mtimes["asn_datacenters.yaml"] = mt
 
 	// tls_fp_catalog: top-level map(hash_b → {family, status}). Validate
-	// делает структурные проверки (непустой family, валидный status); сюда
-	// просто кладём результат decodeYAML.
+	// does the structural checks (a non-empty family, a valid status); here we
+	// simply store the decodeYAML result.
 	tlsCat, mt, err := loadTLSFPCatalog(l.dir, "tls_fp_catalog.yaml")
 	if err != nil {
 		return nil, err
@@ -224,46 +224,46 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	slow.TLSFPBrowserProfiles = tlsProf
 	mtimes["tls_fp_browser_profiles.yaml"] = mt
 
-	// Финальная валидация через catalog.Validate: regex компилируется,
-	// CIDR парсятся как симметрично-к-ipmatcher'у. Та же модель, что в
-	// dbloader.Load: упадём до того, как Store увидит битый payload.
-	// Merge с nil runtime-частью — Validate проверит только slow-слой
-	// (Policy пуст → per-host-валидация скипается).
+	// The final validation through catalog.Validate: regexes compile and
+	// CIDRs parse symmetrically with ipmatcher. The same model as in
+	// dbloader.Load: we fail before the Store ever sees a broken payload.
+	// Merging with a nil runtime part means Validate checks only the slow layer
+	// (Policy is empty → the per-host validation is skipped).
 	if err := catalog.Validate(catalog.Merge(slow, nil)); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
 	}
 
-	// Atomic apply кеша. До этой точки mtimes — локальная карта; чтобы
-	// частичный fail (например, ip_whitelist прочли, asn упал) не сдвинул
-	// l.mtimes — обновляем целиком на успехе.
+	// Applying the cache atomically. Up to this point the mtimes are a local map; so that a
+	// partial failure (ip_whitelist read but asn failed) does not shift
+	// l.mtimes, we update it wholesale on success.
 	l.mtimes = mtimes
 	return slow, nil
 }
 
-// readFile читает файл из dir и возвращает байты + mtime. Отсутствие
-// файла — ошибка (защита от опечатки в имени; пустой каталог должен
-// быть представлен пустым файлом / только комментариями).
+// readFile reads a file from dir and returns the bytes plus the mtime. A missing
+// file is an error (protection from a typo in the name; an empty catalog must
+// be represented by an empty file or one with only comments).
 func readFile(dir, name string) ([]byte, time.Time, error) {
 	path := filepath.Join(dir, name)
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("stat %s: %w", name, err)
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // путь под контролем оператора, не из запроса
+	data, err := os.ReadFile(path) //nolint:gosec // the path is operator-controlled, not from a request
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("read %s: %w", name, err)
 	}
 	return data, info.ModTime(), nil
 }
 
-// loadStatusMap читает YAML-файл вида map[string]string, валидирует
-// status'ы, отдаёт ВЕСЬ валидированный map (key → status) callback'у —
-// и active, и staging (A11): доставку staging решает сериализатор, не этот
-// загрузчик. Пустой файл / только комментарии → пустой map (это нормальное
-// состояние «каталог ещё пуст»).
+// loadStatusMap reads a YAML file of the form map[string]string, validates the
+// statuses and hands the WHOLE validated map (key → status) to the callback —
+// both active and staging (A11): delivering staging is the serialiser's decision, not this
+// loader's. An empty file or one with only comments → an empty map (the normal
+// state, "the catalog is still empty").
 //
-// Возвращает mtime файла, чтобы reloader мог его закешировать; ошибку —
-// если YAML битый, ключ нестроковый, status незнакомый.
+// It returns the file's mtime so that the reloader can cache it, and an error
+// when the YAML is broken, a key is not a string, or a status is unknown.
 func loadStatusMap(dir, name string, apply func(entries map[string]string) error) (time.Time, error) {
 	data, mt, err := readFile(dir, name)
 	if err != nil {
@@ -284,8 +284,8 @@ func loadStatusMap(dir, name string, apply func(entries map[string]string) error
 	return mt, nil
 }
 
-// loadStringSlice читает YAML-файл, top-level которого — последовательность
-// строк. Пустой файл → пустой срез.
+// loadStringSlice reads a YAML file whose top level is a sequence of
+// strings. An empty file → an empty slice.
 func loadStringSlice(dir, name string) ([]string, time.Time, error) {
 	data, mt, err := readFile(dir, name)
 	if err != nil {
@@ -301,9 +301,9 @@ func loadStringSlice(dir, name string) ([]string, time.Time, error) {
 	return s, mt, nil
 }
 
-// loadTLSFPCatalog читает YAML-map(hash_b → {family, status}). Пустой файл /
-// только комментарии = пустой каталог. Структурные проверки (непустой family,
-// валидный status) делает catalog.Validate на следующем шаге Load.
+// loadTLSFPCatalog reads a YAML map(hash_b → {family, status}). An empty file or
+// one with only comments means an empty catalog. The structural checks (a non-empty family,
+// a valid status) are done by catalog.Validate at the next step of Load.
 func loadTLSFPCatalog(dir, name string) (map[string]catalog.TLSFPCatalog, time.Time, error) {
 	data, mt, err := readFile(dir, name)
 	if err != nil {
@@ -319,8 +319,8 @@ func loadTLSFPCatalog(dir, name string) (map[string]catalog.TLSFPCatalog, time.T
 	return m, mt, nil
 }
 
-// loadBrowserProfiles читает YAML-map(family → {expected_cipher_cnt, status}).
-// Симметрично loadTLSFPCatalog: проверки в catalog.Validate.
+// loadBrowserProfiles reads a YAML map(family → {expected_cipher_cnt, status}).
+// Symmetric with loadTLSFPCatalog: the checks live in catalog.Validate.
 func loadBrowserProfiles(dir, name string) (map[string]catalog.BrowserProfile, time.Time, error) {
 	data, mt, err := readFile(dir, name)
 	if err != nil {
@@ -336,9 +336,9 @@ func loadBrowserProfiles(dir, name string) (map[string]catalog.BrowserProfile, t
 	return m, mt, nil
 }
 
-// loadASNs читает YAML-файл с последовательностью чисел и приводит к
-// []uint32. Принимаем любое целое; границы 0..2^32-1 — потому что ASN
-// 32-bit (RFC 6793). Отрицательное / больше uint32 — ошибка (как в
+// loadASNs reads a YAML file with a sequence of numbers and converts it to
+// []uint32. Any integer is accepted; the bounds 0..2^32-1 come from ASNs being
+// 32-bit (RFC 6793). Negative or above uint32 is an error (as in
 // dbloader.loadUint32List).
 func loadASNs(dir, name string) ([]uint32, time.Time, error) {
 	data, mt, err := readFile(dir, name)
@@ -359,10 +359,10 @@ func loadASNs(dir, name string) ([]uint32, time.Time, error) {
 	return out, mt, nil
 }
 
-// decodeYAML — обёртка с strict mode (KnownFields(true)) и человекочитаемой
-// ошибкой, в которой видно имя файла. Пустой документ (только комментарии /
-// пробелы) даёт yaml.NewDecoder io.EOF — трактуем как «ничего не положили
-// в dst», caller это поддерживает (nil-map / nil-slice).
+// decodeYAML — a wrapper with strict mode (KnownFields(true)) and a human-readable
+// error carrying the file name. An empty document (only comments or
+// whitespace) makes yaml.NewDecoder return io.EOF — we treat that as "nothing was put
+// into dst", which the caller supports (a nil map / nil slice).
 func decodeYAML(data []byte, dst any, name string) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
