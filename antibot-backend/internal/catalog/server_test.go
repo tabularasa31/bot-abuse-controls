@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// httpGet — GET с контекстом теста. Линтер noctx требует контекст у каждого
-// http.Get / NewRequest; один хелпер вместо повторяющегося NewRequestWithContext
-// держит тест-кейсы короткими.
+// httpGet — a GET with the test's context. The noctx linter requires a context on every
+// http.Get / NewRequest; one helper instead of a repeated NewRequestWithContext
+// keeps the test cases short.
 func httpGet(t *testing.T, url string) *http.Response {
 	t.Helper()
 	return httpGetWith(t, url, nil)
@@ -35,10 +35,10 @@ func httpGetWith(t *testing.T, url string, headers map[string]string) *http.Resp
 	return resp
 }
 
-// sampleData — наполненная Data: по одной записи в каждом каталоге, два host'a
-// с policy (один с custom-паттернами и attack_mode), один host attack_mode
-// через прямой map. Покрывает combined regex, per-resource ip-листы и оба
-// источника attack_mode.
+// sampleData — a populated Data: one record in every catalog, two hosts
+// with a policy (one with custom patterns and attack_mode), and one host with attack_mode
+// through the direct map. It covers the combined regex, the per-resource IP lists and both
+// sources of attack_mode.
 func sampleData() *Data {
 	d := emptyData()
 	d.Version = "1.2.3"
@@ -47,7 +47,7 @@ func sampleData() *Data {
 	d.UABlacklistStaging = []string{`scrapy/[0-9.]+`}
 	d.IPBlocklist = map[string]string{"203.0.113.0/24": "active", "198.51.100.7/32": "staging"}
 	d.IPWhitelist = []string{"198.51.100.5/32"}
-	d.ASNDatacenters = []uint32{14061, 16509, 14061} // дубликат — проверяем dedup
+	d.ASNDatacenters = []uint32{14061, 16509, 14061} // a duplicate — we check the dedup
 	d.TLSFPCatalog = map[string]TLSFPCatalog{
 		"1ed0482b9b4c": {Family: "python-requests", Status: "active"},
 		"a1b2c3d4e5f6": {Family: "curl", Status: "staging"},
@@ -110,7 +110,7 @@ func TestVersionAndETagHeaders(t *testing.T) {
 	}
 	etag := resp.Header.Get("ETag")
 	if etag == "" || etag[0] != '"' {
-		t.Errorf("ETag=%q должен быть strong и непустой", etag)
+		t.Errorf("ETag=%q must be strong and non-empty", etag)
 	}
 }
 
@@ -121,7 +121,7 @@ func TestConditionalGet304(t *testing.T) {
 	r1.Body.Close()
 	etag := r1.Header.Get("ETag")
 	if etag == "" {
-		t.Fatal("первый GET не дал ETag")
+		t.Fatal("the first GET returned no ETag")
 	}
 
 	r2 := httpGetWith(t, ts.URL+"/catalog/ip_blocklist", map[string]string{"If-None-Match": etag})
@@ -129,18 +129,18 @@ func TestConditionalGet304(t *testing.T) {
 	if r2.StatusCode != http.StatusNotModified {
 		t.Fatalf("status=%d want 304", r2.StatusCode)
 	}
-	// 304 не должен иметь body.
+	// A 304 must have no body.
 	buf := make([]byte, 16)
 	n, _ := r2.Body.Read(buf)
 	if n != 0 {
-		t.Errorf("304 вернул %d байт тела, ожидался пустой", n)
+		t.Errorf("the 304 returned %d bytes of body, expected empty", n)
 	}
-	// ETag и Version должны быть и на 304 (RFC 7232 §4.1).
+	// The ETag and Version must be present on the 304 too (RFC 7232 §4.1).
 	if r2.Header.Get("ETag") != etag {
-		t.Errorf("ETag на 304 не совпадает с 200")
+		t.Errorf("the ETag on the 304 does not match the 200")
 	}
 	if r2.Header.Get("X-Catalog-Version") != "1.2.3" {
-		t.Errorf("X-Catalog-Version отсутствует на 304")
+		t.Errorf("X-Catalog-Version is missing on the 304")
 	}
 }
 
@@ -164,7 +164,7 @@ func TestIfNoneMatchList(t *testing.T) {
 	})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotModified {
-		t.Fatalf("status=%d want 304 (etag в списке)", resp.StatusCode)
+		t.Fatalf("status=%d want 304 (the etag is in the list)", resp.StatusCode)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestETagStableAcrossCalls(t *testing.T) {
 		etag := resp.Header.Get("ETag")
 		resp.Body.Close()
 		if i > 0 && etag != prev {
-			t.Fatalf("call %d: etag=%q != prev=%q (не детерминирован)", i, etag, prev)
+			t.Fatalf("call %d: etag=%q != prev=%q (not deterministic)", i, etag, prev)
 		}
 		prev = etag
 	}
@@ -204,23 +204,23 @@ func TestETagChangesOnDataUpdate(t *testing.T) {
 	etag2 := r2.Header.Get("ETag")
 
 	if etag1 == etag2 {
-		t.Fatalf("ETag не изменился после Replace с новым контентом")
+		t.Fatalf("the ETag did not change after a Replace with new content")
 	}
 
-	// If-None-Match со старым etag после Replace должен дать 200, не 304.
+	// If-None-Match with the old etag after a Replace must give 200, not 304.
 	r3 := httpGetWith(t, ts.URL+"/catalog/tls_fp_blocklist", map[string]string{"If-None-Match": etag1})
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d after Replace want 200 (старый etag не должен матчиться)", r3.StatusCode)
+		t.Fatalf("status=%d after Replace want 200 (the old etag must not match)", r3.StatusCode)
 	}
 }
 
 func TestMultiTenantUABlacklistCombinesRegex(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// Контракт shape (A11) — JSON-объект {"active": "<combined>", "staging":
-	// ["<pattern>", …]}. active — combined regex системных паттернов
-	// (+ per-resource при site); staging — СПИСОК системных staging-паттернов.
+	// The shape contract (A11) — a JSON object {"active": "<combined>", "staging":
+	// ["<pattern>", …]}. active is the combined regex of the system patterns
+	// (plus per-resource ones when a site is given); staging is the LIST of system staging patterns.
 	type uaPayload struct {
 		Active  string   `json:"active"`
 		Staging []string `json:"staging"`
@@ -230,48 +230,48 @@ func TestMultiTenantUABlacklistCombinesRegex(t *testing.T) {
 	etag1 := r1.Header.Get("ETag")
 	r1.Body.Close()
 	if err != nil {
-		t.Fatalf("без site: body не JSON-объект: %v", err)
+		t.Fatalf("no site: the body is not a JSON object: %v", err)
 	}
 	if !strings.Contains(obj1.Active, "curl/.*") || !strings.Contains(obj1.Active, "python-requests/.*") {
-		t.Errorf("без site: active не содержит системных regex'ов: %q", obj1.Active)
+		t.Errorf("no site: active does not contain the system regexes: %q", obj1.Active)
 	}
 	if strings.Contains(obj1.Active, "evil-scraper/.*") {
-		t.Errorf("без site: active содержит per-resource паттерн: %q", obj1.Active)
+		t.Errorf("no site: active contains a per-resource pattern: %q", obj1.Active)
 	}
-	// staging-паттерн (scrapy) — отдельной записью списка, не в active.
+	// The staging pattern (scrapy) is a separate list entry, not part of active.
 	if len(obj1.Staging) != 1 || obj1.Staging[0] != "scrapy/[0-9.]+" {
-		t.Errorf("staging список не содержит staging-паттерна: %v", obj1.Staging)
+		t.Errorf("the staging list does not contain the staging pattern: %v", obj1.Staging)
 	}
 	if strings.Contains(obj1.Active, "scrapy/[0-9.]+") {
-		t.Errorf("active содержит staging-паттерн (должен быть только в staging): %q", obj1.Active)
+		t.Errorf("active contains a staging pattern (it must be in staging only): %q", obj1.Active)
 	}
 
-	// С site=shop — в active добавляется кастомный; staging не зависит от site.
+	// With site=shop the custom one is added to active; staging does not depend on the site.
 	r2 := httpGet(t, ts.URL+"/catalog/ua_blacklist?site=shop.example.com")
 	obj2, err := readJSON[uaPayload](r2)
 	etag2 := r2.Header.Get("ETag")
 	r2.Body.Close()
 	if err != nil {
-		t.Fatalf("site=shop: body не JSON-объект: %v", err)
+		t.Fatalf("site=shop: the body is not a JSON object: %v", err)
 	}
 	if !strings.Contains(obj2.Active, "evil-scraper/.*") {
-		t.Errorf("site=shop: active не содержит кастомного regex'a: %q", obj2.Active)
+		t.Errorf("site=shop: active does not contain the custom regex: %q", obj2.Active)
 	}
 
-	// active combined regex должен компилироваться.
+	// The active combined regex must compile.
 	if _, err := regexp.Compile(obj2.Active); err != nil {
-		t.Errorf("active combined regex не компилируется: %v (pattern=%q)", err, obj2.Active)
+		t.Errorf("the active combined regex does not compile: %v (pattern=%q)", err, obj2.Active)
 	}
 
 	if etag1 == etag2 {
-		t.Errorf("ETag совпали для разных site — per-tenant фильтрация не работает")
+		t.Errorf("the ETags matched for different sites — per-tenant filtering is not working")
 	}
 }
 
 func TestMultiTenantPolicy(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// Известный host — отдаём именно его policy.
+	// A known host — we serve exactly its policy.
 	r1 := httpGet(t, ts.URL+"/catalog/policy?site=shop.example.com")
 	var p Policy
 	if err := json.NewDecoder(r1.Body).Decode(&p); err != nil {
@@ -282,12 +282,12 @@ func TestMultiTenantPolicy(t *testing.T) {
 		t.Errorf("policy[shop] = %+v, want mode=active attack_mode=true", p)
 	}
 
-	// Неизвестный host — дефолт пула (B4): mode=shadow, observe-only.
-	// НЕ пустой Policy{}: edge не должен видеть mode="" и падать на
-	// switch'е, см. PoolDefault.
+	// An unknown host — the pool default (B4): mode=shadow, observe-only.
+	// NOT an empty Policy{}: the edge must not see mode="" and break on the
+	// mode switch, see PoolDefault.
 	r2 := httpGet(t, ts.URL+"/catalog/policy?site=unknown.example.com")
 	if r2.StatusCode != http.StatusOK {
-		t.Fatalf("policy?site=unknown: status=%d want 200 (дефолт, не 404)", r2.StatusCode)
+		t.Fatalf("policy?site=unknown: status=%d want 200 (the default, not a 404)", r2.StatusCode)
 	}
 	var p2 Policy
 	if err := json.NewDecoder(r2.Body).Decode(&p2); err != nil {
@@ -309,10 +309,10 @@ func TestMultiTenantAttackMode(t *testing.T) {
 		site string
 		on   bool
 	}{
-		{"shop.example.com", true},     // через policy.AttackMode
-		{"alerts.example.com", true},   // только через policy.AttackMode
-		{"blog.example.com", false},    // присутствует, но off
-		{"unknown.example.com", false}, // не зарегистрирован
+		{"shop.example.com", true},     // through policy.AttackMode
+		{"alerts.example.com", true},   // only through policy.AttackMode
+		{"blog.example.com", false},    // present, but off
+		{"unknown.example.com", false}, // not registered
 	}
 	for _, tc := range cases {
 		r := httpGet(t, ts.URL+"/catalog/attack_mode?site="+tc.site)
@@ -330,9 +330,9 @@ func TestMultiTenantAttackMode(t *testing.T) {
 func TestPerTenantIPLists(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
-	// ip_blocklist: системный CIDR + per-resource CIDR для shop. Wire-формат
-	// A11 — "<status>:block": системный active → "active:block", системный
-	// staging → "staging:block", per-resource всегда "active:block".
+	// ip_blocklist: the system CIDR plus a per-resource CIDR for shop. The A11 wire
+	// format is "<status>:block": a system active one → "active:block", a system
+	// staging one → "staging:block", and per-resource ones are always "active:block".
 	r := httpGet(t, ts.URL+"/catalog/ip_blocklist?site=shop.example.com")
 	var bl map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&bl); err != nil {
@@ -340,16 +340,16 @@ func TestPerTenantIPLists(t *testing.T) {
 	}
 	r.Body.Close()
 	if bl["203.0.113.0/24"] != "active:block" {
-		t.Errorf("системный active CIDR не в ip_blocklist: %+v", bl)
+		t.Errorf("the system active CIDR is missing from ip_blocklist: %+v", bl)
 	}
 	if bl["198.51.100.7/32"] != "staging:block" {
-		t.Errorf("системный staging CIDR не несёт staging: %+v", bl)
+		t.Errorf("the system staging CIDR does not carry staging: %+v", bl)
 	}
 	if bl["192.0.2.10/32"] != "active:block" {
-		t.Errorf("per-resource CIDR не в ip_blocklist: %+v", bl)
+		t.Errorf("the per-resource CIDR is missing from ip_blocklist: %+v", bl)
 	}
 
-	// ip_whitelist: системный + per-resource, без дублей.
+	// ip_whitelist: system plus per-resource, with no duplicates.
 	r = httpGet(t, ts.URL+"/catalog/ip_whitelist?site=shop.example.com")
 	var wl []string
 	if err := json.NewDecoder(r.Body).Decode(&wl); err != nil {
@@ -361,8 +361,8 @@ func TestPerTenantIPLists(t *testing.T) {
 	}
 }
 
-// TestTLSFPBlocklistStatusPayload: A11 — payload несёт "<status>:block"
-// для active И staging записей, эдж сам разводит блокировку vs staging_match.
+// TestTLSFPBlocklistStatusPayload: A11 — the payload carries "<status>:block"
+// for active AND staging records, and the edge separates a block from a staging_match itself.
 func TestTLSFPBlocklistStatusPayload(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 	r := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
@@ -375,13 +375,13 @@ func TestTLSFPBlocklistStatusPayload(t *testing.T) {
 		t.Errorf("active fp payload = %q want active:block", bl["L13i17h2_abc_def"])
 	}
 	if bl["L12i14h1_ghi_jkl"] != "staging:block" {
-		t.Errorf("staging fp payload = %q want staging:block (staging доезжает по Channel C)", bl["L12i14h1_ghi_jkl"])
+		t.Errorf("staging fp payload = %q want staging:block (staging is delivered over Channel C)", bl["L12i14h1_ghi_jkl"])
 	}
 }
 
 // TestTLSFPCatalogPayload: composite "<status>:<family>" payload — wire
-// формат, который edge tls_fp.lua разбирает split-по-`:` (mirrors verified_bot_ips
-// и не требует cjson.encode per-entry).
+// the format edge tls_fp.lua parses by splitting on `:` (it mirrors verified_bot_ips
+// and needs no per-entry cjson.encode).
 func TestTLSFPCatalogPayload(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 	r := httpGet(t, ts.URL+"/catalog/tls_fp_catalog")
@@ -395,7 +395,7 @@ func TestTLSFPCatalogPayload(t *testing.T) {
 			cat["1ed0482b9b4c"], "active:python-requests")
 	}
 	if cat["a1b2c3d4e5f6"] != "staging:curl" {
-		t.Errorf("tls_fp_catalog[curl] payload = %q, want %q (staging должен оставаться в payload, эдж сам фильтрует)",
+		t.Errorf("tls_fp_catalog[curl] payload = %q, want %q (staging must stay in the payload; the edge filters it itself)",
 			cat["a1b2c3d4e5f6"], "staging:curl")
 	}
 }
@@ -428,7 +428,7 @@ func TestASNDatacentersDedup(t *testing.T) {
 		t.Errorf("asn_datacenters payload = %v want {14061:1, 16509:1}", asns)
 	}
 	if len(asns) != 2 {
-		t.Errorf("asn_datacenters: дубликат 14061 не схлопнут, len=%d", len(asns))
+		t.Errorf("asn_datacenters: the duplicate 14061 was not collapsed, len=%d", len(asns))
 	}
 }
 
@@ -438,14 +438,14 @@ func TestSiteTooLong(t *testing.T) {
 	resp := httpGet(t, ts.URL+"/catalog/policy?site="+long)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400 для site длиннее 253 байт", resp.StatusCode)
+		t.Fatalf("status=%d want 400 for a site longer than 253 bytes", resp.StatusCode)
 	}
 }
 
-// TestConcurrentPullsNoRace: 10 эджей одновременно дёргают endpoint, часть с
-// If-None-Match, в середине Replace меняет данные. Проверяем отсутствие data
-// race (`go test -race`), и что каждый GET получает согласованную пару
-// ETag/Body (нет ETag старой версии + Body новой).
+// TestConcurrentPullsNoRace: 10 edges hit the endpoint at once, some with an
+// If-None-Match, while a Replace changes the data mid-flight. We check for the absence of a data
+// race (`go test -race`) and that every GET receives a consistent
+// ETag/Body pair (no old-version ETag with a new Body).
 func TestConcurrentPullsNoRace(t *testing.T) {
 	srv := New()
 	srv.Store().Replace(sampleData())
@@ -486,7 +486,7 @@ func TestConcurrentPullsNoRace(t *testing.T) {
 					b := make([]byte, 1024)
 					n, _ := resp.Body.Read(b)
 					if n == 0 {
-						failures.Store(id, "200 с пустым телом")
+						failures.Store(id, "200 with an empty body")
 						resp.Body.Close()
 						return
 					}
@@ -497,7 +497,7 @@ func TestConcurrentPullsNoRace(t *testing.T) {
 		}(w)
 	}
 
-	// Писатель: меняет данные несколько раз — atomicity Store.Replace.
+	// The writer: it changes the data several times — the atomicity of Store.Replace.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -525,14 +525,14 @@ func TestETagMatcher(t *testing.T) {
 		{`"abc", "def"`, `"def"`, true},
 		{`"abc"`, `"def"`, false},
 		{`*`, `"anything"`, true},
-		{`W/"abc"`, `"abc"`, true}, // weak в запросе — допустим
+		{`W/"abc"`, `"abc"`, true}, // a weak one in the request — acceptable
 		{``, `"abc"`, false},
 		{`  "abc"  `, `"abc"`, true},
-		{`"foo,bar"`, `"foo,bar"`, true},           // запятая внутри quoted-string
-		{`"a", "foo,bar"`, `"foo,bar"`, true},      // запятая внутри второго токена
-		{`"a", "foo,bar", "c"`, `"foo,bar"`, true}, // в середине списка
+		{`"foo,bar"`, `"foo,bar"`, true},           // a comma inside a quoted-string
+		{`"a", "foo,bar"`, `"foo,bar"`, true},      // a comma inside the second token
+		{`"a", "foo,bar", "c"`, `"foo,bar"`, true}, // in the middle of the list
 		{`"a,b", "c,d"`, `"c,d"`, true},
-		{`"esc\"ape", "other"`, `"esc\"ape"`, true}, // quoted-pair: \" не закрывает
+		{`"esc\"ape", "other"`, `"esc\"ape"`, true}, // a quoted-pair: \" does not close it
 	}
 	for _, tc := range cases {
 		if got := etagMatches(tc.header, tc.etag); got != tc.match {
@@ -541,12 +541,12 @@ func TestETagMatcher(t *testing.T) {
 	}
 }
 
-// TestStoreLoadedFlagNotVersion: 503 решается по флагу Store.IsLoaded, а
-// не по сравнению Version с defaultVersion — иначе оператор, который
-// поставит `version: "0.0.0"` в YAML, получал бы 503 на легитимном payload'е.
+// TestStoreLoadedFlagNotVersion: the 503 is decided by the Store.IsLoaded flag and
+// not by comparing Version with defaultVersion — otherwise an operator who
+// sets `version: "0.0.0"` in the YAML would get a 503 on a legitimate payload.
 func TestStoreLoadedFlagNotVersion(t *testing.T) {
 	srv := New()
-	d := emptyData() // Version уже = defaultVersion ("0.0.0")
+	d := emptyData() // Version is already defaultVersion ("0.0.0")
 	srv.Store().Replace(d)
 	mux := http.NewServeMux()
 	srv.Register(mux)
@@ -556,15 +556,15 @@ func TestStoreLoadedFlagNotVersion(t *testing.T) {
 	resp := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d want 200 на Replace с version=%q (бывший сентинель)", resp.StatusCode, defaultVersion)
+		t.Fatalf("status=%d want 200 on a Replace with version=%q (the former sentinel)", resp.StatusCode, defaultVersion)
 	}
 	if got := resp.Header.Get("X-Catalog-Version"); got != defaultVersion {
 		t.Errorf("X-Catalog-Version=%q want %q", got, defaultVersion)
 	}
 }
 
-// TestNormalizeDedupStrings: дубликат CIDR в YAML не должен раздувать
-// catalog payload — normalize дедуплицирует строковые срезы наряду с ASN.
+// TestNormalizeDedupStrings: a duplicate CIDR in the YAML must not inflate the
+// catalog payload — normalize deduplicates string slices alongside the ASNs.
 func TestNormalizeDedupStrings(t *testing.T) {
 	d := emptyData()
 	d.Version = "1.0.0"
@@ -587,7 +587,7 @@ func TestNormalizeDedupStrings(t *testing.T) {
 	}
 	r.Body.Close()
 	if len(wl) != 2 {
-		t.Errorf("ip_whitelist len=%d want 2 (дубликат 10.0.0.0/8 не схлопнут): %v", len(wl), wl)
+		t.Errorf("ip_whitelist len=%d want 2 (the duplicate 10.0.0.0/8 was not collapsed): %v", len(wl), wl)
 	}
 
 	r = httpGet(t, ts.URL+"/catalog/ua_blacklist")
@@ -597,7 +597,7 @@ func TestNormalizeDedupStrings(t *testing.T) {
 	}](r)
 	r.Body.Close()
 	if strings.Count(obj.Active, "curl/") != 1 {
-		t.Errorf("ua_blacklist active содержит дубликат curl/: %q", obj.Active)
+		t.Errorf("ua_blacklist active contains the duplicate curl/: %q", obj.Active)
 	}
 
 	r = httpGet(t, ts.URL+"/catalog/ip_blocklist?site=shop.example.com")
@@ -606,20 +606,20 @@ func TestNormalizeDedupStrings(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Body.Close()
-	// map дедуплицирует по природе, но если бы normalize оставил дубликат
-	// в slice'е, jsonBytes(map) всё равно был бы корректен; проверяем сам факт
-	// нормализации Policy на уровне Data.
+	// A map deduplicates by nature, but if normalize had left a duplicate
+	// in the slice, jsonBytes(map) would still be correct; we check the fact of
+	// normalisation of Policy at the Data level.
 	got := srv.Store().data.Load()
 	if l := len(got.Policy["shop.example.com"].IPBlocklist); l != 1 {
-		t.Errorf("policy[shop].IPBlocklist дубликат не схлопнут: len=%d", l)
+		t.Errorf("policy[shop].IPBlocklist duplicate not collapsed: len=%d", l)
 	}
 }
 
-// TestStoreNotLoaded503: до Replace Store отдаёт defaultVersion; handler
-// должен ответить 503 с Retry-After, а не "успешный" 200 с пустым телом —
-// иначе эдж перезатёр бы свой fail-stale-кэш (codex review).
+// TestStoreNotLoaded503: before a Replace the Store serves defaultVersion; the handler
+// must answer 503 with a Retry-After rather than a "successful" 200 with an empty body —
+// otherwise the edge would overwrite its own fail-stale cache (from review).
 func TestStoreNotLoaded503(t *testing.T) {
-	srv := New() // без Replace
+	srv := New() // with no Replace
 	mux := http.NewServeMux()
 	srv.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -628,26 +628,26 @@ func TestStoreNotLoaded503(t *testing.T) {
 	resp := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d want 503 на эмпти-Store", resp.StatusCode)
+		t.Fatalf("status=%d want 503 on an empty Store", resp.StatusCode)
 	}
 	if got := resp.Header.Get("X-Catalog-Version"); got != defaultVersion {
 		t.Errorf("X-Catalog-Version=%q want %q", got, defaultVersion)
 	}
 	if resp.Header.Get("Retry-After") == "" {
-		t.Errorf("Retry-After не выставлен на 503")
+		t.Errorf("Retry-After is not set on the 503")
 	}
 
-	// После Replace тот же endpoint становится доступен.
+	// After a Replace the same endpoint becomes available.
 	srv.Store().Replace(sampleData())
 	r2 := httpGet(t, ts.URL+"/catalog/tls_fp_blocklist")
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d want 200 после Replace", r2.StatusCode)
+		t.Fatalf("status=%d want 200 after Replace", r2.StatusCode)
 	}
 }
 
-// TestIfNoneMatchMultipleHeaders: клиент имеет право прислать
-// If-None-Match несколько раз; handler должен учитывать ВСЕ значения.
+// TestIfNoneMatchMultipleHeaders: a client may send
+// If-None-Match several times; the handler must consider ALL the values.
 func TestIfNoneMatchMultipleHeaders(t *testing.T) {
 	ts := newTestServer(t, sampleData())
 
@@ -661,18 +661,18 @@ func TestIfNoneMatchMultipleHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Add("If-None-Match", `"deadbeef"`)
-	req.Header.Add("If-None-Match", etag) // второй заголовок с актуальным etag
+	req.Header.Add("If-None-Match", etag) // a second header with the current etag
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotModified {
-		t.Fatalf("status=%d want 304 при etag во втором If-None-Match", resp.StatusCode)
+		t.Fatalf("status=%d want 304 when the etag is in the second If-None-Match", resp.StatusCode)
 	}
 }
 
-// readJSON — generic helper для тестов.
+// readJSON — a generic helper for the tests.
 func readJSON[T any](r *http.Response) (T, error) {
 	var v T
 	err := json.NewDecoder(r.Body).Decode(&v)
