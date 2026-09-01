@@ -2,7 +2,7 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (edge admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (B11). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The whole cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
+The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The whole cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
 
 ## Scenarios a reviewer can probe
 
@@ -14,7 +14,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 | `/` | `wget -O - --no-check-certificate https://<host>/` | 200 | Same. wget's fp varies by build; visible in the BAC_LOG stream. |
 | `/__health` | anything | `ok` | Liveness probe; bypasses verdict. The only operational endpoint on the public edge. |
 
-> **Phase 1 — edge surface shrunk.** `/__fp`, `/__version`, `/__admin`,
+> **The edge surface is deliberately small.** `/__fp`, `/__version`, `/__admin`,
 > `/__admin/recover_ip`, `/__policy`, `/metrics` and `/baseline/` were removed
 > from the public edge. Observability moved to the **stdout → Loki** streams:
 > per-request records as `BAC_LOG` and aggregate counters (the old `/metrics`
@@ -23,7 +23,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 > Query in Grafana/Loki: `{kind="edge_stats"}` for counters, `{kind="bac_log"}`
 > for requests. False-positive recovery is the dashboard's job via the Policy
 > API (the edge no longer mutates policy). `/__fp` returns on a controlled
-> measurement surface when the browser farm is built (Phase 4).
+> measurement surface when the browser farm is built.
 
 **Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — is dropped with `444` (the edge is tenant-only; the bundled landing page was removed). `/__health` is the only public local endpoint; every other former `/__*` / `/metrics` path is gone from the public surface (moved to the private `:9090` plane or to Loki). Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (the tracker ). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
 
@@ -48,11 +48,11 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 
 Rollback: unset/remove the auto-ssl wiring → the static fallback cert path is exactly the pre-change behaviour.
 
-The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` (B11) — see the section above and `policy.lua`.
+The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` () — see the section above and `policy.lua`.
 
-## Structured log (Phase 1 schema)
+## Structured log
 
-Every request through the pipeline emits exactly one JSON record to docker stdout, prefixed `BAC_LOG `, per the [Phase 1 spec](../../docs/product/phase1-spec.md). View it with:
+Every request through the pipeline emits exactly one JSON record to docker stdout, prefixed `BAC_LOG `, per the [log contract](../../docs/product/entities-reference.md). View it with:
 
 ```sh
 docker logs -f nginx-demo 2>&1 | grep --line-buffered 'BAC_LOG ' | sed 's/.*BAC_LOG //' | jq -c .
@@ -66,11 +66,11 @@ Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO
 - `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / challenge).
 - `proxy_ms` — `cascade_ms + upstream_response_ms`: request arrival → we hold the full origin response ready to send. This is the request's path through the proxy that adds latency, **without** the slow-client delivery tail (which is `latency_ms − proxy_ms`).
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` (B11) — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land (A11).
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` () — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land ().
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, the design decision, [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
-The cascade stages (hygiene/reputation/rate_limits — separate tasks) record their outcome via `bac_log.set_verdict()`/`add_tag()`; the final triggering rule wins. The stand's fp-block path is recorded as the Phase 2 `tls_fp` stage through the same contract. TLS-fp data columns and the centralized telemetry sink are out of scope here (separate tasks).
+The cascade stages record their outcome via `bac_log.set_verdict`/`add_tag`; the final triggering rule wins. The fp-block path is recorded as the `tls_fp` stage through the same contract. TLS-fp data columns and the centralized telemetry sink are out of scope here (separate tasks).
 
 ## Quickstart on a fresh VM
 
@@ -90,7 +90,7 @@ cp /your/privkey.pem   infra/demo-stand/certs/privkey.pem
 # gitignored .env holds DEMO_BIND_IP / EDGE_ID / Channel C settings.
 touch infra/demo-stand/.env
 
-# (Optional, B6) Connect to antibot-backend for live Channel C catalog pulls.
+# (Optional, ) Connect to antibot-backend for live Channel C catalog pulls.
 # Without these the stand runs on the static tls_fp_blocklist seed only.
 #   ANTIBOT_BACKEND_URL — scheme+host[:port], no trailing slash. UNSET or
 #     empty → no timer fires (out-of-box: static seed, clean error.log).
@@ -179,7 +179,7 @@ first — see below.
 
 Protection must never take the site down. If the cascade misbehaves — a bug, a
 perf regression, a flood of false positives — switch it off. Two levers
-(vision.md §"Emergency levers", A12):
+(vision.md §"Emergency levers", ):
 
 - **Global** — the whole cascade goes no-op: traffic proxies straight to the
   origin and **no `BAC_LOG` record is written**. The catastrophe lever (Lua
@@ -226,9 +226,9 @@ commit `kill_switch.local.conf` — it is operational state, gitignored; only th
 no `BAC_LOG` lines (`docker logs --since 1m nginx-demo | grep BAC_LOG`); with the
 `tls_fp` kill on, `BAC_LOG` lines drop their `tls_fp` field and `tls_fp:*` tags.
 
-## Challenge HMAC secret (Phase 4)
+## Challenge HMAC secret
 
-Phase 4 (L5 active verification) signs the clearance cookie and the self-signed
+L5 active verification signs the clearance cookie and the self-signed
 nonce of the challenge page with a local HMAC secret — without calling the backend
 (vision §"The HMAC secret for the clearance cookie", §Channel A). One secret for the whole
 edge pool, delivered as a file mount like `./certs/*.pem` and `kill_switch.local.conf`.
@@ -264,14 +264,14 @@ docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # the new challenge_se
 ```
 
 **Failure mode.** If the file is missing, the stand starts, prints a WARN into
-error.log, and L2.1 cookie verify plus L5 cookie issue refuse to work (Phase 4
-is effectively off). Phase 1–3 requests keep flowing. On an empty or too short
+error.log, and L2.1 cookie verify plus L5 cookie issue refuse to work, so
+verification is effectively off. Everything else keeps flowing. On an empty or too short
 (<32 bytes) file — an ERR plus the same fail-closed path. The secret is never
 printed to the logs, only its fingerprint.
 
-## Challenge page asset + cascade version pin (Phase 4, C2)
+## Challenge page asset + cascade version pin ()
 
-Phase 4 "Branch A" (vision §5.2) serves the browser an HTML+JS page; the JS computes
+L5 "Branch A" (vision §5.2) serves the browser an HTML+JS page; the JS computes
 `SHA-256(nonce + JS_SECRET)` and POSTs the token to the verify endpoint; the edge
 substitutes a single-use nonce into the template (TTL 60 s, signed with the same HMAC
 secret as the clearance cookie, see the previous section). C2 landed on the stand
@@ -292,7 +292,7 @@ with the issuing side only (the template + the nonce + the version pin); binding
   that changes the nonce format, `JS_SECRET`, the fingerprint fields, the verify path or
   the expected response contract. The version↔template contract is described in
   [challenge/README.md](challenge/README.md).
-- `infra/demo-stand/lua/challenge.lua` — `preload()` compares the template's
+- `infra/demo-stand/lua/challenge.lua` — `preload` compares the template's
   `<meta name="cascade-version">` against the contents of `CASCADE_VERSION` at
   init_by_lua (a mismatch fails the nginx start); `render(host)` / `issue_nonce(host)`
   are for C5.
@@ -334,7 +334,7 @@ docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # confirm commit/casca
 
 The `tls_fp_blocklist` content lives in `catalogs/tls_fp_blocklist.yaml` and
 arrives via Channel C; per-Host `policy.mode` decides whether a hit blocks
-or only logs (B11). Analytics state (`state/`, `reports/`) is gitignored —
+or only logs (). Analytics state (`state/`, `reports/`) is gitignored —
 copy it from `abuse-controls.bak.*` to keep history, or start clean. Then
 install the cron line from "Updating a running stand" above.
 
@@ -386,7 +386,7 @@ them to the **Loki** instance on the antibot-backend VM under a `kind` label
 `https://<backend-host>/grafana/d/bac-raw-logs` renders requests with filters on
 `verdict / host / mode / edge_id`; query `{kind="edge_stats"}` for the counters
 (edge-deny drops, TLS rejects, cache ratio, fp_unique, commit, cascade_version).
-There is no per-request `/__admin` UI — it was removed (Phase 1).
+There is no per-request `/__admin` UI — it was removed.
 
 Reuses existing infra:
 - Push goes through the same LB-nginx mTLS gate as Channel C
@@ -395,7 +395,7 @@ Reuses existing infra:
   [`scripts/install-edge-client-cert.sh`](scripts/install-edge-client-cert.sh)
   is reused.
 - No changes to the Lua cascade: the on-stdout JSON contract from
-  Phase 1 is already what promtail consumes.
+  This is already what promtail consumes.
 
 Setup (after `infra/demo-backend/` has the Loki + Grafana profile up —
 see [its README](../demo-backend/README.md#bac-log-viewer)):
@@ -423,11 +423,11 @@ and the cascade behaves identically.
 
 ## What this does NOT show
 
-- **Hot-reload of the blocklist** (cascade task C1). The demo uses a static blocklist loaded at init.
-- **Grey-verdict / sidecar scoring** (cascade task C2). The demo is edge-only.
-- **JS challenge issuance** (cascade task A8). The demo blocks or allows; no challenge flow.
-- **Rate limiting** (cascade task A3). Each request is independent.
-- **UA↔JA consistency** (cascade task A5). The demo's blocklist doesn't include this signal.
+- **Hot-reload of the blocklist** (cascade task ). The demo uses a static blocklist loaded at init.
+- **Grey-verdict / sidecar scoring** (cascade task ). The demo is edge-only.
+- **JS challenge issuance** (cascade task ). The demo blocks or allows; no challenge flow.
+- **Rate limiting** (cascade task ). Each request is independent.
+- **UA↔JA consistency** (cascade task ). The demo's blocklist doesn't include this signal.
 
 The demo is intentionally the **A1 fp blocklist** slice of the cascade only — the part that's production-ready post-PR #3/#4. Other cascade tasks are sequenced after a successful demo + integration with the prod edge.
 
@@ -450,13 +450,13 @@ infra/demo-stand/
 │   ├── init.lua                    load blocklist, init metrics counters
 │   ├── edge_stats.lua              EDGE_STATS stdout dump (counters + deploy metadata → Loki; replaces /metrics + /__version)
 │   ├── recent.lua                  last-N request ring buffer (shared_dict; written by log_event)
-│   ├── probe.lua                   TLS-fp dump — UNROUTED (returns on a controlled surface in Phase 4)
-│   ├── bac_log.lua                 Phase 1 structured-log contract (init/set_verdict/add_tag/emit)
+│   ├── probe.lua                   TLS-fp dump — not routed
+│   ├── bac_log.lua                 structured-log contract (init/set_verdict/add_tag/emit)
 │   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
-│   ├── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
-│   └── challenge.lua               [C2] Phase 4 challenge page renderer + nonce issuer (version-pinned)
-├── CASCADE_VERSION                 [C2] semver, compared against the template meta tag at init
-└── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A on the demo)
+│   ├── challenge_secret.lua HMAC secret loader (file mount → shared_dict)
+│   └── challenge.lua challenge page renderer + nonce issuer (version-pinned)
+├── CASCADE_VERSION semver, compared against the template meta tag at init
+└── challenge/ HTML+JS challenge page asset (file mount = Channel A on the demo)
     ├── page.html                   the template with the {{NONCE}} / {{EXPIRY}} placeholders; cascade-version baked in as a literal
     └── README.md                   the contract with C5 (the verify endpoint) + the version bump rules
 ```

@@ -3,7 +3,7 @@
 Illustrative configuration templates for the DDoS layer. The concrete config here is mostly
 **connection/protocol level** (nginx directives: timeouts, the `limit_conn` zone, keepalive,
 HTTP/2). L7 rate-based is configured through the cascade (rate limits / challenge / policy,
-see [vision.md](vision.md)); volumetric L3/L4 is outside the proxy's perimeter. The behaviour
+see [vision.md](../product/vision.md)); volumetric L3/L4 is outside the proxy's perimeter. The behaviour
 contract is [ddos-spec.md](ddos-spec.md).
 
 **Related material:** [ddos-rules-reference.md](ddos-rules-reference.md),

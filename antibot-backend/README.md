@@ -19,8 +19,8 @@ functions, nothing more:
    mode and `/catalog/*` answers `503`.
 2. **The log receiver** — `POST /v1/logs` accepts the BAC_LOG stream from the edges and answers
    `202`. The `antibot_backend_log_lines_received_total` metric counts the lines.
-   Schema validation, batching into the sink and the disk queue are tasks [B6]/[B9].
-3. **The rDNS worker** ([B7]) — a reactive background goroutine. The receiver parsing
+   Schema validation, batching into the sink and the disk queue are tasks / .
+3. **The rDNS worker**  — a reactive background goroutine. The receiver parsing
    BAC_LOG calls `Worker.Enqueue` for every line with a search engine UA
    (Googlebot/bingbot/YandexBot/DuckDuckBot) and a non-empty IP. The worker performs
    `PTR → forward DNS` (both steps must resolve to the search engine's official
@@ -86,7 +86,7 @@ The SQL files live in [`internal/dbloader/migrations/`](internal/dbloader/migrat
 are embedded through `//go:embed` and are applied at startup when
 `MIGRATE_ON_STARTUP=true`. `CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS`
 — rerunning them is safe; a full migrator (golang-migrate with a
-tracking table) arrives with [B15].
+tracking table) arrives with .
 
 The per-host `policy` is the only table with JSONB fields: `ua_blacklist`,
 `ip_whitelist`, `ip_blocklist`, `asn_block`, `geo_whitelist`, `rate_rules`.

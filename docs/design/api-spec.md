@@ -3,7 +3,7 @@
 **Version:** v1.0 · Status: a design contract (target behaviour) · a post-MVP layer
 
 This document describes the target behaviour of the API and account protection layer as a
-separate layer on top of the cascade ([vision.md](vision.md)): a "pick it up and build it"
+separate layer on top of the cascade ([vision.md](../product/vision.md)): a "pick it up and build it"
 specification to implement from. The cascade from the vision rate-limits and checks by
 network keys (IP, fingerprint, UA, path); this layer adds the dimension of identity
 (account, key, token) and of the API contract (what is permitted at an endpoint), neither

@@ -6,7 +6,7 @@
 > [blocklist-scoring.md](../blocklist-scoring.md).
 >
 > **Triage complete (2026-05-30): all six ideas worked up into design docs and tickets.**
-> #1 [solve-rate](challenge-solve-rate-design.md) (D12) · #2 [positive fp catalog](positive-fp-catalog-design.md)
+> #1 [solve-rate](challenge-solve-rate-design.md) · #2 [positive fp catalog](positive-fp-catalog-design.md)
 > (D13, plus spike R2 HTTP/2) · #3 [subnet unit](subnet-unit-design.md) (G1/G2/G3) ·
 > #5 [anti-poisoning](scoring-anti-poisoning-design.md) (D18/D19) ·
 > #6 [cross-tenant threat intel](cross-tenant-threat-intel-design.md) (G4) ·
@@ -25,16 +25,16 @@ against `catalogs/`.
 
 Three observations that set the direction:
 1. The decision rests on **one dimension** — the TLS fingerprint (a JA4-like
-   ClientHello). Fingerprints are cheap to rotate.
+ ClientHello). Fingerprints are cheap to rotate.
 2. The scoring works on **aggregates per fingerprint**, with no behavioural or
-   temporal dimension.
+ temporal dimension.
 3. **Strong labels are already accumulating that never feed back into the
-   scoring** — challenge outcomes (`challenge_issued`/`challenge_solved`),
-   clearance results, `staging_match`.
+ scoring** — challenge outcomes (`challenge_issued`/`challenge_solved`),
+ clearance results, `staging_match`.
 
 ## Directions
 
-### #1 — Feed challenge outcomes back into the scoring  ⭐ priority
+### #1 — Feed challenge outcomes back into the scoring ⭐ priority
 A fingerprint that receives challenges en masse and almost never solves them
 (`solve_rate≈0` over N issued) is a near-ground-truth bot label, stronger than any
 static heuristic. The signal is already emitted (C5:
@@ -45,13 +45,13 @@ D1, with no new cascade stages. **The detailed design is in its own document.**
 
 ### #2 — Extend the fingerprint beyond TLS
 - **HTTP/2 fingerprint** (SETTINGS frame order, WINDOW_UPDATE, pseudo-header
-  order) — orthogonal to TLS, and it breaks cheap JA4 rotation. Today this
-  dimension does not exist at all.
+ order) — orthogonal to TLS, and it breaks cheap JA4 rotation. Today this
+ dimension does not exist at all.
 - It overlaps with the backlog: **D2** (positive fp catalog: known-browser cipher
-  hashes plus version), **D3** (UA version versus fp version mismatch), **D4**
-  (a headless catalog for Playwright/Puppeteer/UDC). D2+D3 together catch
-  home-grown and headless stacks **without** a tool dictionary (mismatch instead
-  of impersonator).
+ hashes plus version), **D3** (UA version versus fp version mismatch), **D4**
+ (a headless catalog for Playwright/Puppeteer/UDC). D2+D3 together catch
+ home-grown and headless stacks **without** a tool dictionary (mismatch instead
+ of impersonator).
 
 ### #3 — Raise the unit of analysis above a single fingerprint
 Today we block a fingerprint. Introduce correlation across **fp × IP/ASN subnet ×
@@ -91,7 +91,7 @@ and G2 (hot /24s).
 ## Relation to the existing backlog
 - Already filed: **D2, D3, D4** (catalogs/mismatch), D5 (cache), D6 (metrics), R1 (DBSC).
 - New or not yet written up: **#1** (challenge solve rate → scoring), **#2 HTTP/2 fp**,
-  **#3 subnet/behavioural unit**, **#4 behavioural signals**, **#5 anti-poisoning**,
-  **#6 cross-tenant threat intel**.
+ **#3 subnet/behavioural unit**, **#4 behavioural signals**, **#5 anti-poisoning**,
+ **#6 cross-tenant threat intel**.
 
 Priority by effect over cost: **#1** first (the data is already there), then **D2+D3**.

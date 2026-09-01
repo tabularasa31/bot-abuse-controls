@@ -287,7 +287,7 @@ local asn_dc_n = 0
 for _ in pairs(reputation.asn_dc_set) do asn_dc_n = asn_dc_n + 1 end
 ngx.log(ngx.NOTICE, "[demo] reputation matchers: ip_whitelist=", rep_wl,
     " active, ip_blocklist=", rep_bl, " active, asn_dc=", asn_dc_n,
-    " (geo_blocklist dormant — per-resource policy source is Phase 3)")
+    " (geo_blocklist dormant — no per-resource country list yet)")
 ngx.log(ngx.NOTICE, "[demo] verified-bot fastpath: ua_alts=", vb_alts_n,
     " (verified_bots dict empty until Channel C `verified_bot_ips`",
     " catalog pull lands — searchbot UAs get bot_verified_pending)")
@@ -299,7 +299,7 @@ if (require "verified_bots").enabled and vb_alts_n == 0 then
         " defaults.conf; the fastpath will NEVER fire")
 end
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
-    " active (observe-only — verdict logged, no 429/delay in Phase 1)")
+    " active (observe-only — verdict logged, no 429 or delay)")
 -- Empty at init by construction, so nothing is logged: a startup line would
 -- read as "the catalog never landed".
 ngx.log(ngx.NOTICE, "[demo] tls_fp staged catalogs: all three (blocklist / ",
@@ -307,7 +307,7 @@ ngx.log(ngx.NOTICE, "[demo] tls_fp staged catalogs: all three (blocklist / ",
     "init and are filled in tls_fp.refresh() after the first pull (see /metrics ",
     "antibot_staging_match_total and *_gen)")
 ngx.log(ngx.NOTICE, "[demo] challenge page template loaded, cascade_version=",
-    cascade_version, " (C2 — preload only; serving wires up in C5)")
+    cascade_version, " (preload only)")
 
 -- Prime metrics counters so they're visible at zero rather than absent.
 local metrics = ngx.shared.metrics

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Acceptance checks for the antibot-backend demo stack.
 #
-# [B1] substrate:
+# substrate:
 #   1. PostgreSQL is up and accepting connections.
 #   2. The edge -> backend HTTPS path answers on :443.
 #   3. The LB round-robins across the >=2 backend instances (HA).
 #
-# [B2] real Go service surfaces (skeleton — bodies/contracts land in B3/B6/B7):
-#   4. /catalog/<name> mounted (known catalog returns 501 until B3).
+# real Go service surfaces (skeleton — bodies/contracts land in B3/B6/):
+#   4. /catalog/<name> mounted (known catalog returns 501 until ).
 #   5. POST /v1/logs accepts a payload (202).
 #   6. rDNS worker is alive (counter present in /metrics).
 #
-# [B6] Channel C auth (config-distribution §Auth/transport):
+# Channel C auth (config-distribution §Auth/transport):
 #   7. AUTH_MODE=ip-allowlist (default): loopback request passes; an empty
 #      allowlist rejects with 403 → restores. Verifies "unauthenticated source
 #      is rejected" without disturbing the regular path.
@@ -39,7 +39,7 @@ skip() { printf '  [skip] %s\n' "$*"; }
 # Strip any :port so the host part can be matched against the local names.
 host_only="${HOST%%:*}"
 
-# [B6] AUTH_MODE — pick up from .env if not set in the environment, so that
+# AUTH_MODE — pick up from .env if not set in the environment, so that
 # AUTH_MODE in .env (which actually drives the LB at compose-up) is the
 # source of truth and we don't mis-verify a stack that's already on mtls
 # with the ip-allowlist default. Env > .env > hardcoded default.
@@ -74,7 +74,7 @@ case "${host_only}" in
         ;;
 esac
 
-# [B6] When the LB runs AUTH_MODE=mtls, EVERY check (#2–#6) must present a
+# When the LB runs AUTH_MODE=mtls, EVERY check (#2–#6) must present a
 # client cert — otherwise nginx rejects with 400 No required SSL certificate
 # and the rest of verify.sh reports false failures (codex review). The "no
 # cert" negative path in #7 uses a separate bare-curl invocation.
@@ -131,7 +131,7 @@ else
     bad "GET /catalog/bogus -> ${code} (expected 404)"
 fi
 
-echo "5. POST /v1/logs accepts payload + sink ingests into PostgreSQL (B9)"
+echo "5. POST /v1/logs accepts payload + sink ingests into PostgreSQL"
 # The body is a valid BAC_LOG record (minimum required: request_id/timestamp/edge_id).
 # Without it the sink increments parse_errors_total and leaves inserted=0,
 # so acceptance B9 would not pass.
@@ -274,7 +274,7 @@ case "${AUTH_MODE}" in
         ;;
 esac
 
-echo "8. Policy API (B10): PATCH attack_mode -> backend reload -> /catalog/attack_mode"
+echo "8. Policy API: PATCH attack_mode -> backend reload -> /catalog/attack_mode"
 # Probes the dashboard-backend → antibot-backend → edge path on the
 # backend-side only (catalog ETag change). Edge swap happens once B12
 # registers the catalog in catalog_pull.lua._M.catalogs.
@@ -358,7 +358,7 @@ esac
 
 echo "9. Edge reachable (cross-stack, opt-in via STAND_HOST)"
 if [ -n "${STAND_HOST:-}" ]; then
-    # Phase 1: the catalog-staleness signal moved off the public /metrics
+    # The catalog-staleness signal moved off the public /metrics
     # endpoint to the EDGE_STATS stream (Loki, {kind="edge_stats"}
     # catalog_staleness_seconds) and the edge's PRIVATE :9090 /__stats plane —
     # neither is reachable cross-host (mgmt is bound to the edge VM's loopback).

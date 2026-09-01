@@ -1,4 +1,4 @@
-# tls_fp_catalog.yaml — the catalog of automation signatures by TLS fp (Phase 2+).
+# tls_fp_catalog.yaml — the catalog of automation signatures by TLS fp.
 #
 # Used by the tls_fp_impersonator rule (soft category): if the UA
 # claims a browser but the TLS fp hash_b matches a known automation

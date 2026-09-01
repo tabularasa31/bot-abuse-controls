@@ -46,7 +46,7 @@ services:
       # Where geoip.lua looks for the GeoLite2 .mmdb files inside the container.
       # Defaults to the mount point below; override only if you also remount.
       BAC_GEOIP_DIR: ${BAC_GEOIP_DIR:-/etc/nginx/geoip}
-      # [B6] Channel C backend URL + optional mTLS client cert. ANTIBOT_BACKEND_URL
+      # Channel C backend URL + optional mTLS client cert. ANTIBOT_BACKEND_URL
       # unset → catalog_pull skips the timer (static seed only). For mTLS, drop
       # edge-client.{crt,key} into ./certs (already mounted) and set both paths.
       ANTIBOT_BACKEND_URL: ${ANTIBOT_BACKEND_URL:-}
@@ -58,7 +58,7 @@ services:
       # demo-backend on a side VM). Default unset → catalog_pull keeps
       # ssl_verify=true (production-path).
       ANTIBOT_BACKEND_SSL_VERIFY: ${ANTIBOT_BACKEND_SSL_VERIFY:-}
-      # NOTE: DASHBOARD_API_TOKEN / ADMIN_ACL_CIDR were removed (Phase 1) —
+      # NOTE: DASHBOARD_API_TOKEN / ADMIN_ACL_CIDR were removed —
       # the /__admin recovery endpoint they gated is gone; false-positive
       # recovery is the dashboard's job via the Policy API.
       # On-demand TLS (lua-resty-auto-ssl) for tenant custom domains.
@@ -103,7 +103,7 @@ services:
       # restarting the container re-applies it (hot-reload is a separate task).
       - ./config:/etc/nginx/config:ro
       - ./certs:/etc/nginx/certs:ro
-      # [C2] Phase 4 challenge page asset, delivered as a file mount over
+      # The challenge page asset, delivered as a file mount over
       # Channel A. Read once in init_by_lua via challenge.lua;
       # change = bump CASCADE_VERSION + edit page.html + `openresty -s
       # reload`. See infra/demo-stand/challenge/README.md.

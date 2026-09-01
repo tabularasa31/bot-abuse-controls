@@ -23,7 +23,7 @@ local _M = {
     whitelist      = nil,   -- ipmatcher or nil when no active entries
     blocklist      = nil,   -- ipmatcher or nil when no active entries
     blocklist_staging = nil, -- ipmatcher (new_with_value: match→cidr) or nil; A11 observe-only
-    asn_dc_set     = {},    -- { ["24940"] = true, ... }; cold-start from asn_datacenters.conf, then Channel C via refresh_asn (B12)
+    asn_dc_set     = {},    -- { ["24940"] = true, ... }; cold-start from asn_datacenters.conf, then Channel C via refresh_asn ()
     geo_enabled    = true,  -- [blocking.geo_blocklist].enabled (dormant: no source yet)
     demo_geo_header = false, -- honour X-Demo-IP override (stand testing); env-gated
 }
@@ -132,7 +132,7 @@ function _M.build(config)
     -- The tag has no toggle of its own; the per-stage kill switch covers it.
     _M.asn_dc_set = _M.to_set(_M.active_values(config.asn_datacenters))
 
-    -- Dormant in Phase 1: there is no country whitelist source yet.
+    -- Dormant: there is no country whitelist source yet.
     _M.geo_enabled = rule_enabled("blocking", "geo_blocklist")
 
     _M.demo_geo_header = (os.getenv("BAC_DEMO_GEO_HEADER") == "on")

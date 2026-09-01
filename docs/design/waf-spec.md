@@ -32,7 +32,7 @@ the engine choice.
 ## 2. Why
 
 The cascade today does not inspect request bodies, query/POST parameters or headers
-against signatures. [vision.md](vision.md) names DDoS as an explicit goal and mentions
+against signatures. [vision.md](../product/vision.md) names DDoS as an explicit goal and mentions
 WAF only indirectly (XSS as the reason for `HttpOnly` on the cookie). This is greenfield:
 a whole class of application-level attacks (the OWASP Top 10 core) currently passes
 straight through the cascade to the origin.
@@ -47,7 +47,7 @@ TLS fingerprint blocklist hit calls `policy.enforce(403)` directly.
 hygiene → [contract] → reputation → tls_fp → [WAF inspection] → rate_limits → verification
 ```
 
-The cascade invariant is preserved ([rules-reference.md](rules-reference.md)): the single
+The cascade invariant is preserved ([rules-reference.md](../product/rules-reference.md)): the single
 point where flags are consolidated is L5 (`verification`), and rules do not issue verdicts
 themselves apart from the explicit hard-block exit points under `policy.enforce`. The WAF
 sits after the cheap identity checks and the positive contract, before the expensive

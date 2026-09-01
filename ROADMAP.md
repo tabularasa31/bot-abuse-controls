@@ -72,6 +72,25 @@ Attacks below the request layer, which the cascade cannot see: slow-attack
 baselines through nginx timeouts and connection limits, HTTP/2 abuse mitigation,
 and feeding both into reputation as signals.
 
+### Known gaps
+
+Things the current implementation deliberately does not do, carried over from the
+delivery specs:
+
+- No `X-Antibot-*` headers towards the customer's origin — the verdict stays on
+  our side of the proxy.
+- No external reputation feeds (residential proxy lists, Tor exit nodes,
+  commercial known-bad sets).
+- The TLS fingerprint uses the handshake fields nginx exposes, not the full
+  extension list or the signature algorithms. Reaching those needs a raw
+  ClientHello parser.
+- The fingerprint catalogs are shared across all resources; a per-customer TLS
+  policy would be a separate mechanism.
+- Per-fingerprint counters are per proxy. Without shared state, a bot that hops
+  between nodes resets its own limits.
+- The customer-facing dashboard is a separate product surface; this repo ships
+  the policy API it would talk to.
+
 ### Research
 
 - Device Bound Session Credentials as an additional bot signal.

@@ -1,10 +1,10 @@
 # Bot & Abuse Controls — config templates
 
-Illustrative templates for every configuration file mentioned in [vision.md](vision.md) and the Phase 1/2 specs.
+Illustrative templates for every configuration file mentioned in [vision.md](vision.md).
 
 **Format:** shown as YAML with comments for readability. What matters is the data structure and the semantics of the fields, not the exact syntax.
 
-> **The real implementation of the slow catalogs (Phase 1+, as it exists in the repo):**
+> **The real implementation of the slow catalogs (as it exists in the repo):**
 > the files live in [`../../catalogs/`](../../catalogs/) (`tls_fp_blocklist.yaml`,
 > `ua_blacklist.yaml`, `ip_blocklist.yaml`, `ip_whitelist.yaml`,
 > `asn_datacenters.yaml`, `version`). The format differs from the illustrative
@@ -21,11 +21,11 @@ whitelist_ip.conf        ← the system IP whitelist (monitoring, check services
 blocklist_ip.conf        ← the curated IP blocklist (PR-populated)
 ua_blacklist.conf        ← UA patterns (PR-populated, with staging)
 asn_datacenters.conf     ← datacenter ASN numbers for the reputation:asn_dc tag
-tls_fp_blocklist.conf    ← TLS fingerprints of bots (Phase 2+, PR-populated, with staging)
-tls_fp_catalog.conf      ← automation signatures for impersonator detection (Phase 2+, with staging)
-tls_fp_browser_profiles.conf ← cipher_cnt per browser (Phase 2+, populated with a baseline)
-challenge_secret         ← the HMAC secret for the clearance cookie (Phase 4+, delivered through an env var or a mounted file)
-policy/<host>.yaml       ← per-resource policy (Phase 3+, arrives from the backend over Channel C, not stored locally as a file)
+tls_fp_blocklist.conf    ← TLS fingerprints of bots (PR-populated, with staging)
+tls_fp_catalog.conf      ← automation signatures for impersonator detection (with staging)
+tls_fp_browser_profiles.conf ← cipher_cnt per browser (populated with a baseline)
+challenge_secret         ← the HMAC secret for the clearance cookie (delivered through an env var or a mounted file)
+policy/<host>.yaml       ← per-resource policy (arrives from the backend over Channel C, not stored locally as a file)
 ```
 
 ---
@@ -35,7 +35,7 @@ policy/<host>.yaml       ← per-resource policy (Phase 3+, arrives from the bac
 The main config, without which the cascade does not start. The structure of the sections defines each rule's category.
 
 ```yaml
-# defaults.conf — the base cascade config (Phase 1+)
+# defaults.conf — the base cascade config
 
 # L1 Hygiene
 hygiene:
@@ -64,7 +64,7 @@ rules:
     ua_blacklist:
       stage: hygiene
       source: ua_blacklist.conf
-      enabled: true                 # Phase 1: the catalog is empty, the rule is wired in
+      enabled: true# the catalog is empty, the rule is wired in
 
     ip_blocklist:
       stage: reputation
@@ -81,7 +81,7 @@ rules:
       source: policy[host].geo_whitelist  # inverted logic
       enabled: true
 
-    tls_fp_blocklist:                 # Phase 2+
+    tls_fp_blocklist:
       stage: tls_fp
       source: tls_fp_blocklist.conf
       enabled: true
@@ -105,7 +105,7 @@ rules:
       window_10s: 50
       window_60s: 300
 
-    rate_tls_fp:                      # Phase 2+
+    rate_tls_fp:
       stage: rate_limits
       key: tls_fp
       window_10s: 50
@@ -119,13 +119,13 @@ rules:
       window_10s: 50
       window_60s: 200
 
-    non_browser_blocked:              # Phase 4+, L5 logic
+    non_browser_blocked:, L5 logic
       stage: verification
       source: built-in
 
   # The allow category — rules that emit verdict=allow (a fastpath)
   allow:
-    cookie_valid:                     # Phase 4+, not a lookup but an HMAC verify
+    cookie_valid:, not a lookup but an HMAC verify
       stage: reputation
       source: built-in                # Lua logic
       # IMPORTANT: cookie_valid is a PARTIAL fastpath. It skips L3 (tls_fp) and L5 (verification),
@@ -147,7 +147,7 @@ rules:
       # the cookie is scoped Domain=<host> and is not sent on requests to other hosts.
       # Previously issued 24-hour cookies are not invalidated when attack_mode is enabled — they live out their TTL.
 
-    bot_verified:                     # Phase 3+, a catalog lookup
+    bot_verified:, a catalog lookup
       stage: reputation
       source: catalog.bot_verification_status
       ua_pattern: "Googlebot|bingbot|YandexBot|DuckDuckBot"
@@ -157,19 +157,19 @@ rules:
       stage: reputation
       source:
         - whitelist_ip.conf           # the system one
-        - policy[host].ip_whitelist   # per-resource (Phase 3+)
+        - policy[host].ip_whitelist   # per-resource
 
   # The soft category — rules that accumulate a challenge flag
   soft:
-    tls_fp_impersonator:              # Phase 2+
+    tls_fp_impersonator:
       stage: tls_fp
       source: tls_fp_catalog.conf
 
-    tls_fp_suspicious_ciphers:        # Phase 2+
+    tls_fp_suspicious_ciphers:
       stage: tls_fp
       source: tls_fp_browser_profiles.conf
 
-    tls_fp_dc_browser:                # Phase 2+
+    tls_fp_dc_browser:
       stage: tls_fp
       source: built-in                 # cross-layer: L3 fp + asn_datacenters.conf
 
@@ -183,11 +183,11 @@ tags:
     stage: reputation
     source: asn_datacenters.conf
 
-  - id: tls_fp:automation_ua         # Phase 2+
+  - id: tls_fp:automation_ua
     stage: tls_fp
     source: built-in                 # a Lua check for automation UA patterns
 
-  - id: tls_fp:no_sni                # Phase 2+
+  - id: tls_fp:no_sni
     stage: tls_fp
     source: built-in                 # from the TLS handshake data
 
@@ -198,9 +198,9 @@ kill_switch:
   per_stage:                         # disables one layer
     hygiene: false
     reputation: false
-    tls_fp: false                    # Phase 2+
+    tls_fp: false
     rate_limits: false
-    verification: false              # Phase 4+
+    verification: false
 
 # attack_mode is per host only and lives in policy[host].attack_mode.
 # There is no global toggle for the whole pool. For infrastructure-level incidents, use the kill switch.
@@ -213,7 +213,7 @@ kill_switch:
 A list of the IPs and CIDR subnets of our monitoring, check services and trusted system clients. Used by the `ip_whitelist` rule (category `allow`).
 
 ```
-# whitelist_ip.conf — the system IP whitelist (Phase 1+)
+# whitelist_ip.conf — the system IP whitelist
 # Populated at launch. Changes go through a PR.
 
 # Internal monitoring services
@@ -236,7 +236,7 @@ A list of the IPs and CIDR subnets of our monitoring, check services and trusted
 Empty at launch. Populated through PRs from log analysis or complaints. Used by the `ip_blocklist` rule (category `blocking`).
 
 ```
-# blocklist_ip.conf — IP-blocklist (Phase 1+)
+# blocklist_ip.conf — IP-blocklist
 # Empty at launch. Additions go through a PR, always via staged rollout (see below).
 
 # Format:
@@ -256,7 +256,7 @@ Empty at launch. Populated through PRs from log analysis or complaints. Used by 
 Empty at launch. Populated through PRs from analysis of the top UAs in the logs. Supports staged rollout.
 
 ```
-# ua_blacklist.conf — UA patterns (Phase 1+)
+# ua_blacklist.conf — UA patterns
 # Empty at launch. Additions go through a PR, always via staged rollout.
 
 # Format:
@@ -276,7 +276,7 @@ Empty at launch. Populated through PRs from analysis of the top UAs in the logs.
 Populated at launch with a stable baseline list. Used for the `reputation:asn_dc` tag (informational, not a rule).
 
 ```
-# asn_datacenters.conf — datacenter ASNs (Phase 1+)
+# asn_datacenters.conf — datacenter ASNs
 # Populated with a baseline. Rarely changes (new providers or transferred numbers).
 # Source: public data.
 
@@ -304,12 +304,12 @@ Populated at launch with a stable baseline list. Used for the `reputation:asn_dc
 
 ---
 
-## 6. `tls_fp_blocklist.conf` — TLS-fingerprint blocklist (Phase 2+)
+## 6. `tls_fp_blocklist.conf` — TLS-fingerprint blocklist
 
 Empty at launch. Populated through PRs. Supports staged rollout.
 
 ```
-# tls_fp_blocklist.conf — TLS fingerprints of known bots (Phase 2+)
+# tls_fp_blocklist.conf — TLS fingerprints of known bots
 # Empty at launch. Additions go through a PR, via staged rollout.
 
 # Format:
@@ -322,12 +322,12 @@ Empty at launch. Populated through PRs. Supports staged rollout.
 
 ---
 
-## 7. `tls_fp_catalog.conf` — automation signatures for impersonator detection (Phase 2+)
+## 7. `tls_fp_catalog.conf` — automation signatures for impersonator detection
 
 Empty at launch. A map `hash_b → automation family`. Used by the `tls_fp_impersonator` rule.
 
 ```yaml
-# tls_fp_catalog.conf — Phase 2+
+# tls_fp_catalog.conf
 # Empty at launch. Additions go through a PR, via staged rollout.
 
 # Each entry:
@@ -347,12 +347,12 @@ entries:
 
 ---
 
-## 8. `tls_fp_browser_profiles.conf` — expected cipher_cnt per browser (Phase 2+)
+## 8. `tls_fp_browser_profiles.conf` — expected cipher_cnt per browser
 
 Populated with a baseline at launch. Used by the `tls_fp_suspicious_ciphers` rule.
 
 ```yaml
-# tls_fp_browser_profiles.conf — Phase 2+
+# tls_fp_browser_profiles.conf
 # Populated with a baseline set. Corrected as new browser versions appear.
 
 profiles:
@@ -377,7 +377,7 @@ If a browser's version updates and its cipher_cnt shifts, product first adds the
 
 ---
 
-## 9. `challenge_secret` — the HMAC secret for the clearance cookie (Phase 4+)
+## 9. `challenge_secret` — the HMAC secret for the clearance cookie
 
 Not a list file — a single secret string. Delivered over Channel A as an env variable or a protected file. One secret shared across the whole edge pool.
 
@@ -398,7 +398,7 @@ Any rotation invalidates every clearance cookie issued so far (by design).
 
 ---
 
-## 10. `policy/<host>.yaml` — per-resource policy (Phase 3+)
+## 10. `policy/<host>.yaml` — per-resource policy
 
 **It is not stored on the proxy as a file** — it arrives from the backend over Channel C as part of the `policy` catalog. The catalog is a map `host → policy_json`. What follows is the structure of one entry in that map, for information.
 

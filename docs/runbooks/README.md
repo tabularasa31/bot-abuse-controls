@@ -1,4 +1,4 @@
-# Runbooks — demo stand (Phase 4 readiness)
+# Runbooks — demo stand
 
 Operational procedures for the **demo stand** (`infra/demo-stand/`, a
 long-running reverse proxy on a VM). Channel A here is a file mount plus
@@ -6,11 +6,11 @@ long-running reverse proxy on a VM). Channel A here is a file mount plus
 procedure below has been exercised against the live stand — see the "Verified on
 stand" section at the end of each file.
 
-All four mechanisms are already implemented in the cascade (C1–C7). These
-runbooks are the emergency levers and the drill to run before turning on real
-verification (`mode=active`) for a pilot customer.
+All four mechanisms are implemented in the cascade. These runbooks are the
+emergency levers and the drill to run before turning on real verification
+(`mode=active`) for a customer.
 
-## Phase 4 readiness — checklist before `mode=active` on the pilot
+## Checklist before `mode=active` on a customer
 
 - [ ] **HMAC secret** generated, fingerprint visible in EDGE_STATS
   (`challenge_secret_fp`), rotation exercised → [secret-rotation.md](secret-rotation.md)
@@ -39,8 +39,8 @@ verification (`mode=active`) for a pilot customer.
   [attack-response.md](attack-response.md).
 
 [`docs/product/vision.md`](../product/vision.md): §"Emergency levers",
-§"Catalog rollback", §"HMAC secret"/"Rotation", §"Channel C" (the product
-delivery contract), §Roadmap Phase 4/5.
+§"Catalog rollback", §"HMAC secret"/"Rotation" and §"Channel C" (the delivery
+contract).
 
 ## Stand topology (one place, so it is not repeated in every file)
 

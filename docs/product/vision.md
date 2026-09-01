@@ -114,7 +114,7 @@ For us it is the monetisation hook: we show the customer what we see in their tr
 
 Full protection: blocking rules really block (403 / 429 with Retry-After), soft signals trigger verification through L5 (a JS challenge), and verified crawlers fastpath. Everything that "would have been blocked" in shadow is now really blocked.
 
-Inside active there is the emergency Under Attack toggle (`attack_mode=true`) — per host, enabled by the customer for their domain. With it on, L5 forces `should_challenge()=true` for every request that reaches it: browsers go to the JS challenge, non-browser clients are blocked as `non_browser_blocked` (branch B), and protocol-incompatible requests as `unchallengeable_request` (branch C). Verified search bots and IP whitelist holders keep fastpathing at L2 (SEO and trusted integrations are unaffected). Clearance cookies issued BEFORE the attack started do not fastpath while `attack_mode=on` (an attacker could have stockpiled them in advance) — such a request goes through the cascade to L5 for a challenge. Cookies issued during the attack (after re-solving the challenge) fastpath as usual, so a real user solves one challenge per attack rather than one per request. Use it during an ongoing attack, or pre-emptively ahead of expected load.
+Inside active there is the emergency Under Attack toggle (`attack_mode=true`) — per host, enabled by the customer for their domain. With it on, L5 forces `should_challenge=true` for every request that reaches it: browsers go to the JS challenge, non-browser clients are blocked as `non_browser_blocked` (branch B), and protocol-incompatible requests as `unchallengeable_request` (branch C). Verified search bots and IP whitelist holders keep fastpathing at L2 (SEO and trusted integrations are unaffected). Clearance cookies issued BEFORE the attack started do not fastpath while `attack_mode=on` (an attacker could have stockpiled them in advance) — such a request goes through the cascade to L5 for a challenge. Cookies issued during the attack (after re-solving the challenge) fastpath as usual, so a real user solves one challenge per attack rather than one per request. Use it during an ongoing attack, or pre-emptively ahead of expected load.
 
 ---
 
@@ -379,7 +379,7 @@ The passive allow rules (the clearance cookie, verified bots, the IP whitelist) 
 
 ##### 5.1. The verification decision
 
-Whether active verification is needed right now is decided by `should_challenge()`. It is a function computed at L5 on every request, from three inputs:
+Whether active verification is needed right now is decided by `should_challenge`. It is a function computed at L5 on every request, from three inputs:
 
 1. **The `attack_mode` toggle** for this host (per host). When it is on, every request that reaches L5 requires verification regardless of every other signal. See Under Attack mode below.
 2. **The accumulated challenge flags** from the earlier layers (tls_fp_impersonator / tls_fp_suspicious_ciphers / tls_fp_dc_browser from L3, rate rules with action=challenge from L4). The request reached L5, so at least one flag has already fired.
@@ -418,9 +418,9 @@ Targeted cases — known API partners, specific webhook sources, individual path
 
 ##### 5.2. Choosing and issuing the verification
 
-When `should_challenge()=true` we do NOT always issue a JS challenge. Not all legitimate traffic comes from a browser — API clients, mobile apps, server-to-server integrations and IoT do not execute JS. Issuing them a JS challenge would block the customer's legitimate non-browser requests.
+When `should_challenge=true` we do NOT always issue a JS challenge. Not all legitimate traffic comes from a browser — API clients, mobile apps, server-to-server integrations and IoT do not execute JS. Issuing them a JS challenge would block the customer's legitimate non-browser requests.
 
-So when `should_challenge()=true` the cascade chooses the verification mechanism by client type:
+So when `should_challenge=true` the cascade chooses the verification mechanism by client type:
 
 **Branch A: the client looks like a browser** (the UA contains Mozilla/Chrome/Safari/Firefox/Edge and it passes the basic header checks) → a JS challenge:
 
@@ -443,7 +443,7 @@ So when `should_challenge()=true` the cascade chooses the verification mechanism
 
 So → the blocking category → `verdict=block, rule=non_browser_blocked`. We block it as suspicious.
 
-**When branch B fires.** Only when `should_challenge()=true` at stage 5.1 — that is, either `attack_mode` is on, or the client is on Standard Strictness and has accumulated system challenge flags. Under Permissive, branch B does not fire: there `should_challenge()` returns false for system flags, the request never reaches branch B and physically continues through the cascade. The log then records `verdict=permissive, rule=<name of the last soft flag>` — which is the whole point of Permissive (not getting in the way of non-browser clients without clear need), while the separate verdict lets analytics see "Standard would have blocked here".
+**When branch B fires.** Only when `should_challenge=true` at stage 5.1 — that is, either `attack_mode` is on, or the client is on Standard Strictness and has accumulated system challenge flags. Under Permissive, branch B does not fire: there `should_challenge` returns false for system flags, the request never reaches branch B and physically continues through the cascade. The log then records `verdict=permissive, rule=<name of the last soft flag>` — which is the whole point of Permissive (not getting in the way of non-browser clients without clear need), while the separate verdict lets analytics see "Standard would have blocked here".
 
 **The false-positive recovery loop.** A blocked request lands in the log with all the details (the IP, the UA, which challenge flags fired, exactly which rules carried it to L5, the fingerprint). In the dashboard the customer sees that block in the "Blocked requests" widget and can:
 
@@ -462,7 +462,7 @@ Once it applies, the next request from that client fastpaths at L2.3 and never r
 | `Upgrade: websocket` (a WebSocket handshake) | The client is waiting for `101 Switching Protocols`. An HTML response breaks the upgrade and the connection is never established. |
 | `Accept` explicitly excludes `text/html` (for example `application/json`, `application/grpc`, `image/*`) | The client is not a browser, will not render an HTML page and will not execute the JS. It receives HTML instead of the expected JSON or binary and breaks while parsing. The default when there is no `Accept` header is to treat it as `*/*` (not html) → unchallengeable. (The product team may adjust this during implementation if they find a practical counter-example.) |
 
-Branch C's decision when `should_challenge()=true`: `verdict=block, rule=unchallengeable_request`. The recovery loop is the same as branch B's — the customer sees the block in the dashboard and can add the IP to the per-resource IP whitelist.
+Branch C's decision when `should_challenge=true`: `verdict=block, rule=unchallengeable_request`. The recovery loop is the same as branch B's — the customer sees the block in the dashboard and can add the IP to the per-resource IP whitelist.
 
 **Why a separate `unchallengeable_request` rule rather than the general `non_browser_blocked`.** It is useful for the customer in the dashboard to distinguish two different reasons for a block:
 
@@ -479,7 +479,7 @@ A forced mode, toggled by `attack_mode` per host (its own toggle for each protec
 
 With `attack_mode=on` for a domain:
 
-- **Every request that reaches L5 is forced into verification** regardless of Strictness and the accumulated flags. The branch routing at L5 is preserved: a browser → a JS challenge (branch A); a non-browser → `verdict=block, rule=non_browser_blocked` (branch B); a protocol-incompatible request → `verdict=block, rule=unchallengeable_request` (branch C). So attack_mode does not cancel L5's protective blocks; it forces `should_challenge()=true` for everyone.
+- **Every request that reaches L5 is forced into verification** regardless of Strictness and the accumulated flags. The branch routing at L5 is preserved: a browser → a JS challenge (branch A); a non-browser → `verdict=block, rule=non_browser_blocked` (branch B); a protocol-incompatible request → `verdict=block, rule=unchallengeable_request` (branch C). So attack_mode does not cancel L5's protective blocks; it forces `should_challenge=true` for everyone.
 - **Cookie verify at L2.1: cookies issued before the attack started do not fastpath** — the attacker could have stockpiled them in advance on freshly issued IPs, so we do not trust them. Real users re-solve the challenge once and receive a fresh cookie with TTL=1 h, which fastpaths for the rest of the attack (see below).
 - **Verified search bots (stage 2.2) and the IP whitelist (stage 2.3) keep fastpathing** — SEO and the server integrations the customer has explicitly trusted are unaffected.
 - The L4 rate limits apply as usual to everything that reaches L4 — including clearance cookie holders (the cookie skips L3 and L5 but not L4, see L2.1). A full bypass of L4 belongs to verified bots and the IP whitelist only.
@@ -818,19 +818,12 @@ The request's `Host` is available directly on the proxy (from the HTTP header). 
 
 ---
 
-## Roadmap
+## Delivery order
 
-| Phase | What | Status | Actions | Who |
-| --- | --- | --- | --- | --- |
-| **Phase 1** | An observe-only cascade, L1–L2 plus L4 (no TLS fingerprint, no active verification). Logs into the telemetry sink. | In flight | We observe and block nothing. We calibrate the thresholds from the logs. | the edge admins (per the Phase 1 spec) |
-| **Phase 2** | L3 is added — the TLS fingerprint on top of the cascade. Observe-only, like Phase 1. | In flight | The same logs plus tls_fp, and new tags in the `tags` field with the `tls_fp:*` namespace. We populate the fingerprint catalog and the blocklist through PRs. | the edge admins (per the Phase 2 spec) |
-| **Phase 3** | The antibot backend plus catalog HTTP plus the dashboard. The per-resource policy over Channel C. The backend's rDNS worker populates the `bot_verification_status` catalog (the verified-bot allowlist at L2 becomes genuinely operational; until then the catalog is empty). Still shadow by default. | Next | The backend, the dashboard UI, migrating Lua from local configs to pulling from the catalog. | the backend and frontend teams plus the edge admins (per the integration spec) |
-| **Phase 4** | L5 active verification implemented: issuing the JS challenge, the clearance cookie HMAC verify and Under Attack mode. Additional artifacts are delivered to the proxy over Channel A: the HMAC secret and the HTML+JS template of the challenge page. Technical readiness for enforcement mode. | Future | Real physical actions for the first time — but only for pilot customers in `mode=active` (enabled by the team by hand for a shakedown). Free and non-pilot customers stay in shadow. | the same |
-| **Phase 5** | Opening mode=active to everyone who wants it, and monetisation. It starts after Phase 4 has been proven on the pilots, the product has been tested and the decision to hand it to customers has been made. It is not tied to a calendar date — the gate is readiness plus a product decision. | Future | Billing, marketing, support for switching, an SLA on the team's response. | product plus billing plus support |
-| **v2** | A globally exact rate limit (cross-proxy shared storage), HTTP/2 fingerprinting, extended TLS coverage. | Out of scope for v1 | — | — |
-| **A different product** | L6/L7 — behavioural ML over sessions, a mouse/timing beacon. | Out of scope | — | — |
-
-**The key thing to understand about the phases:** enforcement mode is switched on in step with the per-resource `mode=active/shadow`. Enabling enforce globally without that separation is impossible — it would affect every customer at once, free ones included. So Phase 4 is impossible without Phase 3, and Phase 5 is a product decision about a commercial launch rather than the next technical step.
+Enforcement is switched on per resource through `mode=active`. Turning it on
+globally would affect every customer at once, free ones included, so the
+per-resource mode is the gate everything else waits on. What is built and what is
+planned lives in [ROADMAP.md](../../ROADMAP.md).
 
 ---
 
@@ -891,14 +884,6 @@ The browser fingerprint collected during the JS challenge (User-Agent, screen re
 
 ---
 
-## Team responsibilities (for handover)
-
-| Team | What they do | Input artifacts |
-| --- | --- | --- |
-| **The admins** | Implementing the Lua cascade, integrating it into their nginx config on the edge pool, maintaining the configs through their own configuration management, enriching the logs with TLS fields | The Phase 1 spec (ready), the Phase 2 spec (ready), the integration spec for the pull channel (to be written as part of Phase 3) |
-| **The backend team** | The antibot backend: the catalog store and its delivery to the proxies (the mechanism is the team's choice, the product contract is in the "Channel C" section), the background rDNS worker, the log receiver, HA, deployment | This document plus the catalog contract spec (TBD, as the first Phase 3 artifact) |
-| **The frontend team** | The per-resource policy UI (Strictness, rate rules, ASN, custom UA, the attack_mode toggle) and analytics | This document plus the page design (mockup TBD) |
-| **Product** | The default policies, populating the fingerprint catalog and the UA blacklist through PRs, calibrating the thresholds from the logs, acceptance | This document as the reference point |
 
 ---
 
@@ -918,65 +903,6 @@ Recorded here so that nobody expects otherwise:
 
 ---
 
-## What is new in v0.5 (changelog from v0.4)
-
-An iteration on top of v0.4 following a discussion. The positioning, the modes and the business semantics are preserved; the contentious points are clarified, a high-level overview has been added and the terminology has been aligned across the documents.
-
-The main points:
-
-1. **A "Product overview" section has been added** at the start — a high-level description for colleagues: what this is, what it consists of (the proxy plus the backend), what the cascade is, what a rule and a tag mean in our terminology, the policies and the modes. Plus "who needs it" and "what it is not".
-2. **`attack_mode` is per host only.** There is no longer a pool-wide toggle (for the infrastructure level there is the kill switch). Under attack, clearance cookies issued before the attack started do not fastpath (those issued during it do); verified bots and the IP whitelist do fastpath. Non-browser and protocol-incompatible requests are blocked under attack (branches B/C) rather than going to a challenge.
-3. **A new `permissive` verdict.** When system soft flags are suppressed by Strictness=Permissive, the log records `verdict=permissive, rule=<the last soft flag>` — distinguishing "it passed because of Permissive" from "it passed because it was clean".
-4. **`should_challenge()` is described as a function computed at L5** (from attack_mode plus the accumulated flags plus Strictness), not as a stored flag.
-5. **A new `unchallengeable_request` rule** (branch C): the request is protocol-incompatible with a JS challenge (not a GET, a WebSocket, an `Accept` without `text/html`).
-6. **A new `hygiene:header_anomaly` tag** (L1): anomalous header combinations (HTTP/2 without `Accept`). Informational, it blocks nothing.
-7. **Rate limits — GCRA is fixed.** Customer rate rules are checked before the system ones; the rule code `rate_custom` plus the log field `client_rule_name` (unique within a host).
-8. **The clearance cookie's attributes** are stated explicitly (HttpOnly / Secure / SameSite=Lax / Path / Domain). Cross-proxy challenges through a self-signed nonce. HMAC secret rotation: scheduled over Channel A plus an emergency admin playbook. The cookie TTL is a system constant (24 h / 1 h under attack).
-
-8b. **The `flags` log field.** The log gained an array of every challenge flag accumulated along the way (the soft rules) — separately from the terminal `rule`. It fulfils the overview's promise of "a log record with the rule, the flags and the tags" and gives analytics the co-occurrence of signals.
-8a. **The clearance cookie is a partial fastpath, not a full one.** A holder of a valid cookie skips L3 (the TLS fingerprint) and L5 (the challenge) but goes through L4 (rate limits) — a cookie confers no right to abuse (brute force, scraping). A full fastpath (skipping L3-L5) remains with verified bots and the IP whitelist only. It closes the "solve one challenge → hammer rate-free for the cookie's whole TTL" hole.
-9. **rDNS clarified:** `rejected` TTL 5 min → 1 h; `bot_family` for rejected is the UA-claimed one; `bot_verified_pending` fires on every request until the backend publishes a status.
-10. **`resource_id`** is filled in by the backend when it ingests the log (the proxy works with `Host` alone).
-11. **Scope: edge pool domains with no policy entry** run on the system defaults (shadow), and the policy is an override. The per-host policy is delivered as deltas; cross-proxy consistency is eventual within the SLA.
-12. **Failure behaviour:** cold start is let-through plus a log (stage `cold_start`); a broken catalog from the backend means working from the last good version.
-13. **The kill switch** is an operational mechanism of the edge admins (not a product self-service button).
-14. **The related documents are aligned:** [rules-reference.md](rules-reference.md) (the flat rule catalog) and [config-templates.md](config-templates.md) (the config templates) have been added. The policy field `asn_blocklist` was renamed to `asn_block`. The backlog was synchronised on `attack_mode` and the rDNS TTL.
 
 ---
 
-## What is new in v0.4 (changelog from v0.3)
-
-The document iterates on top of v0.3 — the positioning, the modes and the business semantics of every feature are preserved. The main structural change: the document is now focused on the under-the-hood end-to-end traffic path (from accepting a request on the proxy to delivering it to the client from cache or from the origin) — which is what the teams need to design the backend and the proxy integration.
-
-The customer dashboard's UI (how the customer sees their analytics, buys protection and configures Strictness) is a separate task and is not covered here. We assume the customer has already bought, their policy is in our database and it has reached the proxy.
-
-What changed:
-
-1. **The architecture was rethought.** v0.3 described a monolithic sidecar process on every proxy that nginx called on every request. That is obsolete. A clean separation: the proxy runs the ENTIRE L1–L5 cascade locally on every request; the antibot backend is only a source of catalogs, a log receiver and a background rDNS worker. The backend is not on the hot path. No mentions of the obsolete architecture remain in the text.
-2. **A six-level protection model, L1–L6, has been added.** Previously the features were a flat list; now each one clearly belongs to a layer, and it is visible where v1's scope stops (L5) and what was left out (L6+).
-3. **The "How it works" section was rewritten as an end-to-end traffic flow.** From the TLS handshake → the L1–L5 cascade → the cache lookup → the origin fetch → delivering the response → writing the log. It explicitly shows that the antibot is applied before the cache lookup, and that the edge pool is a full CDN rather than just a proxy. It describes what happens on `verdict=block/challenge` (the flow stops, 403/429/the challenge page). The scope is explicitly narrowed: we consider only traffic to protected customer domains; other traffic is the edge admins' territory.
-4. **The "Features" section was removed.** Every product feature (Scoring/Strictness, rate limit presets, the JS challenge, the clearance cookie, verified bots, the bad-bot blocklist, ASN blocking, Under Attack mode, TLS fingerprinting) is described inside the corresponding cascade stage.
-5. **TLS fingerprinting (Phase 2)** was added as cascade layer L3. v0.3 had no such layer.
-6. **The "How it looks in the dashboard" section was removed.** The UI scope moves to a separate task; this document only notes that a dashboard exists.
-7. **The "What runs in the background and in parallel" section** was gathered into one place, in three categories: continuous background processes (the catalog pull, the rDNS worker, log delivery), catalog and policy updates triggered by the customer or product (a policy change, curation, a rollback), and the emergency levers (attack mode, the kill switch). Previously all of it was scattered across sections.
-8. **The phasing was explained** (Phase 1 observe-only → Phase 2 TLS fingerprint → Phase 3 backend plus dashboard → Phase 4 active verification → Phase 5 enforcement plus monetisation). v0.3 described the product as already working; now it is explicit that in Phase 1/2 the cascade only observes.
-9. **Configuration — the two-channel model** (the framework channel plus our catalog HTTP pull). Lookup by `Host`, not by `resource_id`. It closes the open question from Phase 1.
-10. **Team responsibilities** — a new dedicated section, so that the document can be handed over for review with an explicit statement of who does what.
-11. **The technical section on resource consumption** was rewritten for the new topology: we run no Go processes on the proxy.
-12. **The comparison with Cloudflare** gained a row about TLS fingerprinting.
-
-What did not change:
-
-- The positioning ("not an enterprise antibot, ~80% of typical SMB cases")
-- The shadow / active modes (previously Off / Standard / Under Attack — simplified to two, plus a separate Under Attack toggle as a flag on top of active)
-- The business semantics of every feature (though they moved into "How it works", each to its own layer)
-- What is explicitly out of v1 (extended, but not shortened)
-
-What was moved to other tasks:
-
-- The customer dashboard's UI and the analytics widgets
-- The feedback loops (how product calibrates thresholds from the logs, how the customer sees their analytics)
-
----
-
-*Document version: v0.5 | Date: 2026-05-21 | Previous: v0.4 (2026-05-18)*

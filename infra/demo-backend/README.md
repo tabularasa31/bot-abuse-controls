@@ -6,13 +6,13 @@ HTTPS path opened. Topology from
 the design decision
 and [config-distribution §HA](../../docs/architecture/config-distribution.md).
 
-The substrate (compose, LB, certs, firewall, provision scripts) is [B1]. The
+The substrate (compose, LB, certs, firewall, provision scripts) is . The
 `backend-*` containers run the real Go service from
-[`../../antibot-backend/`](../../antibot-backend/) — task [B2], skeleton of the
+[`../../antibot-backend/`](../../antibot-backend/) — task , skeleton of the
 three backend functions: catalog server, log receiver, rDNS worker. Full
 contracts for those functions land in B3 (catalog HTTP/ETag), B6/B9 (log sink),
 B7 (rDNS state machine). App-level production deploy with DB migrations is
-[B15].
+ .
 
 > This is our own demo infra, **not** the operator's prod edge pool — see
 > [ROADMAP.md](../../ROADMAP.md) "NOT OURS".
@@ -325,8 +325,8 @@ with the restart.
   — list operations on per-host arrays. POST is dedup'd; DELETE returns 404
   if the item wasn't there.
 
-Dashboard mutation → backend reload tick (5s, [B4]) → edge `/catalog/*` pull
-(30s, [B5]) → swap on edge. End-to-end ≤30s under the contract from
+Dashboard mutation → backend reload tick (5s, ) → edge `/catalog/*` pull
+(30s, ) → swap on edge. End-to-end ≤30s under the contract from
 [`config-distribution.md`](../../docs/architecture/config-distribution.md).
 
 ## BAC log viewer (Loki + Grafana)

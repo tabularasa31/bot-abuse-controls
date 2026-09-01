@@ -21,8 +21,7 @@ To check it is alive: `curl` the IP or a foreign Host → 444; Loki shows
 
 ## Where to watch an attack (observability)
 
-Everything is in Loki/Grafana (the edge exposes no observability HTTP endpoints —
-Phase 1).
+Everything is in Loki/Grafana; the edge exposes no observability HTTP endpoints.
 
 - **Request stream and verdicts** — `{kind="bac_log"}`: fields `host`, `ip`,
   `asn`, `geo_country`, `verdict`, `rule`, `tls_fp`, `ua`, `status`. This shows

@@ -1,5 +1,5 @@
 #!/bin/sh
-# [C1] Generate the Phase 4 HMAC secret for clearance cookies on the demo
+# Generate the HMAC secret for clearance cookies on the demo
 # stand. Writes a 32-byte base64-encoded random string to ./certs/
 # challenge_secret.key (gitignored via infra/demo-stand/certs/*.key).
 #

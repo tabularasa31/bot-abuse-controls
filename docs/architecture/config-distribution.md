@@ -105,9 +105,9 @@ Each thing pulled in Channel C is a **catalog**: a named, fully-versioned snapsh
 
 Edge has `ngx.var.host` for free. The `policy` catalog is a map `host → policy_json`. No need for an additional `Host → resource_id` lookup, no dependency on the operator's resource registry.
 
-A new pool domain that has not yet been registered in our dashboard simply has no entry in `policy`; the pipeline falls back to the pool default (initially `mode=shadow`, all rules observe-only — Phase 1 default).
+A new pool domain that has not yet been registered in our dashboard simply has no entry in `policy`; the pipeline falls back to the pool default (`mode=shadow`, all rules observe-only).
 
-This collapses the "where does resource_id come from" open question from the Phase 1 spec to nothing.
+That removes the question of where a resource id comes from entirely.
 
 ## What was rejected and why
 
@@ -122,7 +122,7 @@ This collapses the "where does resource_id come from" open question from the Pha
 
 **Channel C network reach.** A firewall rule from the edge egress to the backend, plus the IP allowlist or the mTLS certificate distribution path.
 
-Nginx-internal questions (where exactly in their cascade `access_by_lua` slots in, what `lua_shared_dict` names are chosen, how our Lua coexists with theirs) are **not on our side** — Phase 1 and Phase 2 specs put integration squarely in the edge admins' zone of responsibility. We supply the reference Lua implementation, the integration spec (cascade order, hook phase, shared_dict prefix `antibot_*`), the catalog HTTP contract, and the backend. They slot it into their nginx config. The Phase 2 fp task is already issued to them on that contract; TLS termination at nginx and availability of `$ssl_*` / `$geoip_*` are already known facts (otherwise Phase 2 spec couldn't have been written).
+**Integrating into an existing nginx config** — where `access_by_lua` slots into an existing cascade, which `lua_shared_dict` names are chosen, how this Lua coexists with other modules. What this side supplies is the reference implementation, the hook contract (cascade order, phase, the `antibot_*` dict prefix), the catalog HTTP contract and the backend. The fingerprint work assumes TLS terminates at nginx and that `$ssl_*` and `$geoip_*` are available.
 
 ## Terminology cleanup
 

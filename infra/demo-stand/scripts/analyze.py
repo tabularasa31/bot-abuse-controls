@@ -2,7 +2,7 @@
 """
 Daily traffic analyzer for the abuse-controls demo stand (resty).
 
-Reads the Phase 1 structured `BAC_LOG {json}` lines the stand emits to
+Reads the structured `BAC_LOG {json}` lines the stand emits to
 docker stdout (container nginx-demo), builds a per-fingerprint view, and
 produces a blocklist-candidate report (markdown / HTML / subject line).
 fp comes from the record's `tls_fp` field; cipher_count is derived from
@@ -53,7 +53,7 @@ STAGING_SINCE_FILE = STATE_DIR / "staging-since.json"
 # rebuilding the container (a recreate drops the container's docker-json log
 # history). We fold these back in so a rebuild deploy leaves no gap.
 ARCHIVE_DIR = STATE_DIR / "bac-archive"
-# Aged-out lifetime records (rotate-state.py / D7). Monthly shards keyed by the
+# Aged-out lifetime records (rotate-state.py / ). Monthly shards keyed by the
 # record's last-seen month. Distinct from bac-archive above (which holds raw
 # events, not lifetime state). seen-fps.json / ip-cache.json grow unbounded on a
 # production edge (millions of unique fp/IP per day), so rotate-state.py moves
@@ -82,7 +82,7 @@ STATE_COMPACT_MIN_IDLE_DAYS = 7
 STATE_ARCHIVE_RETENTION_MONTHS = int(os.environ.get("STATE_ARCHIVE_RETENTION_MONTHS", "6"))
 _SHARD_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
-# The stand's container. It emits one Phase 1 `BAC_LOG {json}` record per
+# The stand's container. It emits one `BAC_LOG {json}` record per
 # request to docker stdout.
 CONTAINER = os.environ.get("BAC_CONTAINER", "nginx-demo")
 
@@ -268,7 +268,7 @@ def _event_from_bac_line(line):
         "verdict": rec.get("verdict") or "pass",
         "rule": rec.get("rule") or "-",
         # D12 solve-rate signal filter (§A): valid only on active-host,
-        # attack-off events. `mode` is the per-host enum (B11); `attack_mode`
+        # attack-off events. `mode` is the per-host enum (); `attack_mode`
         # is the edge boolean — None means the log predates the field rollout,
         # which _is_signal_event treats as not-countable (conservative).
         "mode": rec.get("mode") or "-",
@@ -609,7 +609,7 @@ def seed_ip_cache_from_log(events, cache):
     same source the edge's reputation:asn_dc tag uses. Any accumulated `count`
     on an existing good entry is preserved (the lifetime pass increments it);
     entries that were previously errors are reset (they were never counted).
-    A prior `last_seen` (the rotation clock, D7) survives the rebuild too."""
+    A prior `last_seen` (the rotation clock, ) survives the rebuild too."""
     dc = _load_asn_datacenters()
     for e in events:
         ip = e.get("remote")
@@ -635,7 +635,7 @@ def seed_ip_cache_from_log(events, cache):
         cache[ip] = entry
 
 
-# --- Lifetime-state rotation (D7) ------------------------------------------
+# --- Lifetime-state rotation () ------------------------------------------
 # seen-fps.json / ip-cache.json accumulate every fp/IP ever seen. rotate-state.py
 # (run from cron BEFORE analyze.py) calls rotate_state() to move the aged-out
 # tail into state/archive/YYYY-MM.json and drop low-signal one-offs; analyze.py
@@ -1111,7 +1111,7 @@ def _fp_hard_identity_allow(events_for_fp):
     (reputation.lua), cookie_valid (verdict.lua), i.e. any verdict==allow EXCEPT
     challenge_pass. Non-empty list is truthy so callers testing truthiness work
     unchanged. challenge_pass is excluded here and handled by _challenge_pass_gate:
-    a solved challenge is no longer a permanent shield (design §B2)."""
+    a solved challenge is no longer a permanent shield (design §)."""
     return [
         (e.get("remote") or "?", e.get("rule") or "?")
         for e in events_for_fp
@@ -1315,7 +1315,7 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
 
     # D12 challenge solve-rate (lifetime, from state). +2: between impersonator
     # (+3, dictionary-exact) and weak heuristics (+1) — a strong behavioural
-    # signal, hard to fake. Only ranks; the gate decision is separate (§B1).
+    # signal, hard to fake. Only ranks; the gate decision is separate (§).
     sig = solve_signal((seen_entry or {}).get("challenge_issued", 0),
                        (seen_entry or {}).get("challenge_solved", 0))
     if sig["enough"] and sig["solve_rate"] <= LOW_SOLVE_RATE:
@@ -1365,7 +1365,7 @@ def find_blocklist_candidates(events, ip_cache, seen):
         generic_honest_tool = known_tool and not has_impersonator
         intent = has_impersonator or (has_recon and not generic_honest_tool)
 
-        # D12 challenge_pass ladder (§B2), on lifetime issued/solved from state.
+        # D12 challenge_pass ladder (§), on lifetime issued/solved from state.
         # "veto" kills the allowlist gate; "gray" passes the gate but blocks
         # auto-promote (→ staging observation); "clear" imposes no constraint.
         # Read the counters and the two hard-identity components once so the
@@ -1618,7 +1618,7 @@ def find_staging_observation(events, now_utc, min_staging_hours, since_map=None)
         hs = human_share(matched)
         # Hard identity (whitelist IP or non-challenge_pass allow) still means
         # "caught a real client". challenge_pass is judged by solve_rate among
-        # the active matches instead (§B2) — this is where HUMAN_SOLVE_RATE gets
+        # the active matches instead (§) — this is where HUMAN_SOLVE_RATE gets
         # real meaning: many solved challenges → humans → fp_caught.
         hard_hit = any(_ip_in_whitelist(e["remote"], whitelist_nets) for e in matched) \
             or bool(_fp_hard_identity_allow(matched))
@@ -2273,7 +2273,7 @@ def main() -> int:
         sys.stdout.write(render_subject(events_24h, seen, sLT, ip_cache, now_utc) + "\n")
         return 0
 
-    # Lazy restore (D7): a fp/IP that reappears in this window but was archived
+    # Lazy restore (): a fp/IP that reappears in this window but was archived
     # by rotate-state.py is pulled back into the active state with its history
     # intact, BEFORE the accumulation below adds the new window onto it. Only the
     # full-report path does this (and then persists) — the read-only JSON views
@@ -2322,7 +2322,7 @@ def main() -> int:
             days = set(seen[fp].get("days_seen", []))
             days.add(ev_day)
             seen[fp]["days_seen"] = sorted(days)
-        # D12: accumulate the solve-rate signal lifetime per-fp, counting only
+        # : accumulate the solve-rate signal lifetime per-fp, counting only
         # active-host, attack-off events (§A). Same watermark dedup as `count`.
         if _is_signal_event(e):
             if e.get("verdict") == "challenge":
@@ -2332,7 +2332,7 @@ def main() -> int:
         ip = e["remote"]
         if ip in ip_cache and "error" not in ip_cache[ip]:
             ip_cache[ip]["count"] = ip_cache[ip].get("count", 0) + 1
-            # The IP rotation clock (D7): newest day this IP was counted.
+            # The IP rotation clock (): newest day this IP was counted.
             ip_cache[ip]["last_seen"] = max(
                 ip_cache[ip].get("last_seen", ""), ev_day)
 

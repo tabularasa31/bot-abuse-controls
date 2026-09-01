@@ -16,7 +16,7 @@ the challenge cascade     the blocklist cycle,        protection — new AXES of
 [done]                    [in progress]               [horizon / deciding where to grow]
 ```
 
-- **The MVP is [vision.md](vision.md) plus phase1/phase2 plus the C series.** The
+- **The MVP is [vision.md](../product/vision.md) plus phase1/phase2 plus the C series.** The
   L1→L5 cascade, the challenge, clearance, Channel C, the policy. Built — see
   [ROADMAP.md](../../ROADMAP.md).
 - **post-MVP is the D series.** Deepening the detector: scoring plus the blocklist
@@ -107,7 +107,7 @@ where we are a signal supplier rather than the one that acts.
 
 ## 5. How this document relates to the others
 
-- [vision.md](vision.md) — the behavioural contract of the MVP (what the edge does with
+- [vision.md](../product/vision.md) — the behavioural contract of the MVP (what the edge does with
   a request). This document is the **horizon beyond vision**, and does not override it.
 - [research/waf-ddos-roadmap.md](../research/waf-ddos-roadmap.md) — the concrete phases
   and tickets for the first two post-post-MVP axes (WAF, DDoS).

@@ -68,7 +68,7 @@ verdict=block. After calibration they are promoted to `active`. Supported for
 | `rate_ip` | `rate_limits` | `blocking` | The per-IP threshold was exceeded (100/600 over 10 s/60 s windows) | Local proxy counters |
 | `rate_ip_ua` | `rate_limits` | `blocking` | The per-IP+UA threshold was exceeded (100/600) | Local proxy counters |
 | `rate_api` | `rate_limits` | `blocking` | The per-IP threshold on API endpoints was exceeded (50/300) | Local proxy counters |
-| `rate_tls_fp` | `rate_limits` | `blocking` | The per-fingerprint threshold was exceeded (50/300). Phase 2+. Does not fire when no fingerprint was computed | Local proxy counters |
+| `rate_tls_fp` | `rate_limits` | `blocking` | The per-fingerprint threshold was exceeded (50/300). Does not fire when no fingerprint was computed | Local proxy counters |
 | `rate_scan_urls` | `rate_limits` | `blocking` | The per-IP unique-URL threshold was exceeded (50/200) — a scraping indicator | Local proxy counters |
 | `non_browser_blocked` | `verification` | `blocking` | A non-browser client (its UA does not look like a browser) reached L5 with challenge flags and holds no whitelist trust | The L5 decision (branch B) |
 | `unchallengeable_request` | `verification` | `blocking` | The request is protocol-incompatible with a JS challenge: a non-GET method, a WebSocket upgrade, an `Accept` without `text/html`. The UA may still be a browser one | The L5 decision (branch C) |
@@ -115,10 +115,10 @@ the JSON log.
 | `asn` | string | The client ASN (per MaxMind) | Always |
 | `geo_country` | string | The client's country (ISO 3166-1 alpha-2) | Always |
 | `ua` | string | The full User-Agent | Always |
-| `tls_fp` | string | The computed TLS fingerprint, in the form `L<ver><sni_flag><cipher_cnt><alpn>_<hash_b>_<hash_c>` | When the request reached stage 3 (Phase 2+) |
-| `tls_cipher_count` | int | The number of ciphers after stripping GREASE | Phase 2+ |
-| `tls_alpn` | string | The negotiated ALPN (h2, http/1.1) | Phase 2+ |
-| `tls_sni_present` | boolean | Whether SNI was present in the handshake | Phase 2+ |
+| `tls_fp` | string | The computed TLS fingerprint, in the form `L<ver><sni_flag><cipher_cnt><alpn>_<hash_b>_<hash_c>` | When the request reached stage 3 |
+| `tls_cipher_count` | int | The number of ciphers after stripping GREASE |
+| `tls_alpn` | string | The negotiated ALPN (h2, http/1.1) |
+| `tls_sni_present` | boolean | Whether SNI was present in the handshake |
 | `stage` | string (enum) | The stage at which the final rule fired | Always |
 | `verdict` | string (enum) | The decision of the final rule that fired | Always |
 | `rule` | string | The code of the final rule that fired | Empty when `verdict=pass` |
@@ -140,9 +140,9 @@ the JSON log.
 | --- | --- | --- |
 | `hygiene` | L1 | Basic hygiene (method, UA blacklist) |
 | `reputation` | L2 | Source reputation (cookie, verified bot, IP, ASN, geo) |
-| `tls_fp` | L3 | TLS fingerprinting *(Phase 2+)* |
+| `tls_fp` | L3 | TLS fingerprinting ** |
 | `rate_limits` | L4 | Behavioural limits |
-| `verification` | L5 | Active verification *(Phase 4+)* |
+| `verification` | L5 | Active verification ** |
 | `egress` | — | The request traversed the whole cascade with no blocking or allow rule firing, and continues into the CDN flow (cache/origin). Emitted on `verdict=pass` (no rule fired) or `verdict=permissive` (soft flags were raised but Permissive suppressed the challenge). For `verdict=block`/`allow`/`challenge`, `stage` is the layer where the final rule fired (`hygiene`/`reputation`/`tls_fp`/`rate_limits`/`verification`) |
 | `cold_start` | — | The proxy has just started and the catalogs have not loaded yet. The request skipped the checks; see the fail modes in Channel C |
 

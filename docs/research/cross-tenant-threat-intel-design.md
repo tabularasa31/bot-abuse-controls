@@ -16,11 +16,11 @@ react in seconds rather than minutes.
 
 **The attacker's reputation is global; the enforcement stance is per tenant.**
 - The badness of a fingerprint/subnet/ASN belongs to the BOT, not the victim → share
-  it globally.
+ it globally.
 - attack_mode / drop / strictness are the state and risk tolerance of a SPECIFIC
-  tenant → do not impose A's wartime posture on B's users.
+ tenant → do not impose A's wartime posture on B's users.
 - Only the attacking side (fp/IP/subnet/ASN) crosses tenants. Tenant A's data (host,
-  URL) never reaches B — isolation is preserved.
+ URL) never reaches B — isolation is preserved.
 
 ## Two tiers (by confidence and speed)
 
@@ -41,19 +41,19 @@ the slow, PR-gated tier.
 ```
 1. An attack on tenant A → the edge sees bad fingerprints/subnets (reactive signals, G2)
 2. The backend fast aggregator confirms ATTACKER-SIDE BADNESS (a high bar):
-     • subnet: datacenter-only + churn + human_share≈0 + participation in an active attack
-     • fp: confirmed bad (impersonator / on the blocklist / solve_rate≈0 with volume)
-     ← "was present during an attack" is NOT sufficient on its own (a real user
-       caught in the attack window must not qualify)
+ • subnet: datacenter-only + churn + human_share≈0 + participation in an active attack
+ • fp: confirmed bad (impersonator / on the blocklist / solve_rate≈0 with volume)
+ ← "was present during an attack" is NOT sufficient on its own (a real user
+ caught in the attack window must not qualify)
 3. Publish into the global active_threats (short TTL) → Channel C
 4. ALL edges pull the list (≤30 s)
 5. At each tenant, those fingerprints/subnets are PRE-ARMED:
-     • +score / a lower threshold / challenge-first
-     • a tenant UNDER attack → may escalate to DROP (local G2 logic)
-     • a tenant NOT under attack → challenge-first only, NEVER an auto-block
+ • +score / a lower threshold / challenge-first
+ • a tenant UNDER attack → may escalate to DROP (local G2 logic)
+ • a tenant NOT under attack → challenge-first only, NEVER an auto-block
 6. Entries expire on their own TTL
-     if repeated or confirmed → promoted into the SLOW tier by the usual
-     PR-gated pipeline (D1/G1)
+ if repeated or confirmed → promoted into the SLOW tier by the usual
+ PR-gated pipeline (D1/G1)
 ```
 
 ## The fast aggregator (Q2 — on the backend, speed is the point)
@@ -67,9 +67,9 @@ fast because there is no round trip to Loki.
 
 Implementation notes:
 - The in-memory rolling state is lost on restart — **acceptable** (ephemeral
-  short-TTL data, rebuilt within minutes).
+ short-TTL data, rebuilt within minutes).
 - HA backend: with several instances, each needs the full stream OR a shared rolling
-  state. The stand runs a single backend, which is fine; HA is a follow-up.
+ state. The stand runs a single backend, which is fine; HA is a follow-up.
 
 ## Propagation (Q1 — Channel C, ≤30 s)
 
@@ -82,9 +82,9 @@ over-engineering; we are not building one.
 
 An entry in `active_threats` does not block automatically at a tenant. It:
 - adds **+score** / lowers the threshold / makes those fingerprints and subnets
-  **challenge-first**;
+ **challenge-first**;
 - leads to a DROP **only** if the tenant is itself under attack (its own
-  attack_mode) AND the local G2 signals agree.
+ attack_mode) AND the local G2 signals agree.
 
 **That is the built-in protection against poisoning (#5):** the worst a poisoned
 hot list can do is put a captcha in front of a few tenants, not block them.
@@ -97,7 +97,7 @@ A false positive in `active_threats` hits EVERY tenant, so the confidence bar is
 above the local one:
 - the same purity / human_share / datacenter-only gates as D1/G1, but stricter;
 - "an active attack" is context, not a sufficient condition; combine it with
-  attacker-side badness.
+ attacker-side badness.
 
 ## Opt-out (Q4 — not needed)
 
@@ -108,12 +108,12 @@ the network effect is maximised.
 ## What this pins down in adjacent tickets
 
 - **G1:** `subnet_reputation` must be designed as a **global** artifact (not per
-  host), otherwise cross-tenancy has to break it later. (A comment was added to G1.)
+ host), otherwise cross-tenancy has to break it later. (A comment was added to G1.)
 
 ## Non-goals
 
 - HA replication of the aggregator's rolling state — a follow-up (the stand is a
-  single instance).
+ single instance).
 - Auto-blocking from the fast tier — rejected (pre-arm only).
 - Sharing anything beyond attacker-side identifiers.
 
