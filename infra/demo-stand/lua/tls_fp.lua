@@ -1,81 +1,26 @@
--- L3 tls_fp soft-rule + tag stage (rules-reference L3 #11/#12 + tags T2–T4;
--- phase2-spec "Rules of the stage"; vision §"A UA family ↔ fingerprint mismatch").
+-- L3 tls_fp: the soft rules and the informational tags.
 --
--- This module owns the NON-blocking part of the tls_fp stage. The blocking
--- part (tls_fp_blocklist → ngx.exit(403)) stays inline in verdict.lua because
--- it short-circuits the cascade; everything here is observe-only and never
--- exits, so it lives as its own stage module alongside hygiene/reputation.
+-- The blocking half of the stage stays inline in verdict.lua because it
+-- short-circuits the cascade; everything here is observe-only and never exits.
 --
--- Naming note: the A9 ticket body sketched this as `ua_fp_consistency.lua`
--- with a per-request sidecar `/__score` round-trip (RFC §C2 grey-verdict
--- path). That path is explicitly retired in the current architecture — see
--- docs/architecture/edge-lua-vs-sidecar.md (terminology note, 2026-05-18:
--- "§C2 ... not used in the current design (no heavy/grey-verdict scoring)").
--- So A9 reduces to the doc-aligned tls_fp stage: two soft rules + three
--- informational tags, all evaluated in Lua, all observe-only. Hence the
--- stage name `tls_fp` rather than `ua_fp_consistency` (which would not cover
--- suspicious_ciphers or the tags).
+-- Soft rules accumulate a flag, and L5 decides what to do with it:
+--   * tls_fp_impersonator — the UA claims a browser, but the fingerprint
+--     matches a known automation signature.
+--   * tls_fp_suspicious_ciphers — the UA claims a browser, but the cipher count
+--     is not the one that family offers.
 --
--- Soft rules (the soft category → they accumulate a flag in `flags`; the final verdict
--- is decided by L5/verification.lua from Strictness plus attack_mode, see C4):
---   * tls_fp_impersonator       — UA claims a browser family, but the fp's
---                                 hash_b matches a known automation signature
---                                 in tls_fp_catalog (UA Chrome + fp = curl/
---                                 python-requests/Go/okhttp ⇒ masquerade).
---   * tls_fp_suspicious_ciphers — UA claims a browser family, but the fp's
---                                 cipher_count differs from that family's
---                                 expected count in tls_fp_browser_profiles
---                                 (chrome=15, firefox=16, safari=20, edge=15).
+-- Tags emit no verdict and never stop the cascade: tls_fp:automation_ua,
+-- tls_fp:no_sni, and tls_fp:dc_browser, which combines this layer with L2 — a
+-- browser-shaped fingerprint arriving from a datacenter ASN.
 --
--- Informational tags (NOT rules — emit no verdict, never stop the cascade,
--- accumulate in `tags` independent of the verdict):
---   * tls_fp:automation_ua — UA carries explicit automation markers
---                            (curl/python-requests/Go/okhttp/…). Duplicates
---                            what ua_blacklist will catch once populated; a
---                            primary automation signal until then.
---   * tls_fp:no_sni        — client sent no SNI in the TLS handshake.
---   * tls_fp:dc_browser    — cross-layer (L3 fp + L2 reputation): the fp is
---                            browser-shaped (cipher_count matches a browser
---                            profile) AND the IP is in a datacenter ASN (the
---                            reputation:asn_dc tag set upstream this request).
+-- The catalogs arrive over Channel C and are rebuilt per worker on a generation
+-- flip. Until the first pull lands there is a small static fallback, described
+-- at COLD_START_PROFILES.
 --
--- Observe-only (phase2-spec, "in the MVP the cascade only observes"): run() records
--- flags and tags through bac_log, never calls ngx.exit and never
--- short-circuits. Before C4 this is also where verdict=challenge was set for soft
--- signals; after C4 that is gone — L5/verification.lua takes the decision,
--- honouring Strictness and attack_mode. A terminal block is still
--- not clobbered by a soft flag (the block stays in `rule` and the soft flag lives in
--- `flags`) — verification.decide() guarantees that: with verdict=="block"
--- it silently returns nil and leaves the terminal untouched.
---
--- Config model. After PR2 (ADR-006) tls_fp_catalog and tls_fp_browser_profiles
--- live in the `catalogs/` git repo and arrive over Channel C: the backend reads the
--- YAML into the catalog server, the edge polls through catalog_pull.lua plus an atomic swap into a
--- shared_dict. refresh() is a gen-cached per-worker rebuild, cheap on every
--- run(), rebuilding only on a flip. Until the first pull, the cold-start
--- fallback applies (COLD_START_PROFILES); after profiles_landed() → the fallback goes OFF and the
--- backend is the single source of truth. The pre-PR2 INI parsing in config.lua was removed.
---
--- Staging (A11, phase2-spec §"Staged rollout for PR catalogs"). Catalog
--- entries with status=staging are kept OUT of the active lookup tables (so they
--- never produce a verdict/rule even in active mode) and instead compiled into
--- parallel *_staging tables. When a staged entry matches the same way its
--- active counterpart would, run() records the fact into the `staging_match` log
--- slot ("<catalog>:<pattern_id>") via bac_log.add_staging_match — pure
--- observation for the promotion workflow (staging → active in a separate PR, or
--- revert). pattern_id per catalog: tls_fp_blocklist = the fp token,
--- tls_fp_catalog = hash_b, tls_fp_browser_profiles = browser_family. The
--- blocklist staging set lives here too (not in init.lua's active tls_fp_blocklist
--- seed) so the whole stage's staging detection is in one place; a staged fp is
--- absent from the active dict, so verdict.lua never exits on it and the request
--- always reaches run().
---
--- A11 follow-up (86exrtjpc): blocklist_staging is now built from the Channel C
--- snapshot in refresh() (the tls_fp_blocklist shared_dict, where staged fps
--- arrive as "staging:block" — see store.buildTLSFPBlocklist / parse_value),
--- not from the local tls_fp_blocklist.conf. The .conf stays the cold-start
--- seed for ACTIVE fps only (init.lua); staged observation is delivered live by
--- Channel C, symmetric with tls_fp_catalog / tls_fp_browser_profiles staging.
+-- Staged catalog entries are kept out of the active tables entirely and
+-- compiled into parallel ones. A staged match is recorded into staging_match
+-- and never becomes a verdict, so the promotion decision has data before
+-- anything blocks.
 
 local fp_state = require "tls_fp_blocklist_state"
 
@@ -104,15 +49,9 @@ local AUTOMATION_MARKERS = {
     "axios/", "scrapy", "aiohttp", "httpx", "guzzle", "postmanruntime",
 }
 
--- pure: classify a UA into a browser family or "other". Order matters because
--- browser UA tokens nest: Edge carries "Chrome" and "Safari"; Chrome carries
--- "Safari". Check the most specific marker first.
---   Edge   : edg/ (desktop), edga/ (android), edgios/ (ios)
---   Chrome : chrome/ (desktop/android), crios/ (ios) — and not Edge
---   Firefox: firefox/, fxios/ (ios)
---   Safari : safari/ + version/ — and not Chrome (genuine Safari has no Chrome)
--- Matched against the lowercased UA (like is_automation_ua), so a spoof that
--- lowercases the tokens still classifies and can't slip past the soft rules.
+-- Order matters: browser UA tokens nest, with Edge carrying both Chrome and
+-- Safari and Chrome carrying Safari, so the most specific marker wins.
+-- Lowercased first, or a lowercased spoof would slip past the soft rules.
 function _M.classify_ua(ua)
     if type(ua) ~= "string" or ua == "" then return "other" end
     local low = ua:lower()
@@ -135,11 +74,8 @@ function _M.is_automation_ua(ua)
     return false
 end
 
--- pure: extract hash_b (the sorted-cipher hash) from an fp string. Layout
--- (ja4_compute.lua): "L<prefix>_<hash_b>_<hash_c>". Anchored only on the
--- second underscore-delimited segment, not the whole string, so it keeps
--- working if the fp ever grows trailing segments. Returns nil for a
--- malformed/absent fp so callers fall through without a catalog lookup.
+-- Anchored on the second segment rather than the whole string, so it survives
+-- the fingerprint growing more segments.
 function _M.hash_b(fp)
     if type(fp) ~= "string" then return nil end
     return fp:match("^[^_]+_([^_]+)_")
@@ -154,13 +90,8 @@ function _M.cipher_count(fp)
     return cc and tonumber(cc) or nil
 end
 
--- pure: parse wire-format map { [hash_b] = "<status>:<family>" } (composite
--- string per Channel C contract — symmetric to verified_bot_ips) into two
--- tables: active hash_b → family, staging hash_b → family. Empty family or
--- unknown status is skipped (defense-in-depth — backend validates these,
--- but a partial Channel C payload should never blow up the request path).
--- Used by refresh() to rebuild the per-process lookup tables after a
--- Channel C gen flip; also tested standalone (pure, no ngx deps).
+-- Splits the wire map into active and staging tables. Malformed entries are
+-- skipped: a partial payload must never break the request path.
 function _M.build_catalog(wire)
     local active, staging = {}, {}
     for hb, raw in pairs(wire or {}) do
@@ -200,12 +131,8 @@ function _M.build_profiles(wire)
     return active, staging
 end
 
--- pure: build the staging fp set from a Channel C wire map { [fp] =
--- "<status>:block" } (store.buildTLSFPBlocklist). Keeps only status=staging
--- fps as a membership set; active fps are NOT kept here (verdict.lua blocks
--- those directly off the same dict). A legacy bare "block" value (no colon)
--- is treated as active and thus skipped. Symmetric to build_catalog, but the
--- blocklist's verdict is implicit (block), so we keep only membership.
+-- Only the staged fingerprints, as a membership set: the active ones are
+-- blocked in verdict.lua straight off the same dict.
 function _M.build_blocklist(wire)
     local staging = {}
     for fp, raw in pairs(wire or {}) do
@@ -226,25 +153,12 @@ function _M.is_impersonator(ua_family, hb, catalog)
     return catalog[hb] ~= nil
 end
 
--- pure: tls_fp_suspicious_ciphers decision. Fires when the UA claims a browser
--- family with a known profile AND the observed cipher_count differs from it.
--- Unknown family (no profile) or an unparseable cipher_count never fires.
--- The cold-start fallback for is_suspicious_ciphers / fp_looks_like_browser:
--- a small static map of families → expected_cipher_cnt. Before PR2
--- (ADR-006) these values lived in infra/demo-stand/config/tls_fp_browser_profiles.conf
--- and were parsed in init_by_lua, so the cascade worked from the first second and
--- kept working even with the backend unavailable. After PR2 the catalog
--- arrives over Channel C, leaving a ~30 s cold-start window after a restart
--- plus an unbounded outage while the backend is unavailable. The fallback covers
--- both scenarios.
+-- The cold-start fallback: without it the stage would be blind for the first
+-- 30 s after a restart, and for the whole of any backend outage.
 --
--- IMPORTANT (from re-review): the fallback is active ONLY until the first successful
--- Channel C pull (`profiles_landed()` below). Once the gen has flipped
--- at least once (gen >= 1), Channel C is the only source of truth:
--- if the backend deliberately removed or changed a profile (chrome moved from 15 → 16,
--- or it was deleted entirely), the edge MUST follow the backend rather than sticking to
--- the old hardcoded value. Without that condition an always-on fallback
--- would mask real catalog updates.
+-- It applies only until the first successful pull. After that the catalog is
+-- the only source of truth — an always-on fallback would mask a deliberate
+-- change, such as a browser's expected cipher count moving.
 local COLD_START_PROFILES = {
     chrome  = 15,
     firefox = 16,
@@ -252,28 +166,16 @@ local COLD_START_PROFILES = {
     edge    = 15,
 }
 
--- profiles_landed — true if at least one successful Channel C pull
--- delivered tls_fp_browser_profiles into the shared_dict (refresh() moved
--- _cached_gen_profiles to a number > 0). Until then the fallback is legitimate;
--- afterwards the backend is authoritative even if it sent an empty catalog.
---
--- If `_M._cached_gen_profiles` is empty (tests call the is_* helpers
--- directly without refresh), we treat it as a cold start (fallback on), to
--- keep the unit tests deterministic regardless of ngx initialisation.
+-- Whether a pull has ever landed. Afterwards the catalog is authoritative even
+-- when it is empty.
 local function profiles_landed()
     local g = _M._cached_gen_profiles
     return type(g) == "number" and g > 0
 end
 
--- is_suspicious_ciphers: returns true if `cc` doesn't match the expected
--- cipher count for `ua_family`. `profiles` is the table to check (active
--- OR staging). `allow_fallback` (default false) decides whether the cold-start
--- fallback to COLD_START_PROFILES is permitted when the dict is empty and Channel C has not yet
--- landed. From review: apply the fallback ONLY for the active call (where the
--- goal is baseline detection before the first pull). For the staging call it is
--- forbidden: otherwise an empty staging table plus a not-landed gen emits
--- phantom `staging_match` events for every browser with a non-standard
--- cipher_count, poisoning the promotion metrics with signatures that do not exist.
+-- The fallback is allowed only for the active call. Applying it to the staging
+-- one would emit staging_match events for signatures that do not exist yet and
+-- poison the promotion metrics.
 function _M.is_suspicious_ciphers(ua_family, cc, profiles, allow_fallback)
     local expected = profiles[ua_family]
     if not expected and allow_fallback and not profiles_landed() then
@@ -313,17 +215,7 @@ function _M.has_tag(tags, want)
     return false
 end
 
--- Called once in init_by_lua, after config.load(). After PR2 (ADR-006)
--- tls_fp_catalog / tls_fp_browser_profiles are no longer INI files on the edge —
--- Channel C pulls them from the catalogs/ git repo through the backend (see
--- the catalog_pull.lua descriptors). Only the cold start happens here: we set empty
--- lookup tables; the first successful pull in catalog_pull.fetch fills the
--- shared_dict, and refresh() in run() builds the per-worker Lua tables from
--- that snapshot. blocklist_staging is Channel C-based too:
--- refresh() builds it from the tls_fp_blocklist shared_dict; at init the table is empty and
--- staged fingerprints arrive with the first pull. The local tls_fp_blocklist.conf remains
--- only a cold-start seed for ACTIVE fingerprints (init.lua), and staging is no longer
--- observed through it.
+-- Only the cold start happens here: empty tables, filled by the first pull.
 function _M.build(config)
     _M.catalog          = {}
     _M.profiles         = {}
@@ -351,26 +243,14 @@ function _M.build(config)
     return _M
 end
 
--- refresh — reads the current gen from meta:get(gen_key) and, if it differs
--- from the one cached for this worker, rebuilds the Lua tables
--- _M.catalog / _M.catalog_staging (and likewise the profiles) from the shared_dict.
--- Cheap in steady state: one meta:get per catalog plus a number comparison.
--- A rebuild happens only when Channel C delivered a new snapshot (≈ every 30 s).
--- It is called at the start of run(), so that the cascade works from the current catalog
--- with no explicit pub/sub between catalog_pull and tls_fp.
+-- Rebuilds the per-worker tables when the generation moved; in steady state
+-- this is one dict read and a comparison. Called from run(), so the stage needs
+-- no pub/sub with the pull.
 --
--- The per-request dict:get_keys(0) variant was rejected: for tls_fp_catalog
--- the size is small (dozens), but dict:get_keys locks the shared_dict for the
--- duration of the scan, which adds per-request latency variance. A per-gen rebuild
--- amortises that down to one lock per pull.
---
--- The performance trade-off (from review): `dict:get_keys(0)` locks the whole
--- shared_dict for the scan. For tls_fp_catalog (<100 entries) and
--- tls_fp_browser_profiles (≈5 entries) the lock is measured in microseconds —
--- acceptable. If a catalog grows past ~10K entries we will need a
--- "keys-of-gen-N" side index in the `meta` shared_dict and iterate over it
--- (the same plan is left open for fp_blocklist / verified_bot_ips,
--- see the comment in the catalog_pull.lua sweep).
+-- The rebuild scans the dict under a lock, which is why it happens per
+-- generation rather than per request. At these catalog sizes the lock is
+-- microseconds; past ~10K entries this would need a key index per generation
+-- instead.
 local function rebuild_from_dict(dict_name, cur_gen, builder)
     local dict = ngx.shared[dict_name]
     if not dict then return {}, {} end
@@ -386,34 +266,18 @@ local function rebuild_from_dict(dict_name, cur_gen, builder)
     return builder(wire)
 end
 
--- reconcile_staging_metrics — on every gen flip of a Channel C catalog:
---   1) It seeds the counter `staging:<catalog>:<pattern_id>` with 0 in
---      the metrics shared_dict for every entry of the new staging table. That
---      lets promotion dashboards see "a staged signature is declared, zero
---      matches" instead of "metric absent" (telling "the PR landed but there was no
---      traffic" from "the PR never arrived").
---   2) It deletes the counter keys for entries that WERE in the previous
---      staging table but are gone from the new one (promoted to active or
---      removed). Without that a stale counter lives in the metrics dict until LRU
---      eviction, and the dashboard shows a phantom "staged, zero traffic"
---      entry for a signature product has already promoted (from review).
---
--- With an unsupported metrics dict (no declaration in nginx.conf) it is a silent
--- no-op. On a write error (no_memory under shm pressure) it logs a WARN: the fix
--- for the silent failure found in review (safe_add returns nil without an exception and does not
--- LRU-evict — the counter simply never appears and the dashboard sees "metric
--- absent" against the contract).
+-- Keeps the staging counters honest across a generation flip: a new staged
+-- entry is primed at zero, so "landed but no traffic" is distinguishable from
+-- "never arrived", and an entry that left staging has its counter dropped so no
+-- phantom stays behind.
 local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging)
     local m = ngx.shared.metrics
     if not m then return end
     local prefix = "staging:" .. catalog_name .. ":"
 
-    -- Add a zero counter for the new entries. Under shm pressure safe_add can
-    -- return (nil, "no memory") for every entry. A hybrid log policy
-    -- (from review): the first VERBOSE_LIMIT failures are logged with the pattern_id
-    -- (which matters for debugging non-OOM errors like "key too long" or a unique
-    -- collision); the rest are aggregated into a single WARN. That keeps the log readable
-    -- under high-volume failures and attributable under low-volume ones.
+    -- The first few failures are logged individually, which is what makes a
+    -- non-memory error debuggable; the rest are aggregated so shm pressure
+    -- cannot flood the log.
     local VERBOSE_LIMIT = 3
     local fail_count, last_err = 0, nil
     for pattern_id in pairs(new_staging) do
@@ -434,12 +298,8 @@ local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging
             " additional failures elided (last err: ", tostring(last_err), ")")
     end
 
-    -- Delete the counter for entries that are no longer in new (promoted to active
-    -- or removed). But ONLY when value == 0 — otherwise we erase the
-    -- accumulated match count (the history of a staging→active promotion, which the
-    -- promotion dashboard needs). The trade-off from review: phantom entries (always 0)
-    -- are cleaned; entries with real history are left as "zombies" — an operator
-    -- can clear them by hand, but we do not lose data.
+    -- Only when still zero: a non-zero counter is the match history the
+    -- promotion decision was made from, and is left for the operator to clear.
     if prev_staging then
         for pattern_id in pairs(prev_staging) do
             if not new_staging[pattern_id] then
@@ -461,12 +321,9 @@ function _M.refresh()
     if cat_gen ~= _M._cached_gen_catalog then
         local active, staging = rebuild_from_dict(
             "tls_fp_catalog", cat_gen, _M.build_catalog)
-        -- From review: swap before reconcile, so that log_event.incr from a
-        -- parallel request does not race with reconcile's delete-if-zero
-        -- (after the swap, run() no longer sees a promoted/removed pattern in the
-        -- staging table → it never calls incr → the delete is safe).
-        -- `prev_staging` is still reachable through the local reference to the
-        -- previously assigned table (Lua tables are by reference).
+        -- Swap before reconciling: afterwards a concurrent request can no
+        -- longer see the removed pattern, so it cannot increment a counter that
+        -- is about to be deleted.
         local prev_staging = _M.catalog_staging
         _M.catalog          = active
         _M.catalog_staging  = staging
@@ -485,13 +342,8 @@ function _M.refresh()
         reconcile_staging_metrics("tls_fp_browser_profiles", prev_staging, staging)
     end
 
-    -- tls_fp_blocklist (86exrtjpc): staged fps arrive over Channel C in the
-    -- tls_fp_blocklist shared_dict as "staging:block". verdict.lua blocks the
-    -- ACTIVE ones directly off this dict; here we rebuild only the staging
-    -- membership set so run() can record staging_match for them. Same gen-cached
-    -- rebuild + metric reconcile as the two catalogs above. The gen key is the
-    -- blocklist's own (fp_state.META_GEN_KEY), bumped by catalog_pull's
-    -- tls_fp_blocklist descriptor.
+    -- Only the staging set is rebuilt here; verdict.lua blocks the active
+    -- entries straight off the same dict.
     local bl_gen = meta:get(fp_state.META_GEN_KEY) or 0
     if bl_gen ~= _M._cached_gen_blocklist then
         local staging = rebuild_from_dict("tls_fp_blocklist", bl_gen, _M.build_blocklist)
@@ -502,14 +354,8 @@ function _M.refresh()
     end
 end
 
--- Record a soft challenge flag. The flag is always accumulated (vision.md:
--- flags = every soft signal seen along the path). C4: the terminal verdict is
--- NO LONGER set here — the soft signals only ACCUMULATE, and the decision
--- to "issue a challenge" is taken at L5 (verification.lua), honouring the
--- per-resource Strictness and attack_mode. Before C4 this function wrote
--- verdict=challenge directly, which broke rules-reference §"the L3/L4 flags
--- ... never issue a challenge themselves at L3/L4; they only mark the request, and the
--- single point where the decision is taken is this call at L5".
+-- Accumulates the flag and nothing else. A soft signal never decides a
+-- challenge here; L5 does, weighing Strictness and attack mode.
 local function fire_soft(bac_log, rule)
     bac_log.add_flag(rule)
 end
@@ -554,12 +400,9 @@ function _M.run(fp)
         bac_log.add_tag("tls_fp:dc_browser")
     end
 
-    -- Soft rules. Both may fire; both flags accumulate (flags = all soft
-    -- signals). impersonator is evaluated first, so suspicious_ciphers wins the
-    -- terminal `rule` when both fire — `rule` is the last/terminal rule, the
-    -- full set lives in `flags`.
-    -- Only parse hash_b for a browser-family UA — is_impersonator rejects
-    -- non-browser UAs anyway, so the common case skips the string.match.
+    -- Both may fire and both flags accumulate; the later one wins the terminal
+    -- rule. hash_b is parsed only for a browser UA, since nothing else can
+    -- match anyway.
     local hb = BROWSER_FAMILIES[ua_family] and _M.hash_b(fp) or nil
     if _M.is_impersonator(ua_family, hb, _M.catalog) then
         fire_soft(bac_log, "tls_fp_impersonator")
@@ -568,11 +411,8 @@ function _M.run(fp)
         fire_soft(bac_log, "tls_fp_suspicious_ciphers")
     end
 
-    -- Staged patterns (A11). A staged entry is matched with the SAME predicate
-    -- its active counterpart uses, so the recorded count reflects what would
-    -- fire after promotion — but it only writes to staging_match, never to
-    -- verdict/rule/flags. Gated by _M.enabled (above) like the rest of the
-    -- stage, so the tls_fp kill-switch silences staging observation too.
+    -- Matched with the same predicate as the active entries, so the count
+    -- reflects what promotion would do — but it only ever writes staging_match.
     if _M.is_impersonator(ua_family, hb, _M.catalog_staging) then
         bac_log.add_staging_match("tls_fp_catalog:" .. hb)
     end
