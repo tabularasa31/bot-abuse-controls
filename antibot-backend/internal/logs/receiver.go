@@ -1,16 +1,16 @@
-// Package logs принимает поток BAC_LOG с эджей (вторая функция backend по
+// Package logs accepts the BAC_LOG stream from the edges (the backend's second function per
 // ADR-005).
 //
-// Skeleton-уровень B2 только считал строки и возвращал 202. В B7 receiver
-// получил ещё одну ответственность — это единственная точка backend'а, через
-// которую rDNS-воркер узнаёт о новых IP с поисковым UA (см. vision §"Reverse-
-// DNS воркер": триггер на проверку именно поток логов, никакого превентивного
-// перебора). Receiver парсит каждую строку как JSON, и если видит IP +
-// бот-UA — дёргает Enqueuer (rdns.Worker).
+// The B2 skeleton level only counted lines and returned 202. In B7 the receiver
+// gained one more responsibility — it is the backend's only point through
+// which the rDNS worker learns about new IPs with a search engine UA (see vision §"The reverse-
+// DNS worker": the check is triggered by the log stream itself, with no pre-emptive
+// sweeping). The receiver parses every line as JSON and, when it sees an IP plus a
+// bot UA, calls the Enqueuer (rdns.Worker).
 //
-// Sink-сторона (валидация под аналитику, батч, disk-queue) живёт в пакете
-// internal/logsink ([B9]); receiver просто дёргает LogSink.Submit на каждую
-// строку. Edge-сторона (отправка лога) — часть [A2]/[B6].
+// The sink side (validation for analytics, batching, the disk queue) lives in the
+// internal/logsink package ([B9]); the receiver simply calls LogSink.Submit on every
+// line. The edge side (sending the log) is part of [A2]/[B6].
 package logs
 
 import (
@@ -24,48 +24,48 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// errOversizedLine — одна строка батча длиннее maxLineBytes. bufio.Scanner
-// поднимает bufio.ErrTooLong; для receiver это "одна битая строка", а не
-// "битый батч" — отвечаем 202 и инкрементим parseErr, чтобы edge не
-// ретраил весь батч (что задублировало бы Enqueue для всех нормальных
-// строк до плохой). См. PR #53 review.
+// errOversizedLine — one line of the batch is longer than maxLineBytes. bufio.Scanner
+// raises bufio.ErrTooLong; for the receiver that is "one broken line", not
+// "a broken batch" — we answer 202 and increment parseErr, so that the edge does not
+// retry the whole batch (which would duplicate the Enqueue for every good
+// line before the bad one). See review.
 var errOversizedLine = errors.New("logs: oversized line in batch")
 
-// maxBodyBytes — потолок на одно тело запроса. Edge батчит BAC_LOG короткими
-// строками; 10 MiB — с запасом на батч из сотен тысяч записей и одновременно
-// твёрдый предохранитель от случайного/злонамеренного огромного POST'а.
-// B6 уточнит, когда будет известен реальный размер батча.
+// maxBodyBytes — the ceiling on one request body. The edge batches BAC_LOG as short
+// lines; 10 MiB leaves room for a batch of hundreds of thousands of records while being a
+// hard fuse against an accidental or malicious enormous POST.
+// B6 will refine it once the real batch size is known.
 const maxBodyBytes = 10 * 1024 * 1024
 
-// maxLineBytes — потолок на одну JSON-строку. UA capped в bac_log.lua на 2 KiB,
-// плюс остальные поля — реалистичный максимум ~4 KiB. 32 KiB с запасом на
-// эволюцию схемы; защита от случайной huge-line без хвоста '\n'.
+// maxLineBytes — the ceiling on one JSON line. The UA is capped at 2 KiB in bac_log.lua,
+// and with the other fields a realistic maximum is ~4 KiB. 32 KiB leaves room for
+// schema evolution and guards against an accidental huge line with no trailing '\n'.
 const maxLineBytes = 32 * 1024
 
-// Enqueuer — sink для rDNS-воркера. Receiver зовёт его для каждой
-// JSON-строки с известным бот-UA и непустым IP. Реализация — *rdns.Worker;
-// интерфейс здесь, чтобы пакет logs не зависел от rdns (cycle).
+// Enqueuer — the sink for the rDNS worker. The receiver calls it for every
+// JSON line with a known bot UA and a non-empty IP. The implementation is *rdns.Worker;
+// the interface lives here so that the logs package does not depend on rdns (a cycle).
 type Enqueuer interface {
 	Enqueue(ip, claimedFamily string)
 }
 
-// LogSink — приёмник BAC_LOG ([B9]). Receiver сабмитит каждую строку
-// сюда; пакет sink сам парсит, батчит и пишет в PostgreSQL c disk-queue
-// fallback'ом. Интерфейс — чтобы receiver не зависел от logsink (impl
+// LogSink — the BAC_LOG receiver ([B9]). The receiver submits every line
+// here; the sink package parses, batches and writes into PostgreSQL with a disk-queue
+// fallback of its own. The interface exists so that the receiver does not depend on logsink (impl
 // — *logsink.Sink).
 type LogSink interface {
 	Submit(line []byte)
 }
 
-// FamilyClassifier — функция, превращающая UA-строку в каноничную семью
-// бота или "" если UA не похож на поискового. Реализация —
-// rdns.FamilyOfUA. Инжектится через конструктор по той же причине, что
-// Enqueuer (изоляция зависимостей).
+// FamilyClassifier — a function turning a UA string into a canonical bot
+// family, or "" when the UA does not look like a search engine. The implementation is
+// rdns.FamilyOfUA. It is injected through the constructor for the same reason as
+// Enqueuer (dependency isolation).
 type FamilyClassifier func(ua string) string
 
-// logLine — поля BAC_LOG, нужные rDNS-воркеру. JSON приходит с большим
-// числом полей (см. infra/demo-stand/lua/bac_log.lua); читаем только два,
-// всё остальное игнорируется decoder'ом.
+// logLine — the BAC_LOG fields the rDNS worker needs. The JSON arrives with far more
+// fields (see infra/demo-stand/lua/bac_log.lua); we read only two and
+// the decoder ignores the rest.
 type logLine struct {
 	IP string `json:"ip"`
 	UA string `json:"ua"`
@@ -82,23 +82,23 @@ type Receiver struct {
 	sink     LogSink
 }
 
-// New возвращает receiver без rDNS-интеграции и без sink'а (skeleton-режим /
-// тесты, которым нужен только подсчёт строк).
+// New returns a receiver with no rDNS integration and no sink (skeleton mode /
+// tests that only need line counting).
 func New(reg prometheus.Registerer) *Receiver {
 	return NewWithDeps(reg, nil, nil, nil)
 }
 
-// NewWithEnqueuer — обратная совместимость с B7-стартом: receiver с rDNS,
-// но без sink'a. Эквивалент NewWithDeps(..., nil).
+// NewWithEnqueuer — backward compatibility with the B7 start: a receiver with rDNS
+// but no sink. Equivalent to NewWithDeps(..., nil).
 func NewWithEnqueuer(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyClassifier) *Receiver {
 	return NewWithDeps(reg, enqueue, classify, nil)
 }
 
-// NewWithDeps — receiver с обеими опциональными зависимостями. Любая из
-// них может быть nil:
-//   - enqueue+classify оба заданы → dispatch в rDNS-воркер (B7-функция);
-//   - sink задан → каждая строка уходит в logsink (B9-функция);
-//   - всё nil → skeleton-режим, только received-счётчик.
+// NewWithDeps — a receiver with both optional dependencies. Either of
+// them may be nil:
+//   - enqueue+classify both set → dispatch into the rDNS worker (the B7 function);
+//   - sink set → every line goes to logsink (the B9 function);
+//   - everything nil → skeleton mode, only the received counter.
 func NewWithDeps(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyClassifier, sink LogSink) *Receiver {
 	r := &Receiver{
 		received: prometheus.NewCounter(prometheus.CounterOpts{
@@ -110,11 +110,11 @@ func NewWithDeps(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyCla
 		sink:     sink,
 	}
 	reg.MustRegister(r.received)
-	// parsed/parseErr/botSpotted — это метрики dispatch-пути. В skeleton-
-	// режиме (enqueue==nil) dispatch уходит в ранний return и эти счётчики
-	// никогда не двигались бы, но висели в /metrics на нуле — оператор
-	// видел бы flatline и думал, что receiver сломан. Регистрируем их
-	// только когда dispatch реально работает. PR #53 review.
+	// parsed/parseErr/botSpotted are metrics of the dispatch path. In skeleton
+	// mode (enqueue==nil) the dispatch returns early and these counters
+	// would never move while sitting at zero in /metrics — the operator
+	// would see a flatline and think the receiver was broken. We register them
+	// only when the dispatch really works. From review.
 	if enqueue != nil && classify != nil {
 		r.parsed = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "antibot_backend_log_lines_parsed_total",
@@ -133,19 +133,19 @@ func NewWithDeps(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyCla
 	return r
 }
 
-// Register монтирует POST /v1/logs. Метод — на уровне ServeMux (Go 1.22+),
-// чужие методы сразу отбиваются 405.
+// Register mounts POST /v1/logs. The method is pinned at the ServeMux level (Go 1.22+),
+// so other methods are rejected with a 405 immediately.
 func (rcv *Receiver) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/logs", rcv.handle)
 }
 
-// bufPool переиспользует scanner-буферы между запросами — иначе под
-// нагрузкой от edge каждый POST аллоцировал бы 32 KiB и грузил GC.
+// bufPool reuses scanner buffers between requests — otherwise, under
+// load from the edge, every POST would allocate 32 KiB and load the GC.
 //
-// make длиной maxLineBytes (не cap'ом нулевой длины): bufio.Scanner.Buffer
-// делает `buf[0:cap(buf)]`, так что cap уже достаточен; но `len=maxLineBytes`
-// делает контракт пула явным («полноразмерный готовый буфер»), не зависим
-// от внутренней реализации Scanner. PR #53 gemini review.
+// make with length maxLineBytes (rather than a cap with zero length): bufio.Scanner.Buffer
+// does `buf[0:cap(buf)]`, so the cap alone would suffice; but `len=maxLineBytes`
+// makes the pool's contract explicit ("a full-size ready buffer") without depending
+// on Scanner's internals. From review.
 var bufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, maxLineBytes)
@@ -154,17 +154,17 @@ var bufPool = sync.Pool{
 }
 
 func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
-	// MaxBytesReader — твёрдый потолок на тело: при переборе чтение вернёт
-	// ошибку *http.MaxBytesError, мы отвечаем 413 и НЕ инкрементим счётчик
-	// (иначе атакующий мог бы накачивать метрику дёшево).
+	// MaxBytesReader — a hard ceiling on the body: on an overflow the read returns
+	// an *http.MaxBytesError, we answer 413 and do NOT increment the counter
+	// (otherwise an attacker could inflate the metric cheaply).
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	defer func() { _ = r.Body.Close() }()
 
 	n, err := rcv.consume(r.Body)
-	// received инкрементим всегда по числу обработанных строк, даже если
-	// дальше вернём 4xx: dispatch уже мог дёрнуть Enqueue/parseErr/botSpotted
-	// для строк ДО ошибки, и без received_total получились бы метрики
-	// botSpotted > received (инверсия, ломающая capacity-планирование).
+	// received is always incremented by the number of lines processed, even when we
+	// return a 4xx afterwards: the dispatch may already have called Enqueue/parseErr/botSpotted
+	// for the lines BEFORE the error, and without received_total we would get metrics where
+	// botSpotted > received (an inversion that breaks capacity planning).
 	// PR #53 review.
 	if n > 0 {
 		rcv.received.Add(float64(n))
@@ -176,18 +176,18 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, errOversizedLine) {
-			// Одна строка батча длиннее maxLineBytes. Отвечаем 202 —
-			// edge не должен ретраить из-за одной плохой строки
-			// (иначе Enqueue для всех нормальных строк до неё
-			// задвоится). parseErr уже инкрементирован в consume().
+			// One line of the batch is longer than maxLineBytes. We answer 202 —
+			// the edge must not retry because of one bad line
+			// (otherwise the Enqueue for every good line before it
+			// would be duplicated). parseErr was already incremented in consume().
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"status":"accepted","note":"oversized line skipped"}`))
 			return
 		}
-		// Обрыв соединения / прочее IO — отвечать в сломанный сокет
-		// смысла мало, но явный 400 пусть будет на случай, если связь
-		// успела восстановиться к моменту записи.
+		// A dropped connection or other IO — writing into a broken socket
+		// makes little sense, but let there be an explicit 400 in case the
+		// link recovered by the time of the write.
 		http.Error(w, `{"error":"read_failed"}`, http.StatusBadRequest)
 		return
 	}
@@ -196,12 +196,12 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"accepted","note":"sink/batching wiring lands in B6/B9"}`))
 }
 
-// consume читает тело построчно, парсит каждую как JSON и для строк с
-// бот-UA дёргает enqueue. Возвращает число строк (включая невалидные —
-// received-счётчик считает «что приехало», parseErr — отдельная метрика).
+// consume reads the body line by line, parses each as JSON and, for lines with a
+// bot UA, calls enqueue. It returns the number of lines (invalid ones included —
+// the received counter counts "what arrived", and parseErr is a separate metric).
 //
-// Контракт BAC_LOG из bac_log.lua: одна JSON-запись на строку,
-// разделитель \n, последняя строка может быть без \n.
+// The BAC_LOG contract from bac_log.lua: one JSON record per line,
+// separated by \n, and the last line may lack a \n.
 func (rcv *Receiver) consume(body io.Reader) (int, error) {
 	bufPtr, _ := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
@@ -217,28 +217,28 @@ func (rcv *Receiver) consume(body io.Reader) (int, error) {
 		if len(line) == 0 {
 			continue
 		}
-		// Sink дёргаем безусловно — он сам парсит и батчит. Skeleton-
-		// режим (sink==nil) — пропускаем; rDNS-путь работает независимо.
+		// We call the sink unconditionally — it parses and batches on its own. In skeleton
+		// mode (sink==nil) we skip it; the rDNS path works independently.
 		if rcv.sink != nil {
 			rcv.sink.Submit(line)
 		}
 		rcv.dispatch(line)
 	}
 	if err := sc.Err(); err != nil {
-		// bufio.ErrTooLong — одна строка длиннее maxLineBytes. Это
-		// "битая строка", а не "битый батч": считаем как parseErr и
-		// возвращаем sentinel'ную ошибку, которую handle() мапит в
-		// 202 вместо 400/ErrServerClosed. См. errOversizedLine.
+		// bufio.ErrTooLong — one line longer than maxLineBytes. That is
+		// "a broken line", not "a broken batch": we count it as parseErr and
+		// return a sentinel error that handle() maps to a
+		// 202 instead of a 400/ErrServerClosed. See errOversizedLine.
 		if errors.Is(err, bufio.ErrTooLong) {
-			// parseErr регистрируется только когда есть enqueue (skeleton-
-			// режим без него — без счётчика). Защищаем nil-deref.
+			// parseErr is registered only when enqueue exists (in skeleton
+			// mode there is no counter). We guard against a nil deref.
 			if rcv.parseErr != nil {
 				rcv.parseErr.Inc()
 			}
-			// Oversized-строка не доходит до sink.Submit ниже — её отбраковал
-			// scanner. В antibot_backend_log_sink_* движения не будет;
-			// дашборд аналитики должен учитывать parse_errors_total c
-			// receiver-уровня как полную картину потерь (code-review #56).
+			// An oversized line never reaches sink.Submit below — the scanner rejected it.
+			// There will be no movement in antibot_backend_log_sink_*;
+			// an analytics dashboard should treat parse_errors_total at the
+			// receiver level as the full picture of losses (from code review).
 			return count, errOversizedLine
 		}
 		return count, err
@@ -246,13 +246,13 @@ func (rcv *Receiver) consume(body io.Reader) (int, error) {
 	return count, nil
 }
 
-// dispatch — парсит одну JSON-строку и, если IP+UA содержат поискового
-// бота, дёргает enqueue. Любая ошибка парсинга — инкремент parseErr и
-// тихий пропуск: receiver не отвечает 4xx за одну битую строку
-// (один кривой батч не должен ронять остальные строки этого батча).
+// dispatch — parses one JSON line and, if the IP and UA carry a search engine
+// bot, calls enqueue. Any parse error increments parseErr and is
+// silently skipped: the receiver does not answer 4xx because of one broken line
+// (one malformed batch must not take down the rest of that batch's lines).
 func (rcv *Receiver) dispatch(line []byte) {
 	if rcv.enqueue == nil || rcv.classify == nil {
-		// Skeleton-режим: rdns не подключён, парсить незачем.
+		// Skeleton mode: rdns is not wired in, so there is nothing to parse for.
 		return
 	}
 	var ll logLine
@@ -269,7 +269,7 @@ func (rcv *Receiver) dispatch(line []byte) {
 		return
 	}
 	rcv.botSpotted.Inc()
-	// Enqueue сам проверит catalog/in-flight и решит, реально ли
-	// слать в DNS-очередь.
+	// Enqueue checks the catalog and in-flight state itself and decides whether to
+	// really send it to the DNS queue.
 	rcv.enqueue.Enqueue(ll.IP, family)
 }

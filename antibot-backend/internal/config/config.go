@@ -14,81 +14,81 @@ import (
 )
 
 type Config struct {
-	// Instance — короткая метка экземпляра в /health и логах, чтобы LB-round-robin
-	// был наблюдаем (см. infra/demo-backend/scripts/verify.sh шаг 3 "HA").
+	// Instance — a short instance label in /health and the logs, so that LB round-robin
+	// is observable (see step 3, "HA", in infra/demo-backend/scripts/verify.sh).
 	Instance string
-	// HTTPAddr — слушаем именно его. LB ходит на :8080, как и плейсхолдер из B1.
+	// HTTPAddr — exactly what we listen on. The LB goes to :8080, like the B1 placeholder.
 	HTTPAddr string
-	// PostgresDSN — DSN для pgxpool. Пустая строка = DB необязательна
-	// (skeleton-режим: сервис поднимется и пройдёт acceptance B1, но любые
-	// будущие фичи B3/B6/B7, которым DB нужна, должны это явно проверять).
+	// PostgresDSN — the DSN for pgxpool. An empty string means the DB is optional
+	// (skeleton mode: the service comes up and passes the B1 acceptance, but any
+	// future B3/B6/B7 features that need the DB must check for it explicitly).
 	PostgresDSN string
-	// RDNSInterval — устаревший knob от B2-скелета (фоновый тик воркера).
-	// В B7 воркер reactive — никаких периодических тиков по очереди нет,
-	// триггер — поток логов. Оставлен для обратной совместимости с
-	// compose-файлами; реальное значение игнорируется. Будет удалён в B15
-	// (миграция конфига).
+	// RDNSInterval — a deprecated knob from the B2 skeleton (a background worker tick).
+	// In B7 the worker is reactive — there are no periodic ticks over the queue and the
+	// trigger is the log stream. It is kept for backward compatibility with
+	// compose files; the actual value is ignored. It will be removed in B15
+	// (the config migration).
 	RDNSInterval time.Duration
-	// RDNSQueueSize — буфер reactive-очереди (Enqueue → consumer).
-	// Переполнение = receiver получает дроп задачи в метрику, edge
-	// продолжит выдавать provisional. См. rdns.DefaultConfig().
+	// RDNSQueueSize — the reactive queue buffer (Enqueue → consumer).
+	// An overflow means the receiver gets a dropped task in a metric, and the edge
+	// keeps issuing provisional passes. See rdns.DefaultConfig().
 	RDNSQueueSize int
-	// RDNSWorkers — параллельных DNS-резолверов на воркера.
+	// RDNSWorkers — parallel DNS resolvers per worker.
 	RDNSWorkers int
-	// RDNSDNSTimeout — потолок на одну итерацию проверки IP. Защищает
-	// consumer-слот от зависшего DNS-резолвера.
+	// RDNSDNSTimeout — the ceiling on one IP check iteration. It protects the
+	// consumer slot from a hung DNS resolver.
 	RDNSDNSTimeout time.Duration
-	// RDNSGCInterval — как часто DELETE'им протухшие verified_bot_ips.
-	// Час сильно реже TTL (1ч) — таблица не пухнет, нагрузки на DB нет.
+	// RDNSGCInterval — how often we DELETE expired verified_bot_ips.
+	// An hour is far rarer than the TTL (1 h) — the table does not bloat and the DB sees no load.
 	RDNSGCInterval time.Duration
-	// ShutdownTimeout — таймаут graceful-shutdown HTTP-сервера.
+	// ShutdownTimeout — the graceful shutdown timeout of the HTTP server.
 	ShutdownTimeout time.Duration
-	// CatalogsDir — корневая папка медленных каталогов из git-репо (ADR-006).
-	// Backend читает оттуда tls_fp_blocklist.yaml / ua_blacklist.yaml / etc. на
-	// каждом тике reloader'a; mtime-кеш в reloader защищает от лишних
-	// YAML-парсов, когда файлы не двигались. Источник обязательный — без
-	// файлов медленные каталоги пусты, эдж получит «успешный» payload без
-	// уже-добавленных продактом записей (silent regression).
+	// CatalogsDir — the root directory of the slow catalogs from the git repo (ADR-006).
+	// The backend reads tls_fp_blocklist.yaml / ua_blacklist.yaml / etc. from there on
+	// every reloader tick; the reloader's mtime cache guards against needless
+	// YAML parsing when the files have not moved. The source is mandatory — without the
+	// files the slow catalogs are empty and the edge gets a "successful" payload without
+	// the records product has already added (a silent regression).
 	CatalogsDir string
 
-	// CatalogReloadInterval — как часто backend перечитывает каталоги
-	// (filesource + dbloader runtime → Merge → Store). Дефолт 5 с короче,
-	// чем edge-poll (30 с), чтобы дашборд-edit гарантированно доезжал на
-	// edge ≤30 c (acceptance B4/B13). Тот же интервал используется как
-	// per-tick deadline в Reloader.Run.
+	// CatalogReloadInterval — how often the backend rereads the catalogs
+	// (filesource plus dbloader runtime → Merge → Store). The default of 5 s is shorter
+	// than the edge poll (30 s), so that a dashboard edit reliably reaches the
+	// edge in ≤30 s (acceptance B4/B13). The same interval is used as the
+	// per-tick deadline in Reloader.Run.
 	CatalogReloadInterval time.Duration
 
-	// MigrateOnStartup — если true и POSTGRES_DSN задан, backend применит
-	// встроенные миграции до Bootstrap'a reloader'a. Дефолт true: миграции
-	// идемпотентны (CREATE TABLE IF NOT EXISTS), а ручной шаг до B15
-	// добавил бы внешний failure-mode "забыли накатить".
+	// MigrateOnStartup — when true and POSTGRES_DSN is set, the backend applies the
+	// built-in migrations before the reloader's Bootstrap. The default is true: the migrations are
+	// idempotent (CREATE TABLE IF NOT EXISTS), and a manual step before B15
+	// would add an external failure mode, "we forgot to apply them".
 	MigrateOnStartup bool
 
-	// LogsSinkSpoolDir — где складывать NDJSON-батчи BAC_LOG при простое
-	// PostgreSQL ([B9]). Пустая строка = spill отключён (sink будет терять
-	// строки при недоступности DB — допустимо для dev/CI; в проде надо
-	// задать persistent volume в compose'е, иначе acceptance B9 «disk-queue
-	// в backend» не выполняется). Дефолта НЕТ намеренно: дефолтный
-	// /var/lib/... под root upset'ил бы dev-запуск без root'a, а
-	// пограничный сценарий «забыл задать в проде» виден в логе как явный
-	// WARN при инициализации.
+	// LogsSinkSpoolDir — where to put NDJSON BAC_LOG batches during a
+	// PostgreSQL outage ([B9]). An empty string disables the spill (the sink will lose
+	// lines while the DB is unavailable — acceptable for dev/CI; in production a
+	// persistent volume must be set in compose, otherwise the B9 acceptance "a disk queue
+	// in the backend" is not met). There is deliberately NO default: a default
+	// /var/lib/... under root would upset a dev run without root, while the
+	// edge case "forgot to set it in production" is visible in the log as an explicit
+	// WARN at initialisation.
 	LogsSinkSpoolDir string
-	// LogsSinkBatchSize / LogsSinkFlushInterval — пороги флаша на DB.
+	// LogsSinkBatchSize / LogsSinkFlushInterval — the flush thresholds towards the DB.
 	LogsSinkBatchSize     int
 	LogsSinkFlushInterval time.Duration
-	// LogsSinkQueueSize — bound на in-memory очередь Submit→consumer.
+	// LogsSinkQueueSize — the bound on the in-memory Submit→consumer queue.
 	LogsSinkQueueSize int
-	// LogsSinkSpoolMaxBytes — потолок размера спул-каталога. При превышении
-	// старейшие батчи удаляются с метрикой spool_dropped_files_total.
+	// LogsSinkSpoolMaxBytes — the ceiling on the spool directory size. Above it,
+	// the oldest batches are deleted with the spool_dropped_files_total metric.
 	LogsSinkSpoolMaxBytes int64
-	// LogsSinkDrainInterval — как часто пробуем вернуть спул в DB.
+	// LogsSinkDrainInterval — how often we try to return the spool to the DB.
 	LogsSinkDrainInterval time.Duration
 
-	// DashboardAPIToken — shared M2M secret для bearer-auth между
-	// dashboard-backend и antibot-backend ([B10] / internal/antibotapi).
-	// Пустая строка = /antibot/v1/* не регистрируется (fail-closed; warn
-	// в лог). Других потребителей policy-API нет и не планируется, поэтому
-	// per-tenant токенов не вводим — единственный subject всегда
+	// DashboardAPIToken — the shared M2M secret for bearer auth between the
+	// dashboard backend and antibot-backend ([B10] / internal/antibotapi).
+	// An empty string means /antibot/v1/* is not registered (fail-closed; a warn
+	// in the log). There are no other consumers of the policy API and none are planned, so
+	// we do not introduce per-tenant tokens — the only subject is always
 	// dashboard-backend.
 	DashboardAPIToken string
 }
@@ -123,21 +123,21 @@ func Load() (Config, error) {
 		cfg.CatalogReloadInterval = d
 	}
 	if v := os.Getenv("MIGRATE_ON_STARTUP"); v != "" {
-		// Принимаем:
-		//   - всё, что понимает strconv.ParseBool (1/t/T/TRUE/true/True и
-		//     0/f/F/FALSE/false/False — идиоматично для YAML/k8s-secret'ов);
-		//   - историческое 'yes'/'no' (case-insensitive) — раньше брал
-		//     ручной switch, ParseBool их не знает. Не ломаем чужие
-		//     compose/manifest'ы из-за чистоты Go-парсера. PR #43 review.
+		// We accept:
+		//   - everything strconv.ParseBool understands (1/t/T/TRUE/true/True and
+		//     0/f/F/FALSE/false/False — idiomatic for YAML and k8s secrets);
+		//   - the historical 'yes'/'no' (case-insensitive) — which the previous
+		//     hand-written switch accepted and ParseBool does not know. We do not break other people's
+		//     compose files and manifests for the sake of a pure Go parser. From review.
 		b, err := parseBoolWithYesNo(v)
 		if err != nil {
 			return cfg, fmt.Errorf("MIGRATE_ON_STARTUP: %w", err)
 		}
 		cfg.MigrateOnStartup = b
 	}
-	// RDNS_INTERVAL — deprecated после B7 (воркер reactive, периодики нет).
-	// Принимаем любое значение, включая невалидное / 0 / -1, чтобы старые
-	// compose'ы из B2 эры не ломали запуск. Реально нигде не читается.
+	// RDNS_INTERVAL — deprecated after B7 (the worker is reactive, with no periodic tick).
+	// We accept any value, invalid / 0 / -1 included, so that old
+	// compose files from the B2 era do not break startup. It is never actually read.
 	// PR #53 review.
 	_ = os.Getenv("RDNS_INTERVAL")
 	if v := os.Getenv("RDNS_QUEUE_SIZE"); v != "" {
@@ -175,8 +175,8 @@ func Load() (Config, error) {
 		}
 		cfg.ShutdownTimeout = d
 	}
-	// time.NewTicker паникует при <=0, не даём пользователю прострелить ногу.
-	// RDNSInterval — deprecated, не валидируем (см. выше).
+	// time.NewTicker panics on <=0, so we do not let the user shoot themselves in the foot.
+	// RDNSInterval is deprecated and not validated (see above).
 	if cfg.ShutdownTimeout <= 0 {
 		return cfg, fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0, got %s", cfg.ShutdownTimeout)
 	}
@@ -227,9 +227,9 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// parseBoolWithYesNo расширяет strconv.ParseBool — добавляет
-// case-insensitive 'yes'/'no', которые принимал предыдущий ручной
-// switch и которые до сих пор встречаются в k8s/YAML конфигах.
+// parseBoolWithYesNo extends strconv.ParseBool — it adds the
+// case-insensitive 'yes'/'no' the previous hand-written switch accepted
+// and which still turn up in k8s/YAML configs.
 // PR #43 follow-up.
 func parseBoolWithYesNo(v string) (bool, error) {
 	switch strings.ToLower(v) {
