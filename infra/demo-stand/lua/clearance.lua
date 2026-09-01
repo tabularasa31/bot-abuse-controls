@@ -1,29 +1,18 @@
--- L2.1 clearance cookie verify.
+-- L2.1 clearance cookie verify. The client presents an HMAC-signed cookie
+-- issued after solving the challenge; the proxy verifies it locally.
 --
--- The client presents an HMAC-signed cookie issued at L5 after solving the JS
--- challenge; the proxy verifies it locally, with no call to the backend. A
--- valid cookie allows the request and skips L3 and L5, but not L4 — the cookie
--- proves the client is not a scripted bot, not that it may abuse.
---
--- Format:
 --     body = b64url(<site-host>) .. ":" .. <iat> .. ":" .. <exp>
---     sig  = b64url(HMAC-SHA256(secret, body))
---     cookie value = body .. "." .. sig
+--     cookie = body .. "." .. b64url(HMAC-SHA256(secret, body))
 --
--- It is a bearer token: nothing binds it to a fingerprint, so whoever steals it
--- within its TTL can use it. Cross-tenant use is contained by the Domain
--- attribute plus the site check in the payload.
+-- A bearer token: nothing binds it to a fingerprint, so a stolen cookie works
+-- until it expires. Cross-tenant use is contained by the Domain attribute and
+-- the site check.
 --
--- Under attack_mode the pre-attack gate applies: cookies issued before the
--- attack started are not trusted, because an attacker could have stockpiled
--- them. They are told apart by TTL type — a normal cookie carries 24 h, one
--- issued during the attack carries 1 h — so only the short ones fastpath. That
--- is what makes it one challenge per attack rather than one per request. The
--- threshold arrives from the caller, keeping verify a pure function.
---
--- The TTL mechanism has a known limit: a short cookie from a previous attack is
--- accepted during a new attack starting inside its 1 h window. Telling those
--- apart would need the attack start time in the policy.
+-- Under attack, cookies issued beforehand are not trusted — an attacker could
+-- have stockpiled them. They are told apart by TTL type, which is why a user
+-- solves one challenge per attack rather than one per request. A short cookie
+-- from a previous attack inside its own window is accepted; separating those
+-- would need the attack start time in the policy.
 local hmac   = require "resty.openssl.hmac"
 local bit    = require "bit"
 local secret = require "challenge_secret"
@@ -34,7 +23,6 @@ if not ok_config then config = nil end
 
 local _M = {}
 
--- Pool-wide constant, like the HMAC secret; overridable only through the config.
 local DEFAULT_COOKIE_NAME = "tf_clearance"
 
 -- These double as the metric labels.
@@ -44,15 +32,13 @@ _M.RESULT_EXPIRED    = "expired"     -- HMAC ok, exp <= now
 _M.RESULT_MISSING    = "missing"     -- no cookie header
 _M.RESULT_MALFORMED  = "malformed"   -- structure unparseable
 _M.RESULT_WRONG_SITE = "wrong_site"  -- HMAC ok but payload.site ~= request host
--- Its own code rather than invalid/expired, so the attack-mode trust reset stays
--- distinguishable from crypto failures in the metric.
+-- Its own code, so the attack-mode trust reset stays distinguishable from a
+-- crypto failure.
 _M.RESULT_STALE_PRE_ATTACK = "stale_pre_attack"
--- Distinct from `invalid` so a secret outage cannot hide behind what looks like
--- an attack, and can be alerted on separately.
+-- Distinct from invalid, so a secret outage cannot look like an attack.
 _M.RESULT_NO_SECRET  = "no_secret"
 
--- nginx variable names allow only [A-Za-z0-9_], and `ngx.var["cookie_x-y"]`
--- silently returns nil. Without this guard a cookie name containing a hyphen
+-- nginx variable names allow only [A-Za-z0-9_], so a cookie name with a hyphen
 -- would make every request look cookie-less, with nothing in the log.
 local function valid_var_suffix(name)
     return name:match("^[%w_]+$") ~= nil
@@ -98,8 +84,8 @@ local function b64url_decode(s)
     return ngx.decode_base64(s)
 end
 
--- Constant-time compare: the loop must run to the end, or the timing difference
--- lets an attacker recover the signature byte by byte.
+-- Constant-time: the loop must run to the end, or the timing recovers the
+-- signature byte by byte.
 local function ct_eq(a, b)
     if type(a) ~= "string" or type(b) ~= "string" then return false end
     if #a ~= #b then return false end
@@ -120,11 +106,8 @@ local function compute_hmac(key, body)
     return sig
 end
 
--- Lives next to verify so the payload format has one owner: a divergence
--- between the two would invalidate every cookie on rollout.
---
--- The caller picks ttl_seconds, since the per-host attack state is not visible
--- from here. `now` is a test override.
+-- Lives next to verify so the payload format has one owner. The caller picks
+-- the TTL, since the per-host attack state is not visible here.
 function _M.issue(host, ttl_seconds, now)
     if type(host) ~= "string" or host == "" then
         return nil, "host required"
@@ -141,15 +124,11 @@ function _M.issue(host, ttl_seconds, now)
     return body .. "." .. b64url_encode(sig), exp
 end
 
--- Returns a RESULT_* code. Pure: the caller records the verdict and the metric,
--- which keeps this testable without an ngx stub.
+-- Pure: the caller records the verdict and the metric.
 --
--- Check order is deliberate. Structure is parsed, then the HMAC is verified, and
--- only then are site and expiry read — an untrusted payload is never
--- interpreted, and the cheap checks cannot become a timing oracle for whether
--- the signature matched.
---
--- `opts` carries the attack context: {attack_mode, max_under_attack_ttl}.
+-- Check order is deliberate — structure, then HMAC, then site and expiry. An
+-- untrusted payload is never interpreted, and the cheap checks cannot become a
+-- timing oracle for whether the signature matched.
 function _M.verify(host, opts)
     local name = get_cookie_name()
     local raw  = ngx.var["cookie_" .. name]
@@ -157,15 +136,13 @@ function _M.verify(host, opts)
         return _M.RESULT_MISSING
     end
 
-    -- Split on the rightmost `.`, so a future payload containing one still
-    -- parses.
+    -- Rightmost `.`, so a future payload containing one still parses.
     local body, sig_b64 = raw:match("^(.+)%.([^.]+)$")
     if not body or not sig_b64 then
         return _M.RESULT_MALFORMED
     end
 
-    -- Structural check before the HMAC: anything malformed would fail the HMAC
-    -- anyway, and this skips the crypto on a garbage cookie.
+    -- Structural check first, to skip the crypto on a garbage cookie.
     local site_b64, iat_s, exp_s = body:match("^([%w%-_]+):(%d+):(%d+)$")
     if not site_b64 then
         return _M.RESULT_MALFORMED
@@ -183,8 +160,7 @@ function _M.verify(host, opts)
 
     local key = secret.get()
     if not key then
-        -- Fail closed: with no secret nothing can be trusted, and the request
-        -- takes the full cascade.
+        -- Fail closed: with no secret nothing can be trusted.
         ngx.log(ngx.WARN, "clearance.verify: challenge_secret not loaded; ",
             "cookie cannot be verified (RESULT_NO_SECRET)")
         return _M.RESULT_NO_SECRET
@@ -200,9 +176,8 @@ function _M.verify(host, opts)
         return _M.RESULT_INVALID
     end
 
-    -- Expiry is checked before the site so that an ordinary expired cookie under
-    -- apex Domain scoping reads as expired rather than as a cross-tenant
-    -- attempt. wrong_site should mean something.
+    -- Expiry before site, so an ordinary expired cookie under apex Domain
+    -- scoping does not read as a cross-tenant attempt.
     local exp = tonumber(exp_s)
     if not exp or exp <= ngx.time() then
         return _M.RESULT_EXPIRED
@@ -212,12 +187,8 @@ function _M.verify(host, opts)
         return _M.RESULT_WRONG_SITE
     end
 
-    -- The cookie is otherwise valid; under attack a long TTL means it predates
-    -- the attack. Exactly the under-attack TTL still fastpaths.
-    --
-    -- Fail closed without a threshold: pre-attack cannot be told from
-    -- during-attack, and failing open would silently cancel the trust reset
-    -- that is the whole point of the gate.
+    -- Under attack a long TTL means the cookie predates it. Fail closed with no
+    -- threshold: failing open would cancel the trust reset entirely.
     if opts and opts.attack_mode then
         local max_ttl = opts.max_under_attack_ttl
         if not max_ttl then

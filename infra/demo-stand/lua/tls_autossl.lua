@@ -1,51 +1,36 @@
--- On-demand Let's Encrypt certificates for tenant custom domains, over
--- lua-resty-acme (http-01).
+-- On-demand Let's Encrypt certificates for tenant custom domains.
 --
--- The edge has to stay the TLS terminator: the cascade fingerprints the
--- client's handshake, and a terminating proxy in front would hide it and break
--- detection. So the certificate is chosen here, per SNI, at handshake time.
+-- The edge stays the TLS terminator, because the cascade fingerprints the
+-- client handshake, so the certificate is chosen here per SNI. Issuance is
+-- gated on the host being a registered tenant: without that gate anyone
+-- pointing DNS at the edge could burn the rate limit.
 --
--- The static certificate stays the fallback and every name it already covers
--- keeps working without ACME. Issuance is gated on the host being a registered
--- tenant and not under the stand's own base domain — without that gate anyone
--- pointing DNS at the edge could trigger issuance and burn the Let's Encrypt
--- rate limit.
---
--- Every entry point is pcall-wrapped and fails open to the static certificate:
--- a broken auto-ssl must never take HTTPS down for existing tenants.
---
--- Env: AUTO_SSL_DIR (storage; mount a volume so certs and the account key
--- survive restarts), AUTO_SSL_STAGING, ACME_ACCOUNT_EMAIL, STAND_BASE_DOMAIN.
+-- Every entry point fails open to the static certificate — a broken auto-ssl
+-- must never take HTTPS down.
 local _M = {}
 
--- Cached at module load: os.getenv cannot be JIT-compiled, and this runs in the
--- handshake path for a value that never changes in a worker's life. A reload
--- re-requires the module. _reset_cache is a test hook.
+-- Cached: os.getenv cannot be JIT-compiled and this runs per handshake.
 local DEFAULT_BASE_DOMAIN
 function _M._reset_cache()
     DEFAULT_BASE_DOMAIN = string.lower(os.getenv("STAND_BASE_DOMAIN") or "example.com")
 end
 _M._reset_cache()
 
--- Whether to obtain an on-demand certificate for this host. `opts` injects the
--- dependencies for tests; production passes nil.
+-- `opts` injects the dependencies for tests; production passes nil.
 function _M.allow_domain(host, opts)
     if not host or host == "" then return false end
     host = string.lower(host)
 
     local base = opts and opts.base_domain
     if base == nil then base = DEFAULT_BASE_DOMAIN end
-    -- Hosts at/under the stand base domain are covered by the static
-    -- (wildcard/SAN) fallback cert — never ACME them.
+    -- The base domain is covered by the static certificate.
     if base ~= "" then
         if host == base or host:sub(-(#base + 1)) == ("." .. base) then
             return false
         end
     end
 
-    -- Otherwise: only a registered tenant (policy has a non-empty origin_ip)
-    -- gets a cert. Everyone else (random Host, scanner SNI) is refused, so
-    -- they can't trigger issuance.
+    -- Only a registered tenant, so nobody else can trigger issuance.
     local lookup = opts and opts.origin_ip
     local ip
     if lookup then
@@ -56,9 +41,8 @@ function _M.allow_domain(host, opts)
     return type(ip) == "string" and ip ~= ""
 end
 
--- Whether the edge serves this SNI at all — true for the base domain and for
--- registered tenants. The counterpart to allow_domain, which asks whether to
--- issue a certificate: the base domain answers no there and yes here.
+-- Whether the edge serves this SNI at all. The counterpart to allow_domain:
+-- the base domain answers no there and yes here.
 function _M.sni_known(host, opts)
     if not host or host == "" then return false end
     host = string.lower(host)
@@ -69,12 +53,8 @@ function _M.sni_known(host, opts)
         return true
     end
 
-    -- if/else rather than `or`: for a real non-tenant the injected lookup
-    -- returns nil, and `or` would fall through to the real policy module.
-    --
-    -- The require is deliberately not pcall-wrapped. The caller already wraps
-    -- the decision in a pcall that fails open; catching here would instead fail
-    -- closed and could drop a real tenant's handshake on a transient error.
+    -- The require is deliberately not pcall-wrapped: the caller already fails
+    -- open, and catching here would fail closed and drop a tenant's handshake.
     local lookup = opts and opts.origin_ip
     local ip
     if lookup then
@@ -85,21 +65,14 @@ function _M.sni_known(host, opts)
     return type(ip) == "string" and ip ~= ""
 end
 
--- Aborts the handshake for a present SNI that is neither a tenant nor a
--- base-domain name — the cheapest disposal available for a flood announcing a
--- bogus SNI, since nothing HTTP has been read yet.
+-- Aborts the handshake for an SNI that is neither a tenant nor the base domain,
+-- before any HTTP is read. A handshake with no SNI carries no name to judge and
+-- is left to the HTTP layer.
 --
--- A handshake with no SNI is not rejected here: there is no name to judge, so
--- the static certificate is served and the HTTP layer drops it by its empty
--- origin. The two layers are complementary.
+-- Nothing is logged per handshake: under a flood that would be the bottleneck.
 --
--- Nothing is logged per handshake — under a flood the logging would become the
--- bottleneck, so the counter is the signal.
---
--- The decision is wrapped in a pcall that fails open, because a throw here
--- happens before the caller's own pcall and would abort the handshake. The exit
--- stays outside it: pcall would swallow the control-flow exception and turn a
--- reject into a silent pass.
+-- The decision fails open, but the exit stays outside the pcall — it would
+-- swallow the control flow and turn a reject into a silent pass.
 function _M.reject_unknown_sni()
     local ok, reject = pcall(function()
         local config = require "config"
@@ -115,10 +88,7 @@ function _M.reject_unknown_sni()
     return ngx.exit(ngx.ERROR)
 end
 
--- setup() — configure lua-resty-acme autossl (call from init_by_lua, master).
--- Wrapped by the caller in pcall; on any failure _M._ready stays false and
--- ssl_certificate() no-ops → static fallback cert. require is done HERE (not at
--- module load) so unit tests can require this module without resty.acme.
+-- The require is here rather than at module load so tests need no resty.acme.
 function _M.setup()
     local autossl = require "resty.acme.autossl"
     autossl.init({
@@ -132,10 +102,7 @@ function _M.setup()
     _M._ready = true
 end
 
--- init_worker() — pcall-wrapped: a throw here (e.g. renewal-timer registration
--- failure) must NOT abort the init_worker_by_lua block, otherwise the steps
--- after it (catalog_pull.start) would never run and the worker would silently
--- stop pulling Channel C. Same fallback-safety contract as ssl_certificate().
+-- A throw here would abort init_worker and silently stop the catalog pull.
 function _M.init_worker()
     if not _M._ready then return end
     local ok, err = pcall(function() require("resty.acme.autossl").init_worker() end)
@@ -145,14 +112,10 @@ function _M.init_worker()
     end
 end
 
--- Per-handshake certificate selection. If lua-resty-acme throws, log and fall
--- through: with no certificate set by Lua, OpenResty serves the static
--- fallback and HTTPS stays up.
+-- Falls through on error: with no certificate set, the static one is served.
 function _M.ssl_certificate()
-    -- Edge self-protection (step 2) runs FIRST, independent of _ready: an
-    -- unknown SNI is dropped at the handshake even when on-demand TLS is
-    -- inactive (static-cert-only stand). If it doesn't reject, fall through to
-    -- per-SNI cert selection. ngx.exit inside reject_unknown_sni ends the phase.
+    -- Runs first and independent of _ready, so an unknown SNI is dropped even
+    -- when on-demand TLS is inactive.
     _M.reject_unknown_sni()
 
     if not _M._ready then return end
@@ -163,8 +126,7 @@ function _M.ssl_certificate()
     end
 end
 
--- serve_http_challenge() — answers /.well-known/acme-challenge/* during issuance.
--- pcall-wrapped so a challenge-handler error returns cleanly instead of 500.
+-- Answers the ACME challenge during issuance.
 function _M.serve_http_challenge()
     if not _M._ready then return end
     local ok, err = pcall(function() require("resty.acme.autossl").serve_http_challenge() end)
