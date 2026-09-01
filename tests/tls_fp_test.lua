@@ -114,7 +114,7 @@ check(prof_active.zero,    nil, "build_profiles drops zero cipher_cnt")
 
 -- ===========================================================================
 -- build_blocklist — parse Channel C wire map { [fp] = "<status>:block" } into
--- the staging fp set (A11, 86exrtjpc). Only status=staging fps are kept; active
+-- the staging fp set (A11, ). Only status=staging fps are kept; active
 -- ones block directly in verdict.lua off the same dict, legacy bare "block" is
 -- active.
 -- ===========================================================================
@@ -232,7 +232,7 @@ check(tls_fp.is_suspicious_ciphers("chrome", 16, moved, true), false,
 tls_fp._cached_gen_profiles = nil
 
 -- ===========================================================================
--- refresh() blocklist staging from the Channel C snapshot (A11, 86exrtjpc).
+-- refresh() blocklist staging from the Channel C snapshot (A11, ).
 -- Mock ngx.shared (meta + tls_fp_blocklist + metrics) and assert refresh()
 -- rebuilds tls_fp.blocklist_staging to exactly the status=staging fps in the
 -- dict at the published generation — verdict.lua blocks the active ones, this

@@ -1,4 +1,4 @@
--- Unit tests for infra/demo-stand/lua/staging_metrics.lua (A11, 86exrtjpc).
+-- Unit tests for infra/demo-stand/lua/staging_metrics.lua (A11, ).
 -- Pure logic over a mocked `ngx.shared.metrics`; runs under bare luajit.
 --
 -- Run with:

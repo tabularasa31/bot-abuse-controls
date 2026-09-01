@@ -6,7 +6,7 @@ product maintains. The backend reads it on every reloader tick
 application across the edge pool is **≤ 15 minutes** (see [vision.md](../docs/product/vision.md)
 §"Catalog and policy updates").
 
-See also [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
+See also the design decision
 on why the slow catalogs live in git rather than in the database.
 
 ## The files

@@ -733,7 +733,7 @@ do
 end
 
 -- ===========================================================================
--- A11 (86exrtjpc): ua_blacklist + ip_blocklist descriptors.
+-- A11: ua_blacklist + ip_blocklist descriptors.
 -- ===========================================================================
 
 -- ua_blacklist: object payload {active=string, staging=array}. apply writes
@@ -780,7 +780,7 @@ do
 end
 
 -- ===========================================================================
--- B12 (86ext2zb4): ip_whitelist + asn_datacenters descriptors.
+-- B12: ip_whitelist + asn_datacenters descriptors.
 -- ===========================================================================
 
 -- ip_whitelist: flat ARRAY payload [cidr, …]. apply writes `<cidr>:<gen>` → "1";

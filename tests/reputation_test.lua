@@ -13,7 +13,7 @@ package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 
 -- Stub the `policy` module so `require "reputation"` resolves under
 -- bare luajit. reputation requires policy at module-top (B11 /
--- 86exr05q7), and the real policy.lua pulls in cjson.safe which isn't
+-- ), and the real policy.lua pulls in cjson.safe which isn't
 -- shipped with the host luajit used by `make test-host`. The pure
 -- helpers covered here never invoke reputation.run(), so the stub's
 -- bodies don't run — only its shape matters (same pattern hygiene_test
@@ -24,7 +24,7 @@ package.loaded["policy"] = {
     canonical_host = function(h) return h end,
 }
 
--- policy_matchers (86exr05xt) — same stub rationale: tests cover pure
+-- policy_matchers — same stub rationale: tests cover pure
 -- helpers that never reach the per-host matcher path. EMPTY sentinel
 -- shape mirrors the real module.
 package.loaded["policy_matchers"] = {
@@ -103,7 +103,7 @@ check_arr(
 
 -- ===========================================================================
 -- reputation.staging_values() — mirror image of active_values: keeps only
--- status=staging CIDRs (A11, 86exrtjpc), drops active/blank. Order preserved.
+-- status=staging CIDRs (A11, ), drops active/blank. Order preserved.
 -- ===========================================================================
 check_arr(reputation.staging_values(nil), {}, "staging_values nil -> {}")
 check_arr(
@@ -167,7 +167,7 @@ check(reputation.country_blocked({ RU = true }, ""), false,
 
 -- ===========================================================================
 -- reputation.refresh_whitelist() / refresh_asn() — gen-cached rebuild from the
--- Channel C snapshot (B12, 86ext2zb4). Mock ngx.shared (meta + the two catalog
+-- Channel C snapshot (B12, ). Mock ngx.shared (meta + the two catalog
 -- dicts) and a fake resty.ipmatcher; assert a gen flip swaps the matcher/set.
 -- ===========================================================================
 

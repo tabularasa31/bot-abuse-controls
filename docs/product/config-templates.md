@@ -11,7 +11,7 @@ Illustrative templates for every configuration file mentioned in [vision.md](vis
 > `.conf` below: a compact YAML map `<entry>: <status>` is used
 > instead of sections. The staged rollout contract (`active`/`staging`),
 > the validation (regex/CIDR/uint32) and Channel C are the same. See
-> [ADR-006](../architecture-decisions/006-slow-catalogs-as-files.md).
+> the design decision.
 
 ## Config hierarchy
 

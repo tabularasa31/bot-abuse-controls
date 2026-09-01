@@ -1,13 +1,13 @@
 # antibot-backend — the centralized Go service (B2)
 
 The implementation of antibot-backend per
-[ADR-005](../docs/architecture-decisions/005-centralized-antibot-backend.md) and
+the design decision and
 [config-distribution.md](../docs/architecture/config-distribution.md): three
 functions, nothing more:
 
 1. **The catalog server** — serves the catalogs to the edge over Channel C
    (`GET /catalog/<name>`, ETag/If-None-Match, `?site=<host>`). After
-   [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
+   the design decision
    there are two sources:
    - **the slow catalogs** (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
      `ip_whitelist`, `asn_datacenters` plus `version`) live in the

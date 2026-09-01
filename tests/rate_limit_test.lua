@@ -12,7 +12,7 @@
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 
 -- Stub the `policy` module so `require "rate_limit"` resolves under
--- bare luajit. rate_limit requires policy at module-top (86exr0627),
+-- bare luajit. rate_limit requires policy at module-top,
 -- and the real policy.lua pulls in cjson.safe which isn't shipped
 -- with the host luajit used by `make test-host`. The pure helpers
 -- covered here never invoke rate_limit.run(), so the stub's bodies

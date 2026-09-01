@@ -1,6 +1,6 @@
 -- Unit tests for infra/demo-stand/lua/policy.lua get()/lookup().
 -- Focus: origin_ip routing must survive the mode/strictness enum-guard
--- fallback (86exrefdz / PR #94 review #1) — a malformed mode must not deroute
+-- fallback (/ PR #94 review #1) — a malformed mode must not deroute
 -- a registered tenant to the non-tenant 444 drop.
 --
 -- Runs under bare luajit: stub cjson(.safe) + ngx (shared dicts, ctx, log)

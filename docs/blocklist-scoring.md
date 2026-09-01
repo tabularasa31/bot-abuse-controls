@@ -191,6 +191,6 @@ draft PR plus human approval.
 The analytics lives on the **backend+obs VM** (the `antibot-analytics` container)
 and is sourced from **Loki** (7 days of history from every edge, in-network). See
 [config-distribution](architecture/config-distribution.md) and
-[ADR-006](architecture-decisions/006-slow-catalogs-as-files.md). The container
+the design decision. The container
 writes JSON artifacts into `state/`; the host-side `blocklist-autopilot.sh` turns
 them into draft PRs.

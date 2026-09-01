@@ -3,7 +3,7 @@
 > **Status: STRATEGY / horizon.** This document is about the **ceiling of ambition**
 > for the product, not a task plan and not a behavioural contract. Nothing below is
 > **implemented** or promised for near-term implementation — for the current status
-> see [PROGRESS.md](../../PROGRESS.md). The concrete WAF/DDoS roadmap is
+> see [ROADMAP.md](../../ROADMAP.md). The concrete WAF/DDoS roadmap is
 > [research/waf-ddos-roadmap.md](../research/waf-ddos-roadmap.md).
 
 ## Where this sits on the product timeline
@@ -17,8 +17,8 @@ the challenge cascade     the blocklist cycle,        protection — new AXES of
 ```
 
 - **The MVP is [vision.md](vision.md) plus phase1/phase2 plus the C series.** The
-  L1→L5 cascade, the challenge, clearance, Channel C, the policy. Closed (see
-  PROGRESS.md "IN PLACE TODAY").
+  L1→L5 cascade, the challenge, clearance, Channel C, the policy. Built — see
+  [ROADMAP.md](../../ROADMAP.md).
 - **post-MVP is the D series.** Deepening the detector: scoring plus the blocklist
   cycle (D1), challenge solve rate, the subnet unit, anti-poisoning, threat intel,
   behavioural signals. This is the **same core** (bot management), done more
@@ -82,7 +82,7 @@ security layer for our own customers.
 - **The CDN cache and content delivery itself** — an adjacent discipline. We are a
   security layer *on top of* a CDN, not a replacement for one.
 
-Per [CLAUDE.md](../../CLAUDE.md), everything in this section is **reality level 3**
+Per the project scope, everything in this section is **reality level 3**
 (the territory of network and infrastructure admins, with no production access). Do not
 present it as done; if a production network becomes necessary, that is a separate phase
 with access — **ask**.

@@ -3,11 +3,11 @@
 > **Status: PLANNED / research.** This is a snapshot of the brainstorm on "where to
 > grow the product after closing the C series (challenge) and D1 (scoring)" towards
 > WAF and anti-DDoS. Nothing described below is **implemented** in the stand until
-> it has explicitly moved into [PROGRESS.md](../../PROGRESS.md) → "IN PLACE TODAY".
+> it has explicitly moved into [ROADMAP.md](../../ROADMAP.md) → "IN PLACE TODAY".
 > Do not present it as done. The WAF engine is deliberately left as a
 > **research/ADR candidate** (build versus buy is unresolved) — see §3. Volumetric
 > L3/L4 is included in the roadmap on request, but honestly marked as **outside the
-> OpenResty stand** (reality level 3 per [CLAUDE.md](../../CLAUDE.md)) — see §4.3.
+> OpenResty stand** (reality level 3 per the project scope) — see §4.3.
 >
 > **What has already moved into the backlog since the first version:**
 > connection/protocol-level DDoS (slow attacks E1–E3, HTTP/2 DoS E4–E5) is filed as
@@ -22,7 +22,7 @@
 ## 1. The baseline — what we already have (and what we do not)
 
 The cascade in `infra/demo-stand/lua/` today is **bot abuse control (BAC)**, not a
-WAF and not anti-DDoS. The stages (see [PROGRESS.md](../../PROGRESS.md) "IN PLACE
+WAF and not anti-DDoS. The stages (see [ROADMAP.md](../../ROADMAP.md) "IN PLACE
 TODAY"):
 
 | Layer | What it does | Relation to WAF/DDoS |
@@ -134,7 +134,7 @@ No code lands before that ADR.
 
 ## 4. DDoS — three layers at different maturity
 
-> **A correction after checking against the ClickUp backlog.** DDoS splits into three
+> **A correction after checking against the backlog.** DDoS splits into three
 > layers for us, not one:
 > - **§4.1 L7 rate-based** — already scoped in the G series (G1–G4), not duplicated here.
 > - **§4.2 connection/protocol level (slow attacks, HTTP/2 DoS)** — genuinely new scope,
@@ -147,13 +147,13 @@ No code lands before that ADR.
 Everything I originally sketched as "DDoS phase 1/2" turned out, on checking the
 backlog, to be already-filed tickets (the G series plus one signal from layer D):
 
-| Idea | Where it already lives (ClickUp / research) |
+| Idea | Where it already lives (backlog / research) |
 |---|---|
-| Automatically raising `attack_mode` on "bad" traffic (not raw volume), hysteresis, manual precedence over automatic, the per-host `auto_attack_mode` flag | **[G3]** `86ext6yuq` (backlog, design ready) — detection by bot rate / solve rate / origin latency relative to the host baseline |
-| Subnet/ASN reputation for datacenter pools (soft, analytics) | **[G1]** `86ext6yn6` (backlog) plus [subnet-unit-design.md](subnet-unit-design.md) |
-| Transient subnet challenge→drop during an attack | **[G2]** `86ext6ytk` (backlog) |
-| A fast hot list of attackers (pre-arming edges when a botnet pivots) | **[G4]** `86ext718e` (backlog) plus [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
-| Solve rate as a bot signal under a flood (the ticket itself is **layer D**, the detector; the G series reuses it) | **[D12]** `86ext5daf` (review) plus [challenge-solve-rate-design.md](challenge-solve-rate-design.md) |
+| Automatically raising `attack_mode` on "bad" traffic (not raw volume), hysteresis, manual precedence over automatic, the per-host `auto_attack_mode` flag | **[G3]** (backlog, design ready) — detection by bot rate / solve rate / origin latency relative to the host baseline |
+| Subnet/ASN reputation for datacenter pools (soft, analytics) | **[G1]** (backlog) plus [subnet-unit-design.md](subnet-unit-design.md) |
+| Transient subnet challenge→drop during an attack | **[G2]** (backlog) |
+| A fast hot list of attackers (pre-arming edges when a botnet pivots) | **[G4]** (backlog) plus [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
+| Solve rate as a bot signal under a flood (the ticket itself is **layer D**, the detector; the G series reuses it) | **[D12]** (review) plus [challenge-solve-rate-design.md](challenge-solve-rate-design.md) |
 
 **Conclusion:** the L4 (`rate_limit`) and L5 (`attack_mode`/challenge) mechanisms exist,
 and deepening them adaptively is the G series, which we are doing anyway. There is no
@@ -187,7 +187,7 @@ point.
 cured in OpenResty/Lua** — by the time traffic reaches nginx the TCP handshake has
 already happened. This is the network layer: edge ACLs, conntrack/iptables rate limits,
 eBPF/XDP drops, BGP blackholing, anycast spreading. Per
-[CLAUDE.md](../../CLAUDE.md) this is **reality level 3** — the territory of the
+the project scope this is **reality level 3** — the territory of the
 production edge's network and infrastructure admins, which we have no production access
 to.
 
@@ -200,9 +200,8 @@ infrastructure:
   for Lua;
 - write a **research ADR/design** for eBPF/XDP dropping as a future phase, without
   implementing it in production.
-- do NOT invent an integration with the production edge's salt/Puppet (CLAUDE.md §"What
-  not to do"). If a production network layer becomes necessary, that is a separate phase
-  with production access — **ASK**.
+- do NOT assume an integration with a production edge's configuration management.
+  If a production network layer becomes necessary, that is a separate phase.
 
 ## 5. API security / account protection — an adjacent axis (0 tickets in the backlog)
 
@@ -320,29 +319,26 @@ that are absent from the backlog entirely:
    G1–G4 in the G series.
 
 ## 7. Relation to the existing backlog and research
-- **Rate-based L7 DDoS — already in the backlog (layer G):** [G1] `86ext6yn6` (subnet
-  reputation), [G2] `86ext6ytk` (transient drop), [G3] `86ext6yuq` (automatic attack
-  mode), [G4] `86ext718e` (cross-tenant). It uses the solve-rate signal from layer D
-  ([D12] `86ext5daf`) and rests on `attack_mode` (C7) plus `rate_limit` (A7/A10), which
+- **Rate-based L7 DDoS — already in the backlog (layer G):** [G1] (subnet
+  reputation), [G2] (transient drop), [G3] (automatic attack
+  mode), [G4] (cross-tenant). It uses the solve-rate signal from layer D
+  ([D12] ) and rests on `attack_mode` (C7) plus `rate_limit` (A7/A10), which
   are already in the code.
-- **Connection/protocol-level DDoS — filed (§4.2):** [E1] `86ext8r0p` (slow-attacks
-  baseline), [E2] `86ext8r0x` (observability), [E3] `86ext8r15` (a policy knob,
-  optional); [E4] `86ext8r2q` (HTTP/2 DoS mitigation audit), [E5] `86ext8r31` (h2 abuse
-  as a signal, depends on R2 `86ext6dez`). Reuses `bac_log`, the metrics, G1 reputation
+- **Connection/protocol-level DDoS — filed (§4.2):** [E1] (slow-attacks
+  baseline), [E2] (observability), [E3] (a policy knob,
+  optional); [E4] (HTTP/2 DoS mitigation audit), [E5] (h2 abuse
+  as a signal, depends on R2 ). Reuses `bac_log`, the metrics, G1 reputation
   and the edge ACL.
 - **WAF — there is NO such axis in the backlog** (checked: 0 tasks on WAF/SQLi/XSS).
   Proposed as a `W` series: W1 spike/ADR-007, W2 the engine, W3 the signature catalog
   over Channel C, W4 a per-host WAF profile in the policy, W5 virtual patching. Reuses
   ADR-006 (git catalogs), B10 (the Policy API) and `policy.enforce` (the mode gate),
   plus `bac_log` and the metrics.
-- **API security / account protection — filed (§5.4, the `P` series):** [P1] `86ext9dze`
-  (identity extraction), [P2] `86ext9dzx` (per-key/per-account profiles), [P3]
-  `86ext9e02` (failed-auth feedback), [P4] `86ext9dzk` (auth-endpoint policy config),
-  [P5] `86ext9e0x` (optional breached credentials). Closer to the existing core than WAF.
-- **API contract / governance — filed (§5.6, the `Q` series):** [Q1] `86ext9y83`
-  (per-endpoint contract), [Q2] `86ext9y70` (schema validation), [Q3] `86ext9y7d`
-  (resource limits), [Q4] `86ext9ybj` (edge JWT), [Q5] `86ext9ycp` (mTLS, optional), [Q6]
-  `86ext9ydp` (transport hygiene), [Q7] `86ext9ye2` (API inventory). A positive model,
+- **API security / account protection — filed (§5.4, the `P` series):** [P1] (identity extraction), [P2] (per-key/per-account profiles), [P3]
+  (failed-auth feedback), [P4] (auth-endpoint policy config),
+  [P5] (optional breached credentials). Closer to the existing core than WAF.
+- **API contract / governance — filed (§5.6, the `Q` series):** [Q1] (per-endpoint contract), [Q2] (schema validation), [Q3] (resource limits), [Q4] (edge JWT), [Q5] (mTLS, optional), [Q6]
+  (transport hygiene), [Q7] (API inventory). A positive model,
   complementary to WAF (`W`).
 - **Volumetric L3/L4** — outside the stand repo's scope; present as a contract plus
   research, not as an implementation (reality level 3).

@@ -1,10 +1,9 @@
 # Bot detector — directions for development (ideas)
 
 > **Status: PLANNED / research.** This is a snapshot of the brainstorm on "where
-> to grow the detector after D1 (scoring plus the blocklist cycle)". None of the
-> below is **implemented** in the stand until it has explicitly moved into
-> PROGRESS.md → "IN PLACE TODAY". Do not present it as done. The baseline is the
-> closed D1 (see [blocklist-scoring.md](../blocklist-scoring.md)).
+> to grow the detector after the scoring and blocklist cycle. None of the
+> below is implemented yet — see [ROADMAP.md](../../ROADMAP.md). The baseline is
+> [blocklist-scoring.md](../blocklist-scoring.md).
 >
 > **Triage complete (2026-05-30): all six ideas worked up into design docs and tickets.**
 > #1 [solve-rate](challenge-solve-rate-design.md) (D12) · #2 [positive fp catalog](positive-fp-catalog-design.md)
@@ -89,7 +88,7 @@ false positive now hits everyone, which raises the importance of #5). Design: se
 the dedicated document. Related to G1 (`subnet_reputation` is worth making global)
 and G2 (hot /24s).
 
-## Relation to the existing D-series backlog (PROGRESS.md)
+## Relation to the existing backlog
 - Already filed: **D2, D3, D4** (catalogs/mismatch), D5 (cache), D6 (metrics), R1 (DBSC).
 - New or not yet written up: **#1** (challenge solve rate → scoring), **#2 HTTP/2 fp**,
   **#3 subnet/behavioural unit**, **#4 behavioural signals**, **#5 anti-poisoning**,

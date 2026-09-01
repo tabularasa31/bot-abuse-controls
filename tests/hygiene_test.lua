@@ -10,7 +10,7 @@
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 
 -- Stub the `policy` module so `require "hygiene"` resolves under bare
--- luajit. hygiene requires policy at module-top (B11 / 86exr05fn), and
+-- luajit. hygiene requires policy at module-top (B11 / ), and
 -- the real policy.lua pulls in cjson.safe which isn't shipped with the
 -- host luajit used by `make test-host`. The pure helpers covered here
 -- never invoke hygiene.run(), so the stub's bodies don't run — only its
@@ -82,7 +82,7 @@ check(
 
 -- ===========================================================================
 -- hygiene.build_staging() — combined regex + pattern list of STAGING patterns
--- (A11, 86exrtjpc). Mirror image of build_combined: keeps only status=staging.
+-- (A11, ). Mirror image of build_combined: keeps only status=staging.
 -- ===========================================================================
 
 do
@@ -138,7 +138,7 @@ check(hygiene.header_anomaly("HTTP/1.1", nil), false,
 
 -- ===========================================================================
 -- refresh() — rebuild active_re / staging from the Channel C ua_blacklist
--- snapshot (A11, 86exrtjpc). Mock ngx.shared (meta + antibot_ua_blacklist +
+-- snapshot (A11, ). Mock ngx.shared (meta + antibot_ua_blacklist +
 -- metrics) and a cjson.safe.decode stub; assert a gen flip swaps the matcher.
 -- ===========================================================================
 

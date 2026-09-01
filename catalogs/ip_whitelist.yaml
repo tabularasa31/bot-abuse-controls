@@ -14,5 +14,5 @@
 
 # NB: in the current stand the allow side does NOT fastpass — a whitelisted IP that also
 # lands in tls_fp_blocklist is still cut downstream (verdict.lua, task
-# 86exr05xt). The entry below becomes a real bypass once fastpass lands.
+# ). The entry below becomes a real bypass once fastpass lands.
 - 203.0.113.10/32   # operator, ASN 64512 — 2026-06-23

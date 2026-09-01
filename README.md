@@ -1,5 +1,8 @@
 # bot-abuse-controls
 
+[![CI](https://github.com/tabularasa31/bot-abuse-controls/actions/workflows/ci.yml/badge.svg)](https://github.com/tabularasa31/bot-abuse-controls/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
 Bot and abuse controls for a CDN edge: a request-scoped verdict cascade running in
 OpenResty/Lua at the edge, driven by a centralized Go control plane.
 
@@ -72,6 +75,8 @@ Policy is keyed by `Host`, so one edge serves many tenants independently.
 - `docs/product/` — the behavioural specification the cascade implements
 - `docs/runbooks/` — operational procedures: secret rotation, mode toggle, catalog rollback
 - `tests/`, `infra/test-harness/` — unit tests, and an integration harness for the catalog contract
+
+What is built and what is planned: [ROADMAP.md](ROADMAP.md).
 
 ## Running it
 

@@ -14,7 +14,7 @@
 #
 # The script writes the YAML by hand (with no dependency on Go or a yaml generator), to
 # avoid introducing new build artifacts. The format is symmetric with what
-# internal/filesource expects (see docs/architecture-decisions/006).
+# internal/filesource expects.
 
 set -euo pipefail
 

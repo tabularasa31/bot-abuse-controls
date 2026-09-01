@@ -2,7 +2,7 @@
 
 **Status:** accepted 2026-05-18.
 **Supersedes:** the implicit three-channel model in earlier drafts (Puppet + operator salt pillars + per-edge sidecar HTTP pull).
-**Related:** [ADR-001](../architecture-decisions/001-edge-lua-vs-go-sidecar.md), [RFC edge-lua-vs-sidecar.md](edge-lua-vs-sidecar.md).
+**Related:** the design decision, the design notes.
 
 ## What this document fixes
 
@@ -74,7 +74,7 @@ There is **no salt-pillars extension on the operator side**. Per-resource antibo
 
 **Source of truth:** PostgreSQL inside the antibot-backend service. Populated by the client dashboard (per-resource policy), PRs (blocklists), or background workers (rDNS verified bots).
 
-**Distribution:** edge Lua calls `ngx.timer.every(30, fetch)` in `init_worker_by_lua_block`. Each tick does conditional `GET` per catalog with `If-None-Match`. On 200 — parse, atomic-swap into `lua_shared_dict` (generation-counter scheme from [RFC §C1](edge-lua-vs-sidecar.md)). On 304 — no work.
+**Distribution:** edge Lua calls `ngx.timer.every(30, fetch)` in `init_worker_by_lua_block`. Each tick does conditional `GET` per catalog with `If-None-Match`. On 200 — parse, atomic-swap into `lua_shared_dict` (generation-counter scheme from the design notes). On 304 — no work.
 
 **Cadence:** 30 s. Bounded staleness window. Sufficient for "dashboard slider moved → effect on edge" UX (sub-minute) and for emergency `attack_mode=on` (sub-minute global effect).
 
@@ -137,5 +137,5 @@ Nginx-internal questions (where exactly in their cascade `access_by_lua` slots i
 | **catalog** | one named, ETag-versioned data set served by the antibot-backend and held in one `lua_shared_dict` on the edge. |
 | **Channel A** | Puppet path for framework code/config. Slow, human-driven. |
 | **Channel C** | antibot-backend HTTP pull from edge Lua. Fast, automated, 30 s cadence. |
-| **sidecar** | **deprecated term.** In older docs ([ADR-001](../architecture-decisions/001-edge-lua-vs-go-sidecar.md), [RFC](edge-lua-vs-sidecar.md)) refers to a Go process on each edge. Per this document, that process does not exist; the Go side is centralized. Read "sidecar" in older docs as "antibot-backend". |
+| **sidecar** | **deprecated term.** It referred to a Go process on each edge. That process does not exist: the Go side is centralized. |
 | **Channel B** | **does not exist.** Earlier drafts had a salt-pillars channel for per-resource policy; rejected (see above table). |

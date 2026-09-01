@@ -1,5 +1,5 @@
 -- Unit tests for infra/demo-stand/lua/proxy_target.lua.
--- Policy-driven routing (ClickUp 86exrefdz). Pure function — no ngx, no
+-- Policy-driven routing (the tracker ). Pure function — no ngx, no
 -- shared_dict, no I/O: the tenant set is injected via the test-only
 -- policy_override argument ({host -> origin_ip}), so we never touch the
 -- real policy module / Channel C harness.

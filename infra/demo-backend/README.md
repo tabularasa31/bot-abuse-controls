@@ -3,7 +3,7 @@
 Reproducible deploy of the **antibot-backend** demo VM: PostgreSQL plus a
 ≥2-instance backend pair behind a TLS-terminating LB, with the edge → backend
 HTTPS path opened. Topology from
-[ADR-005](../../docs/architecture-decisions/005-centralized-antibot-backend.md)
+the design decision
 and [config-distribution §HA](../../docs/architecture/config-distribution.md).
 
 The substrate (compose, LB, certs, firewall, provision scripts) is [B1]. The
@@ -15,7 +15,7 @@ B7 (rDNS state machine). App-level production deploy with DB migrations is
 [B15].
 
 > This is our own demo infra, **not** the operator's prod edge pool — see
-> [PROGRESS.md](../../PROGRESS.md) "NOT OURS".
+> [ROADMAP.md](../../ROADMAP.md) "NOT OURS".
 
 ## Topology
 
