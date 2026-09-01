@@ -1,565 +1,397 @@
-# Аналитика и жизненный цикл блок-листа (пост-MVP)
+# Analytics and the blocklist lifecycle (post-MVP)
 
-**Версия:** v1.1 Статус: проектный контракт (целевое поведение) Слой: пост-MVP
-
----
-
-## Обзор
-
-### Что это
-
-Фоновый слой аналитики, который решает, какие TLS-сигнатуры можно блокировать, и поддерживает блок-лист в актуальном состоянии. Он работает рядом с каскадом, но никогда не стоит на пути запроса — вся его работа происходит в офлайне, по уже собранным логам.
-
-Каскад принимает решение по каждому запросу за микросекунды, опираясь на каталоги, которые уже лежат у него в памяти. Эти каталоги кто-то должен наполнять. Аналитический слой наполняет список плохих TLS-сигнатур (`tls_fp_blocklist`). Раз в сутки он анализирует собранные логи, считает по каждой сигнатуре оценку «насколько похоже на бота» и проверки «безопасно ли блокировать» (скоринг) и оформляет созревшие изменения блок-листа черновиком PR: какие сигнатуры поставить на наблюдение, какие включить на блокировку, какие снять с блокировки. Человек ревьюит и принимает решение мержить PR; после мержа обновленный каталог доставляется на эдж.
-
-Анализ идет по TLS-сигнатуре (фингерпринту) — короткой строке, в которую эдж сворачивает параметры TLS-рукопожатия клиента. Слой ее получает готовой в каждом логе. У настоящих браузеров и у инструментов автоматизации сигнатуры разные — по этому расхождению слой их и различает: «браузер» в User-Agent при не-браузерной сигнатуре — это маскировка (impersonator).
-
-### Как это устроено
-
-```
-   эдж (каскад) ── поток вердиктов ──► аналитика ──► скоринг ──► решение
-        ▲                                                         │
-        │                                                         ▼
-        └──── доставка каталога ◄──── автомат + человек ◄── каталог (PR)
-```
-
-Эдж пишет лог по каждому запросу → поток стекается в лог-хранилище → слой читает его, строит картину по каждой TLS-сигнатуре, ранжирует подозрительные, через проверки-гейты решает, какие безопасно блокировать,  → результат уезжает обратно на эдж готовым каталогом.
-
-Разные участки этой петли работают с разной скоростью:
-
-- **Логи копятся непрерывно.** Эдж пишет каждый запрос в реальном времени, слой их только читает.
-- **Решения принимаются раз в сутки.** Слой один раз в день пересчитывает всю картину и предлагает изменения блок-листа. Все «промоуты», «блокировки» и «снятия» происходят в этом суточном прогоне, а не в момент запроса.
-- **Включает блокировку человек.** Слой только готовит предложение (черновик PR); финальное «да» дает человек на ревью.
-- **На эдж изменение доезжает быстро.** После мержа обновленный каталог раздается на эджи за минуты.
-
-То есть сам анализ и решения — суточные; сбор данных идет постоянно, а доставка одобренного каталога — быстрая. Подробности каждого шага — в разделах ниже.
-
-### Где это работает
-
-Слой целиком работает на backend-стороне. Аналитический воркер и автомат запускаются как фоновые задания по расписанию там же, где лежат лог-хранилище (Loki) и git-репозиторий каталогов с файлами состояния слоя. На самом эдже из этого слоя не крутится ничего.
-
-Эдж по отношению к слою делает ровно две вещи: пишет логи (они уходят в Loki) и применяет уже доставленный каталог. Скоринг, гейты, жизненный цикл, накопитель состояния — все это вне эджа и вне горячего пути запроса. Ревью и мерж PR живут в git-репозитории и CI; после мержа каталог доставляется на эдж.
-
-### Из чего состоит
-
-
-| Компонент                | Роль                                                                                                                                                                  | Раздел                 |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| **Аналитический воркер** | главный процесс: раз в сутки читает логи и справочники, считает модель скоринга, пишет решения и отчет                                                                | «Аналитический воркер» |
-| **Автомат**              | собирает решения воркера в один черновик PR за прогон и ведет жизненный цикл записи (наблюдение → блокировка → снятие); никогда не мержит сам                         | «Автомат»              |
-| **Харвестер отпечатков** | гоняет реальные браузеры и инструменты, снимает их fp и draft-PR-ом наполняет каталоги `tls_fp_browser_profiles` (браузеры) и `tls_fp_catalog` (инструменты/headless) | «Харвестер отпечатков» |
-| **Лог-хранилище (Loki)** | горячее хранилище: поток логов с эджей за короткое окно (7 дней)                                                                                                      | «Лог-хранилище (Loki)» |
-| **Накопитель состояния** | холодное хранилище: долгая память по сигнатурам                                                                                                                       | «Накопитель состояния» |
-
-
-### Сопутствующие материалы
-
-- [analytics-rules-reference.md](analytics-rules-reference.md) — все правила
-скоринга, проверок и жизненного цикла в формате «если условие → действие».
-- [analytics-entities-reference.md](analytics-entities-reference.md) — словарь
-сущностей: оценка, проверки, тиры, запись каталога, состояния, перечисления.
+**Version:** v1.1 · Status: a design contract (target behaviour) · Layer: post-MVP
 
 ---
 
-## Аналитический воркер
+## Overview
 
-Воркер — главный процесс слоя: раз в сутки запускается на backend, читает собранные логи и справочники и считает по ним решения.
+### What it is
 
-### Что он читает на входе
+A background analytics layer that decides which TLS signatures may be blocked and keeps the blocklist current. It works alongside the cascade but never stands in a request's path — all of its work happens offline, over logs that have already been collected.
 
-Слой потребляет один структурный лог на каждый обработанный запрос. Минимально нужные поля лога:
+The cascade decides about each request in microseconds, relying on catalogs already sitting in its memory. Somebody has to fill those catalogs. The analytics layer fills the list of bad TLS signatures (`tls_fp_blocklist`). Once a day it analyses the collected logs, computes for each signature a score for "how much this looks like a bot" and the checks for "is it safe to block" (the scoring), and packages the changes that have matured into a draft PR: which signatures to put under observation, which to switch to blocking, which to retire. A human reviews it and decides to merge; after the merge the updated catalog is delivered to the edge.
 
+The analysis runs by TLS signature (fingerprint) — the short string the edge folds a client's TLS handshake parameters into. The layer receives it ready-made in every log line. Real browsers and automation tools have different signatures, and that divergence is what the layer distinguishes them by: a "browser" in the User-Agent with a non-browser signature is a disguise (an impersonator).
 
-| Поле            | Зачем слою                                                                                                                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tls_fp`        | ключ всего анализа; вся агрегация идет по сигнатуре                                                                                                                                                           |
-| `ip`            | число уникальных IP, сигнал «много IP», сверка со списком доверенных                                                                                                                                          |
-| `ua`            | классификация: инструмент / маскировка / настоящий браузер                                                                                                                                                    |
-| `path`          | сигнал разведки (обращения к типовым путям сканеров)                                                                                                                                                          |
-| `verdict`       | итог каскада по запросу; если хоть один запрос под сигнатурой каскад пропустил как доверенный (`allow` — verified-бот / IP из whitelist / валидная cookie), сигнатуру не блокируем (кормит гейт «доверенные») |
-| `rule`          | какое правило каскада сработало (атрибуция)                                                                                                                                                                   |
-| `staging_match` | под какие наблюдаемые записи запрос подошел                                                                                                                                                                   |
-| `asn`           | сигнал «IP из датацентра»                                                                                                                                                                                     |
-| метка времени   | окно наблюдения, число разных дней, устойчивость во времени                                                                                                                                                   |
+### How it is arranged
 
+```
+   the edge (the cascade) ── the verdict stream ──► analytics ──► scoring ──► a decision
+        ▲                                                                       │
+        │                                                                       ▼
+        └──── catalog delivery ◄──── the autopilot + a human ◄── the catalog (a PR)
+```
 
-### Справочники-источники
+The edge writes a log line per request → the stream flows into the log store → the layer reads it, builds a picture per TLS signature, ranks the suspicious ones, decides through gate checks which are safe to block → and the result travels back to the edge as a finished catalog.
 
-Кроме потока логов воркер опирается на справочники. Они кормят сигналы оценки и гейты.
+Different parts of that loop run at different speeds:
 
+- **Logs accumulate continuously.** The edge writes every request in real time; the layer only reads them.
+- **Decisions are taken once a day.** Once a day the layer recomputes the whole picture and proposes blocklist changes. Every promotion, block and retirement happens in that daily run, not at request time.
+- **A human switches blocking on.** The layer only prepares a proposal (a draft PR); the final "yes" is given by a human at review.
+- **The change reaches the edge quickly.** After the merge the updated catalog is distributed to the edges within minutes.
 
-| Справочник                                               | Что это                                                                                                       | Кормит                                                                          |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| словарь инструментов (`tls_fp_catalog`)                  | хеши известных инструментов автоматизации и headless-стеков (curl/python/go/okhttp; Playwright/Puppeteer/UCD) | маскировку, UA-инструмент, сигнал headless (оценка), обоснованность (гейт)      |
-| позитивный каталог браузеров (`tls_fp_browser_profiles`) | белый список реальных браузеров: полный fp → `{семейство, версия}`                                            | гейт known-good (настоящий браузер → не блокировать), сигнал расхождения версий |
-| challenge-счетчики                                       | сколько по сигнатуре выдано и решено челленджей                                                               | гейт «решение челленджей», ускорение перехода к блокировке                      |
+So the analysis and the decisions are daily, data collection is continuous, and delivery of an approved catalog is fast. The details of each step are in the sections below.
 
+### Where it runs
 
-Кто их наполняет. Каталог состоит из хешей рукопожатий и чисел шифров, отпечаток снимают с реального клиента. Этим занят Харвестер отпечатков: он автоматически прогоняет известный набор и draft-PR-ом раскладывает результат по двум каталогам — реальные браузеры → `tls_fp_browser_profiles`,
-инструменты и headless → `tls_fp_catalog`. Мержит человек.
+The layer runs entirely on the backend side. The analytics worker and the autopilot run as scheduled background jobs in the same place as the log store (Loki) and the git repository of catalogs with the layer's state files. Nothing from this layer runs on the edge itself.
 
-Исключения: 
+Towards this layer the edge does exactly two things: it writes logs (which go to Loki) and it applies the catalog once delivered. The scoring, the gates, the lifecycle and the state accumulator all live outside the edge and off the request's hot path. Review and merging of the PR live in the git repository and CI; after the merge the catalog is delivered to the edge.
 
-Первое — клиенты, которых харвестер не может прогнать сам: браузеры и инструменты не из его набора (LibreWolf, Tor, мобильные браузеры). Их отпечаток снимают и вносят отдельным PR. 
+### What it consists of
 
-Второе — новый незнакомый отпечаток: аналитика подсветила в логах частый отпечаток, которого нет ни в одном каталоге и который не дал ни один известный клиент; тогда человек выясняет, что это, и решает, заносить ли. Роль продакта — вести список того, что харвестить, разбирать такие незнакомые отпечатки и ревьюить PR.
+| Component | Role | Section |
+| --- | --- | --- |
+| **The analytics worker** | the main process: once a day it reads the logs and the reference data, computes the scoring model, and writes the decisions and the report | "The analytics worker" |
+| **The autopilot** | collects the worker's decisions into one draft PR per run and runs an entry's lifecycle (observation → blocking → retirement); it never merges anything itself | "The autopilot" |
+| **The fingerprint harvester** | drives real browsers and tools, captures their fingerprints and populates the `tls_fp_browser_profiles` (browsers) and `tls_fp_catalog` (tools/headless) catalogs through draft PRs | "The fingerprint harvester" |
+| **The log store (Loki)** | hot storage: the log stream from the edges over a short window (7 days) | "The log store (Loki)" |
+| **The state accumulator** | cold storage: long-term memory per signature | "The state accumulator" |
 
-### Суточный прогон
+### Related material
 
-Воркер не работает в реальном времени: все решения принимаются в одном прогоне раз в
-сутки по расписанию. Порядок такой:
-
-1. **Уборка долгой памяти (ротация).** У слоя есть долгая память по сигнатурам — накопитель состояния (про него отдельный раздел ниже). Он со временем разрастается, поэтому перед скорингом его подчищают: давно не встречавшееся уводят в архив, разовый шум выбрасывают. Чисто подготовительный шаг.
-2. **Скоринг.** Воркер читает Loki за последние 7 дней и за один проход считает вердикт по каждой сигнатуре на всех стадиях её жизненного цикла:
-
-- **новые кандидаты** — оценка + гейты: годится ли в наблюдение (см. «Модель скоринга»);
-- **записи в наблюдении** — по их событиям с `staging_match` прогоняет гейты активации:
- включать блокировку, снять или наблюдать дальше (см. «Жизненный цикл»);
-- **записи в блокировке** — не замолчали ли они дольше срока (кандидаты на снятие).
- Выход — два: (а) **машинные артефакты** с вердиктом по каждой сигнатуре (их читает автомат  на шаге 3); (б) **человекочитаемый отчет** ответственному на почту. Сам каталог воркер не  трогает.
-
-1. **Автомат.** Читает свежие артефакты, оставленные воркером на шаге 2, и собирает все созревшие за день решения в один черновик PR: новые сигнатуры — на наблюдение; наблюдаемые с чистым подтверждением — на блокировку; замолчавшие — на снятие. Мержит человек.
-
-Что именно происходит с сигнатурой за прогон — это переходы ее жизненного цикла
-(см. «Жизненный цикл записи блок-листа» ниже).
-
-### Модель скоринга
-
-Решение «блокировать ли сигнатуру» состоит из двух независимых частей: оценка отвечает «насколько это похоже на бота», проверки — «можно ли это блокировать».
-
-#### Оценка — насколько похоже на бота
-
-Оценка — это сумма сигналов. Нужна только чтобы отсортировать кандидатов для блокировки. Сама по себе оценка ничего не блокирует.
-
-
-| Сигнал                    | Очки   | Что значит                                                                                                                         |
-| ------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| маскировка (impersonator) | **+3** | UA называет браузер, но фингерпринт совпадает с инструментом автоматизации из нашего словаря (curl, python-requests, Go, okhttp)   |
-| подозрительные шифры      | +1     | UA представляется браузером, но число предложенных шифров не из браузерного набора                                                 |
-| UA-инструмент             | +1     | сам UA честно называет инструмент автоматизации, а не браузер (curl/python/go/okhttp/bot/scanner)                                  |
-| IP из датацентра          | +1     | хотя бы один IP под сигнатурой принадлежит датацентру                                                                              |
-| много IP                  | +1     | одна и та же сигнатура приходит с двух и более разных IP                                                                           |
-| устойчивость              | +1     | сигнатура встречается не первый день (видна в два и более разных дня)                                                              |
-| разведка                  | +1     | запросы к типовым путям сканеров (`/.env`, `/wp-login`, …)                                                                         |
-| headless-стек             | **+3** | отпечаток совпал с headless-записью в словаре инструментов (`tls_fp_catalog`): Playwright, Puppeteer, undetected-chromedriver      |
-| расхождение версий        | **+2** | UA называет конкретную версию браузера, но почерк отпечатка — другой версии или семейства (сверка с эталонным каталогом браузеров) |
-| поведение                 | +1     | слишком ровный ритм запросов или сканерные маршруты (recon/sitemap вместо переходов по ссылкам)                                    |
-| всплеск объема            | +1     | за окно сигнатура дает аномально большую долю всех событий или резкий рост день-к-дню — поток, нетипичный для одиночного клиента   |
-
-
-Тиры по сумме: CRITICAL ≥8, HIGH 5–7, MEDIUM 3–4, LOW 1–2.
-
-Тир CRITICAL — это «уверенность по точной улике». Порог 8 стоит выше суммы всех несигнатурных
-сигналов: эвристика, контекст и поведение в сумме дают максимум 7 (UA-инструмент ИЛИ
-подозрительные шифры, датацентр, много IP, устойчивость, разведка, поведение, всплеск объема —
-семь несовместимых между собой пунктов по +1). Поэтому дотянуть до CRITICAL одной эвристикой
-нельзя — нужна сигнатурная улика (маскировка +3, headless +3 или расхождение версий +2), то
-есть совпадение со справочником, а не вывод из поведения. CRITICAL меняет точку входа в
-жизненный цикл: автомат предлагает блокировку сразу, минуя наблюдение (см. «Жизненный цикл
-записи блок-листа»). Инвариант сопровождения: порог CRITICAL держать строго выше максимальной
-суммы несигнатурных сигналов — при добавлении новых легких сигналов порог пересматривать, иначе
-CRITICAL перестанет гарантировать наличие точной улики.
-
-Один сигнал стоит расписать отдельно — как именно считается всплеск объема.
-
-**Всплеск объема (+1).** Считается по окну анализа (7 дней из Loki, с разбивкой по
-календарным дням). Для сигнатуры берем:
-
-- `today` — число ее событий за последние сутки окна;
-- `baseline` — медиана суточных чисел ее событий за предыдущие дни окна (медиана, а не
-среднее: устойчивый многодневный поток не задирает базу, а реальный скачок все равно виден);
-- `total_today` — число событий всех сигнатур за те же сутки.
-
-Сигнал срабатывает, если выполнено хотя бы одно из двух правил:
-
-1. Доминирование: `today / total_today ≥ 6%` И `today ≥ 50`. Сигнатура держит заметную часть
-
-всего суточного трафика.
-2. Рост: `baseline > 0` И `today ≥ 10 × baseline` И `today ≥ 50`. Ранее тихая сигнатура за
-сутки выросла десятикратно и более.
-
-Суточный минимум в 50 событий стоит в обоих правилах нарочно: это не масштаб атаки, а нижняя
-граница доверия к доле и кратности — пока за сутки событий меньше, ни доля, ни рост сигнал не
-зажигают (на 4 запросах за ночь или скачке 2→20 блокировать не на чем). Правила дополняют друг
-друга: первое берет новую сигнатуру, появившуюся сразу большим потоком (своей дневной истории у
-нее еще нет, `baseline = 0`, второе правило для нее не считается); второе берет ранее тихий
-отпечаток, который внезапно раскочегарился. Источник — оконные данные Loki, а не lifetime-счетчик
-накопителя: всплеск это про недавнюю динамику. Все три числа (6%, ×10, 50) — настраиваемые пороги;
-значения по умолчанию подобраны под суточный объем порядка нескольких тысяч событий и
-пересматриваются с ростом трафика.
-
-Вес +1 намеренный: один объем не отличает бота от наплыва живых (релиз, реклама, попадание в
-топ), поэтому всплеск не блокирует сам по себе, а добивает до HIGH сигнатуру, у которой уже есть
-другие признаки — маскировка, разведка, датацентр, много IP. Защита живых не слабеет: known-good
-и доверенные по-прежнему ветируют блок, обоснованность требует повода именно для этого отпечатка.
-
-#### Проверки (гейты) — безопасно ли блокировать
-
-Гейт смотрит на сигнатуру как на корзину трафика и решает «не заденем ли кого-то, кого нельзя», правда ли под сигнатурой один только бот-трафик, без живых людей. Кандидат может быть ботом стопроцентно — но если рядом в корзине есть живые люди, блокировать ее нельзя.
-
-Каждый гейт — это пропускной пункт «можно ли блокировать эту сигнатуру». Если условие в
-колонке выполнено — гейт пройден; если хоть один не пройден — автомат блокировку не
-предложит, какой бы высокой ни была оценка. Гейты не суммируются и не компенсируют друг
-друга. Итог: **условие блокировки — это выполнение всех гейтов одновременно плюс высокая
-оценка.**
-
-Важно: гейты живут в решении автомата — они определяют, предложит ли автомат блокировку сам. На сам каталог гейтов нет: человек правит блок-лист своим PR и формально может завести любой fp и гейт его не остановит. 
-
-Пометка «вето» — про то, насколько нормально пройти гейт мимо вручную:
-
-- **Мягкие** (объем, дубль) — про качество данных. Провести сигнатуру мимо такого гейта вручную — рядовое осознанное решение оператора (мало данных, но он уверен).
-- **Вето** (доверенные, known-good, решение челленджей) — про безопасность: за ними живые пользователи и легитимный трафик. Пройти мимо вето вручную = сознательно заблокировать невиновных. Технически человека ничто не держит, но это красная черта, а не рядовая операция.
-
-
-| Проверка                      | Блокировать можно, если…                                                                                                                                 | Зачем так                                                                                                                                                  |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **объем**                     | под сигнатурой за все время накопилось достаточно событий (порядка 20)                                                                                   | пары случайных запросов мало, чтобы кого-то блокировать — нужна устойчивая выборка                                                                         |
-| **доверенные** (вето)         | ни один запрос под сигнатурой не был пропущен как доверенный (поисковый бот по rDNS, IP из белого списка, валидная clearance-cookie)                     | не блокировать тех, кого сам каскад уже признал легитимными                                                                                                |
-| **дубль**                     | этой сигнатуры еще нет в блок-листе                                                                                                                      | не добавлять то, что уже заблокировано                                                                                                                     |
-| **обоснованность**            | у блокировки есть основание именно для этого отпечатка: либо маскировка, либо разведка под отпечатком, который не является общим инструментом вроде curl | общий отпечаток инструмента (curl, python) есть и у легитимных клиентов — его блокировать нельзя                                                           |
-| **known-good** (вето)         | fp нет в каталоге настоящих браузеров (`tls_fp_browser_profiles`)                                                                                        | если fp в каталоге — это реальный браузер, под ним живые пользователи; не блокировать ни при какой оценке (см. «Защита от отравления»)                     |
-| **решение челленджей** (вето) | под сигнатурой челленджи почти не решаются                                                                                                               | если челленджи решаются — под отпечатком живые люди; низкая доля решений, наоборот, ускоряет переход к блокировке (см. «Жизненный цикл записи блок-листа») |
-
-
-Каждый гейт — простой детерминированный расчет по событиям сигнатуры за окно анализа (последние 7 дней из Loki). Исключение — гейт «объем»: он смотрит не на окно, а на счетчик за все время (lifetime) из накопителя (7 дней мало, чтобы судить об объеме).  
-
-**объем.** Проверяем, что данных накопилось достаточно для решения.
-
-- Пройден, если под сигнатурой за все время накопилось достаточно событий (счетчик из
-накопителя; порог настраиваемый, по умолчанию порядка 20); меньше — придержать. Это мягкий
-гейт: по паре случайных запросов решение не принимают, а число выбрано так, чтобы реальная
-кампания его легко перешагнула, а единичные пробы — нет.
-
-**доверенные** (вето). Проверяем, не пропускал ли каскад кого-то под этой сигнатурой как
-заведомо легитимного.
-
-1. Пройти по всем событиям сигнатуры и ее IP.
-2. Считается «пропуск как доверенный», если был хоть один: вердикт `allow` по verified-боту
-
-(поисковик, подтвержденный rDNS), по IP из белого списка или по валидной clearance-cookie;
-либо IP сигнатуры есть в белом списке.
-3. Пройден, если ни одного такого пропуска нет; иначе вето — нельзя блокировать тех, кого сам
-каскад уже признал своими.
-
-**дубль.** Пройден, если сигнатуры еще нет в блок-листе; если уже есть — ничего не добавляем
-(не плодим дубли и не трогаем живую запись).
-
-**обоснованность.** Проверяем, есть ли повод блокировать именно этот отпечаток, а не общий
-инструмент.
-
-1. Посчитать по событиям сигнатуры три признака: `маскировка` (браузерный UA на
-
-инструментальном отпечатке), `разведка` (запросы к recon-путям), `общий честный инструмент`
-(отпечаток из словаря инструментов И при этом не маскировка — то есть честный curl/python).
-2. `обоснованность = маскировка ИЛИ (разведка И НЕ общий честный инструмент)`. 3. Пройден, если обоснованность есть; иначе автоблока нет. Отпечаток самого curl/python одинаков у всех его пользователей в мире (мониторинги, CI/CD, легитимные API-клиенты), поэтому заблокировать его значит отрезать всю легитимную автоматизацию. «Бот-онли» тут не страхует: браузерных запросов под таким fp нет вовсе, его доля = 0, гейт спокойно проходит — а блокировать все равно нельзя. Общий инструмент автомат не трогает; это случай для адресного UA/IP, решает человек. (Поэтому маскировка и разведка-на-необщем-отпечатке и нужны: только они дают повод, специфичный именно для этого fp, а не для всех пользователей curl.)
-
-**known-good** (вето). Защищает настоящие браузеры от блокировки — это единственная проверка
-«не живой ли это браузер».
-
-1. Сверить fp сигнатуры с каталогом настоящих браузеров (`tls_fp_browser_profiles`) — белым
-
-списком отпечатков, снятых харвестером с реальных Chrome/Firefox/Edge.
-2. Пройден, если fp в каталоге НЕТ; если есть — вето: это реальный браузер, его не блокируют
-никогда (см. «Защита от отравления»).
-
-Почему этого достаточно и не нужна отдельная проверка «доли живых людей»: отпечаток задается
-TLS-стеком, а не личностью, и блокировка идет по точному fp. Значит «под сигнатурой есть живые
-люди» равно «ее fp — это fp настоящего браузера», то есть ровно совпадение с каталогом. Либо
-fp браузерный (вето, не трогаем), либо нет — и тогда живых людей под ним и не будет, потому
-что у них был бы другой fp.
-
-**решение челленджей** (вето). Смотрим, проходит ли клиент под этой сигнатурой JS-челлендж.
-
-1. Взять счетчики выданных и решенных челленджей по сигнатуре — только с хостов в режиме `active` и с выключенным attack mode (см. примечание ниже).
-2. При достаточном числе выданных посчитать долю решенных.
-3. Пройден, если доля низкая (челленджи почти не решаются — так ведет себя бот). Высокая доля — вето: челленджи проходят, значит под отпечатком живые люди. Низкая доля вдобавок ускоряет переход `наблюдение → блокировка`.
-
-Примечание про attack mode для гейта «решение челленджей». Долю решений слой считает только по событиям с хостов в режиме `active` и с выключенным attack mode. Под атакой (attack mode включен на хосте) эдж выдает challenge всем подряд, в том числе живым людям, — и доля решений перестает быть меткой бота. Такие события в счет не идут.
-
-Важно не путать оценку и гейты. Оценка — это сумма: сигналы складываются, одно добивается другим. Гейты так не работают: они объединяются по «И» — должны выполниться все сразу, и ни один не компенсирует провал другого. Поэтому полное условие блокировки —это конъюнкция: оценка дотянула до HIGH (порог по сумме сигналов) И все гейты пройдены одновременно И сигнатура видна хотя бы один день.
-
-#### Защита от отравления
-
-Петля частично автоматическая, значит ее можно пытаться обмануть. Что этому противостоит:
-
-- **Каталог браузеров не выучивается из трафика.** «Настоящий браузер» слой определяет не по
-тому, как выглядит трафик под сигнатурой, а по каталогу, снятому харвестером с реальных
-браузеров. Поэтому отравить решение, налив «человеческого» трафика под свой fp, нельзя —
-никакой «доли живых» по трафику слой не считает, fp либо в каталоге, либо нет.
-- **Known-good.** Автомат никогда не блокирует fp из каталога настоящих браузеров — настоящий
-Chrome/Firefox под блок не подставить.
-- **Человек в петле(human-in-the-loop).** Высокий порог и ручной мерж PR — последняя линия: ложный блок дорог, решение обратимо и проходит ревью.
-
-Честный предел: бот, который в точности повторяет TLS-рукопожатие реального браузера, совпадет
-с каталогом и уйдет от автоблокировки (его fp — браузерный). Это та же граница, что в «Чем
-слой не является»: продвинутые мимикрирующие боты — не наш случай.
+- [analytics-rules-reference.md](analytics-rules-reference.md) — every scoring, gate and
+  lifecycle rule in "if condition → action" form.
+- [analytics-entities-reference.md](analytics-entities-reference.md) — the entity
+  vocabulary: the score, the gates, the tiers, a catalog entry, the states, the enumerations.
 
 ---
 
-## Автомат
+## The analytics worker
 
-Автомат превращает суточные решения воркера в один черновик PR за прогон. Сам он ничего не
-блокирует — только готовит черновик; финальное «да» дает человек.
+The worker is the layer's main process: once a day it runs on the backend, reads the collected logs and the reference data, and computes the decisions from them.
 
-**Что попадает в PR.** К блокировке автомат двигает кандидата, только если совпало
-все: тир HIGH или выше, сигнатура видна достаточно дней, все гейты пройдены и есть
-обоснованность. Куда именно — зависит от тира: HIGH идет на наблюдение (в блокировку — позже,
-после окна наблюдения), CRITICAL автомат предлагает сразу в блокировку, минуя наблюдение (см.
-«Жизненный цикл записи блок-листа» ниже). Остальное (HIGH/CRITICAL без обоснованности или с
-непройденным гейтом, MEDIUM, LOW) автомат не трогает — оно остается в отчете на усмотрение
-человека. Порог «сколько дней до входа» низкий намеренно: вход — это пока
-только наблюдение, а не блокировка (см. «Жизненный цикл записи блок-листа» ниже), проверять
-устойчивость до входа смысла мало — настоящий полигон это окно наблюдения, а случайные
-однодневки отсекает гейт объема.
+### What it reads as input
 
-- **Никогда не мержит и не открывает не-черновик.** Ревьюит и мержит человек.
-- **Работает в обе стороны.** В одном PR — все созревшее: новые сигнатуры на
-наблюдение, включение блокировки для чисто наблюдавшихся, снятие молчащих.
-- **Один PR за прогон.** Все изменения батчатся в одну ветку — не десятки PR.
-- **Идемпотентен.** Повторный прогон в тот же период не плодит дубли.
-- **Не действует на устаревших данных.** Решения воркера несут метку времени; если
-они устарели (воркер лежит) — автомат не действует.
-- **Чистое состояние при любом исходе.** Прерывание на середине откатывает правки.
+The layer consumes one structured log line per processed request. The minimum log fields it needs:
 
-Тело PR — паспорт по секциям (наблюдение / блокировка / снятие), каждая строка с
-оценкой, тиром, доказательствами и датой ревизии.
+| Field | Why the layer needs it |
+| --- | --- |
+| `tls_fp` | the key to the whole analysis; all aggregation runs by signature |
+| `ip` | the number of unique IPs, the "many IPs" signal, and cross-checking against the trusted list |
+| `ua` | classification: a tool / a disguise / a real browser |
+| `path` | the reconnaissance signal (requests to typical scanner paths) |
+| `verdict` | the cascade's outcome for the request; if even one request under the signature was let through by the cascade as trusted (`allow` — a verified bot / a whitelisted IP / a valid cookie), the signature is not blocked (it feeds the "trusted" gate) |
+| `rule` | which cascade rule fired (attribution) |
+| `staging_match` | which observed entries the request matched |
+| `asn` | the "IP from a datacenter" signal |
+| the timestamp | the observation window, the number of distinct days, persistence over time |
 
-### Жизненный цикл записи блок-листа
+### Reference data sources
 
-Жизненный цикл — это состояния записи блок-листа и правила переходов между ними:
-наблюдение → блокировка → снятие. 
+Besides the log stream the worker relies on reference data. It feeds the score's signals and the gates.
 
-Каждая сигнатура проходит управляемый путь от кандидата в отчете до блокировки и
-обратно. По умолчанию между прогнозом и блокировкой есть фаза наблюдения на живом трафике;
-исключение — тир CRITICAL (точная сигнатурная улика), который автомат предлагает сразу в
-блокировку, минуя наблюдение.
+| Reference data | What it is | What it feeds |
+| --- | --- | --- |
+| the tool dictionary (`tls_fp_catalog`) | hashes of known automation tools and headless stacks (curl/python/go/okhttp; Playwright/Puppeteer/UCD) | the disguise signal, the UA-tool signal, the headless signal (the score), and justification (a gate) |
+| the positive browser catalog (`tls_fp_browser_profiles`) | a whitelist of real browsers: the full fingerprint → `{family, version}` | the known-good gate (a real browser → do not block) and the version mismatch signal |
+| the challenge counters | how many challenges were issued and solved under the signature | the "challenge solving" gate, and acceleration of the move to blocking |
+
+Who populates them. The catalog consists of handshake hashes and cipher counts, and a fingerprint is captured from a real client. That is the fingerprint harvester's job: it automatically drives a known set and lays the result out into two catalogs through a draft PR — real browsers → `tls_fp_browser_profiles`, tools and headless stacks → `tls_fp_catalog`. A human merges it.
+
+Exceptions:
+
+First, clients the harvester cannot drive itself: browsers and tools outside its set (LibreWolf, Tor, mobile browsers). Their fingerprints are captured and added by a separate PR.
+
+Second, a new unfamiliar fingerprint: analytics highlighted a frequent fingerprint in the logs that is in neither catalog and that no known client produced; then a human works out what it is and decides whether to add it. Product's role is to maintain the list of what to harvest, investigate such unfamiliar fingerprints and review the PRs.
+
+### The daily run
+
+The worker does not work in real time: every decision is taken in a single scheduled run once a day. The order is:
+
+1. **Tidying the long-term memory (rotation).** The layer has long-term memory per signature — the state accumulator (with its own section below). It grows over time, so it is tidied before the scoring: what has not been seen for a long time is archived, and one-off noise is discarded. A purely preparatory step.
+2. **Scoring.** The worker reads the last 7 days from Loki and, in a single pass, computes a verdict for every signature at every stage of its lifecycle:
+
+- **new candidates** — the score plus the gates: does it qualify for observation (see "The scoring model");
+- **entries under observation** — it runs the activation gates over their events with `staging_match`:
+  switch blocking on, retire it, or keep observing (see "The lifecycle");
+- **entries in blocking** — have they gone quiet for longer than the deadline (retirement candidates).
+ There are two outputs: (a) **machine artifacts** with a verdict per signature (which the autopilot reads at step 3); (b) **a human-readable report** emailed to whoever is responsible. The worker never touches the catalog itself.
+
+3. **The autopilot.** It reads the fresh artifacts the worker left at step 2 and collects every decision that matured during the day into one draft PR: new signatures to observation; observed ones with a clean confirmation to blocking; silent ones to retirement. A human merges it.
+
+What exactly happens to a signature during a run is a transition in its lifecycle (see "The lifecycle of a blocklist entry" below).
+
+### The scoring model
+
+The decision "should this signature be blocked" consists of two independent parts: the score answers "how much does this look like a bot", the gates answer "may this be blocked".
+
+#### The score — how much it looks like a bot
+
+The score is a sum of signals. It exists only to sort the candidates for blocking. By itself the score blocks nothing.
+
+| Signal | Points | What it means |
+| --- | --- | --- |
+| a disguise (impersonator) | **+3** | the UA claims a browser, but the fingerprint matches an automation tool from our dictionary (curl, python-requests, Go, okhttp) |
+| suspicious ciphers | +1 | the UA presents itself as a browser, but the number of offered ciphers is not from a browser's set |
+| a tool UA | +1 | the UA honestly names an automation tool rather than a browser (curl/python/go/okhttp/bot/scanner) |
+| a datacenter IP | +1 | at least one IP under the signature belongs to a datacenter |
+| many IPs | +1 | the same signature arrives from two or more distinct IPs |
+| persistence | +1 | the signature is not seen for the first day (visible on two or more distinct days) |
+| reconnaissance | +1 | requests to typical scanner paths (`/.env`, `/wp-login`, …) |
+| a headless stack | **+3** | the fingerprint matched a headless entry in the tool dictionary (`tls_fp_catalog`): Playwright, Puppeteer, undetected-chromedriver |
+| a version mismatch | **+2** | the UA names a specific browser version, but the fingerprint's handwriting belongs to a different version or family (checked against the reference browser catalog) |
+| behaviour | +1 | too even a request rhythm, or scanner-like routes (recon/sitemap instead of following links) |
+| a volume spike | +1 | over the window the signature accounts for an anomalously large share of all events, or grew sharply day over day — a stream atypical for a single client |
+
+The tiers by total: CRITICAL ≥8, HIGH 5–7, MEDIUM 3–4, LOW 1–2.
+
+The CRITICAL tier means "confidence from hard evidence". The threshold of 8 sits above the sum of every non-signature signal: heuristics, context and behaviour together give at most 7 (a tool UA OR suspicious ciphers, a datacenter, many IPs, persistence, reconnaissance, behaviour, a volume spike — seven mutually exclusive +1 items). So heuristics alone cannot reach CRITICAL — it needs signature evidence (a disguise +3, headless +3 or a version mismatch +2), that is, a match against reference data rather than an inference from behaviour. CRITICAL changes the entry point into the lifecycle: the autopilot proposes blocking straight away, bypassing observation (see "The lifecycle of a blocklist entry"). A maintenance invariant: keep the CRITICAL threshold strictly above the maximum sum of the non-signature signals — when new light signals are added the threshold must be revisited, otherwise CRITICAL stops guaranteeing hard evidence.
+
+One signal is worth spelling out separately — exactly how a volume spike is computed.
+
+**A volume spike (+1).** Computed over the analysis window (7 days from Loki, broken down by calendar day). For a signature we take:
+
+- `today` — its event count over the last day of the window;
+- `baseline` — the median of its daily event counts over the window's earlier days (a median rather than a mean: a steady multi-day stream does not inflate the base, while a real jump is still visible);
+- `total_today` — the event count of every signature over that same day.
+
+The signal fires if at least one of two rules holds:
+
+1. Dominance: `today / total_today ≥ 6%` AND `today ≥ 50`. The signature holds a noticeable share of the whole day's traffic.
+2. Growth: `baseline > 0` AND `today ≥ 10 × baseline` AND `today ≥ 50`. A previously quiet signature grew tenfold or more within a day.
+
+The daily minimum of 50 events is deliberately present in both rules: it is not the scale of an attack but the lower bound of trust in a share or a multiplier — while there are fewer events in a day, neither the share nor the growth lights the signal (four requests overnight, or a 2→20 jump, are nothing to block on). The rules complement each other: the first catches a new signature that appeared as a large stream at once (it has no daily history of its own, `baseline = 0`, so the second rule does not apply to it); the second catches a previously quiet fingerprint that suddenly took off. The source is windowed Loki data rather than the accumulator's lifetime counter: a spike is about recent dynamics. All three numbers (6%, ×10, 50) are configurable thresholds; the defaults were chosen for a daily volume of a few thousand events and are revisited as traffic grows.
+
+The weight of +1 is deliberate: volume alone does not distinguish a bot from a surge of real people (a release, an ad campaign, hitting the front page), so a spike never blocks by itself — it tops a signature up to HIGH when it already has other markers: a disguise, reconnaissance, a datacenter, many IPs. Protection of real people is not weakened: known-good and trusted still veto a block, and justification requires a reason specific to that fingerprint.
+
+#### The gates — is it safe to block
+
+A gate looks at the signature as a bucket of traffic and decides "will we hit somebody we must not", whether the traffic under the signature really is bot-only, with no real people in it. A candidate may be a bot with total certainty — but if there are real people in the same bucket, it cannot be blocked.
+
+Each gate is a checkpoint for "may this signature be blocked". If the condition in the column holds, the gate passes; if even one fails, the autopilot will not propose a block, however high the score. Gates do not add up and do not compensate for one another. In short: **the condition for blocking is that every gate passes simultaneously, plus a high score.**
+
+The "veto" label is about how acceptable it is to bypass a gate by hand:
+
+- **Soft** (volume, duplicate) — about data quality. Carrying a signature past such a gate by hand is a routine, deliberate operator decision (little data, but they are confident).
+- **Veto** (trusted, known-good, challenge solving) — about safety: real users and legitimate traffic sit behind them. Bypassing a veto by hand means knowingly blocking the innocent. Technically nothing stops a human, but it is a red line, not a routine operation.
+
+| Check | Blocking is permitted if… | Why it works that way |
+| --- | --- | --- |
+| **volume** | enough events have accumulated under the signature over all time (on the order of 20) | a couple of random requests is too little to block anyone on — a stable sample is needed |
+| **trusted** (veto) | not a single request under the signature was let through as trusted (a search bot by rDNS, a whitelisted IP, a valid clearance cookie) | do not block those the cascade itself has already recognised as legitimate |
+| **duplicate** | the signature is not in the blocklist yet | do not add what is already blocked |
+| **justification** | there is a reason to block this specific fingerprint: either a disguise, or reconnaissance under a fingerprint that is not a shared tool like curl | a shared tool fingerprint (curl, python) is also used by legitimate clients — it must not be blocked |
+| **known-good** (veto) | the fingerprint is not in the catalog of real browsers (`tls_fp_browser_profiles`) | if it is in the catalog it is a real browser with real users behind it; never block it, at any score (see "Protection from poisoning") |
+| **challenge solving** (veto) | challenges are almost never solved under the signature | if challenges are being solved there are real people behind the fingerprint; a low solve share, conversely, accelerates the move to blocking (see "The lifecycle of a blocklist entry") |
+
+Every gate is a simple deterministic computation over the signature's events in the analysis window (the last 7 days from Loki). The exception is the "volume" gate: it looks not at the window but at the all-time (lifetime) counter from the accumulator (7 days is too little to judge volume).
+
+**volume.** We check that enough data has accumulated to decide.
+
+- It passes if enough events have accumulated under the signature over all time (the counter from the accumulator; the threshold is configurable, by default on the order of 20); fewer means holding back. This is a soft gate: no decision is taken on a couple of random requests, and the number is chosen so that a real campaign steps over it easily while isolated probes do not.
+
+**trusted** (veto). We check whether the cascade let anyone through under this signature as unambiguously legitimate.
+
+1. Walk every event of the signature and its IPs.
+2. It counts as "let through as trusted" if there was at least one: an `allow` verdict for a verified bot (a search engine confirmed by rDNS), for a whitelisted IP or for a valid clearance cookie; or the signature's IP is in the whitelist.
+3. It passes if there is no such pass; otherwise it is a veto — you must not block those the cascade itself has already recognised as its own.
+
+**duplicate.** It passes if the signature is not in the blocklist yet; if it already is, we add nothing (we neither create duplicates nor touch a live entry).
+
+**justification.** We check whether there is a reason to block this particular fingerprint rather than a shared tool.
+
+1. Compute three markers over the signature's events: `disguise` (a browser UA on a tool fingerprint), `reconnaissance` (requests to recon paths), and `a shared honest tool` (a fingerprint from the tool dictionary AND not a disguise — that is, an honest curl or python).
+2. `justification = disguise OR (reconnaissance AND NOT a shared honest tool)`.
+3. It passes if justification exists; otherwise there is no automatic block. The fingerprint of curl or python itself is identical for every user of it in the world (monitoring, CI/CD, legitimate API clients), so blocking it means cutting off all legitimate automation. "Bot-only" does not save you here: there are no browser requests under such a fingerprint at all, its share is 0 and the gate passes easily — yet it still must not be blocked. The autopilot never touches a shared tool; that is a case for a targeted UA or IP rule, decided by a human. (Which is exactly why the disguise and reconnaissance-on-a-non-shared-fingerprint markers exist: only they give a reason specific to that fingerprint rather than to every curl user.)
+
+**known-good** (veto). It protects real browsers from being blocked — the layer's only "is this a live browser" check.
+
+1. Compare the signature's fingerprint against the catalog of real browsers (`tls_fp_browser_profiles`) — the whitelist of fingerprints the harvester captured from real Chrome/Firefox/Edge.
+2. It passes if the fingerprint is NOT in the catalog; if it is, that is a veto: this is a real browser and it is never blocked (see "Protection from poisoning").
+
+Why that is enough and no separate "share of real people" check is needed: the fingerprint is set by the TLS stack rather than by a person, and blocking goes by the exact fingerprint. So "there are real people under this signature" is equivalent to "its fingerprint is the fingerprint of a real browser", which is exactly a catalog match. Either the fingerprint is a browser one (a veto, we leave it alone) or it is not — and then there will be no real people under it, because they would have a different fingerprint.
+
+**challenge solving** (veto). We look at whether a client under this signature passes the JS challenge.
+
+1. Take the issued and solved challenge counters for the signature — only from hosts in `active` mode with attack mode off (see the note below).
+2. With enough issued, compute the solved share.
+3. It passes if the share is low (challenges are almost never solved — which is how a bot behaves). A high share is a veto: challenges are being passed, so there are real people behind the fingerprint. A low share additionally accelerates the `observation → blocking` transition.
+
+A note on attack mode for the "challenge solving" gate. The layer computes the solved share only from events on hosts in `active` mode with attack mode off. Under attack (attack mode on for a host) the edge issues challenges to everyone, real people included — and the solved share stops being a bot marker. Such events do not count.
+
+It is important not to confuse the score with the gates. The score is a sum: the signals add up and one tops up another. Gates do not work that way: they combine with AND — all of them must hold at once, and none compensates for another's failure. So the full condition for blocking is a conjunction: the score reached HIGH (the threshold on the sum of signals) AND every gate passed simultaneously AND the signature has been seen for at least one day.
+
+#### Protection from poisoning
+
+The loop is partly automated, which means someone may try to fool it. What stands against that:
+
+- **The browser catalog is not learned from traffic.** The layer determines "a real browser" not from what the traffic under a signature looks like but from the catalog captured by the harvester from real browsers. So the decision cannot be poisoned by pouring "human" traffic under your own fingerprint — the layer computes no "share of real people" from traffic at all; the fingerprint is either in the catalog or it is not.
+- **Known-good.** The autopilot never blocks a fingerprint from the catalog of real browsers — a genuine Chrome or Firefox cannot be framed.
+- **A human in the loop.** A high threshold and a manual PR merge are the last line: a false block is expensive, the decision is reversible and it goes through review.
+
+The honest limit: a bot that reproduces a real browser's TLS handshake exactly will match the catalog and escape automatic blocking (its fingerprint is a browser one). That is the same boundary as in "What this layer is not": advanced mimicking bots are not our case.
+
+---
+
+## The autopilot
+
+The autopilot turns the worker's daily decisions into one draft PR per run. It blocks nothing itself — it only prepares the draft; the final "yes" is given by a human.
+
+**What goes into the PR.** The autopilot moves a candidate towards blocking only when everything lines up: the tier is HIGH or above, the signature has been seen for enough days, every gate passed and justification exists. Where exactly depends on the tier: HIGH goes to observation (and to blocking later, after the observation window), while CRITICAL is proposed straight to blocking, bypassing observation (see "The lifecycle of a blocklist entry" below). Everything else (HIGH/CRITICAL without justification or with a failed gate, MEDIUM, LOW) the autopilot leaves alone — it stays in the report for a human to judge. The "how many days before entry" threshold is deliberately low: entry is still only observation rather than blocking (see "The lifecycle of a blocklist entry" below), so checking persistence before entry buys little — the real proving ground is the observation window, and the volume gate cuts one-day accidents.
+
+- **It never merges and never opens a non-draft.** A human reviews and merges.
+- **It works in both directions.** One PR carries everything that matured: new signatures to observation, blocking enabled for cleanly observed ones, and retirement for the silent.
+- **One PR per run.** Every change is batched into one branch — not dozens of PRs.
+- **It is idempotent.** A repeat run in the same period creates no duplicates.
+- **It does not act on stale data.** The worker's decisions carry a timestamp; if they are stale (the worker is down), the autopilot does nothing.
+- **A clean state whatever happens.** An interruption halfway rolls the edits back.
+
+The PR body is a passport organised into sections (observation / blocking / retirement), each line carrying the score, the tier, the evidence and the review-by date.
+
+### The lifecycle of a blocklist entry
+
+The lifecycle is the set of states a blocklist entry can be in and the rules for moving between them: observation → blocking → retirement.
+
+Every signature travels a managed path from a candidate in the report to blocking and back. By default there is an observation phase on live traffic between the prediction and blocking; the exception is the CRITICAL tier (hard signature evidence), which the autopilot proposes straight to blocking, bypassing observation.
 
 ```
-   кандидат в отчете
+   a candidate in the report
         │
-        ├─ HIGH: прогноз (проверки + обоснованность) ──► наблюдение
-        │                                                   │ набл. ≥окна, ноль ложняков, ≥минимума совпадений
-        │                                                   │ задел живой браузер → флаг на снятие
+        ├─ HIGH: a prediction (the gates + justification) ──► observation
+        │                                                   │ observed ≥ the window, zero false positives, ≥ the minimum matches
+        │                                                   │ it touched a real browser → flagged for retirement
         │                                                   ▼
-        └─ CRITICAL: сигнатурная улика (+ проверки) ──────► блокировка
-                                                            │ молчит > срока
-                          авто-снятие: блокировка → наблюдение → удаление
+        └─ CRITICAL: signature evidence (+ the gates) ─────► blocking
+                                                            │ silent > the deadline
+                          auto-retirement: blocking → observation → removal
 ```
 
-#### Состояния записи
+#### The states of an entry
 
-Каталог блок-листа хранит по каждой сигнатуре статус: наблюдение или блокировка.
-Над каждой записью — комментарий-паспорт (причина, оценка, доказательства, дата ревизии).
+The blocklist catalog stores a status per signature: observation or blocking. Above each entry sits a passport comment (the reason, the score, the evidence, the review-by date).
 
+| Status on the edge | The cascade's behaviour |
+| --- | --- |
+| observation | the edge matches the signature and records the match in the log, but **does not block** |
+| blocking | the edge blocks (403) under the `tls_fp_blocklist` rule |
+| no entry | the cascade does not know the signature |
 
-| Статус на эдже | Поведение каскада                                                           |
-| -------------- | --------------------------------------------------------------------------- |
-| наблюдение     | эдж сопоставляет сигнатуру, отмечает совпадение в логе, но **не блокирует** |
-| блокировка     | эдж блокирует (403) по правилу `tls_fp_blocklist`                           |
-| нет записи     | каскад сигнатуру не знает                                                   |
+#### Candidate → observation
 
+The trigger is the scoring model's verdict that the signature is fit for automatic blocking. That is still a prediction: the conclusion was reached offline over past logs and has not been confirmed on live traffic. The autopilot opens a PR with the "observation" status. After the merge the entry is delivered to the edge and starts matching, without blocking. The point of the phase is to obtain ground truth about false positives before blocking is switched on.
 
-#### Кандидат → наблюдение
+#### Candidate → blocking (the CRITICAL tier)
 
-Триггер — вердикт скоринг-модели, что сигнатура годна для автоблокировки. Это пока прогноз: вывод сделан офлайн, по прошлым логам, и на живом трафике еще не подтвержден. Автомат открывает PR со статусом «наблюдение». После мержа запись доставляется на эдж и начинает сопоставляться, но не блокирует. Смысл фазы — получить наземную правду о ложных срабатываниях до того, как включится блокировка.
+For the CRITICAL tier the observation phase is skipped: the autopilot proposes a PR with the "blocking" status straight away. The grounds: CRITICAL is unreachable without signature evidence (a disguise or headless — an exact fingerprint match against the tool dictionary, or a version mismatch against the browser catalog). That is not an inference from behaviour but a fact from reference data: there are no real people under the fingerprint of a known tool, and observation would only confirm what the dictionary already asserts — at the cost of a day or two of delay, which is expensive against an active farm.
 
-#### Кандидат → блокировка (тир CRITICAL)
+Every gate still applies as usual (known-good, trusted, justification, duplicate, volume) — CRITICAL skips observation only, not the checks. And the PR is still a draft: a human merges it, which for direct blocking is the only buffer in place of observation. The risk of a bad entry in the tool dictionary is closed the same way as for the browser catalog: the dictionary is populated by the harvester through a manually merged draft PR and cannot be poisoned by traffic (see "Protection from poisoning").
 
-Для тира CRITICAL фаза наблюдения пропускается: автомат предлагает PR сразу со статусом
-«блокировка». Основание — CRITICAL недостижим без сигнатурной улики (маскировка или headless —
-точное совпадение fp со словарем инструментов, либо расхождение версий с каталогом браузеров).
-Это не вывод из поведения, а факт справочника: под отпечатком известного инструмента живых
-людей нет, и наблюдение лишь подтвердило бы то, что словарь уже утверждает — ценой суток-двух
-задержки, что для активной фермы дорого.
+#### Observation → blocking
 
-Все гейты при этом применяются как обычно (known-good, доверенные, обоснованность, дубль,
-объем) — CRITICAL пропускает только наблюдение, не проверки. И PR по-прежнему черновик: мержит
-человек, для прямой блокировки это единственный буфер вместо наблюдения. Риск кривой записи в
-словаре инструментов закрыт тем же, что и для каталога браузеров: словарь наполняет харвестер
-через ручной мерж draft-PR, трафиком его не отравить (см. «Защита от отравления»).
+Observation is automatic, not a manual pause. It works in two beats:
 
-#### Наблюдение → блокировка
+- **The edge, continuously.** Every request whose fingerprint matched an observed entry is marked in the log as `staging_match` without being blocked — ground truth accumulates with no risk of touching anyone.
+- **The worker, on every daily run.** It takes the events with `staging_match` for the entry over the observation window and runs the activation gates (below). From the results it issues a verdict, and the autopilot puts it into the daily PR.
 
-Наблюдение автоматическое, не ручная пауза. Работает на два такта:
+Here blocking is switched on by confirmation from live traffic rather than by a prediction. Over the events where the signature matched in observation mode, the following is checked across the observation window:
 
-- **Эдж, непрерывно.** Каждый запрос, чей fp совпал с наблюдаемой записью, эдж помечает в
-логе как `staging_match`, но не блокирует — копится наземная правда без риска кого-то задеть.
-- **Воркер, каждый суточный прогон.** Берет события с `staging_match` по записи за окно
-наблюдения и прогоняет гейты активации (ниже). По итогам выдает вердикт, а автомат кладет его
-в дневной PR.
+| Check | Condition | Why |
+| --- | --- | --- |
+| the window | it has been in observation for at least the minimum number of hours | to catch traffic across different times of day |
+| volume | at least the minimum number of matches | otherwise there is nothing to judge |
+| zero false positives (veto) | during the observation the fingerprint never turned up in the catalog of real browsers | if it did (the harvester confirmed it as a browser), do not activate — retire it |
+| trusted (again) | there are no trusted or verified entries among the matches | a re-check, this time against real traffic |
 
-Здесь блокировку включает уже не прогноз, а подтверждение живым трафиком. По событиям,
-где сигнатура совпала в режиме наблюдения, за окно наблюдения проверяется:
+The outcomes of observation: switch blocking on (all clear), a retirement candidate (observation caught legitimate traffic — we do not propose blocking), or keep observing (too few matches or too little time).
 
+#### Automatic retirement on inactivity
 
-| Проверка              | Условие                                                                 | Зачем                                                                         |
-| --------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| окно                  | в наблюдении не меньше минимального числа часов                         | застать разный суточный трафик                                                |
-| объем                 | не меньше минимума совпадений                                           | иначе судить не о чем                                                         |
-| ноль ложняков (вето)  | за время наблюдения fp так и не оказался в каталоге настоящих браузеров | если оказался (харвестер подтвердил его как браузер) — не активировать, снять |
-| доверенные (повторно) | среди совпадений нет доверенных и verified                              | перепроверка уже на реальном трафике                                          |
+No human tracks which signature stopped being a threat, so the autopilot does it. "Last seen" comes from the state accumulator (which outlives the log store's horizon). If a signature is silent for longer than the set deadline, it becomes a retirement candidate. Retirement is two-step: blocking → observation (if still silent) → removal (if silent again). The autopilot leaves entries with no observation history alone, for a human.
 
+The deadline here is not an expiry of the entry on the edge (the catalog has none) but the inactivity threshold for the automatic retirement detector.
 
-Исходы наблюдения: включить блокировку (все чисто), кандидат на снятие (наблюдение
-поймало легитимный трафик — блокировку не предлагаем), наблюдать дальше (мало
-совпадений или времени).
+#### Manual retirement
 
-#### Авто-снятие по неактивности
-
-Человек не уследит, какая сигнатура перестала быть угрозой, поэтому это делает
-автомат. «Последний раз виден» берется из накопителя состояния (он живет дольше,
-чем горизонт лог-хранилища). Если сигнатура молчит дольше установленного срока —
-она кандидат на снятие. Снятие двухступенчатое: блокировка → наблюдение (если
-молчит) → удаление (если молчит и дальше). Записи без истории наблюдения автомат не
-трогает — оставляет человеку.
-
-Срок здесь — это не протухание записи на эдже (его в каталоге нет), а порог
-неактивности для авто-детектора снятия.
-
-#### Ручное снятие
-
-Любой переход откатывается адресно (снять одну сигнатуру или вернуть ее в
-наблюдение) либо целиком (revert PR). Все в рамках SLA доставки каталога.
+Any transition can be rolled back specifically (retire one signature or return it to observation) or wholesale (revert the PR). All within the catalog delivery SLA.
 
 ---
 
-## Харвестер отпечатков
+## The fingerprint harvester
 
-**Что это.** Фоновое задание (CI-job по расписанию), которое снимает отпечатки с реальных
-клиентов и раскладывает их по справочным каталогам. Хеши рукопожатий с клавиатуры не
-ввести — единственный надежный источник отпечатка это сам клиент, и харвестер автоматизирует
-его прогон.
+**What it is.** A background job (a scheduled CI job) that captures fingerprints from real clients and lays them out into the reference catalogs. Handshake hashes cannot be typed in by hand — the only reliable source of a fingerprint is the client itself, and the harvester automates driving it.
 
-**Что делает.**
+**What it does.**
 
-1. Запускает известный набор реальных клиентов — Playwright со stable Chrome/Firefox/Edge
+1. It runs a known set of real clients — Playwright with stable Chrome/Firefox/Edge (the browsers) and automation tools (curl, python-requests, Go, okhttp, plus the headless ones — Playwright/Puppeteer/UCD).
+2. With each of them it opens the edge's service endpoint `/__fp` (which returns a ready fingerprint, bypassing the cascade) and captures the full fingerprint.
+3. It opens a draft PR. A human merges it.
 
-(браузеры) и инструменты автоматизации (curl, python-requests, Go, okhttp, а также headless —
-Playwright/Puppeteer/UCD).
-2. Каждым из них открывает служебный эндпоинт эджа `/__fp` (он возвращает готовый fp, минуя
-каскад) и снимает полный отпечаток.
-3. Открывает draft-PR. Мержит человек.
+**What comes out.** Two catalogs:
 
-**Что на выходе.** Два каталога:
+- **`tls_fp_browser_profiles`** — the whitelist of known-good: the fingerprints of real browsers. The known-good gate and the version mismatch signal read it.
+- **`tls_fp_catalog`** — the tool dictionary: the fingerprints of automation and headless stacks. The disguise, tool-UA and justification checks read it.
 
-- `**tls_fp_browser_profiles`** — белый список «известно-хороших»: отпечатки реальных
-браузеров. Его читают гейт known-good и сигнал расхождения версий.
-- `**tls_fp_catalog`** — словарь инструментов: отпечатки автоматизации и headless. Его читают
-маскировка, UA-инструмент и обоснованность.
+**How much to drive.** The set is finite and small: Chromium forks (Brave, Vivaldi, Opera, Edge) on one build produce the same fingerprint, so among browsers Chrome, Firefox and Edge-if-it-differs are enough; the tools are a known list. What the harvester cannot provide (LibreWolf, Tor, mobile, exotic tools) is added by hand in a separate PR.
 
-**Сколько гонять.** Набор конечный и небольшой: Chromium-форки (Brave, Vivaldi, Opera, Edge)
-на одном build дают один и тот же отпечаток, так что из браузеров хватает Chrome, Firefox и
-Edge-если-отличается; инструменты — это известный список. Чего харвестер не дает (LibreWolf,
-Tor, мобильные, экзотические инструменты), дописывают вручную отдельным PR.
+**How often.** Rarely — a TLS stack changes infrequently (Chrome's comes from BoringSSL), so the harvester runs roughly once every few major versions, not monthly.
 
-**Как часто.** Редко — TLS-стек меняется нечасто (у Chrome его задает BoringSSL), поэтому
-харвестер гоняется порядка раза в несколько мажорных версий, не ежемесячно.
-
-**Чего харвестер не закрывает.** Новый незнакомый отпечаток из логов, который не дал ни один  
-прогнанный клиент, харвестер по определению не атрибутирует — это ручное расследование  
-(см. «Справочники-источники»).
+**What the harvester does not cover.** A new unfamiliar fingerprint from the logs that none of the driven clients produced cannot be attributed by the harvester by definition — that is a manual investigation (see "Reference data sources").
 
 ---
 
-## Лог-хранилище (Loki)
+## The log store (Loki)
 
-Горячее хранилище слоя — Loki: сюда централизованно стекаются логи со всех эджей. Это
-рабочий материал скоринга — по нему воркер строит картину по каждой сигнатуре здесь и
-сейчас.
+The layer's hot storage is Loki: the logs from every edge flow into it centrally. This is the scoring's working material — the worker builds its per-signature picture here and now from it.
 
-Окно хранения короткое: 7 дней (retention), дальше запись автоматически вычищается —
-отдельную запись недельной давности в Loki уже не найти. Решениям, которым нужна память
-дольше (снятие по 14-дневной неактивности, накопленный за все время объем событий),
-этого окна мало — они опираются на холодный накопитель состояния (см. «Накопитель
-состояния»).
+The retention window is short: 7 days, after which a record is cleaned up automatically —
+a week-old individual record can no longer be found in Loki. Decisions that need a longer memory (retirement after 14 days of inactivity, the all-time accumulated event volume) are not served by that window — they rely on the cold state accumulator (see "The state accumulator").
 
-Как логи туда попадают: на каждом эдже агент-сборщик (promtail) забирает строки
-`BAC_LOG` и пушит их в центральный Loki на backend (через балансировщик, по пути
-записи). Наружу Loki не опубликован — на чтение он доступен только воркеру изнутри сети.
-(Конкретные адреса/порты и конфиг promtail — в инфраструктурном runbook, не здесь.)
+How the logs get there: on every edge a collector agent (promtail) picks up the `BAC_LOG` lines and pushes them to the central Loki on the backend (through the load balancer, along the write path). Loki is not published externally — for reads it is reachable only by the worker from inside the network. (The specific addresses, ports and the promtail config live in the infrastructure runbook, not here.)
 
 ---
 
-## Накопитель состояния
+## The state accumulator
 
-Loki помнит логи только 7 дней. Накопитель — это JSON-файлы состояния
-(`state/seen-fps.json` и кеш по IP), которые хранят ровно то, что нужно поверх этого
-горизонта: накопленный объем событий (для проверки объема) и «последний раз виден»
-(для снятия по неактивности, чей срок — 14 дней — больше 7-дневного окна Loki).
-Ключ — сигнатура.
+Loki remembers logs for 7 days only. The accumulator is a set of JSON state files (`state/seen-fps.json` plus an IP cache) holding exactly what is needed beyond that horizon: the accumulated event volume (for the volume gate) and "last seen" (for retirement on inactivity, whose deadline of 14 days exceeds Loki's 7-day window). The key is the signature.
 
-**Ротация.** Накопитель растет, поэтому его чистят: старые записи архивируются,
-малозначимые отбрасываются, при повторном появлении сигнатуры — восстанавливаются
-по необходимости. Исключение: сигнатуры, которые сейчас в каталоге блок-листа, из
-ротации исключены. Иначе молчащая заблокированная запись выпала бы из проверки
-авто-снятия (она смотрит только в активный накопитель), и снятие по неактивности
-перестало бы работать именно для тех записей, ради которых и существует.
+**Rotation.** The accumulator grows, so it is cleaned: old records are archived, insignificant ones are discarded, and when a signature reappears they are restored as needed. The exception: signatures currently in the blocklist catalog are excluded from rotation. Otherwise a silent blocked entry would drop out of the automatic retirement check (which only looks at the live accumulator), and retirement on inactivity would stop working for precisely the entries it exists for.
 
 ---
 
-## Доставка и SLA
+## Delivery and SLA
 
-Мерж PR → каталог раздается на эдж в фоне → эдж подхватывает. Эдж работает на
-последней доставленной копии, запрос клиента никогда не ждет доставку.
+The PR is merged → the catalog is distributed to the edge in the background → the edge picks it up. The edge works from the last copy delivered, and a client's request never waits for delivery.
 
-
-| Метрика                    | Значение  | Что включает                              |
-| -------------------------- | --------- | ----------------------------------------- |
-| отчет → блокировка в проде | **≤4ч**   | наблюдение + ревью + включение + доставка |
-| мерж → каталог на эдже     | ≤15 мин   | доставка каталога                         |
-| минимальное наблюдение     | ≥48ч      | окно подтверждения перед блокировкой      |
-| срок авто-снятия           | ~2 недели | порог неактивности                        |
-
+| Metric | Value | What it covers |
+| --- | --- | --- |
+| report → blocking in production | **≤4 h** | observation + review + switching on + delivery |
+| merge → the catalog on the edge | ≤15 min | catalog delivery |
+| minimum observation | ≥48 h | the confirmation window before blocking |
+| the automatic retirement deadline | ~2 weeks | the inactivity threshold |
 
 ---
 
-## Наблюдаемость и аудит
+## Observability and audit
 
-- **Ежедневный отчет** — ранжированные кандидаты HIGH/MEDIUM/LOW с цепочкой
-доказательств, отправляется ответственному.
-- **Счетчик совпадений в наблюдении** — сколько раз наблюдаемая запись совпала, не
-блокируя. Наземная правда для перехода к блокировке.
-- **Паспорт записи** — в PR и в комментарии над записью каталога: действие, причина,
-оценка и тир, цепочка доказательств, пройденные проверки,
-дата ревизии, план жизненного цикла. По любой заблокированной записи видно, почему
-и на каком основании она там.
+- **The daily report** — ranked HIGH/MEDIUM/LOW candidates with their evidence chain, sent to whoever is responsible.
+- **The observation match counter** — how many times an observed entry matched without blocking. The ground truth for moving to blocking.
+- **The entry's passport** — in the PR and in the comment above the catalog entry: the action, the reason, the score and tier, the evidence chain, the gates passed, the review-by date and the lifecycle plan. For any blocked entry it is visible why and on what grounds it is there.
 
 ---
 
-### Чем слой не является
+### What this layer is not
 
-- **Не горячий путь.** Слой никогда не вызывается при обработке запроса; его
-недоступность не влияет на скорость, доступность и решения каскада — эдж работает на
-последней доставленной копии каталога.
-- **Не блокировщик.** Слой сам трафик не блокирует: он редактирует каталог, блокирует —
-каскад по доставленному каталогу.
-- **Не автономен.** Блокировку включает человек: автомат готовит черновик PR, мерж
-ручной; прямого пути «аналитика → блокировка» без человека нет.
-- **Не машинное обучение.** Решения детерминированные, по объяснимым сигналам, с жесткими
-проверками; каждое решение разворачивается в человекочитаемое объяснение.
+- **Not the hot path.** The layer is never called while a request is processed; its unavailability affects neither the speed, nor the availability, nor the decisions of the cascade — the edge works from the last delivered copy of the catalog.
+- **Not a blocker.** The layer blocks no traffic itself: it edits the catalog, and the cascade blocks according to the delivered catalog.
+- **Not autonomous.** A human switches blocking on: the autopilot prepares a draft PR and the merge is manual; there is no direct "analytics → blocking" path without a human.
+- **Not machine learning.** The decisions are deterministic, based on explainable signals with hard gates; every decision unfolds into a human-readable explanation.
 
-### Гарантии
+### Guarantees
 
-- **Все обратимо.** Любой переход откатывается адресно или целиком, в рамках SLA
-доставки.
-- **Блокировка по выводу — только после наблюдения.** Если бот-ность выведена из
-поведения/контекста (тир HIGH), между прогнозом и блокировкой всегда есть фаза наблюдения на
-живом трафике. Прямая блокировка без наблюдения возможна только при точной сигнатурной улике
-(тир CRITICAL — совпадение fp со словарем инструментов), где наблюдать нечего.
-- **Чего слой не делает намеренно:** не блокирует общие отпечатки инструментов (это
-адресная работа по UA/IP, решает человек); не вводит протухание записей на эдже;
-не снимает записи без истории наблюдения.
+- **Everything is reversible.** Any transition can be rolled back specifically or wholesale, within the delivery SLA.
+- **Blocking from inference happens only after observation.** If bot-ness was inferred from behaviour or context (the HIGH tier), there is always an observation phase on live traffic between the prediction and blocking. Direct blocking with no observation is possible only with hard signature evidence (the CRITICAL tier — a fingerprint match against the tool dictionary), where there is nothing to observe.
+- **What the layer deliberately does not do:** it does not block shared tool fingerprints (that is targeted UA/IP work, decided by a human); it introduces no expiry of entries on the edge; and it does not retire entries with no observation history.
 
 ---
 
-## Зоны ответственности
+## Areas of responsibility
 
-
-| Кто                      | Что делает                                                                                            |
-| ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| **Аналитический воркер** | читает поток вердиктов, считает оценку и проверки, пишет решения, шлет отчет                          |
-| **Автомат**              | готовит один черновик PR за прогон в обе стороны; никогда не мержит                                   |
-| **Оператор (человек)**   | ревьюит и мержит PR; адресно ставит и снимает записи; решает спорные случаи обоснованности            |
-| **Каскад (эдж)**         | исполняет доставленный каталог; пишет поток вердиктов; сопоставляет наблюдаемые записи без блокировки |
-
-
+| Who | What they do |
+| --- | --- |
+| **The analytics worker** | reads the verdict stream, computes the score and the gates, writes the decisions, sends the report |
+| **The autopilot** | prepares one draft PR per run, in both directions; it never merges |
+| **The operator (a human)** | reviews and merges the PR; adds and retires entries specifically; decides contentious justification cases |
+| **The cascade (the edge)** | enforces the delivered catalog; writes the verdict stream; matches observed entries without blocking |
