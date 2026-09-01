@@ -1,42 +1,42 @@
-# API и Account Protection — шаблоны конфигов
+# API and account protection — config templates
 
-Иллюстративные шаблоны policy-полей, профилей и каталогов слоя (обе оси). Контракт
-поведения — [api-spec.md](api-spec.md); правила — [api-rules-reference.md](api-rules-reference.md);
-словарь — [api-entities-reference.md](api-entities-reference.md).
+Illustrative templates of the layer's policy fields, profiles and catalogs (both axes). The behaviour
+contract is [api-spec.md](api-spec.md); the rules are [api-rules-reference.md](api-rules-reference.md);
+the vocabulary is [api-entities-reference.md](api-entities-reference.md).
 
-Формат — YAML с комментариями для читаемости. Главное — структура и семантика полей,
-не точный синтаксис. Слой встраивается в существующую per-host политику и в
-rate-limit-движок; декларация путей расширяет матчинг API-путей; схемы и
-disposable-email доставляются как slow-каталоги (PR-only).
+The format is YAML with comments for readability. What matters is the structure and the semantics of the fields,
+not the exact syntax. The layer plugs into the existing per-host policy and into the
+rate-limit engine; the path declaration extends API path matching; the schemas and
+disposable-email list are delivered as slow catalogs (PR-only).
 
-> PII-инвариант. Username и токен/ключ используются как ключ и пишутся в лог только
-> хешированными (HMAC). Пароль не логируется, не хранится, не инспектируется — в
-> конфигах его нет и быть не может.
-
----
-
-## Что добавляется к политике хоста
-
-Слой расширяет запись `policy[host]` группами полей: декларация эндпоинтов и
-per-endpoint contract, профили по идентичности, failed-auth feedback, resource limits,
-JWT/mTLS-конфиг, transport-флаги, disposable-email. Все mode-gated: при `enforce: false`
-все считается и логируется, но физически не исполняется.
+> The PII invariant. The username and the token or key are used as keys and written to the log only
+> in hashed form (HMAC). The password is never logged, stored or inspected — it does not and cannot
+> appear in the configs.
 
 ---
 
-## 1. Декларация эндпоинтов + per-endpoint contract
+## What is added to a host's policy
+
+The layer extends the `policy[host]` entry with groups of fields: the endpoint declaration and
+the per-endpoint contract, the identity profiles, failed-auth feedback, resource limits,
+the JWT/mTLS config, the transport flags and disposable email. All of it is mode-gated: under `enforce: false`
+everything is counted and logged but never physically enforced.
+
+---
+
+## 1. The endpoint declaration plus the per-endpoint contract
 
 ```yaml
 example.com:
-  # ... базовые поля policy (mode/strictness/origin_ip/...) ...
+  # ... the base policy fields (mode/strictness/origin_ip/...) ...
 
-  # Декларация путей (фундамент). Glob, как rate_rules.
+  # The path declaration (a foundation). Globs, as in rate_rules.
   endpoints:
     login:    [ /login, /api/v1/auth/login, /signin* ]
     register: [ /register, /signup* ]
     api:      [ /api/*, /graphql ]
 
-  # Per-endpoint contract (позитивная модель): что разрешено на пути.
+  # The per-endpoint contract (the positive model): what is permitted on a path.
   contract:
     - path: /api/v1/orders
       allowed_methods: [ GET, POST ]
@@ -46,55 +46,55 @@ example.com:
       allowed_methods: [ POST ]
       allowed_content_types: [ application/json, application/x-www-form-urlencoded ]
 
-  enforce: false   # false = наблюдение (shadow), true = активное исполнение
+  enforce: false   # false = observation (shadow), true = active enforcement
 ```
 
-| Поле | Тип | Что задает |
+| Field | Type | What it sets |
 | --- | --- | --- |
-| `endpoints.login/register/api` | array of glob | классы путей; стадии идентичности и контракта работают только здесь |
-| `contract[].allowed_methods` | array | разрешенные методы эндпоинта; прочее → reject (403) |
-| `contract[].allowed_content_types` | array | разрешенные content-type тела; прочее → reject (415/422) |
-| `contract[].required_params` | array | обязательные параметры; отсутствие → reject (422) |
-| `enforce` | boolean | mode-gate слоя: наблюдение vs исполнение (дефолт `false`) |
+| `endpoints.login/register/api` | array of glob | The path classes; the identity and contract stages run only here |
+| `contract[].allowed_methods` | array | The methods permitted at an endpoint; everything else is rejected (403) |
+| `contract[].allowed_content_types` | array | The content types permitted for the body; everything else is rejected (415/422) |
+| `contract[].required_params` | array | The required parameters; their absence leads to a reject (422) |
+| `enforce` | boolean | The layer's mode gate: observation versus enforcement (default `false`) |
 
-Чтение тела включается только для классов `login`/`register` (где нужен username) и
-для эндпоинтов со схемой; для upload/бинарных — bypass. API-ключ/токен берутся из
-заголовков/query — тело для `api`-класса не требуется.
+Reading the body is enabled only for the `login`/`register` classes (where the username is needed) and
+for endpoints with a schema; upload and binary endpoints are bypassed. The API key and token come from
+headers or the query — the body is not needed for the `api` class.
 
-## 2. Профили по идентичности
+## 2. Identity profiles
 
-GCRA-профили поверх rate-limit-движка; ключ — идентичность, не сетевой параметр.
+GCRA profiles on top of the rate-limit engine; the key is identity, not a network parameter.
 
 ```yaml
 example.com:
   identity_rate_profiles:
-    login_per_account:                 # ключ = hashed username
+    login_per_account:                 # the key is the hashed username
       key: hashed_username
       windows:
         - { seconds: 60,  limit: 5 }
         - { seconds: 600, limit: 20 }
-      action: challenge                # challenge | block — финал по strictness/enforce
-    per_api_key:                       # ключ = hashed api key
+      action: challenge                # challenge | block — the final action follows strictness/enforce
+    per_api_key:                       # the key is the hashed api key
       key: hashed_api_key
       windows:
         - { seconds: 60,   limit: 600 }
         - { seconds: 3600, limit: 10000 }
-      action: block                    # для API на JS-challenge не опираемся
+      action: block                    # for APIs we do not rely on a JS challenge
 
-  # опц. переопределение окон на конкретном пути
+  # optionally override the windows on a specific path
   per_endpoint_quotas:
     - { path: /api/v1/auth/login, profile: login_per_account, windows: [ { seconds: 60, limit: 3 } ] }
     - { path: /api/bulk-export,   profile: per_api_key,       windows: [ { seconds: 60, limit: 50 } ] }
 ```
 
-| Поле | Тип | Что задает |
+| Field | Type | What it sets |
 | --- | --- | --- |
-| `key` | enum (`hashed_username` / `hashed_api_key`) | источник ключа; всегда хешированный |
-| `windows` | list of `{seconds, limit}` | окна GCRA; срабатывает любое превышенное |
-| `action` | enum (`challenge` / `block`) | желаемое действие; исполнение mode-gated по `enforce` и strictness |
+| `key` | enum (`hashed_username` / `hashed_api_key`) | The source of the key; always hashed |
+| `windows` | list of `{seconds, limit}` | The GCRA windows; any exceeded window fires |
+| `action` | enum (`challenge` / `block`) | The desired action; enforcement is mode-gated by `enforce` and strictness |
 
-Для login с браузерным клиентом `challenge` уместен; для API — `block` (429), на
-JS-challenge не опираемся.
+For login with a browser client `challenge` is appropriate; for APIs use `block` (429), since we do not
+rely on a JS challenge.
 
 ## 3. Failed-auth feedback
 
@@ -108,13 +108,13 @@ example.com:
     on_spike: { reputation_score: increase, escalate: challenge_strictness }
 ```
 
-Это статистика ответов, не проверка пароля. Допущение: origin отдает различимые
-статусы на успех/неуспех — фиксируется при внедрении на домене.
+This is statistics over responses, not a password check. The assumption is that the origin returns distinguishable
+statuses for success and failure — pinned down when onboarding a domain.
 
-## 4. Schema-каталог (slow-каталог, PR-only)
+## 4. The schema catalog (a slow catalog, PR-only)
 
-Доставляется как медленный каталог, отдельно от per-host политики. Компилированное
-подмножество JSON-схем по эндпоинтам.
+Delivered as a slow catalog, separately from the per-host policy. A compiled
+subset of JSON schemas per endpoint.
 
 ```yaml
 # catalog: api_schemas
@@ -122,12 +122,12 @@ example.com:
   /api/v1/orders:
     POST:
       type: object
-      additionalProperties: false        # поля вне схемы → reject (mass-assignment-вектор)
+      additionalProperties: false        # fields outside the schema → reject (the mass-assignment vector)
       required: [ item_id, qty ]
       properties:
         item_id: { type: string }
         qty:     { type: integer }
-  upload_bypass:                          # эндпоинты, где тело не парсится как JSON
+  upload_bypass:                          # endpoints where the body is not parsed as JSON
     - /api/v1/files/upload
 ```
 
@@ -136,38 +136,38 @@ example.com:
 ```yaml
 example.com:
   resource_limits:
-    max_body_bytes: 262144               # размер тела; превышение → 413 (часть на nginx)
+    max_body_bytes: 262144               # the body size; exceeding it gives a 413 (partly at the nginx level)
     json:
-      max_depth: 32                      # защита от «billion laughs»
+      max_depth: 32                      # protection against "billion laughs"
       max_array_len: 10000
-    graphql:                             # опционально
+    graphql:                             # optional
       max_depth: 12
       max_aliases: 50
 ```
 
-## 6. Edge JWT и mTLS
+## 6. Edge JWT and mTLS
 
 ```yaml
 example.com:
   jwt:
     enabled: true
-    applies_to: [ api ]                  # классы путей, где валидируем токен
-    jwks_source: jwks_example_com        # JWKS/секрет (доставляется как секрет/каталог)
+    applies_to: [ api ]                  # the path classes where the token is validated
+    jwks_source: jwks_example_com        # JWKS/the secret (delivered as a secret or catalog)
     expected_iss: [ https://auth.example.com ]
     expected_aud: [ api.example.com ]
-    required_scope:                      # опц. coarse authz per-endpoint
+    required_scope:                      # optional coarse authorisation per endpoint
       - { path: /api/v1/admin/*, scope: admin }
 
-  mtls:                                  # опц., per-tenant, по умолчанию выкл.
+  mtls:                                  # optional, per tenant, off by default
     enabled: false
-    verify: optional                     # off | optional | on (на уровне nginx всегда optional, при on проверка идет в Lua)
+    verify: optional                     # off | optional | on (nginx always uses optional; under on the check happens in Lua)
 ```
 
-JWT — stateless-проверка (подпись/exp/nbf/iss/aud); ревокация/интроспекция со
-state — backend. Сырой токен не логируется. mTLS — транспортный уровень;
-совместимость с on-demand TLS проверяется отдельно.
+JWT is a stateless check (signature/exp/nbf/iss/aud); revocation and stateful
+introspection belong to the backend. The raw token is never logged. mTLS is the transport level;
+compatibility with on-demand TLS is verified separately.
 
-## 7. Transport-гигиена и deprecated-версии
+## 7. Transport hygiene and deprecated versions
 
 ```yaml
 example.com:
@@ -175,36 +175,36 @@ example.com:
     hsts: true
     x_content_type_options: nosniff
     cors:
-      allow_origins: [ https://app.example.com ]   # не "*" вслепую
+      allow_origins: [ https://app.example.com ]   # not a blind "*"
     strip_server_banner: true
     mask_5xx_details: true
 
-  deprecated_versions:                   # путь устаревшей версии → 410 (mode-gated)
+  deprecated_versions:                   # a deprecated version's path → 410 (mode-gated)
     - /api/v0/*
 ```
 
-## 8. Disposable-email (опционально)
+## 8. Disposable email (optional)
 
 ```yaml
 example.com:
   disposable_email:
     enabled: true
-    catalog: disposable_email_domains    # slow-каталог (PR-only)
+    catalog: disposable_email_domains    # a slow catalog (PR-only)
     applies_to: [ register, login ]
-    action: soft_signal                  # +score/флаг, не самостоятельный блок
+    action: soft_signal                  # +score or a flag, never a block on its own
 ```
 
 ---
 
-## Соглашения
+## Conventions
 
-- Glob-паттерны путей — как в базовых rate-правилах; на их основе строится класс
-  эндпоинта.
-- Хеширование ключей — всегда HMAC в контексте и логе; сырье username/токена в конфиг
-  не попадает.
-- mode-gate — поведение слоя определяется `enforce` (per-host); при `false` все
-  считается и логируется, но не исполняется.
-- slow-каталоги (схемы, disposable-email, JWKS) доставляются PR-only, отдельно от
-  быстрой per-host политики.
-- parent-domain fallback — запись хоста покрывает поддомены; более специфичная
-  переопределяет родительскую.
+- Glob path patterns work as in the base rate rules; the endpoint class is derived from
+  them.
+- Key hashing is always HMAC, in the context and in the log; raw usernames and tokens never
+  reach the config.
+- The mode gate: the layer's behaviour is governed by `enforce` (per host); under `false` everything
+  is counted and logged but not enforced.
+- The slow catalogs (schemas, disposable email, JWKS) are delivered PR-only, separately from
+  the fast per-host policy.
+- parent-domain fallback: a host's entry covers its subdomains, and a more specific one
+  overrides the parent.
