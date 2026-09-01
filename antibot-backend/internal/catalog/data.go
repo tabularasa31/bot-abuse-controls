@@ -1,11 +1,11 @@
-// Типизированные данные восьми каталогов Channel C, который backend отдаёт
-// edge'ам по контракту из docs/architecture/config-distribution.md
-// (§"The 'catalog' concept"). Здесь только in-memory представление и YAML-
-// загрузчик; HTTP-доставка — в server.go, snapshot-сборка — в store.go.
+// Typed data for the eight Channel C catalogs the backend serves to the
+// edges, per the contract in docs/architecture/config-distribution.md
+// (§"The 'catalog' concept"). Only the in-memory representation and the YAML
+// loader live here; HTTP delivery is in server.go and snapshot assembly in store.go.
 //
-// Per-resource данные (`policy`, кастомные UA-паттерны, attack_mode) живут
-// в map[host]Policy; общие списки — в плоских структурах. По решению config-
-// distribution per-resource ключ — `host`, не `cdn_resource_id`.
+// Per-resource data (`policy`, custom UA patterns, attack_mode) lives
+// in map[host]Policy; the shared lists are flat structures. Per the config-
+// distribution decision, the per-resource key is `host`, not `cdn_resource_id`.
 package catalog
 
 import (
@@ -15,75 +15,75 @@ import (
 	"sort"
 )
 
-// defaultVersion — semver, который Store отдаёт до первой загрузки. Он же
-// уходит в X-Catalog-Version (заголовок ставится всегда — контракт §C1).
-// "0.0.0" по semver значит "пред-релиз / пусто"; edge может опираться на
-// смену major-сегмента, чтобы понять breaking-change схемы payload'а.
+// defaultVersion — the semver Store serves before the first load. It also
+// goes into X-Catalog-Version (the header is always set — the §C1 contract).
+// "0.0.0" in semver means "pre-release / empty"; the edge can rely on a
+// change of the major segment to detect a breaking change in the payload schema.
 const defaultVersion = "0.0.0"
 
-// Data — снимок всего хранилища каталогов. Меняется целиком атомарно через
-// Store.Replace; ссылки на старую *Data корректны на время чтения, никаких
-// частичных обновлений между каталогами нет.
+// Data — a snapshot of the whole catalog store. It changes atomically as a whole through
+// Store.Replace; references to an old *Data stay correct for the duration of a read, and there are no
+// partial updates across catalogs.
 type Data struct {
-	// Version — semver, кладётся в X-Catalog-Version всех ответов.
-	// Меняется руками или дашбордом, не автогенерация: для эджа важно различать
-	// "схема та же, контент новый" (только ETag меняется) и "схема новая"
-	// (parser нужно обновлять). За свежесть контента отвечает ETag, не Version.
+	// Version — the semver placed into X-Catalog-Version on every response.
+	// It is changed by hand or by the dashboard, not generated: the edge needs to distinguish
+	// "the same schema, new content" (only the ETag changes) from "a new schema"
+	// (the parser needs updating). Content freshness is the ETag's job, not Version's.
 	Version string `yaml:"version"`
 
-	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → status (active|staging); wire-формат "<status>:block" (A11)
-	UABlacklist          []string                  `yaml:"ua_blacklist"`            // активные глобальные regex-паттерны
-	UABlacklistStaging   []string                  `yaml:"-"`                       // staging-паттерны (A11): отдельный combined regex, эдж пишет staging_match, не блокирует
-	IPBlocklist          map[string]string         `yaml:"ip_blocklist"`            // CIDR → status (active|staging); wire-формат "<status>:block" (A11)
-	IPWhitelist          []string                  `yaml:"ip_whitelist"`            // CIDR (системный)
-	ASNDatacenters       []uint32                  `yaml:"asn_datacenters"`         // ASN-номера
-	TLSFPCatalog         map[string]TLSFPCatalog   `yaml:"tls_fp_catalog"`          // hash_b → { family, status }; правило tls_fp_impersonator
-	TLSFPBrowserProfiles map[string]BrowserProfile `yaml:"tls_fp_browser_profiles"` // family → { expected_cipher_cnt, status }; правило tls_fp_suspicious_ciphers
-	VerifiedBotIPs       map[string]string         `yaml:"verified_bot_ips"`        // IP → "<status>:<family>" where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}. Отсутствие ключа = provisional (см. vision §Шаг 2.2).
-	Policy               map[string]Policy         `yaml:"policy"`                  // host → policy (включая attack_mode)
+	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → status (active|staging); wire format "<status>:block" (A11)
+	UABlacklist          []string                  `yaml:"ua_blacklist"`            // the active global regex patterns
+	UABlacklistStaging   []string                  `yaml:"-"`                       // staging patterns (A11): a separate combined regex; the edge writes staging_match and does not block
+	IPBlocklist          map[string]string         `yaml:"ip_blocklist"`            // CIDR → status (active|staging); wire format "<status>:block" (A11)
+	IPWhitelist          []string                  `yaml:"ip_whitelist"`            // CIDR (the system one)
+	ASNDatacenters       []uint32                  `yaml:"asn_datacenters"`         // ASN numbers
+	TLSFPCatalog         map[string]TLSFPCatalog   `yaml:"tls_fp_catalog"`          // hash_b → { family, status }; the tls_fp_impersonator rule
+	TLSFPBrowserProfiles map[string]BrowserProfile `yaml:"tls_fp_browser_profiles"` // family → { expected_cipher_cnt, status }; the tls_fp_suspicious_ciphers rule
+	VerifiedBotIPs       map[string]string         `yaml:"verified_bot_ips"`        // IP → "<status>:<family>" where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}. A missing key means provisional (see vision §Stage 2.2).
+	Policy               map[string]Policy         `yaml:"policy"`                  // host → policy (including attack_mode)
 }
 
-// TLSFPCatalog — одна запись каталога сигнатур автоматизации (Phase 2+).
-// Используется правилом tls_fp_impersonator в [tls_fp.lua].
+// TLSFPCatalog — one entry of the automation signature catalog (Phase 2+).
+// Used by the tls_fp_impersonator rule in [tls_fp.lua].
 //
-// Wire-формат payload'а Channel C — `<status>:<family>` (симметрично
-// verified_bot_ips, чтобы shared_dict на эдже хранил строки без JSON-
-// разбора per-entry). См. buildTLSFPCatalog в store.go.
+// The Channel C wire format of the payload is `<status>:<family>` (symmetric with
+// verified_bot_ips, so that the edge's shared_dict stores strings with no per-entry
+// JSON parsing). See buildTLSFPCatalog in store.go.
 type TLSFPCatalog struct {
 	Family string `yaml:"family" json:"family"`
 	Status string `yaml:"status" json:"status"` // active | staging
 }
 
-// BrowserProfile — ожидаемый cipher_cnt для семейства браузера (Phase 2+).
-// Используется правилом tls_fp_suspicious_ciphers.
+// BrowserProfile — the expected cipher_cnt for a browser family (Phase 2+).
+// Used by the tls_fp_suspicious_ciphers rule.
 //
-// Wire-формат — `<status>:<expected_cipher_cnt>` (число как desimal-строка).
+// The wire format is `<status>:<expected_cipher_cnt>` (the number as a decimal string).
 type BrowserProfile struct {
 	ExpectedCipherCnt int    `yaml:"expected_cipher_cnt" json:"expected_cipher_cnt"`
 	Status            string `yaml:"status" json:"status"` // active | staging
 }
 
-// Policy — per-resource настройки одного host'a. ВСЕ поля без omitempty:
-// контракт `/catalog/policy?site=…` обещает map(host → policy json) c
-// предсказуемой формой; consumer (дашборд/edge) должен видеть "field = zero"
-// и "field absent" одинаково, не различая. Если поле появится позже —
-// заведём для него отдельный major bump Version.
+// Policy — the per-resource settings of one host. NO field carries omitempty:
+// the `/catalog/policy?site=…` contract promises map(host → policy json) with a
+// predictable shape; a consumer (the dashboard or the edge) must see "field = zero"
+// and "field absent" identically, without distinguishing them. If a field appears later,
+// we will give it its own major Version bump.
 type Policy struct {
 	Mode         string     `yaml:"mode" json:"mode"`                   // shadow / active
 	Strictness   string     `yaml:"strictness" json:"strictness"`       // standard / permissive
-	UABlacklist  []string   `yaml:"ua_blacklist" json:"ua_blacklist"`   // кастомные regex клиента
+	UABlacklist  []string   `yaml:"ua_blacklist" json:"ua_blacklist"`   // the customer's custom regexes
 	IPWhitelist  []string   `yaml:"ip_whitelist" json:"ip_whitelist"`   // per-resource allow CIDR
 	IPBlocklist  []string   `yaml:"ip_blocklist" json:"ip_blocklist"`   // per-resource deny CIDR
 	ASNBlock     []uint32   `yaml:"asn_block" json:"asn_block"`         // per-resource deny ASN
-	GeoWhitelist []string   `yaml:"geo_whitelist" json:"geo_whitelist"` // если задан — все остальные блокируются
-	RateRules    []RateRule `yaml:"rate_rules" json:"rate_rules"`       // клиентские per-path rate-rules
-	AttackMode   bool       `yaml:"attack_mode" json:"attack_mode"`     // единственный источник; map'а сверху больше нет
-	OriginIP     string     `yaml:"origin_ip" json:"origin_ip"`         // bare IPv4/IPv6 бэкенда для multi-tenant routing; "" = не проксируемый тенант (86exrefdz)
+	GeoWhitelist []string   `yaml:"geo_whitelist" json:"geo_whitelist"` // when set, everything else is blocked
+	RateRules    []RateRule `yaml:"rate_rules" json:"rate_rules"`       // the customer's per-path rate rules
+	AttackMode   bool       `yaml:"attack_mode" json:"attack_mode"`     // the only source; the map above is gone
+	OriginIP     string     `yaml:"origin_ip" json:"origin_ip"`         // the backend's bare IPv4/IPv6 for multi-tenant routing; "" means a non-proxied tenant
 }
 
-// RateRule — одна клиентская rate-rule из docs/product/config-templates.md
-// §"policy/<host>.yaml". На стенде Lua пока не читает это поле (edge B11);
-// backend хранит и отдаёт as-is для дашборда [B10] и для будущих фаз.
+// RateRule — one customer rate rule from docs/product/config-templates.md
+// §"policy/<host>.yaml". On the stand, Lua does not read this field yet (edge B11);
+// the backend stores and serves it as-is for the dashboard [B10] and for future phases.
 type RateRule struct {
 	Path    string   `yaml:"path" json:"path"`
 	Methods []string `yaml:"methods" json:"methods"`
@@ -92,18 +92,18 @@ type RateRule struct {
 	Action  string   `yaml:"action" json:"action"` // block | challenge | log_only
 }
 
-// SlowData — слой каталогов, который ведёт продакт через PR в git-репо
-// catalogs/. По ADR-006 это единственный источник истины для медленных
-// каталогов; БД для них больше не используется. Парсится из YAML-файлов
-// пакетом filesource и мерджится в *Data на каждом тике reloader'a.
+// SlowData — the catalog layer product maintains through PRs to the
+// catalogs/ git repo. Per ADR-006 it is the single source of truth for the slow
+// catalogs; the database is no longer used for them. It is parsed from the YAML files
+// by the filesource package and merged into *Data on every reloader tick.
 //
-// Версия каталога (для X-Catalog-Version) приходит из файла catalogs/version
-// и кладётся сюда: это часть «конфига», а не runtime state.
+// The catalog version (for X-Catalog-Version) comes from the catalogs/version file
+// and is stored here: it is part of the "config" rather than runtime state.
 type SlowData struct {
 	Version              string
 	TLSFPBlocklist       map[string]string // fp → status (active|staging)
-	UABlacklist          []string          // активные паттерны
-	UABlacklistStaging   []string          // staging-паттерны (A11)
+	UABlacklist          []string          // the active patterns
+	UABlacklistStaging   []string          // the staging patterns (A11)
 	IPBlocklist          map[string]string // CIDR → status (active|staging)
 	IPWhitelist          []string
 	ASNDatacenters       []uint32
@@ -111,24 +111,24 @@ type SlowData struct {
 	TLSFPBrowserProfiles map[string]BrowserProfile
 }
 
-// RuntimeData — слой runtime state, который пишут другие подсистемы
-// backend'а: policy через antibotapi (дашборд), verified_bot_ips через
-// rDNS-воркер. Это НЕ конфиг — данные меняются автоматически, SLA ≤ 30 сек.
-// Остаётся в БД (см. ADR-005 §Variant 3 rejected — для них файлы не
-// подходят по каденции).
+// RuntimeData — the layer of runtime state written by the backend's other
+// subsystems: policy through antibotapi (the dashboard), verified_bot_ips through the
+// rDNS worker. This is NOT config — the data changes automatically, SLA ≤ 30 s.
+// It stays in the database (see ADR-005 §Variant 3 rejected — files do not
+// suit its cadence).
 type RuntimeData struct {
 	VerifiedBotIPs map[string]string
 	Policy         map[string]Policy
 }
 
-// Merge собирает *Data из двух частичных снимков. Принимает nil-указатели
-// (как заглушку «слой не успел подгрузиться»); вернёт корректный *Data
-// с пустыми коллекциями вместо panic'a — handler выше ответит 503 по
-// IsLoaded, если оба слоя пусты на старте.
+// Merge assembles a *Data from the two partial snapshots. It accepts nil pointers
+// (as a stand-in for "the layer has not loaded yet") and returns a correct *Data
+// with empty collections instead of a panic — the handler above answers 503 by
+// IsLoaded when both layers are empty at startup.
 //
-// Версия каталога берётся из SlowData (там же лежит файл version). Если
-// SlowData == nil, ставим defaultVersion — это семантически «ещё не
-// читали», тот же сигнал, что в emptyData().
+// The catalog version comes from SlowData (which also holds the version file). If
+// SlowData == nil we set defaultVersion — semantically "we have not read it
+// yet", the same signal as in emptyData().
 func Merge(s *SlowData, r *RuntimeData) *Data {
 	d := &Data{
 		Version:              defaultVersion,
@@ -171,12 +171,12 @@ func Merge(s *SlowData, r *RuntimeData) *Data {
 	return d
 }
 
-// PoolDefault — то, что отдаётся для незарегистрированного host'a:
-// "новый домен без записи → дефолт пула (mode=shadow, observe-only)"
-// (config-distribution §"Per-resource lookup", задача B4). Реализована
-// как функция, а не как глобальная переменная: каждый вызов даёт новый
-// slice'ный nil-zero — никто из вызывающих не может случайно мутировать
-// общий объект.
+// PoolDefault — what is served for an unregistered host:
+// "a new domain with no record → the pool default (mode=shadow, observe-only)"
+// (config-distribution §"Per-resource lookup", task B4). It is implemented
+// as a function rather than a global variable: every call yields a fresh
+// nil-zero slice — so no caller can accidentally mutate a
+// shared object.
 func PoolDefault() Policy {
 	return Policy{
 		Mode:         "shadow",
@@ -190,10 +190,10 @@ func PoolDefault() Policy {
 	}
 }
 
-// emptyData — детерминированный нуль для Store до первого Replace.
-// Version=defaultVersion (не ""), чтобы X-Catalog-Version был валидным
-// semver'ом даже на эмпти-инстансе — edge не должен различать "header
-// present" vs "header absent" по wire.
+// emptyData — a deterministic zero for Store before the first Replace.
+// Version=defaultVersion (not ""), so that X-Catalog-Version is a valid
+// semver even on an empty instance — the edge must not have to distinguish "header
+// present" from "header absent" on the wire.
 func emptyData() *Data {
 	return &Data{
 		Version:              defaultVersion,
@@ -209,37 +209,37 @@ func emptyData() *Data {
 	}
 }
 
-// normalize приводит Data к каноничному виду: сортирует все срезы и
-// дедуплицирует их (для детерминизма payload'а и стабильности ETag —
-// две одинаковые записи не должны раздувать combined regex и не должны
-// давать разный ETag по сравнению с одной записью).
+// normalize brings Data into canonical form: it sorts every slice and
+// deduplicates them (for a deterministic payload and a stable ETag —
+// two identical records must not inflate the combined regex and must not
+// produce a different ETag from a single record).
 //
-// Вызывается из Store.Replace на каждом merge (filesource + dbloader).
-// Идемпотентен.
+// Called from Store.Replace on every merge (filesource plus dbloader).
+// Idempotent.
 func normalize(d *Data) {
-	// Системные slice'ы: dedup+sort + nil-coerce. Без ensure* json.Marshal
-	// эмитил бы `null` на пустой БД (DB-loader не инициализирует пустые
-	// срезы — append-loop пуст), и ETag дрейфил бы между «никогда не было
-	// записей» и «была одна, удалили». PR #43 review (follow-up).
+	// The system slices: dedup+sort plus a nil coercion. Without ensure*, json.Marshal
+	// would emit `null` on an empty database (the DB loader does not initialise empty
+	// slices — the append loop is empty), and the ETag would drift between "there were never
+	// any records" and "there was one and it was deleted". From review (a follow-up).
 	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
 	d.UABlacklistStaging = ensureStringSlice(dedupSortStrings(d.UABlacklistStaging))
 	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
 	d.ASNDatacenters = ensureUint32Slice(dedupSortUint32(d.ASNDatacenters))
 	for h, p := range d.Policy {
-		// Все []T поля: dedup+sort, потом nil → пустой slice. Coerce nil →
-		// `[]T{}` критичен для JSON-стабильности: операторская запись
-		// `ua_blacklist = 'null'::jsonb` через DB-loader приходит как
-		// nil-slice; json.Marshal сериализует её как `null`, ETag отличается
-		// от логически эквивалентной записи с пустым массивом / от
-		// `PoolDefault()`. Закрываем PR #43 review (Angle A).
+		// Every []T field: dedup+sort, then nil → an empty slice. The nil →
+		// `[]T{}` coercion is critical for JSON stability: an operator writing
+		// `ua_blacklist = 'null'::jsonb` through the DB loader arrives as a
+		// nil slice; json.Marshal serialises it as `null`, and the ETag differs
+		// from the logically equivalent record with an empty array and from
+		// `PoolDefault()`. This closes the review point.
 		p.UABlacklist = ensureStringSlice(dedupSortStrings(p.UABlacklist))
 		p.IPWhitelist = ensureStringSlice(dedupSortStrings(p.IPWhitelist))
 		p.IPBlocklist = ensureStringSlice(dedupSortStrings(p.IPBlocklist))
 		p.GeoWhitelist = ensureStringSlice(dedupSortStrings(p.GeoWhitelist))
 		p.ASNBlock = ensureUint32Slice(dedupSortUint32(p.ASNBlock))
-		// RateRules — порядок задаётся оператором (приоритет правил),
-		// сортировать нельзя; дедуп тоже не делаем (две одинаковые
-		// записи могли быть осознанным повтором).
+		// RateRules — the order is set by the operator (rule priority), so it
+		// must not be sorted; we do not deduplicate either (two identical
+		// records may be a deliberate repeat).
 		if p.RateRules == nil {
 			p.RateRules = []RateRule{}
 		}
@@ -289,37 +289,37 @@ func dedupSortUint32(s []uint32) []uint32 {
 	return out
 }
 
-// Validate проверяет:
-//   - UA-regex (системные и per-host) через regexp.Compile;
-//   - CIDR-строки (системные ip_blocklist / ip_whitelist и per-host
-//     варианты) через `ValidateCIDR`, которая повторяет терпимость
-//     lua-resty-ipmatcher: голый IP без `/N` принимается как host-route
-//     (/32 для v4, /128 для v6), а CIDR с заданными host-битами
-//     (`10.0.0.5/8`) — тоже валиден, ipmatcher всё равно их маскирует.
+// Validate checks:
+//   - UA regexes (system and per host) through regexp.Compile;
+//   - CIDR strings (the system ip_blocklist / ip_whitelist and the per-host
+//     variants) through `ValidateCIDR`, which mirrors the tolerance of
+//     lua-resty-ipmatcher: a bare IP with no `/N` is accepted as a host route
+//     (/32 for v4, /128 for v6), and a CIDR with host bits set
+//     (`10.0.0.5/8`) is valid too, since ipmatcher masks them anyway.
 //
-// Regex: RE2-grammar — не PCRE, но edge тоже на ngx.re (PCRE) с общим
-// подмножеством; синтаксические ошибки (`bot[a-z`, unbalanced `(`,
-// trailing `\`) ловятся одинаково. Если edge захочет PCRE-specific фичу
-// (lookarounds), её нужно гейтить в спеке отдельно.
+// Regexes: the RE2 grammar — not PCRE, but the edge is on ngx.re (PCRE) with a common
+// subset; syntax errors (`bot[a-z`, an unbalanced `(`, a
+// trailing `\`) are caught identically. If the edge ever wants a PCRE-specific feature
+// (lookarounds), it must be gated separately in the spec.
 //
-// CIDR: миграции 0001 НЕ держат `inet`-колонки (комментарий в схеме:
-// "validation lives in the loader" — PR #43 review закрыл это обещание).
-// Валидация специально симметрична edge'у: иначе backend стал бы строже,
-// и оператор, вставивший `203.0.113.5` без `/32`, ловил бы fail-stale
-// несмотря на то, что ipmatcher принял бы запись.
+// CIDR: migration 0001 does NOT hold `inet` columns (the schema comment says
+// "validation lives in the loader" — review closed that promise).
+// The validation is deliberately symmetric with the edge: otherwise the backend would be stricter,
+// and an operator inserting `203.0.113.5` without a `/32` would hit fail-stale
+// even though ipmatcher would have accepted the record.
 //
-// Экспортирована, чтобы любой источник *Data (LoadYAML, dbloader.Load,
-// будущий B10 admin API) обязан был дёргать её до Store.Replace —
-// fail-stale работает только если битый паттерн ловится ДО публикации.
+// It is exported so that any source of *Data (LoadYAML, dbloader.Load, a
+// future B10 admin API) is obliged to call it before Store.Replace —
+// fail-stale only works if a broken pattern is caught BEFORE publication.
 func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("ua_blacklist[%d]: invalid regex %q: %w", i, p, err)
 		}
 	}
-	// Staging-паттерны валидируем тем же предикатом, что и active (A11): они
-	// едут в отдельный combined regex и компилируются на эдже так же, поэтому
-	// битый staging-regex должен валить Load до публикации, а не позже.
+	// Staging patterns are validated by the same predicate as active ones (A11): they
+	// travel in a separate combined regex and are compiled on the edge the same way, so a
+	// broken staging regex must fail the Load before publication rather than later.
 	for i, p := range d.UABlacklistStaging {
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("ua_blacklist(staging)[%d]: invalid regex %q: %w", i, p, err)
@@ -356,9 +356,9 @@ func Validate(d *Data) error {
 		}
 	}
 	// tls_fp_catalog (Phase 2+, ADR-006): hash_b → {family, status}. Family
-	// должен быть непустым (на эдже идёт в attrs.family для is_impersonator);
-	// status — active | staging. Битый status или пустой family здесь ловим
-	// до Store.Replace, иначе на эдже хешировались бы pending-вычеты.
+	// must be non-empty (on the edge it goes into attrs.family for is_impersonator);
+	// status is active | staging. A broken status or an empty family is caught here
+	// before Store.Replace, otherwise the edge would hash pending deductions.
 	for hb, entry := range d.TLSFPCatalog {
 		if hb == "" {
 			return fmt.Errorf("tls_fp_catalog: empty hash_b key")
@@ -371,13 +371,13 @@ func Validate(d *Data) error {
 		}
 	}
 	// tls_fp_browser_profiles (Phase 2+): family → {expected_cipher_cnt, status}.
-	// expected_cipher_cnt > 0 обязательно для ВСЕХ entries (active И staging).
-	// PR-62 re-audit: расслаблять для staging нельзя — edge build_profiles
-	// фильтрует `if n and n > 0` симметрично из defense-in-depth, и запись
-	// со staging:0 тихо исчезает с эджа в ОБЕИХ active/staging таблицах →
-	// staging_match никогда не сработает, promotion-workflow ломается.
-	// Если продакт хочет «зарегистрировать family заранее», он должен ОДНОВРЕМЕННО
-	// поставить разумный начальный cipher_cnt; перекалибровать = отдельный PR.
+	// expected_cipher_cnt > 0 is mandatory for ALL entries (active AND staging).
+	// From re-audit: it must not be relaxed for staging — the edge's build_profiles
+	// filters `if n and n > 0` symmetrically out of defence in depth, and a record
+	// with staging:0 silently disappears from the edge in BOTH the active and staging tables →
+	// staging_match never fires and the promotion workflow breaks.
+	// If product wants to "register a family in advance", they must SIMULTANEOUSLY
+	// set a sensible initial cipher_cnt; recalibrating is a separate PR.
 	for family, prof := range d.TLSFPBrowserProfiles {
 		if family == "" {
 			return fmt.Errorf("tls_fp_browser_profiles: empty family key")
@@ -392,21 +392,21 @@ func Validate(d *Data) error {
 	return nil
 }
 
-// isValidEntryStatus — общий предикат для статуса записи slow-каталога с
-// поддержкой staged rollout (см. catalogs/README.md, A11). Симметрично
-// CHECK-констрейнту, который был в миграции 0001 до ADR-006.
+// isValidEntryStatus — the shared predicate for a slow-catalog entry status with
+// staged rollout support (see catalogs/README.md, A11). Symmetric with the
+// CHECK constraint that lived in migration 0001 before ADR-006.
 func isValidEntryStatus(s string) bool {
 	return s == "active" || s == "staging"
 }
 
-// ValidateCIDR принимает либо «сырой» IP («1.2.3.4», «2001:db8::1»),
-// либо префикс («10.0.0.0/8», «10.0.0.5/8» с заданными host-битами).
-// Это симметрично lua-resty-ipmatcher на edge: тот принимает то же
-// подмножество и сам маскирует host-биты. netip.ParsePrefix отдельно от
-// netip.ParseAddr строже, поэтому пробуем оба. Экспортирована для
-// переиспользования в [internal/antibotapi] (B10): admin-мутация должна
-// валидировать вход тем же предикатом, что и reloader, иначе любая запись
-// от dashboard'а уронит следующий тик reloader'a через catalog.Validate.
+// ValidateCIDR accepts either a "raw" IP ("1.2.3.4", "2001:db8::1")
+// or a prefix ("10.0.0.0/8", or "10.0.0.5/8" with host bits set).
+// This is symmetric with lua-resty-ipmatcher on the edge: it accepts the same
+// subset and masks the host bits itself. netip.ParsePrefix is stricter than
+// netip.ParseAddr, so we try both. It is exported for
+// reuse in [internal/antibotapi] (B10): an admin mutation must
+// validate its input with the same predicate as the reloader, otherwise any record
+// from the dashboard would break the reloader's next tick through catalog.Validate.
 func ValidateCIDR(s string) error {
 	if _, err := netip.ParsePrefix(s); err == nil {
 		return nil
@@ -417,14 +417,14 @@ func ValidateCIDR(s string) error {
 	return fmt.Errorf("invalid IP/CIDR")
 }
 
-// ValidateOriginIP принимает пустую строку (тенант не проксируется / поле
-// снято) либо ОДИНОЧНЫЙ bare-адрес (IPv4 или IPv6) — в отличие от
-// ValidateCIDR, префиксы здесь запрещены: origin_ip — это сетевой
-// destination одного бэкенда, не подсеть. Edge подставляет это значение
-// в proxy_pass-URL (origin_resolve), CIDR там бессмыслен. Экспортирована
-// для переиспользования в [internal/antibotapi]: admin-мутация валидирует
-// тем же предикатом, что и reloader через Validate, иначе запись от
-// дашборда уронила бы следующий тик reloader'a.
+// ValidateOriginIP accepts an empty string (the tenant is not proxied / the field was
+// cleared) or a SINGLE bare address (IPv4 or IPv6) — unlike
+// ValidateCIDR, prefixes are forbidden here: origin_ip is the network
+// destination of one backend, not a subnet. The edge substitutes this value
+// into the proxy_pass URL (origin_resolve), where a CIDR is meaningless. It is exported
+// for reuse in [internal/antibotapi]: an admin mutation validates with
+// the same predicate as the reloader through Validate, otherwise a record from
+// the dashboard would break the reloader's next tick.
 func ValidateOriginIP(s string) error {
 	if s == "" {
 		return nil
