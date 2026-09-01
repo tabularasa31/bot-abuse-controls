@@ -47,29 +47,29 @@ services:
       INSTANCE_NAME: backend-1
       HTTP_ADDR: ":8080"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-antibot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-antibot}?sslmode=disable"
-      # Slow-каталоги (tls_fp_blocklist / ua_blacklist / ...) — git-репо
-      # ../../catalogs/, монтируется ниже как read-only volume. Обе
-      # реплики читают тот же снапшот (mtime-кеш в reloader защищает от
-      # лишних YAML-парсов между тиками). См. ADR-006.
+      # The slow catalogs (tls_fp_blocklist / ua_blacklist / ...) live in the git repo
+      # at ../../catalogs/, mounted below as a read-only volume. Both
+      # replicas read the same snapshot (the mtime cache in the reloader guards against
+      # redundant YAML parses between ticks). See ADR-006.
       CATALOGS_DIR: "/catalogs"
-      # [B9] disk-queue для BAC_LOG sink'a. Путь внутри контейнера совпадает
-      # с примонтированным volume'ом ниже; без него простой PostgreSQL терял
-      # бы поток логов (acceptance B9 «приёмник не теряет логи»).
+      # [B9] the disk queue for the BAC_LOG sink. The path inside the container matches
+      # the volume mounted below; without it, PostgreSQL downtime would lose
+      # the log stream (acceptance B9, "the receiver does not lose logs").
       LOGS_SINK_SPOOL_DIR: "/var/lib/antibot-backend/log-spool"
-      # [B10] shared M2M secret для bearer-auth между dashboard-backend и
-      # antibot-backend (/antibot/v1/*). Без него policy API не
-      # регистрируется (fail-closed, warn в лог).
+      # [B10] the shared M2M secret for bearer auth between the dashboard backend and
+      # antibot-backend (/antibot/v1/*). Without it the policy API is not
+      # registered (fail-closed, with a warning in the log).
       DASHBOARD_API_TOKEN: "${DASHBOARD_API_TOKEN:-}"
     depends_on: &backend_depends
       postgres:
         condition: service_healthy
     volumes:
-      # Per-instance том, чтобы дренаж после рестарта одной реплики не
-      # пересекался с другой (один и тот же файл, прочитанный обеими
-      # репликами, дал бы дубликат в logs).
+      # A per-instance volume, so that draining after one replica restarts does not
+      # overlap with the other (the same file read by both
+      # replicas would produce a duplicate in logs).
       - log-spool-1:/var/lib/antibot-backend/log-spool
-      # Slow-каталоги read-only: backend их только читает; правки идут
-      # через git PR (см. catalogs/README.md).
+      # The slow catalogs are read-only: the backend only reads them; edits go
+      # through a git PR (see catalogs/README.md).
       - ../../catalogs:/catalogs:ro
     restart: unless-stopped
 
@@ -106,10 +106,10 @@ services:
       # Default is ip-allowlist (config-distribution §Channel C fallback);
       # flip AUTH_MODE=mtls in .env once edge clients have edge-client.{crt,key}.
       - ./auth/${AUTH_MODE:-ip-allowlist}.conf:/etc/nginx/conf.d/auth.conf:ro
-      # [B10] Channel C enforcement — pair to auth.conf, applied только
-      # внутри `location /` (catalog/health), не на /antibot/v1/. Split
-      # нужен потому, что server-level auth.conf запускается ДО routing'а
-      # по location и иначе гейтил бы /antibot/v1/ тем же edge-cred'ом
+      # [B10] Channel C enforcement — the pair to auth.conf, applied only
+      # inside `location /` (catalog/health), not on /antibot/v1/. The split
+      # is needed because the server-level auth.conf runs BEFORE location
+      # routing and would otherwise gate /antibot/v1/ with the same edge credential
       # (PR-58 review fix).
       # Mounted outside /etc/nginx/conf.d/ to avoid the base image's
       # `include /etc/nginx/conf.d/*.conf` wildcard — the fragments are

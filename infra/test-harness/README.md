@@ -2,7 +2,7 @@
 
 Boots a minimal antibot stack (postgres + antibot-backend + edge) under
 docker compose and exercises the [Channel C contract](../../docs/architecture/config-distribution.md)
-from `vision.md §«Обновление каталогов»`:
+from `vision.md §"Catalog and policy updates"`:
 
 | Contract claim | Case |
 |---|---|

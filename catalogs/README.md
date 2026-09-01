@@ -4,7 +4,7 @@ This directory is the **single source of truth** for the slow catalogs
 product maintains. The backend reads it on every reloader tick
 (5 s by default) and serves it to the edge through `/catalog/<name>`. The SLA from a PR merge to
 application across the edge pool is **≤ 15 minutes** (see [vision.md](../docs/product/vision.md)
-§"Refreshing the catalogs on the proxy").
+§"Catalog and policy updates").
 
 See also [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
 on why the slow catalogs live in git rather than in the database.

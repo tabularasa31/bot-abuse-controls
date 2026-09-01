@@ -10,20 +10,20 @@
 # file) and the LB container crash-loops. A committed file with safe loopback
 # defaults sidesteps the trap.
 #
-# По умолчанию пускаем loopback (acceptance verify.sh бьет по https://localhost)
-# и RFC1918-диапазоны (типичный egress эджей в private-сети демо-VM). Для prod —
-# заменить на конкретный egress-range эдж-пула (config-distribution §Channel C
+# By default we allow loopback (the acceptance verify.sh hits https://localhost)
+# and the RFC1918 ranges (the typical edge egress inside the demo VM's private network). For prod,
+# replace this with the edge pool's specific egress range (config-distribution §Channel C
 # "Auth/transport: ... IP allowlist for the edge pool's egress range").
 
-# Loopback (verify.sh, локальные curl'ы на самой backend-VM).
+# Loopback (verify.sh, local curls on the backend VM itself).
 allow 127.0.0.1;
 allow ::1;
 
-# RFC1918 (docker bridge сети, edge-VM в той же private сети).
+# RFC1918 (docker bridge networks, the edge VM on the same private network).
 allow 10.0.0.0/8;
 allow 172.16.0.0/12;
 allow 192.168.0.0/16;
 
-# Prod: добавь сюда конкретный CIDR egress'а прод-эджей и удали RFC1918,
-# если backend смотрит наружу.
+# Prod: add the production edges' specific egress CIDR here and drop RFC1918
+# if the backend is exposed externally.
 # allow 198.51.100.0/24;

@@ -15,7 +15,7 @@ B7 (rDNS state machine). App-level production deploy with DB migrations is
 [B15].
 
 > This is our own demo infra, **not** the operator's prod edge pool — see
-> [PROGRESS.md](../../PROGRESS.md) "НЕ НАШЕ".
+> [PROGRESS.md](../../PROGRESS.md) "NOT OURS".
 
 ## Topology
 

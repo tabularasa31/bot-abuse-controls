@@ -359,7 +359,7 @@ jobs:
     if: ${{ needs.changes.outputs.code == 'true' }}
     # End-to-end harness from infra/test-harness/: postgres + antibot-backend
     # + edge under docker compose, four contract scenarios from
-    # vision.md §«Обновление каталогов» (latency / atomicity / fail-stale /
+    # vision.md §"Catalog and policy updates" (latency / atomicity / fail-stale /
     # staleness gauge). Catches regressions that pure-Lua unit tests can't
     # see — wire-level swap behaviour, cross-process timing, the staleness
     # metric as an external observable.

@@ -132,20 +132,20 @@ else
 fi
 
 echo "5. POST /v1/logs accepts payload + sink ingests into PostgreSQL (B9)"
-# Тело — валидный BAC_LOG-record (миним. required: request_id/timestamp/edge_id).
-# Без него sink инкрементирует parse_errors_total и оставляет inserted=0,
-# acceptance B9 не пройдёт.
+# The body is a valid BAC_LOG record (minimum required: request_id/timestamp/edge_id).
+# Without it the sink increments parse_errors_total and leaves inserted=0,
+# so acceptance B9 would not pass.
 
-# scrape_inserted читает antibot_backend_log_sink_inserted_total из /metrics
-# и печатает число; пустая строка = метрика отсутствует (sink не wired).
+# scrape_inserted reads antibot_backend_log_sink_inserted_total from /metrics
+# and prints the number; an empty string means the metric is absent (the sink is not wired).
 scrape_inserted() {
     "${CURL[@]}" "https://${HOST}/metrics" 2>/dev/null \
         | awk '/^antibot_backend_log_sink_inserted_total / {print $2; exit}'
 }
 
-# Снимаем baseline ДО POST'a, чтобы проверять РОСТ, а не абсолют:
-# на уже живом стенде inserted_total > 0 от прошлого трафика; без delta
-# свежий неудавшийся POST давал бы false-pass (PR-56 review P2).
+# We take the baseline BEFORE the POST so that we check GROWTH, not an absolute value:
+# on a stand that is already live, inserted_total > 0 from earlier traffic; without a delta
+# a fresh failed POST would give a false pass (PR-56 review P2).
 before="$(scrape_inserted)"
 
 ts="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
@@ -163,7 +163,7 @@ fi
 if [ -z "${before}" ]; then
     echo "   skip: sink metric absent (POSTGRES_DSN / LOGS_SINK_SPOOL_DIR not set?)"
 else
-    # Sink батчит до FlushInterval=2s → даём 5s окно на flush.
+    # The sink batches up to FlushInterval=2s → we allow a 5s window for the flush.
     echo "   waiting up to 5s for sink to flush the verify payload..."
     sleep 5
     after="$(scrape_inserted)"
@@ -229,13 +229,13 @@ case "${AUTH_MODE}" in
         esac
         ;;
     mtls)
-        # Negative path: BARE curl (no --cert/--key) на /health (Channel C
-        # location). После PR-58 fix `ssl_verify_client optional` пропускает
-        # TLS handshake без cert'a, но `if ($ssl_client_verify != SUCCESS)`
-        # в auth-channelc.conf отдаёт 495 (nginx SSL Certificate Error).
-        # Раньше нас отвергал ssl_verify_client=on на TLS-уровне → 400/000/496;
-        # оба варианта оставляем в списке валидных для backward-compat при
-        # apply'е этого fix'a поэтапно.
+        # Negative path: a BARE curl (no --cert/--key) against /health (the Channel C
+        # location). After the PR-58 fix, `ssl_verify_client optional` lets the
+        # TLS handshake through without a cert, but `if ($ssl_client_verify != SUCCESS)`
+        # in auth-channelc.conf returns 495 (nginx SSL Certificate Error).
+        # Previously ssl_verify_client=on rejected us at the TLS level → 400/000/496;
+        # we keep both variants in the valid list for backward compatibility while
+        # this fix is applied in stages.
         code="$(curl -sk --connect-timeout 3 --max-time 5 \
             -o /dev/null -w '%{http_code}' "https://${HOST}/health")" || code=000
         if [ "${code}" = "495" ] || [ "${code}" = "400" ] || [ "${code}" = "000" ] || [ "${code}" = "496" ]; then
@@ -251,12 +251,12 @@ case "${AUTH_MODE}" in
         else
             bad "edge-client cert rejected on /health (${code})"
         fi
-        # PR-58 review fix: /antibot/v1/* НЕ должно гейтиться mTLS —
-        # dashboard-backend ходит туда без edge client cert'a, только bearer
-        # + dashboard-cidr.conf. BARE curl на /antibot/v1/policy/...
-        # должен пройти TLS handshake (нет mtls-rejection), upstream
-        # ответит уже своей auth-логикой (401 без bearer = норма; главное
-        # что НЕ 495 от mtls-enforcement).
+        # PR-58 review fix: /antibot/v1/* must NOT be gated by mTLS —
+        # the dashboard backend calls it without an edge client cert, using only the bearer
+        # token + dashboard-cidr.conf. A BARE curl against /antibot/v1/policy/...
+        # must get through the TLS handshake (no mTLS rejection); the upstream
+        # then answers with its own auth logic (a 401 without a bearer is expected; what matters
+        # is that it is NOT a 495 from mTLS enforcement).
         code="$(curl -sk --connect-timeout 3 --max-time 5 \
             -o /dev/null -w '%{http_code}' \
             "https://${HOST}/antibot/v1/policy/verify-mtls-isolation.example")" || code=000

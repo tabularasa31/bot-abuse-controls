@@ -67,9 +67,9 @@ else
 fi
 
 # ---- DASHBOARD_API_TOKEN seed (B10) ----
-# Без значения backend warn'ит «policy API disabled» и /antibot/v1/* возвращает
-# 404. Дашборду нужен этот же секрет в его конфиге. Генерим раз, оператор
-# синхронизирует на стороне дашборда.
+# Without a value the backend warns "policy API disabled" and /antibot/v1/* returns
+# 404. The dashboard needs the same secret in its own config. We generate it once; the operator
+# syncs it on the dashboard side.
 if [ ! -f "${ROOT}/.env" ] || ! grep -q '^DASHBOARD_API_TOKEN=' "${ROOT}/.env"; then
     DASH_TOKEN="$(openssl rand -hex 32)"
     if [ -n "$(tail -c1 "${ROOT}/.env" 2>/dev/null)" ]; then
@@ -82,9 +82,9 @@ fi
 # ---- TLS cert for the LB (+ edge-CA + sample client cert from B6) ----
 "${HERE}/gen-certs.sh"
 
-# auth/allow.list AND auth/dashboard-cidr.conf both ship committed (см.
-# auth/allow.list, auth/dashboard-cidr.conf) с safe loopback baseline'ом —
-# no seed step needed. Оператор правит CIDR'ы in-place на VM перед prod.
+# auth/allow.list AND auth/dashboard-cidr.conf both ship committed (see
+# auth/allow.list, auth/dashboard-cidr.conf) with a safe loopback baseline —
+# no seed step needed. The operator edits the CIDRs in place on the VM before prod.
 
 # ---- bring up the stack ----
 log "starting Postgres + HA backend pair + TLS LB"

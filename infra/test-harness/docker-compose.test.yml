@@ -10,7 +10,7 @@
 #   - postgres on tmpfs (no persistent volume; ephemeral CI cattle).
 #   - short reload + pull intervals so tests don't pay for the 30s
 #     production cadence on every assertion (≤30s SLA from
-#     vision.md §«Обновление каталогов» is still asserted by tests;
+#     vision.md §"Catalog and policy updates" is still asserted by tests;
 #     CI just gets to verify it in 3-5s instead of 30s).
 #
 # Edge port 18443 → host. Backend port 18080 → host. Both on loopback
