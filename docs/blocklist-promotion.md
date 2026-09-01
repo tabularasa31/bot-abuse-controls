@@ -71,5 +71,5 @@ scripts/blocklist-autopilot.sh --dry-run
 
 Аналитика и артефакты (`candidates.json` / `staging-observation.json` / `stale.json`) — на
 **backend+obs VM** (`antibot-analytics`, источник Loki). Скрипты promote/demote/autopilot
-запускаются **там же host-side** (нужен git-чекаут + gh). Прод prod-edge / Puppet — не наш контур
-(заморожено в `docs/archive/CDN operator-rollout/`); наш путь доставки — git → backend → эдж.
+запускаются **там же host-side** (нужен git-чекаут + gh). Прод-эдж на Puppet — не наш
+контур; наш путь доставки — git → backend → эдж.

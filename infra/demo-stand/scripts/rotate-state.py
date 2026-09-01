@@ -2,7 +2,7 @@
 """Bound the growth of analyze.py's lifetime state (D7).
 
 seen-fps.json and ip-cache.json accumulate every fp / IP ever seen. On the demo
-stand that is a few thousand records; on a production CDN operator edge (millions of
+stand that is a few thousand records; on a production CDN edge (millions of
 unique fp/IP per day) it would balloon into gigabytes and slow analyze.py down.
 
 This script moves the aged-out tail into state/archive/YYYY-MM.json and drops

@@ -14,7 +14,7 @@ contracts for those functions land in B3 (catalog HTTP/ETag), B6/B9 (log sink),
 B7 (rDNS state machine). App-level production deploy with DB migrations is
 [B15].
 
-> This is our own demo infra, **not** the prod-edge prod edge pool — see
+> This is our own demo infra, **not** the operator's prod edge pool — see
 > [PROGRESS.md](../../PROGRESS.md) "НЕ НАШЕ".
 
 ## Topology
@@ -189,7 +189,7 @@ docker compose -f docker-compose.backend.yml up -d   # re-binds auth.conf
 AUTH_MODE=mtls ./scripts/verify.sh                   # asserts the new mode
 ```
 
-`provision.sh` opens `443/tcp` via `ufw`. **Restrict it to CDN operator's edge
+`provision.sh` opens `443/tcp` via `ufw`. **Restrict it to the edge pool's
 egress range** in a real deploy — `ufw allow 443/tcp` is just the
 out-of-the-box convenience; the production rule must be more specific.
 
@@ -205,7 +205,7 @@ through Channel A (Puppet). Rotation without an outage:
    silently produce a cert/key mismatch). For a rolling cutover keep both
    sides intact and stage the new files under different names.
 2. **Distribute**:
-   - **Prod**: via Channel A — e.g. edge-puppet
+   - **Prod**: via Channel A — e.g. the puppet repo
      `modules/nginx/files/antibot/edge-client.{crt,key}` → Puppet agent run on
      the edge nodes → `nginx -s reload` per edge.
    - **Demo**: there's no Puppet, so the edge VM operator runs
@@ -284,7 +284,7 @@ commit either.
 ## Policy API for the dashboard (B10)
 
 `antibot-backend` exposes `/antibot/v1/policy/{site}/*` for per-host mutations
-from the the platform dashboard-backend. Server-to-server only: the dashboard
+from the client dashboard-backend. Server-to-server only: the dashboard
 authenticates its end users on its side, then forwards the change to
 antibot-backend with a shared bearer token in `Authorization: Bearer …`.
 

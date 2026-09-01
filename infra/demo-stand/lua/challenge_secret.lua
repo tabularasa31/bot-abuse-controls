@@ -1,6 +1,6 @@
 -- Phase 4 HMAC secret для clearance cookie (vision §«HMAC secret для
 -- clearance cookie», §Channel A; config-templates.md §9). Один общий для
--- всего edge-пула секрет, которым L5 подписывает cookie (issue) и self-signed
+-- всего эдж-пула секрет, которым L5 подписывает cookie (issue) и self-signed
 -- nonce challenge-страницы, а L2.1 проверяет cookie на fastpath. Всё —
 -- локально, без обращения к backend.
 --

@@ -1,7 +1,7 @@
 # Config distribution — two-channel model
 
 **Status:** accepted 2026-05-18.
-**Supersedes:** the implicit three-channel model in earlier drafts (Puppet + prod-edge-salt-pillars + per-edge sidecar HTTP pull).
+**Supersedes:** the implicit three-channel model in earlier drafts (Puppet + operator salt pillars + per-edge sidecar HTTP pull).
 **Related:** [ADR-001](../architecture-decisions/001-edge-lua-vs-go-sidecar.md), [RFC edge-lua-vs-sidecar.md](edge-lua-vs-sidecar.md).
 
 ## What this document fixes
@@ -12,13 +12,13 @@ How configuration and runtime data get from where they are authored to the edge 
 
 ```
                                                           ┌────────────────────────────────┐
-                                                          │  CDN operator edge-*           │
-                                                          │  (edge-pool edge, template=edge)  │
+                                                          │  CDN operator edge pool         │
+                                                          │  (edge-*, nginx-only nodes)     │
                                                           │                                  │
 [Channel A — static framework, slow] ─────────────────────┼─► nginx + lua-nginx-module      │
- edge-puppet-master (b05)                                  │   ├─ /etc/nginx/lua/nginx2/*.lua │
+ puppet-master                                            │   ├─ /etc/nginx/lua/nginx2/*.lua │
    modules/nginx/files/lua/nginx2/  ──► Puppet agent ─────┼─►  (verdict.lua, ja4_helpers...)│
-   modules/nginx/manifests/prod-edge.pp                        │   ├─ 50_lua.conf antibot sections│
+   modules/nginx/manifests/edge.pp                        │   ├─ 50_lua.conf antibot sections│
                                                           │   │  (lua_shared_dict decls,     │
                                                           │   │   init_worker_by_lua,        │
                                                           │   │   access_by_lua_file, log_by)│
@@ -30,33 +30,33 @@ How configuration and runtime data get from where they are authored to the edge 
  antibot-backend (our infra, centralized)                 └────────────────────────────────┘  │
    GET /catalog/tls_fp_blocklist                                                                  │
    GET /catalog/ua_blacklist                              ◄──────────────────────────────────┘
-   GET /catalog/ip_blocklist        ◄── all edges of edge-pool pull from one backend
+   GET /catalog/ip_blocklist        ◄── all edges of the pool pull from one backend
    GET /catalog/asn_datacenters
    GET /catalog/verified_bot_ips
    GET /catalog/policy        (host → mode/strictness/origin_ip/rate_rules/...)
    GET /catalog/attack_mode
         │
         ▼
-   PostgreSQL  ◄── client dashboard (per-resource policy edits)
+   PostgreSQL  ◄── dashboard (per-resource policy edits)
                 ◄── PR / manual curation (blocklists, catalogs)
                 ◄── background rDNS worker (verified_bot_ips)
 ```
 
 There is **no per-edge Go process**. The Go service runs once, centrally, on our infrastructure. Edges pull from it.
 
-There is **no prod-edge-salt-pillars extension**. Per-resource antibot policy lives in our backend's DB, keyed by `Host`, and is delivered to edges through Channel C just like any other catalog.
+There is **no salt-pillars extension on the operator side**. Per-resource antibot policy lives in our backend's DB, keyed by `Host`, and is delivered to edges through Channel C just like any other catalog.
 
 ## Channel A — Puppet (framework)
 
 **Purpose:** ship the static framework that doesn't change per request: Lua source files, nginx config snippets declaring `lua_shared_dict` and registering Lua hooks, kill-switch config.
 
-**Source of truth:** our repo (`infra/demo-stand/lua/*.lua` — каскад целиком, включая `ja4_compute.lua` / `ja4_helpers.lua` — и antibot-секции `infra/demo-stand/nginx.demo.conf`, которые puppet берёт как образец `50_lua.conf`-snippet'а), mirrored into edge-puppet's `modules/nginx/files/lua/nginx2/`. Конкретный file-by-file маппинг — в [`docs/archive/CDN operator-rollout/overview.md`](../archive/CDN operator-rollout/overview.md) (заморожено, прод-фаза).
+**Source of truth:** our repo (`infra/demo-stand/lua/*.lua` — каскад целиком, включая `ja4_compute.lua` / `ja4_helpers.lua` — и antibot-секции `infra/demo-stand/nginx.demo.conf`, которые puppet берёт как образец `50_lua.conf`-snippet'а), mirrored into the operator's puppet repo (`modules/nginx/files/lua/nginx2/`).
 
-**Distribution:** standard CDN operator Puppet pipeline. PR to edge-puppet → review → agent run on edge-* via their existing cadence.
+**Distribution:** the operator's standard Puppet pipeline. PR to the puppet repo → review → agent run on edge-* via their existing cadence.
 
 **Cadence:** human-driven. Minutes between merge and rollout. Acceptable because nothing here changes per request or per customer.
 
-**Failure mode:** if Puppet agent fails on a edge node, that edge node stays on the previous framework version. nginx config tests via `nginx -t` block bad rollouts before reload.
+**Failure mode:** if the Puppet agent fails on an edge node, that node stays on the previous framework version. nginx config tests via `nginx -t` block bad rollouts before reload.
 
 **What goes here:**
 - `lua/verdict.lua`, `lua/ja4_helpers.lua`, `lua/log_emitter.lua`, etc.
@@ -72,7 +72,7 @@ There is **no prod-edge-salt-pillars extension**. Per-resource antibot policy li
 
 **Purpose:** deliver everything that can change without a Puppet rollout: blocklists, per-resource policy, attack-mode flag, verified-bot IP allowlist.
 
-**Source of truth:** PostgreSQL inside the antibot-backend service. Populated by client dashboard (per-resource policy), PRs (blocklists), or background workers (rDNS verified bots).
+**Source of truth:** PostgreSQL inside the antibot-backend service. Populated by the client dashboard (per-resource policy), PRs (blocklists), or background workers (rDNS verified bots).
 
 **Distribution:** edge Lua calls `ngx.timer.every(30, fetch)` in `init_worker_by_lua_block`. Each tick does conditional `GET` per catalog with `If-None-Match`. On 200 — parse, atomic-swap into `lua_shared_dict` (generation-counter scheme from [RFC §В1](edge-lua-vs-sidecar.md)). On 304 — no work.
 
@@ -80,7 +80,7 @@ There is **no prod-edge-salt-pillars extension**. Per-resource antibot policy li
 
 **Failure mode:** **fail-stale.** If the backend is unreachable, the next tick logs and skips. The previous good catalog stays in `lua_shared_dict` indefinitely. A `edge_catalog_staleness_seconds` metric per worker per catalog drives alerting. The verdict pipeline never blocks on a missing catalog.
 
-**Auth / transport:** HTTPS to `antibot.internal:443`. mTLS (preferred) or IP allowlist from CDN operator's egress range. One cert per pool, rotated through Puppet (Channel A).
+**Auth / transport:** HTTPS to `antibot.internal:443`. mTLS (preferred) or IP allowlist for the edge pool's egress range. One cert per pool, rotated through Puppet (Channel A).
 
 **HA:** ≥ 2 backend instances behind DNS round-robin or a small LB. Backend is stateless beyond its own DB; HA is trivial.
 
@@ -107,9 +107,9 @@ Each thing pulled in Channel C is a **catalog**: a named, fully-versioned snapsh
 
 ## Per-resource lookup — keyed by Host, not by cdn_resource_id
 
-Edge has `ngx.var.host` for free. The `policy` catalog is a map `host → policy_json`. No need for an additional `Host → resource_id` lookup, no dependency on CDN operator's resource registry.
+Edge has `ngx.var.host` for free. The `policy` catalog is a map `host → policy_json`. No need for an additional `Host → resource_id` lookup, no dependency on the operator's resource registry.
 
-A new edge domain that has not yet been registered in our dashboard simply has no entry in `policy`; the pipeline falls back to the pool default (initially `mode=shadow`, all rules observe-only — Phase 1 default).
+A new pool domain that has not yet been registered in our dashboard simply has no entry in `policy`; the pipeline falls back to the pool default (initially `mode=shadow`, all rules observe-only — Phase 1 default).
 
 This collapses the "where does resource_id come from" open question from the Phase 1 spec to nothing.
 
@@ -117,22 +117,22 @@ This collapses the "where does resource_id come from" open question from the Pha
 
 | Rejected | Why |
 |---|---|
-| **Per-edge Go sidecar process** (original Phase 1 plan, also implied by ADR-001's wording) | No heavy/ML/grey-verdict logic to justify it. Burden: forces CDN operator to host our runtime binary on every edge node, multiplies failure surface, slows our release cycle to their Puppet cadence. With centralized backend, we ship a Go binary to our own infra and edges stay framework-only. |
-| **Three-channel model** (Puppet + prod-edge-salt-pillars + per-edge sidecar) | Two of the three are deployment for the same kind of data (per-resource policy). prod-edge-salt-pillars route requires extending a contract we don't own, coordinated through another team. Channel C does the same work end-to-end on our side, with finer cadence. |
+| **Per-edge Go sidecar process** (original Phase 1 plan, also implied by ADR-001's wording) | No heavy/ML/grey-verdict logic to justify it. Burden: forces the CDN operator to host our runtime binary on every edge node, multiplies failure surface, slows our release cycle to their Puppet cadence. With centralized backend, we ship a Go binary to our own infra and edges stay framework-only. |
+| **Three-channel model** (Puppet + operator salt pillars + per-edge sidecar) | Two of the three are deployment for the same kind of data (per-resource policy). The salt-pillars route requires extending a contract we don't own, coordinated through another team. Channel C does the same work end-to-end on our side, with finer cadence. |
 | **Lua reading PostgreSQL directly** | Connection pools per edge, schema coupling, no ETag protocol natively, no way to fail-stale cleanly. The catalog HTTP layer is exactly the indirection that gives us those properties for free. |
 | **One-shot Puppet push of catalogs as files** | Loses sub-minute updates; emergency `attack_mode=on` can't wait for Puppet. Acceptable only as a fallback during prolonged backend outage; not the primary distribution mechanism. |
 
 ## Open items
 
-**Channel C network reach.** Firewall rule from edge-* egress to `antibot.internal:443`, plus IP allowlist or mTLS cert distribution path. This is the one operational dependency we cannot self-serve and must negotiate with prod-edge.
+**Channel C network reach.** Firewall rule from edge-* egress to `antibot.internal:443`, plus IP allowlist or mTLS cert distribution path. This is the one operational dependency we cannot self-serve and must negotiate with the CDN operator.
 
-Nginx-internal questions (where exactly in their cascade `access_by_lua` slots in, what `lua_shared_dict` names are chosen, how our Lua coexists with theirs) are **not on our side** — Phase 1 and Phase 2 specs put integration squarely in prod-edge-admins' zone of responsibility. We supply the reference Lua implementation, the integration spec (cascade order, hook phase, shared_dict prefix `antibot_*`), the catalog HTTP contract, and the backend. They slot it into their nginx config. The Phase 2 fp task is already issued to them on that contract; TLS termination at nginx and availability of `$ssl_*` / `$geoip_*` are already known facts (otherwise Phase 2 spec couldn't have been written).
+Nginx-internal questions (where exactly in their cascade `access_by_lua` slots in, what `lua_shared_dict` names are chosen, how our Lua coexists with theirs) are **not on our side** — Phase 1 and Phase 2 specs put integration squarely in the edge admins' zone of responsibility. We supply the reference Lua implementation, the integration spec (cascade order, hook phase, shared_dict prefix `antibot_*`), the catalog HTTP contract, and the backend. They slot it into their nginx config. The Phase 2 fp task is already issued to them on that contract; TLS termination at nginx and availability of `$ssl_*` / `$geoip_*` are already known facts (otherwise Phase 2 spec couldn't have been written).
 
 ## Terminology cleanup
 
 | Term | Meaning |
 |---|---|
-| **edge** | a edge-* server. Runs nginx + Lua only. |
+| **edge** | an `edge-*` server. Runs nginx + Lua only. |
 | **antibot-backend** | our Go service, centralized on our infra. Hosts the catalog HTTP API, owns the DB, runs background workers (rDNS), receives logs from edges. |
 | **catalog** | one named, ETag-versioned data set served by the antibot-backend and held in one `lua_shared_dict` on the edge. |
 | **Channel A** | Puppet path for framework code/config. Slow, human-driven. |

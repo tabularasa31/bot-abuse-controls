@@ -12,8 +12,8 @@
 #
 # По умолчанию пускаем loopback (acceptance verify.sh бьет по https://localhost)
 # и RFC1918-диапазоны (типичный egress эджей в private-сети демо-VM). Для prod —
-# заменить на конкретный egress-range prod-edge (config-distribution §Channel C
-# "Auth/transport: ... IP allowlist from CDN operator's egress range").
+# заменить на конкретный egress-range эдж-пула (config-distribution §Channel C
+# "Auth/transport: ... IP allowlist for the edge pool's egress range").
 
 # Loopback (verify.sh, локальные curl'ы на самой backend-VM).
 allow 127.0.0.1;
@@ -24,6 +24,6 @@ allow 10.0.0.0/8;
 allow 172.16.0.0/12;
 allow 192.168.0.0/16;
 
-# Prod: добавь сюда конкретный CIDR egress'а prod-edge эджей и удали RFC1918,
+# Prod: добавь сюда конкретный CIDR egress'а прод-эджей и удали RFC1918,
 # если backend смотрит наружу.
 # allow 198.51.100.0/24;

@@ -15,7 +15,7 @@ stand. State and report archives live under the repo root's `state/` and
 ## State rotation (`rotate-state.py`)
 
 `seen-fps.json` and `ip-cache.json` record **every** fp / IP ever seen. On the
-demo stand that is a few thousand records; on a production CDN operator edge
+demo stand that is a few thousand records; on a production CDN edge
 (millions of unique fp/IP per day) it would grow into gigabytes and slow
 `analyze.py` down. `rotate-state.py` keeps the active files small without losing
 history.

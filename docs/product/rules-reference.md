@@ -125,7 +125,7 @@
 
 ### Что происходит дальше (Этап 5.1 → 5.2)
 
-- `should_challenge()=false` → `verdict=pass` или `verdict=permissive` (см. выше), запрос идет дальше в prod-edge-flow.
+- `should_challenge()=false` → `verdict=pass` или `verdict=permissive` (см. выше), запрос идет дальше в CDN-flow.
 - `should_challenge()=true` → разводка по веткам A/B/C по типу клиента (ниже).
 
 ### Ветки выдачи (Этап 5.2), когда `should_challenge()=true`

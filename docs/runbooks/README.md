@@ -1,7 +1,7 @@
 # Runbooks — demo-stand (Phase 4 readiness)
 
 Операционные процедуры для **демо-стенда** (`infra/demo-stand/`, long-running
-reverse proxy на VM). Это не прод prod-edge: Channel A на стенде = file/mount +
+reverse proxy на VM). Это не прод-эдж: Channel A на стенде = file/mount +
 `openresty -s reload`, а не Puppet. Каждая процедура ниже проверена на живом
 стенде — см. раздел «Verified on stand» в конце каждого файла.
 
@@ -68,6 +68,5 @@ Backend читает медленные каталоги из git-чекаута
 (Host `antibot.internal`), bearer `DASHBOARD_API_TOKEN` из
 `infra/demo-backend/.env`.
 
-> Прод-материал prod-edge (Puppet/hiera/canary) заморожен в
-> [`docs/archive/CDN operator-rollout/`](../archive/CDN operator-rollout/) — это не
-> стендовые инструкции.
+> Прод-материал эджа (Puppet/hiera/canary) в этом репо не ведется — здесь
+> только стендовые инструкции.

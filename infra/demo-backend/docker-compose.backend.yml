@@ -198,7 +198,7 @@ services:
       # forces a password change on first login. .env.example marks this
       # as required when the profile IS enabled.
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-}"
-      # Don't phone home from a demo VM that may be behind CDN operator's egress
+      # Don't phone home from a demo VM that may be behind a restricted egress
       # filtering — and there's nothing useful to report from this scale.
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"

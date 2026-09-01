@@ -1,6 +1,6 @@
 # Demo stand — abuse-controls antibot
 
-A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (CDN operator admins, security, product) can probe it from their own machine without setting anything up.
+A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (edge admins, security, product) can probe it from their own machine without setting anything up.
 
 The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (B11). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The cascade лежит целиком в `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
 
@@ -232,7 +232,7 @@ no `BAC_LOG` lines (`docker logs --since 1m nginx-demo | grep BAC_LOG`); with th
 Phase 4 (L5 active verification) подписывает clearance cookie и self-signed
 nonce challenge-страницы локальным HMAC-секретом — без обращения к backend
 (vision §«HMAC secret для clearance cookie», §Channel A). Один секрет на весь
-edge-пул; в проде доставляется через Puppet (Channel A), на демо-стенде Channel
+эдж-пул; в проде доставляется через Puppet (Channel A), на демо-стенде Channel
 A = file mount, как и для `./certs/*.pem` и `kill_switch.local.conf`.
 
 **Файл.** `infra/demo-stand/certs/challenge_secret.key` — одна строка
@@ -431,7 +431,7 @@ and the cascade behaves identically.
 - **Rate limiting** (cascade task [A3](https://app.clickup.com/t/86exmjzxm)). Each request is independent.
 - **UA↔JA consistency** (cascade task [A5](https://app.clickup.com/t/86exmk00m)). The demo's blocklist doesn't include this signal.
 
-The demo is intentionally the **A1 fp blocklist** slice of the cascade only — the part that's production-ready post-PR #3/#4. Other cascade tasks are sequenced after a successful demo + integration with CDN operator edge.
+The demo is intentionally the **A1 fp blocklist** slice of the cascade only — the part that's production-ready post-PR #3/#4. Other cascade tasks are sequenced after a successful demo + integration with the prod edge.
 
 ## Files
 

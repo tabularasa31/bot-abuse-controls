@@ -3,7 +3,7 @@
 #
 # Contract: catalog staleness (seconds since the last successful pull, 200 or
 # 304) resets to ~0 on every successful pull and grows monotonically while the
-# backend is unreachable. Alerts on the prod-edge side fire on this signal
+# backend is unreachable. Alerts on the edge side fire on this signal
 # (config-distribution §"drives alerting").
 #
 # Phase 1: the signal moved off the public /metrics Prometheus gauge to the

@@ -6,7 +6,7 @@
 -- lookup() per request to fill the geo_country / asn log fields and to drive
 -- the reputation:asn_dc tag.
 --
--- Why the stand does the lookup itself: CDN operator's edge does not (yet) expose
+-- Why the stand does the lookup itself: the prod edge does not (yet) expose
 -- $geoip_* and providing a MaxMind base is out of our hands. Per CLAUDE.md the
 -- stand reproduces edge behaviour in its own Lua, so it carries its own
 -- GeoLite2 database and resolves locally.

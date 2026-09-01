@@ -1,6 +1,6 @@
 # abuse-controls
 
-Bot & Abuse Controls v1 для the platform (продукт на инфраструктуре CDN operator).
+Bot & Abuse Controls v1 — антибот-каскад для CDN-эджа (OpenResty/Lua) с централизованным control plane.
 
 Реализует архитектурное решение из [RFC edge Lua vs Go sidecar](docs/architecture/edge-lua-vs-sidecar.md) + [config-distribution.md](docs/architecture/config-distribution.md): фильтрация — на edge через OpenResty/Lua, control plane (каталоги, dashboard, rDNS, log sink) — централизованный Go-сервис [`antibot-backend/`](antibot-backend/). Per-edge sidecar отменён (см. config-distribution §"What was rejected").
 
