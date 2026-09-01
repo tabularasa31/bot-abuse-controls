@@ -1,13 +1,6 @@
--- Recent-requests ring buffer. (Its /__admin live-view reader was removed in
--- Phase 1; still written by log_event, retained for a future private mgmt view.)
--- Lua analogue of
--- the vanilla sidecar's observe.RecentStore, scoped to what a single edge
--- can do with a shared_dict (no per-fp aggregation store — that's a bigger
--- task; this gives the "what's happening right now" sample the thin admin
--- page was missing).
---
--- Stores the last CAP request records as JSON in ngx.shared.recent, indexed
--- by a monotonic head counter modulo CAP. snapshot() returns newest-first.
+-- Ring buffer of the last CAP requests, as JSON in a shared_dict indexed by a
+-- monotonic head counter modulo CAP. Written by log_event; its reader was
+-- removed with the public admin surface and is kept for a private one.
 
 local cjson = require "cjson.safe"
 
@@ -16,11 +9,8 @@ local _M = {}
 local CAP  = 50
 local dict = ngx.shared.recent
 
--- Record one pipeline request. `rec` is a small flat table; UA is capped so
--- a pathological User-Agent can't blow the shared_dict value limit. host and
--- flags (C6) are kept so the /__admin recovery widget can show enough context
--- to recognise a false positive and dispatch the correct per-resource
--- whitelist call (host → which policy, flags → why it blocked).
+-- UA and host are capped so a pathological header cannot exceed the
+-- shared_dict value limit.
 function _M.record(rec)
     if not dict then return end
     if rec.ua and #rec.ua > 160 then rec.ua = rec.ua:sub(1, 160) end

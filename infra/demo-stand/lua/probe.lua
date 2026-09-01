@@ -1,8 +1,6 @@
--- /__fp educational endpoint. Returns the same fp + raw components
--- that the production probe.lua does. Bypasses the verdict pipeline
--- so it works even if your client's fp is in the blocklist — useful
--- to show a sceptical reviewer "your fp is this, and here's the raw
--- input that produced it".
+-- Returns the caller's own fingerprint and the raw handshake components it was
+-- built from. Bypasses the cascade, so it still answers a client whose
+-- fingerprint is blocklisted.
 
 local ja4 = require "ja4_compute"
 local fp, parts = ja4.compute()
@@ -16,9 +14,8 @@ ngx.say("ciphers=", parts.ciphers)
 ngx.say("curves=",  parts.curves)
 ngx.say("ua=",      ngx.var.http_user_agent or "-")
 
--- Geo/ASN the reputation stage would resolve for this request (A6). Honours
--- X-Demo-IP for convenience here so a reviewer can probe an arbitrary IP;
--- shows "-" when GeoLite2 is not loaded or the IP has no entry.
+-- X-Demo-IP allows probing an arbitrary address; "-" means GeoLite2 is not
+-- loaded or has no entry.
 local geoip = require "geoip"
 local probe_ip = ngx.var.http_x_demo_ip
 if not probe_ip or probe_ip == "" then probe_ip = ngx.var.remote_addr end
