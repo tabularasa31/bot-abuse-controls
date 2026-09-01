@@ -1,4 +1,4 @@
-# abuse-controls
+# bot-abuse-controls
 
 Bot & Abuse Controls v1 — антибот-каскад для CDN-эджа (OpenResty/Lua) с централизованным control plane.
 
