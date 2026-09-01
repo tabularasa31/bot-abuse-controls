@@ -1,243 +1,408 @@
-# Bot & Abuse Controls — Phase 2: TLS-fingerprinting
+# Bot & Abuse Controls — Phase 2: TLS fingerprinting
 
-## Контекст
+## Context
 
-Это продолжение задачи на L1 MVP. Там реализуется классический каскад: метод, IP/ASN/гео, rate-лимиты. Этого достаточно, чтобы отсекать массовый шум, но недостаточно против современных целевых ботов — они маскируются под браузеры, ходят с residential-IP в нормальном rate, и L1–L3 их не отличают от живых пользователей.
+This continues the L1 MVP task, where the classic cascade is implemented: method,
+IP/ASN/geo, rate limits. That is enough to cut off mass noise, but not enough against
+modern targeted bots — they disguise themselves as browsers, arrive from residential IPs
+at a normal rate, and L1–L3 cannot tell them from real users.
 
-Phase 2 закрывает этот пробел через TLS-fingerprinting: вычисление сигнатуры клиента из TLS handshake. Сигнатура определяется TLS-стеком клиента (Chrome NSS / Firefox NSS / OpenSSL / LibreSSL / Go crypto/tls и т.п.) и не меняется при подмене User-Agent: бот может отправить «Chrome 148» в UA, но если он реально python-requests, его TLS-fingerprint выдаст это.
+Phase 2 closes that gap with TLS fingerprinting: computing the client's signature from
+the TLS handshake. The signature is determined by the client's TLS stack (Chrome NSS /
+Firefox NSS / OpenSSL / LibreSSL / Go crypto/tls and so on) and does not change when the
+User-Agent is spoofed: a bot can send "Chrome 148" in its UA, but if it is really
+python-requests, its TLS fingerprint gives it away.
 
-Задача — встроить TLS-fp в каскад из Phase 1 как отдельный слой L3 (между reputation и rate_limits, см. ниже) и собрать структурированные логи, обогащенные fp, для последующего наполнения каталогов и blocklist'ов.
+The task is to embed the TLS fingerprint into the Phase 1 cascade as a separate layer L3
+(between reputation and rate_limits, see below) and to collect structured logs enriched
+with the fingerprint, for populating catalogs and blocklists later.
 
-Стек тот же — nginx + openresty + lua.
+The stack is the same — nginx plus OpenResty plus Lua.
 
-## Зоны ответственности
+## Areas of responsibility
 
-- **Админы** — реализация модуля вычисления fp, встраивание этапа в каскад, ведение конфигов через PR, обогащение логов TLS-полями.
-- **Продакт-менеджер** — постановка задачи, ведение fp-каталога и blocklist по итогам анализа логов, приемка.
-- **Разработка** — на этом этапе не задействована.
+- **Admins** — implementing the fingerprint computation module, embedding the stage into
+  the cascade, maintaining the configs through PRs, enriching the logs with TLS fields.
+- **Product manager** — framing the task, maintaining the fingerprint catalog and the
+  blocklist from log analysis, acceptance.
+- **Development** — not involved at this stage.
 
-## Что важно понимать про Phase 2
+## What matters about Phase 2
 
-- **Phase 2 не заменяет Phase 1, а добавляется поверх.** Каскад из четырех этапов (Phase 1) остается как есть, TLS-fp встраивается между этапом `reputation` и этапом `rate_limits` — после дешевых проверок IP/ASN/гео, до дорогих rate-счетчиков.
-- **Сам fp не блокирует — блокируют производные сигналы.** Fp — это идентификатор клиента. На основе fp работают правила (impersonator-детекция, blocklist по сигнатуре, suspicious cipher count).
-- **Все принципы Phase 1 сохраняются:** каскад только наблюдает (никаких физических блокировок в MVP), категории правил (blocking/allow/soft), один финальный verdict в логе, kill-switch.
-- **Главный выход** — логи, обогащенные `tls_fp` и информационными тегами с namespace `tls_fp:*`. На их основе продукт ведет каталог fp и blocklist; когда придет боевой режим (синхронно с per-resource shadow_mode в отдельной задаче), эти данные станут основой для боевых блокировок.
+- **Phase 2 does not replace Phase 1, it is added on top.** The four-stage cascade from
+  Phase 1 stays as it is, and the TLS fingerprint is inserted between the `reputation`
+  and `rate_limits` stages — after the cheap IP/ASN/geo checks, before the expensive rate
+  counters.
+- **The fingerprint itself does not block — the derived signals do.** The fingerprint is
+  a client identifier. Rules operate on top of it (impersonator detection, a blocklist by
+  signature, suspicious cipher count).
+- **Every Phase 1 principle is preserved:** the cascade only observes (no physical
+  blocking in the MVP), rule categories (blocking/allow/soft), one final verdict in the
+  log, the kill switch.
+- **The main output** is logs enriched with `tls_fp` and informational tags in the
+  `tls_fp:*` namespace. From them product maintains the fingerprint catalog and the
+  blocklist; when enforcement mode arrives (together with the per-resource shadow_mode in
+  a separate task), that data becomes the basis for real blocking.
 
-## Открытые вопросы к админам (до старта)
+## Open questions for the admins (before we start)
 
-- **Доступность нужных переменных в `access_by_lua` на боевом openresty.** Требуются: `$ssl_protocol`, `$ssl_ciphers`, `$ssl_curves`, `$ssl_alpn_protocol`, `$ssl_server_name`. Если каких-то нет — обсуждаем варианты (другая сборка, патч).
-- **Где хранить per-fp state на распределенной проде.** Кэш fp и счетчики per-fp — это `shared_dict` per-proxy. Этого достаточно для MVP, но бот, переключающийся между proxy, обнуляет лимиты. Централизованное состояние (Redis или аналог) — отдельная задача, см. «Out Of Scope».
+- **Availability of the required variables in `access_by_lua` on the production
+  OpenResty.** We need `$ssl_protocol`, `$ssl_ciphers`, `$ssl_curves`,
+  `$ssl_alpn_protocol`, `$ssl_server_name`. If any are missing, we discuss the options (a
+  different build, a patch).
+- **Where to keep per-fingerprint state in a distributed production.** The fingerprint
+  cache and the per-fingerprint counters are a per-proxy `shared_dict`. That is enough for
+  the MVP, but a bot that hops between proxies resets its limits. Centralised state (Redis
+  or similar) is a separate task; see "Out of scope".
 
-## Где встает новый этап в каскаде
+## Where the new stage sits in the cascade
 
-Из Phase 1 каскад был четырехэтапный. Phase 2 добавляет один этап. Этапы идентифицируются стабильными строковыми кодами (не порядковыми номерами), чтобы при добавлении/перестановке этапов в будущем существующие коды не сдвигались и старые логи оставались интерпретируемыми.
+Phase 1 left us a four-stage cascade. Phase 2 adds one stage. Stages are identified by
+stable string codes (not ordinal numbers) so that adding or reordering stages in future
+does not shift the existing codes and old logs stay interpretable.
 
-| Этап (код) | Назначение | Статус |
+| Stage (code) | Purpose | Status |
 |---|---|---|
-| `hygiene` | Идентификация ресурса и базовая гигиена | Phase 1, без изменений |
-| `reputation` | Репутация источника (IP / ASN / гео) | Phase 1, без изменений |
-| `tls_fp` | TLS-fingerprinting | **NEW — Phase 2** |
-| `rate_limits` | Поведенческие лимиты | Phase 1, без изменений в логике (добавляется один новый профиль `rate_tls_fp`, см. ниже) |
-| `egress` | Пропуск к origin клиента | Phase 1, без изменений |
+| `hygiene` | Resource identification and basic hygiene | Phase 1, unchanged |
+| `reputation` | Source reputation (IP / ASN / geo) | Phase 1, unchanged |
+| `tls_fp` | TLS fingerprinting | **NEW — Phase 2** |
+| `rate_limits` | Behavioural limits | Phase 1, logic unchanged (one new profile `rate_tls_fp` is added, see below) |
+| `egress` | Passing through to the customer's origin | Phase 1, unchanged |
 
-Почему между `reputation` и `rate_limits`:
+Why between `reputation` and `rate_limits`:
 
-- Fp дешевле rate-лимитов: один lookup в `shared_dict` против N счетчиков по окнам.
-- Fp меняет вес последующих правил: если на этапе `tls_fp` клиент помечен как impersonator, имеет смысл применить к нему более жесткие rate-лимиты на этапе `rate_limits`. Поэтому fp должен считаться до rate-лимитов.
-- Fp дороже базовой гигиены и IP/ASN (требует sha256 хеша, парсинга cipher list), поэтому идет после них.
+- The fingerprint is cheaper than the rate limits: one `shared_dict` lookup versus N
+  counters across windows.
+- The fingerprint changes the weight of the rules that follow: if the `tls_fp` stage
+  marks a client as an impersonator, it makes sense to apply stricter rate limits at the
+  `rate_limits` stage. So the fingerprint has to be computed before the rate limits.
+- The fingerprint is more expensive than basic hygiene and IP/ASN (it needs a sha256 hash
+  and parsing of the cipher list), so it comes after them.
 
-## Этап `tls_fp` (новый). TLS-fingerprinting
+## Stage `tls_fp` (new). TLS fingerprinting
 
-### Что делает
+### What it does
 
-Для каждого запроса вычисляет fingerprint и обогащает запрос пометками. Сам по себе fp не приводит к блокировке — он становится сигналом для правил.
+For every request it computes a fingerprint and enriches the request with markers. The
+fingerprint by itself leads to no block — it becomes a signal for rules.
 
-### Источники сигналов
+### Signal sources
 
-Из stock nginx-переменных в `access_by_lua`:
+From stock nginx variables in `access_by_lua`:
 
-- `$ssl_protocol` — версия TLS.
-- `$ssl_ciphers` — список offered ciphers.
-- `$ssl_curves` — список offered EC curves.
-- `$ssl_alpn_protocol` — negotiated ALPN.
-- `$ssl_server_name` — SNI.
+- `$ssl_protocol` — the TLS version.
+- `$ssl_ciphers` — the list of offered ciphers.
+- `$ssl_curves` — the list of offered EC curves.
+- `$ssl_alpn_protocol` — the negotiated ALPN.
+- `$ssl_server_name` — the SNI.
 
-### Что должно быть вычислено
+### What has to be computed
 
-**Fingerprint = `L<ver><sni_flag><cipher_cnt><alpn>_<hash_b>_<hash_c>`**, где:
+**Fingerprint = `L<ver><sni_flag><cipher_cnt><alpn>_<hash_b>_<hash_c>`**, where:
 
-- `ver` — `12` для TLS 1.2, `13` для TLS 1.3.
-- `sni_flag` — `d` если SNI присутствует, `i` если нет.
-- `cipher_cnt` — количество cipher'ов после strip GREASE (RFC 8701: значения вида `0x?A?A` где `?` совпадает — это grease, отбрасывается).
-- `alpn` — двухбуквенное обозначение (`h2`, `h1`).
-- `hash_b = sha256(отсортированный список ciphers после strip GREASE)[:12]` — hex.
+- `ver` — `12` for TLS 1.2, `13` for TLS 1.3.
+- `sni_flag` — `d` when SNI is present, `i` when it is not.
+- `cipher_cnt` — the number of ciphers after stripping GREASE (RFC 8701: values of the
+  form `0x?A?A` where the `?`s match are grease and are discarded).
+- `alpn` — a two-letter designation (`h2`, `h1`).
+- `hash_b = sha256(the sorted cipher list after stripping GREASE)[:12]` — hex.
 - `hash_c = sha256(curves_after_grease + alpn + ver)[:12]` — hex.
 
-Пример итогового fp для реального Chrome: `L13d15h2_1ed0482b9b4c_b50336ab2a86`.
+An example of the resulting fingerprint for a real Chrome:
+`L13d15h2_1ed0482b9b4c_b50336ab2a86`.
 
-Требования к compute:
+Requirements on the computation:
 
-- Fingerprint вычисляется один раз на запрос (или один раз на TLS-соединение с кэшированием — на усмотрение реализации).
-- Strip GREASE обязателен — без него fp нестабилен между соединениями (Chrome ротирует GREASE).
-- Результат — детерминированная строка, одинаковая для одного и того же TLS-стека.
+- The fingerprint is computed once per request (or once per TLS connection with caching —
+  at the implementation's discretion).
+- Stripping GREASE is mandatory — without it the fingerprint is unstable between
+  connections (Chrome rotates GREASE).
+- The result is a deterministic string, identical for one and the same TLS stack.
 
-### Правила этапа
+### Rules of the stage
 
-| Правило | Сигнал | Категория |
+| Rule | Signal | Category |
 |---|---|---|
-| `tls_fp_blocklist` | Fp клиента есть в `tls_fp_blocklist.conf`. | blocking |
-| `tls_fp_impersonator` | UA-семейство утверждает X (например, Chrome), `hash_b` совпадает с известной сигнатурой автоматизации Y. Каталог сигнатур — в `tls_fp_catalog.conf`. | soft |
-| `tls_fp_suspicious_ciphers` | UA похож на браузер, но `cipher_cnt` не совпадает с ожидаемым для этого браузера. Профили — в `tls_fp_browser_profiles.conf`. | soft |
-| `tls_fp_dc_browser` | TLS-fp выглядит как браузер (семейство по cipher-профилю), но IP из датацентрового ASN (`asn_datacenters.conf`) — настоящие пользователи не ходят из публичного ДЦ. | soft |
+| `tls_fp_blocklist` | The client's fingerprint is in `tls_fp_blocklist.conf`. | blocking |
+| `tls_fp_impersonator` | The UA family claims X (say Chrome) while `hash_b` matches a known automation signature Y. The signature catalog is `tls_fp_catalog.conf`. | soft |
+| `tls_fp_suspicious_ciphers` | The UA looks like a browser but `cipher_cnt` does not match the expected value for that browser. The profiles are in `tls_fp_browser_profiles.conf`. | soft |
+| `tls_fp_dc_browser` | The fingerprint looks like a browser (family by cipher profile) but the IP is in a datacenter ASN (`asn_datacenters.conf`) — real users do not browse from a public datacenter. | soft |
 
-Категории `blocking`, `allow`, `soft` — те же, что в Phase 1 (см. раздел «Концепция: правила, категории, логи» в постановке Phase 1).
+The `blocking`, `allow` and `soft` categories are the same as in Phase 1 (see "Concept:
+rules, categories, logs" in the Phase 1 spec).
 
-Дополнительно в лог пишутся информационные теги (не правила, не приводят к verdict, нужны только для аналитики):
+The log additionally carries informational tags (not rules, they lead to no verdict and
+exist only for analytics):
 
-- `tls_fp:automation_ua` — в UA явные признаки автоматизации (то же, что будет ловить `ua_blacklist` на этапе hygiene, когда каталог наполнится). В Phase 1/2 `ua_blacklist` пуст, поэтому этот тег — первичный сигнал автоматизации UA до наполнения `ua_blacklist`. Кроме того, дублирование удобно для фильтрации логов по TLS-полям.
-- `tls_fp:no_sni` — клиент пришел без SNI.
+- `tls_fp:automation_ua` — the UA carries explicit automation markers (the same thing
+  `ua_blacklist` will catch at the hygiene stage once its catalog is populated). In
+  Phase 1/2 `ua_blacklist` is empty, so this tag is the primary UA automation signal until
+  it is filled in. The duplication is also convenient for filtering logs by TLS fields.
+- `tls_fp:no_sni` — the client arrived without SNI.
 
-**Примеры** (в MVP физически с запросом ничего не происходит, только запись в лог):
+**Examples** (in the MVP nothing physically happens to the request, only a log record):
 
-- Браузерный Chrome, fp = `L13d15h2_<browser_hash_b>_<browser_hash_c>`, нет совпадения с каталогом → `verdict=pass`, теги пустые.
-- `User-Agent: Mozilla/5.0 ... Chrome/148`, но fp `cipher_cnt=11` (вместо ожидаемого `15` для Chrome) → `verdict=challenge`, `rule=tls_fp_suspicious_ciphers` (категория `soft` → в логе `verdict=challenge` для аналитики).
-- `User-Agent: Mozilla/5.0 ... Chrome/148`, `hash_b` совпадает с сигнатурой `python-requests` в каталоге → `verdict=challenge`, `rule=tls_fp_impersonator`.
-- Fp клиента есть в `tls_fp_blocklist.conf` → `verdict=block`, `rule=tls_fp_blocklist`.
+- A browser Chrome, fingerprint `L13d15h2_<browser_hash_b>_<browser_hash_c>`, no catalog
+  match → `verdict=pass`, no tags.
+- `User-Agent: Mozilla/5.0 ... Chrome/148` but a fingerprint with `cipher_cnt=11` (instead
+  of the expected `15` for Chrome) → `verdict=challenge`,
+  `rule=tls_fp_suspicious_ciphers` (a `soft` category → `verdict=challenge` in the log,
+  for analytics).
+- `User-Agent: Mozilla/5.0 ... Chrome/148` with `hash_b` matching the `python-requests`
+  signature in the catalog → `verdict=challenge`, `rule=tls_fp_impersonator`.
+- The client's fingerprint is in `tls_fp_blocklist.conf` → `verdict=block`,
+  `rule=tls_fp_blocklist`.
 
-### Поведение
+### Behaviour
 
-- Fp вычисляется для каждого запроса, попавшего в каскад. Кэшируется в `tls_fp_cache` (`shared_dict`) с коротким TTL, чтобы повторные запросы того же fp не пересчитывали хеш.
-- `tls_fp` и информационные теги пишутся в лог всегда, независимо от mode правил — это и есть данные для калибровки.
-- Каскад в MVP только наблюдает — наследуется из Phase 1. Все правила TLS-fp срабатывают, факт срабатывания пишется в лог, но физически с запросом ничего не происходит. Боевой режим (физические блокировки) появится синхронно с per-resource shadow_mode в отдельной задаче.
+- The fingerprint is computed for every request that enters the cascade. It is cached in
+  `tls_fp_cache` (a `shared_dict`) with a short TTL, so that repeat requests with the same
+  fingerprint do not recompute the hash.
+- `tls_fp` and the informational tags are always written to the log, regardless of the
+  rules' mode — that is precisely the calibration data.
+- In the MVP the cascade only observes, inherited from Phase 1. Every TLS fingerprint rule
+  fires and the hit is logged, but nothing physically happens to the request. Enforcement
+  mode (physical blocking) arrives together with the per-resource shadow_mode in a separate
+  task.
 
-### Подходящие механизмы openresty
+### Suitable OpenResty mechanisms
 
-- `ngx.shared.DICT` для `tls_fp_cache` (per-fp кэш) и `tls_fp_blocklist` (статический список).
-- `access_by_lua_file` — точка входа этапа (после этапа `reputation`).
-- `init_by_lua_file` — загрузка каталога и blocklist при старте worker.
-- `ngx.sha256_hex` для хешей.
+- `ngx.shared.DICT` for `tls_fp_cache` (the per-fingerprint cache) and `tls_fp_blocklist`
+  (a static list).
+- `access_by_lua_file` — the stage's entry point (after the `reputation` stage).
+- `init_by_lua_file` — loading the catalog and the blocklist at worker startup.
+- `ngx.sha256_hex` for the hashes.
 
-## Влияние на этап `rate_limits` (Поведенческие лимиты)
+## Effect on the `rate_limits` stage (behavioural limits)
 
-После Phase 2 этап `rate_limits` получает возможность использовать `tls_fp` как один из ключей rate-лимитов в дополнение к IP и IP+UA. Это закрывает класс атак, где бот ротирует IP, но TLS-стек остается одним и тем же.
+After Phase 2 the `rate_limits` stage can use `tls_fp` as one of its rate-limit keys, in
+addition to IP and IP+UA. That closes the class of attacks where a bot rotates IPs while
+its TLS stack stays the same.
 
-Новый профиль лимитов (добавляется к существующим из Phase 1):
+A new limit profile (added to the existing ones from Phase 1):
 
-| Профиль | Ключ | Окно 10 с | Окно 1 мин | Код правила | Категория |
+| Profile | Key | 10 s window | 1 min window | Rule code | Category |
 |---|---|---|---|---|---|
-| per-fp | `tls_fp` | 50 req | 300 req | `rate_tls_fp` | blocking |
+| per fingerprint | `tls_fp` | 50 req | 300 req | `rate_tls_fp` | blocking |
 
-Стартовые пороги — заведомо высокие, цель — собрать распределение в логах и опустить по данным. Если `tls_fp_cache` промахнулся (по какой-то причине fp не вычислился) — правило `rate_tls_fp` не срабатывает, работают только лимиты per-IP и per-IP+UA из Phase 1.
+The starting thresholds are deliberately high; the goal is to gather the distribution in
+the logs and lower them from data. If `tls_fp_cache` missed (the fingerprint could not be
+computed for some reason), the `rate_tls_fp` rule does not fire and only the per-IP and
+per-IP+UA limits from Phase 1 apply.
 
-Семантика sliding-window (GCRA) — из Phase 1, не меняется.
+The sliding-window semantics (GCRA) come from Phase 1 and do not change.
 
-## Staged rollout для PR-каталогов (новое в Phase 2)
+## Staged rollout for PR catalogs (new in Phase 2)
 
-**Проблема.** Каталоги, которые наполняются через PR (`tls_fp_blocklist`, `tls_fp_catalog`, `tls_fp_browser_profiles`, а также `ua_blacklist` и `ip_blocklist`), содержат паттерны/сигнатуры. Если продакт добавит новую запись через PR и она сразу же поедет на proxy — в логах сразу появятся срабатывания. Если паттерн оказался слишком широким и задел легитимный браузер — массовый false-positive (в боевом режиме это блокировки; в Phase 1/2 — пока только мусор в логах, но все равно нежелательно).
+**The problem.** The catalogs populated through PRs (`tls_fp_blocklist`,
+`tls_fp_catalog`, `tls_fp_browser_profiles`, plus `ua_blacklist` and `ip_blocklist`)
+contain patterns and signatures. If product adds a new entry through a PR and it goes
+straight to the proxies, hits appear in the logs immediately. If the pattern turned out to
+be too broad and touched a legitimate browser, that is a mass false positive (blocking in
+enforcement mode; in Phase 1/2 only noise in the logs, but undesirable all the same).
 
-**Решение — staging-статус паттернов.** Каждая запись в каталоге имеет поле `status` с двумя значениями:
+**The solution — a staging status for patterns.** Every catalog entry has a `status`
+field with two values:
 
-- `staging` — паттерн загружен на proxy, proxy его матчит и пишет факт срабатывания в специальное поле лога (`staging_match`), но не приводит к `verdict=block` даже в боевом режиме. По факту запрос идет дальше через каскад как обычно.
-- `active` — паттерн полноценно работает: matches → `verdict=block` или `verdict=challenge` (в зависимости от категории правила), как обычное правило.
+- `staging` — the pattern is loaded on the proxy, the proxy matches it and records the hit
+  in a dedicated log field (`staging_match`), but it never leads to `verdict=block`, even
+  in enforcement mode. In effect the request continues through the cascade as usual.
+- `active` — the pattern works fully: a match → `verdict=block` or `verdict=challenge`
+  (depending on the rule's category), like an ordinary rule.
 
-**Workflow для продакта при добавлении нового паттерна:**
+**The product workflow for adding a new pattern:**
 
-1. **PR с паттерном в `staging`**. Через стандартный механизм доставки конфигов — паттерн доехал до proxy.
-2. **Наблюдение по логам.** Сколько раз новый паттерн сработал (`staging_match`), на каких клиентах, какой профиль трафика.
-3. **Решение по результатам:**
-   - FP-rate приемлемый → отдельный PR: переводит паттерн из `staging` в `active`. Паттерн начинает реально срабатывать с `verdict=block/challenge`.
-   - FP-rate высокий → revert PR из этапа 1. Паттерн исчезает с proxy.
+1. **A PR with the pattern in `staging`.** Through the standard config delivery mechanism
+   the pattern reaches the proxies.
+2. **Observation from the logs.** How many times the new pattern fired (`staging_match`),
+   on which customers, with what traffic profile.
+3. **A decision from the results:**
+   - An acceptable false-positive rate → a separate PR moving the pattern from `staging`
+     to `active`. The pattern starts firing for real, with `verdict=block/challenge`.
+   - A high false-positive rate → revert the PR from step 1. The pattern disappears from
+     the proxies.
 
-**Формат `pattern_id` для каждого каталога** (используется при записи в `staging_match`, формат `<catalog>:<pattern_id>`):
+**The `pattern_id` format per catalog** (used when writing to `staging_match`, in the form
+`<catalog>:<pattern_id>`):
 
-- `tls_fp_blocklist` — `pattern_id` = сам fp-токен. Например, `staging_match: ["tls_fp_blocklist:L1300_a8b9c..._d4e5f..."]`.
-- `tls_fp_catalog` — `pattern_id` = `hash_b` запись из каталога. Например, `staging_match: ["tls_fp_catalog:1ed0482b9b4c"]`.
-- `tls_fp_browser_profiles` — `pattern_id` = `browser_family`. Например, `staging_match: ["tls_fp_browser_profiles:chrome"]`.
-- `ua_blacklist` — `pattern_id` = сам regex-паттерн. Например, `staging_match: ["ua_blacklist:(?i)\\bAhrefsBot\\b"]` (стадия hygiene).
-- `ip_blocklist` — `pattern_id` = CIDR/IP запись из каталога. Например, `staging_match: ["ip_blocklist:198.51.100.0/24"]` (стадия reputation).
+- `tls_fp_blocklist` — `pattern_id` is the fingerprint token itself. For example,
+  `staging_match: ["tls_fp_blocklist:L1300_a8b9c..._d4e5f..."]`.
+- `tls_fp_catalog` — `pattern_id` is the catalog's `hash_b` entry. For example,
+  `staging_match: ["tls_fp_catalog:1ed0482b9b4c"]`.
+- `tls_fp_browser_profiles` — `pattern_id` is the `browser_family`. For example,
+  `staging_match: ["tls_fp_browser_profiles:chrome"]`.
+- `ua_blacklist` — `pattern_id` is the regex pattern itself. For example,
+  `staging_match: ["ua_blacklist:(?i)\\bAhrefsBot\\b"]` (the hygiene stage).
+- `ip_blocklist` — `pattern_id` is the CIDR/IP entry from the catalog. For example,
+  `staging_match: ["ip_blocklist:198.51.100.0/24"]` (the reputation stage).
 
-`pattern_id` стабилен между релизами каталога (один и тот же паттерн → один и тот же ID).
+The `pattern_id` is stable across catalog releases (the same pattern → the same ID).
 
-**Доставка staging на эдж.** Все три каталога едут по Channel C из `catalogs/<catalog>.yaml` (A11, задача 86exrtjpc):
+**Delivering staging to the edge.** All three catalogs travel over Channel C from
+`catalogs/<catalog>.yaml` (A11):
 
-- `tls_fp_blocklist` — композит `<status>:block` (backend `store.buildTLSFPBlocklist`); эдж строит staging-набор из pulled-snapshot в `tls_fp.refresh()`.
-- `ip_blocklist` — мапа `{cidr: "<status>:block"}` (`store.buildIPBlocklist`); `reputation.refresh()` пересобирает active + staging matcher'ы из snapshot.
-- `ua_blacklist` — объект `{"active": "<combined-regex>", "staging": ["<pattern>", …]}` (`store.buildUABlacklist`); `hygiene.refresh()` берёт combined regex для active и список паттернов для staging (по-паттернно — чтобы pattern_id в `staging_match` был конкретным).
+- `tls_fp_blocklist` — a composite `<status>:block` (backend
+  `store.buildTLSFPBlocklist`); the edge builds the staging set from the pulled snapshot
+  in `tls_fp.refresh()`.
+- `ip_blocklist` — a map `{cidr: "<status>:block"}` (`store.buildIPBlocklist`);
+  `reputation.refresh()` rebuilds the active and staging matchers from the snapshot.
+- `ua_blacklist` — an object `{"active": "<combined-regex>", "staging": ["<pattern>", …]}`
+  (`store.buildUABlacklist`); `hygiene.refresh()` takes the combined regex for active and
+  the pattern list for staging (pattern by pattern, so that the pattern_id in
+  `staging_match` is specific).
 
-На эдже у `ua_blacklist` / `ip_blocklist` остаётся cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее источник истины — Channel C (gen 1+).
+On the edge, `ua_blacklist` and `ip_blocklist` keep a cold-start seed from the local conf
+(gen 0 in `init.lua`) until the first pull; after that Channel C is the source of truth
+(gen 1+).
 
-`ip_whitelist` / `asn_datacenters` тоже едут по Channel C (B12, задача 86ext2zb4) — это плоские списки без `status` (staged rollout к ним не применяется):
+`ip_whitelist` and `asn_datacenters` also travel over Channel C (B12) — they are flat
+lists without a `status` (staged rollout does not apply to them):
 
-- `ip_whitelist` — массив CIDR (`store.buildIPWhitelist`); `reputation.refresh_whitelist()` пересобирает allow-matcher из snapshot.
-- `asn_datacenters` — мапа `{asn: 1}` (`store.buildASNDatacenters`); `reputation.refresh_asn()` пересобирает membership-набор за тегом `reputation:asn_dc`.
+- `ip_whitelist` — an array of CIDRs (`store.buildIPWhitelist`);
+  `reputation.refresh_whitelist()` rebuilds the allow matcher from the snapshot.
+- `asn_datacenters` — a map `{asn: 1}` (`store.buildASNDatacenters`);
+  `reputation.refresh_asn()` rebuilds the membership set behind the `reputation:asn_dc`
+  tag.
 
-У обоих та же модель, что у `ip_blocklist`: cold-start seed из локального conf (gen 0 в `init.lua`) до первого pull, далее Channel C (gen 1+).
+Both follow the same model as `ip_blocklist`: a cold-start seed from the local conf (gen 0
+in `init.lua`) until the first pull, then Channel C (gen 1+).
 
-**Новое поле в логах: `staging_match`** — массив строк `<catalog>:<pattern_id>`. Пустой если ничего не сматчилось в staging. Не влияет на `verdict`/`rule` — отдельный слот для аналитики promotion'а.
+**A new log field: `staging_match`** — an array of `<catalog>:<pattern_id>` strings. Empty
+when nothing matched in staging. It does not affect `verdict`/`rule` — a separate slot for
+promotion analytics.
 
-## Расширение схемы логов
+## Extending the log schema
 
-Из Phase 1 запись лога содержит `request_id`, `resource_id`, `host`, `ip`, `asn`, `ua`, `stage`, `verdict`, `rule`, `tags`, `latency_ms`. Phase 2 расширяет схему — поля добавляются, ничего из существующего не ломается:
+From Phase 1 a log record carries `request_id`, `resource_id`, `host`, `ip`, `asn`, `ua`,
+`stage`, `verdict`, `rule`, `tags`, `latency_ms`. Phase 2 extends the schema — fields are
+added and nothing existing breaks:
 
-- `tls_fp` — вычисленный fingerprint. Заполнен всегда, если запрос дошел до этапа `tls_fp`.
-- `tls_cipher_count` — количество cipher'ов после strip GREASE. Полезно для аналитики «новых версий браузеров».
-- `tls_alpn` — negotiated ALPN (`h2`, `http/1.1`).
-- `tls_sni_present` — `true|false`, был ли SNI.
-- `tags` — массив тегов со всех слоев с общим namespace-префиксом (`tls_fp:automation_ua`, `tls_fp:no_sni` плюс теги других слоев, например `reputation:asn_dc`). Пустой, если ни один тег не сработал.
-- `staging_match` — массив сработавших staging-паттернов (см. предыдущий раздел). Пустой если ничего не сматчилось в staging.
-- `flags` — массив накопленных challenge-флагов. В Phase 2 это soft-правила tls_fp (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`). Отличие от `rule`: `rule` — одно терминальное правило, `flags` — все soft-сигналы по пути, для аналитики. Пустой если флагов не было.
+- `tls_fp` — the computed fingerprint. Always populated when the request reached the
+  `tls_fp` stage.
+- `tls_cipher_count` — the number of ciphers after stripping GREASE. Useful for analysing
+  "new browser versions".
+- `tls_alpn` — the negotiated ALPN (`h2`, `http/1.1`).
+- `tls_sni_present` — `true|false`, whether SNI was present.
+- `tags` — an array of tags from every layer sharing a namespace prefix
+  (`tls_fp:automation_ua`, `tls_fp:no_sni`, plus tags from other layers such as
+  `reputation:asn_dc`). Empty when no tag fired.
+- `staging_match` — an array of staging patterns that matched (see the previous section).
+  Empty when nothing matched in staging.
+- `flags` — an array of accumulated challenge flags. In Phase 2 these are the soft tls_fp
+  rules (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`). The difference from `rule`:
+  `rule` is the one terminal rule, `flags` are all the soft signals along the way, for
+  analytics. Empty when there were no flags.
 
-При срабатывании одного из правил этапа `tls_fp` — поле `rule` принимает значение из таблицы выше, `stage=tls_fp`. Для `tls_fp_blocklist` — `verdict=block`. Для soft-правил (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`) — `verdict=challenge` (категория soft → в логе `verdict=challenge` для аналитики «отбили бы на верификацию»). В MVP физически с запросом ничего не происходит (наследие Phase 1: каскад только наблюдает).
+When one of the `tls_fp` stage rules fires, the `rule` field takes a value from the table
+above and `stage=tls_fp`. For `tls_fp_blocklist` it is `verdict=block`. For the soft rules
+(`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`) it is `verdict=challenge` (a soft
+category → `verdict=challenge` in the log, for the "we would have sent it to verification"
+analytics). In the MVP nothing physically happens to the request (inherited from Phase 1:
+the cascade only observes).
 
-Полный список новых кодов правил Phase 2:
+The complete list of new Phase 2 rule codes:
 
-| Код | Этап | Категория |
+| Code | Stage | Category |
 |---|---|---|
 | `tls_fp_blocklist` | `tls_fp` | blocking |
 | `tls_fp_impersonator` | `tls_fp` | soft |
 | `tls_fp_suspicious_ciphers` | `tls_fp` | soft |
 | `rate_tls_fp` | `rate_limits` | blocking |
 
-## Конфигурация
+## Configuration
 
-В репозитории конфигов proxy (рядом с конфигами Phase 1):
+In the proxy config repository (next to the Phase 1 configs):
 
-- `tls_fp_blocklist.conf` — [пуст на старте] — список заблокированных fp. Наполняется через PR на основе анализа логов. Поддерживает staged rollout.
-- `tls_fp_catalog.conf` — [пуст на старте] — каталог известных сигнатур `hash_b` для известных типов автоматизации (curl, python-requests, go-http-client, okhttp, известные боты). Наполняется через PR на основе анализа логов — продукт сопоставляет наблюдаемые fp с эталонным трафиком (curl/python/go) и фиксирует соответствие в каталоге. Поддерживает staged rollout.
-- `tls_fp_browser_profiles.conf` — [заполнен базовым] — ожидаемые `cipher_cnt` для семейств браузеров. Стартовый набор (предоставляет продакт):
+- `tls_fp_blocklist.conf` — [empty at launch] — the list of blocked fingerprints.
+  Populated through PRs based on log analysis. Supports staged rollout.
+- `tls_fp_catalog.conf` — [empty at launch] — the catalog of known `hash_b` signatures for
+  known automation types (curl, python-requests, go-http-client, okhttp, known bots).
+  Populated through PRs based on log analysis — product correlates the observed
+  fingerprints with reference traffic (curl/python/go) and records the mapping in the
+  catalog. Supports staged rollout.
+- `tls_fp_browser_profiles.conf` — [populated with a baseline] — the expected
+  `cipher_cnt` per browser family. The starting set (supplied by product):
   - `chrome: 15`
   - `firefox: 16`
   - `safari: 20`
-  Эти значения корректируются по мере появления новых версий браузеров на основе анализа логов. Поддерживает staged rollout (для аккуратного обновления при новых релизах браузеров).
-- Дополнения в существующий `defaults.conf` (из Phase 1) — четыре новых правила в соответствующих категорийных секциях (blocking / soft), параметры нового профиля rate-лимитов `rate_tls_fp`.
+  These values are corrected as new browser versions appear, based on log analysis.
+  Supports staged rollout (for careful updates on new browser releases).
+- Additions to the existing `defaults.conf` (from Phase 1) — four new rules in the
+  corresponding category sections (blocking / soft), and the parameters of the new
+  `rate_tls_fp` rate-limit profile.
 
-Изменения — через PR с ревью продакта. Применение — без передеплоя и без потери клиентского трафика (наследуется механизм Phase 1).
+Changes go through a PR with product review. They are applied without a redeploy and
+without losing customer traffic (the Phase 1 mechanism is inherited).
 
-**Cross-proxy consistency.** То же что в Phase 1: после PR-merge доставка через Puppet занимает минуты, в окне разные эдж-ноды могут видеть разные версии каталога. Это допустимо.
+**Cross-proxy consistency.** The same as in Phase 1: after a PR is merged, delivery
+through Puppet takes minutes, and during that window different edge nodes may see
+different catalog versions. That is acceptable.
 
-## Управление
+## Operations
 
-- Принципы из Phase 1 сохраняются: каскад только наблюдает, никаких per-rule переключателей enforce в MVP нет. Боевой режим — следующая итерация синхронно с per-resource shadow_mode.
-- Глобальный kill-switch — отдельно для всего каскада и отдельно для этапа `tls_fp` (на случай проблем с конкретно этим слоем, чтобы не выключать каскад целиком).
-- Изменения в конфигах (`tls_fp_blocklist.conf`, `tls_fp_catalog.conf`, `tls_fp_browser_profiles.conf`) — через PR с ревью продакта, применение без передеплоя и без потери трафика.
+- The Phase 1 principles are preserved: the cascade only observes, and there are no
+  per-rule enforce switches in the MVP. Enforcement mode is the next iteration, in step
+  with the per-resource shadow_mode.
+- The kill switch exists separately for the whole cascade and for the `tls_fp` stage (in
+  case of trouble with that particular layer, so the whole cascade need not be disabled).
+- Config changes (`tls_fp_blocklist.conf`, `tls_fp_catalog.conf`,
+  `tls_fp_browser_profiles.conf`) go through a PR with product review, applied without a
+  redeploy and without losing traffic.
 
-## Критерии приемки
+## Acceptance criteria
 
-1. На стенде каскад с включенным этапом `tls_fp` отрабатывает тестовый набор запросов (curl, python-requests, реальный браузер — соберу набор отдельно), и для каждого запроса в логе появляются ожидаемые `tls_fp`, `tls_cipher_count`, `tls_alpn`, `tls_sni_present`, корректные `tags` (если есть), и при необходимости — `rule`, `verdict`.
-2. Реальный клиентский трафик продолжает доходить до origin независимо от срабатывания правил TLS-fp — наследуется поведение Phase 1 (каскад только наблюдает).
-3. Записи в логах содержат все новые TLS-поля и попадают в тот же приемник телеметрии, что и логи Phase 1; формат позволяет фильтровать и группировать по `tls_fp`, `tags`, `staging_match`.
-4. Стартовое наполнение `tls_fp_browser_profiles.conf` (предоставляет продакт) принято в репозиторий, proxy стартуют этап `tls_fp` с этими данными. Каталог `tls_fp_catalog.conf` и blocklist `tls_fp_blocklist.conf` — пустые на старте.
-5. Правило `rate_tls_fp` на этапе `rate_limits` корректно использует `tls_fp` как ключ; при превышении лимита пишет `verdict=block, rule=rate_tls_fp` в лог.
-6. **Staged rollout работает:** запись с `status=staging` матчится и попадает в поле `staging_match`, но НЕ приводит к срабатыванию `rule` / `verdict`. Запись с `status=active` ведет себя как обычное правило.
-7. Глобальный kill-switch на этап `tls_fp` выключает его полностью (fp не считается, теги не пишутся, правила этапа не срабатывают), при этом остальной каскад продолжает работать.
+1. On the stand the cascade with the `tls_fp` stage enabled processes a test set of
+   requests (curl, python-requests, a real browser — the set will be assembled
+   separately), and for each request the log carries the expected `tls_fp`,
+   `tls_cipher_count`, `tls_alpn`, `tls_sni_present`, the correct `tags` (if any) and,
+   where applicable, `rule` and `verdict`.
+2. Real customer traffic keeps reaching the origin regardless of whether TLS fingerprint
+   rules fired — the Phase 1 behaviour is inherited (the cascade only observes).
+3. The log records contain every new TLS field and arrive at the same telemetry sink as
+   the Phase 1 logs; the format allows filtering and grouping by `tls_fp`, `tags` and
+   `staging_match`.
+4. The initial contents of `tls_fp_browser_profiles.conf` (supplied by product) are
+   accepted into the repository and the proxies start the `tls_fp` stage with that data.
+   The `tls_fp_catalog.conf` catalog and the `tls_fp_blocklist.conf` blocklist are empty
+   at launch.
+5. The `rate_tls_fp` rule at the `rate_limits` stage correctly uses `tls_fp` as its key;
+   on exceeding the limit it logs `verdict=block, rule=rate_tls_fp`.
+6. **Staged rollout works:** an entry with `status=staging` matches and lands in the
+   `staging_match` field but does NOT trigger `rule` or `verdict`. An entry with
+   `status=active` behaves like an ordinary rule.
+7. The kill switch for the `tls_fp` stage disables it completely (no fingerprint is
+   computed, no tags are written, no rule of the stage fires) while the rest of the cascade
+   keeps working.
 
-## Out Of Scope (для последующих итераций)
+## Out of scope (for later iterations)
 
-- **Verified-crawler whitelist** (Googlebot, Bingbot, Yandex по reverse DNS / опубликованным IP-диапазонам). Без него impersonator-теги могут ложно срабатывать на легитимных краулерах. В MVP это не создает риска (каскад только наблюдает), но для будущего боевого режима этот whitelist обязателен.
-- **Расширенное покрытие TLS-сигналов.** Текущий fp использует только `$ssl_*` переменные из stock nginx, что покрывает основные элементы TLS handshake, но не включает полный список extensions и signature algorithms (их nginx не отдает в `access_by_lua`). Доступные варианты расширения (raw ClientHello parser, дополнительные модули nginx) — отдельная задача. Текущего покрытия достаточно для основной массы impersonator-кейсов.
-- **Автоматическое наполнение blocklist по scoring.** В MVP blocklist-кандидаты выявляются в аналитике, попадание в blocklist — ручное решение продукта через PR. Автоматическое продвижение HIGH-кандидатов в blocklist — отдельная задача со своими гарантиями false-positive.
-- **HTTP/2 fingerprinting.** Дополнительный сигнал клиента — порядок SETTINGS frames, window updates, priority frames. Уровень L4, но независимый от TLS-fp. Будущая задача.
-- **Поведенческий ML на сессиях** (движения мыши, тайминги, sequence URL). Уровень L6 пирамиды защиты, требует JS-бикона на клиенте — отдельный продуктовый сценарий.
-- **Per-resource политики TLS-fp.** Сейчас каталог и blocklist общие для всех ресурсов. Дифференциация (у B2B-API клиента ожидаемые TLS-стеки отличаются от публичного веб-сайта) — следующая итерация, синхронно с per-resource политиками из roadmap'а Phase 1.
-- **Централизованный fp-state между proxy.** Каждый proxy ведет свой `tls_fp_cache` и счетчики per-fp. Централизованное состояние (например, через Redis) — отдельная инфраструктурная задача, без нее бот, переключающийся между proxy, обнуляет лимиты.
-- **Активная верификация** (JS-челлендж, mTLS, API-ключи, crawler whitelist) — единая задача, общая с Phase 1, не дублируется здесь. Будет реализована в следующих фазах.
+- **A verified-crawler whitelist** (Googlebot, Bingbot, Yandex, by reverse DNS or
+  published IP ranges). Without it, impersonator tags can fire falsely on legitimate
+  crawlers. In the MVP that creates no risk (the cascade only observes), but for a future
+  enforcement mode this whitelist is mandatory.
+- **Broader TLS signal coverage.** The current fingerprint uses only the `$ssl_*`
+  variables from stock nginx, which covers the main elements of the TLS handshake but not
+  the full list of extensions and signature algorithms (nginx does not expose them in
+  `access_by_lua`). The available ways to extend it (a raw ClientHello parser, extra nginx
+  modules) are a separate task. The current coverage is enough for the bulk of
+  impersonator cases.
+- **Automatically populating the blocklist by scoring.** In the MVP blocklist candidates
+  are surfaced by analytics and entry into the blocklist is a manual product decision
+  through a PR. Automatic promotion of HIGH candidates is a separate task with its own
+  false-positive guarantees.
+- **HTTP/2 fingerprinting.** An additional client signal — the order of SETTINGS frames,
+  window updates, priority frames. Layer L4, but independent of the TLS fingerprint. A
+  future task.
+- **Behavioural ML over sessions** (mouse movement, timings, URL sequences). Layer L6 of
+  the protection pyramid; it needs a JS beacon on the client and is a separate product
+  scenario.
+- **Per-resource TLS fingerprint policies.** Today the catalog and the blocklist are
+  shared across all resources. Differentiation (a B2B API customer expects different TLS
+  stacks than a public website) is the next iteration, in step with the per-resource
+  policies from the Phase 1 roadmap.
+- **Centralised fingerprint state across proxies.** Each proxy keeps its own
+  `tls_fp_cache` and per-fingerprint counters. Centralised state (through Redis, say) is a
+  separate infrastructure task; without it a bot that hops between proxies resets its
+  limits.
+- **Active verification** (a JS challenge, mTLS, API keys, a crawler whitelist) — a single
+  task shared with Phase 1, not duplicated here. It will be implemented in later phases.
