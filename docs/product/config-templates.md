@@ -1,41 +1,41 @@
-# Bot & Abuse Controls — шаблоны конфигов
+# Bot & Abuse Controls — config templates
 
-Иллюстративные шаблоны для всех конфигурационных файлов, упомянутых в [vision.md](vision.md) и Phase 1/2 specs.
+Illustrative templates for every configuration file mentioned in [vision.md](vision.md) and the Phase 1/2 specs.
 
-**Формат:** показан как YAML с комментариями для удобства чтения. Главное — структура данных и семантика полей, не конкретный синтаксис.
+**Format:** shown as YAML with comments for readability. What matters is the data structure and the semantics of the fields, not the exact syntax.
 
-> **Реальная реализация slow-каталогов (Phase 1+, фактически в репо):**
-> файлы лежат в [`../../catalogs/`](../../catalogs/) (`tls_fp_blocklist.yaml`,
+> **The real implementation of the slow catalogs (Phase 1+, as it exists in the repo):**
+> the files live in [`../../catalogs/`](../../catalogs/) (`tls_fp_blocklist.yaml`,
 > `ua_blacklist.yaml`, `ip_blocklist.yaml`, `ip_whitelist.yaml`,
-> `asn_datacenters.yaml`, `version`). Формат отличается от иллюстративного
-> `.conf` ниже: используется компактный YAML map `<entry>: <status>`
-> вместо секций. Контракт staged rollout (`active`/`staging`),
-> валидация (regex/CIDR/uint32), Channel C — те же. См.
+> `asn_datacenters.yaml`, `version`). The format differs from the illustrative
+> `.conf` below: a compact YAML map `<entry>: <status>` is used
+> instead of sections. The staged rollout contract (`active`/`staging`),
+> the validation (regex/CIDR/uint32) and Channel C are the same. See
 > [ADR-006](../architecture-decisions/006-slow-catalogs-as-files.md).
 
-## Иерархия конфигов
+## Config hierarchy
 
 ```
-defaults.conf            ← главный конфиг каскада (рулрегистрация, пороги, категории)
-whitelist_ip.conf        ← системный IP-whitelist (мониторинг, чек-сервисы)
-blocklist_ip.conf        ← кураторский IP-blocklist (PR-наполняемый)
-ua_blacklist.conf        ← UA-паттерны (PR-наполняемый, с staging)
-asn_datacenters.conf     ← ASN-номера ДЦ для тега reputation:asn_dc
-tls_fp_blocklist.conf    ← TLS-fingerprints botov (Phase 2+, PR-наполняемый, с staging)
-tls_fp_catalog.conf      ← signatures automation для impersonator-детекции (Phase 2+, с staging)
-tls_fp_browser_profiles.conf ← cipher_cnt для браузеров (Phase 2+, заполнен базовым)
-challenge_secret         ← HMAC secret для clearance cookie (Phase 4+, доставка через Puppet env/file)
-policy/<host>.yaml       ← per-resource policy (Phase 3+, приходит из backend через Channel C, не хранится локально как файл)
+defaults.conf            ← the main cascade config (rule registration, thresholds, categories)
+whitelist_ip.conf        ← the system IP whitelist (monitoring, check services)
+blocklist_ip.conf        ← the curated IP blocklist (PR-populated)
+ua_blacklist.conf        ← UA patterns (PR-populated, with staging)
+asn_datacenters.conf     ← datacenter ASN numbers for the reputation:asn_dc tag
+tls_fp_blocklist.conf    ← TLS fingerprints of bots (Phase 2+, PR-populated, with staging)
+tls_fp_catalog.conf      ← automation signatures for impersonator detection (Phase 2+, with staging)
+tls_fp_browser_profiles.conf ← cipher_cnt per browser (Phase 2+, populated with a baseline)
+challenge_secret         ← the HMAC secret for the clearance cookie (Phase 4+, delivered through a Puppet env var or file)
+policy/<host>.yaml       ← per-resource policy (Phase 3+, arrives from the backend over Channel C, not stored locally as a file)
 ```
 
 ---
 
-## 1. `defaults.conf` — базовый конфиг каскада
+## 1. `defaults.conf` — the base cascade config
 
-Главный конфиг, без которого каскад не запускается. Структура секций задает категорию каждого правила.
+The main config, without which the cascade does not start. The structure of the sections defines each rule's category.
 
 ```yaml
-# defaults.conf — базовый конфиг каскада (Phase 1+)
+# defaults.conf — the base cascade config (Phase 1+)
 
 # L1 Hygiene
 hygiene:
@@ -50,21 +50,21 @@ hygiene:
     - DELETE
     - OPTIONS
   api_path_patterns:
-    # Что считать «API-эндпоинтом» для правила rate_api
+    # What counts as an "API endpoint" for the rate_api rule
     - /api/*
     - /graphql
 
-# Категория blocking — правила, эмитящие verdict=block
+# The blocking category — rules that emit verdict=block
 rules:
   blocking:
     method_not_allowed:
       stage: hygiene
-      source: built-in              # хардкод в коде proxy
+      source: built-in              # hardcoded in the proxy code
 
     ua_blacklist:
       stage: hygiene
       source: ua_blacklist.conf
-      enabled: true                 # Phase 1: каталог пуст, правило заложено
+      enabled: true                 # Phase 1: the catalog is empty, the rule is wired in
 
     ip_blocklist:
       stage: reputation
@@ -74,11 +74,11 @@ rules:
     asn_customer:
       stage: reputation
       source: policy[host].asn_block
-      enabled: true                 # активно только если в policy есть записи
+      enabled: true                 # only active when the policy holds entries
 
     geo_blocklist:
       stage: reputation
-      source: policy[host].geo_whitelist  # инвертированная логика
+      source: policy[host].geo_whitelist  # inverted logic
       enabled: true
 
     tls_fp_blocklist:                 # Phase 2+
@@ -110,7 +110,7 @@ rules:
       key: tls_fp
       window_10s: 50
       window_60s: 300
-      fallback: skip                  # если fp не вычислился — правило не срабатывает
+      fallback: skip                  # if no fingerprint was computed, the rule does not fire
 
     rate_scan_urls:
       stage: rate_limits
@@ -123,43 +123,43 @@ rules:
       stage: verification
       source: built-in
 
-  # Категория allow — правила, эмитящие verdict=allow (fastpath)
+  # The allow category — rules that emit verdict=allow (a fastpath)
   allow:
-    cookie_valid:                     # Phase 4+, не lookup, а HMAC verify
+    cookie_valid:                     # Phase 4+, not a lookup but an HMAC verify
       stage: reputation
-      source: built-in                # Lua-логика
-      # ВАЖНО: cookie_valid — ЧАСТИЧНЫЙ фастпас. Пропускает L3 (tls_fp) и L5 (verification),
-      # но НЕ L4: rate-limits применяются к держателю cookie. verdict=allow,rule=cookie_valid
-      # выставляется, только если L4 чист; иначе выигрывает сработавшее правило L4.
-      # Полный фастпас (skip L3/L4/L5) — только у bot_verified и ip_whitelist.
+      source: built-in                # Lua logic
+      # IMPORTANT: cookie_valid is a PARTIAL fastpath. It skips L3 (tls_fp) and L5 (verification),
+      # but NOT L4: rate limits apply to the cookie holder. verdict=allow,rule=cookie_valid
+      # is only set when L4 is clean; otherwise the L4 rule that fired wins.
+      # A full fastpath (skipping L3/L4/L5) belongs to bot_verified and ip_whitelist only.
       cookie_name: tf_clearance
-      secret_source: challenge_secret # см. отдельный файл
-      # Привязка к клиенту: cookie выписывается под TLS-fp + подсеть IP (/24 для IPv4, /64 для IPv6) того клиента,
-      # который прошел challenge, и на L2.1 фастпасит только при их совпадении —
-      # украденный или переданный на другой клиент cookie не действует.
-      ttl_seconds_normal: 86400       # 24 часа — обычный режим
-      ttl_seconds_under_attack: 3600  # 1 час — при attack_mode=on
-      # Значения TTL — системные константы, общие для всего пула; клиент в дашборде их не настраивает.
-      # Выбор per-request на L5: proxy смотрит attack_mode ИМЕННО для того host'a, на который пришел запрос.
-      #   attack_mode[host]=on  → выписывает cookie с ttl_under_attack
-      #   attack_mode[host]=off → выписывает cookie с ttl_normal
-      # Включение attack_mode у одного клиента не затрагивает TTL cookie других клиентов:
-      # cookie скоупится Domain=<host>, в запросах на чужие хосты не передается.
-      # Ранее выписанные 24-часовые cookie не инвалидируются при включении attack_mode — они доживают свой TTL.
+      secret_source: challenge_secret # see the separate file
+      # Client binding: the cookie is issued against the TLS fingerprint plus the IP subnet (/24 for IPv4, /64 for IPv6) of the client
+      # that solved the challenge, and at L2.1 it fastpaths only when both match —
+      # a stolen cookie, or one handed to another client, does not work.
+      ttl_seconds_normal: 86400       # 24 hours — normal mode
+      ttl_seconds_under_attack: 3600  # 1 hour — under attack_mode=on
+      # The TTL values are system constants shared across the pool; the customer does not configure them in the dashboard.
+      # The per-request choice at L5: the proxy looks at attack_mode for EXACTLY the host the request came to.
+      #   attack_mode[host]=on  → issues a cookie with ttl_under_attack
+      #   attack_mode[host]=off → issues a cookie with ttl_normal
+      # Enabling attack_mode for one customer does not affect other customers' cookie TTLs:
+      # the cookie is scoped Domain=<host> and is not sent on requests to other hosts.
+      # Previously issued 24-hour cookies are not invalidated when attack_mode is enabled — they live out their TTL.
 
-    bot_verified:                     # Phase 3+, lookup в каталоге
+    bot_verified:                     # Phase 3+, a catalog lookup
       stage: reputation
       source: catalog.bot_verification_status
       ua_pattern: "Googlebot|bingbot|YandexBot|DuckDuckBot"
-      provisional_pending: true       # выдавать bot_verified_pending при отсутствии записи
+      provisional_pending: true       # issue bot_verified_pending when there is no record
 
     ip_whitelist:
       stage: reputation
       source:
-        - whitelist_ip.conf           # системный
+        - whitelist_ip.conf           # the system one
         - policy[host].ip_whitelist   # per-resource (Phase 3+)
 
-  # Категория soft — правила, накапливающие challenge-flag
+  # The soft category — rules that accumulate a challenge flag
   soft:
     tls_fp_impersonator:              # Phase 2+
       stage: tls_fp
@@ -173,11 +173,11 @@ rules:
       stage: tls_fp
       source: built-in                 # cross-layer: L3 fp + asn_datacenters.conf
 
-# Информационные теги (не правила, не эмитят verdict)
+# Informational tags (not rules, they emit no verdict)
 tags:
   - id: hygiene:header_anomaly
     stage: hygiene
-    source: built-in                 # Lua-проверка заголовков (напр. HTTP/2 без Accept)
+    source: built-in                 # a Lua header check (e.g. HTTP/2 without Accept)
 
   - id: reputation:asn_dc
     stage: reputation
@@ -185,100 +185,100 @@ tags:
 
   - id: tls_fp:automation_ua         # Phase 2+
     stage: tls_fp
-    source: built-in                 # Lua-проверка UA-паттернов автоматизации
+    source: built-in                 # a Lua check for automation UA patterns
 
   - id: tls_fp:no_sni                # Phase 2+
     stage: tls_fp
-    source: built-in                 # из TLS handshake данных
+    source: built-in                 # from the TLS handshake data
 
-# Kill-switch — выключатели на случай инцидентов
+# Kill switch — the levers for incidents
 kill_switch:
-  global:                            # выключает каскад целиком
-    enabled: false                   # по умолчанию выключатель НЕ активирован
-  per_stage:                         # выключает отдельный слой
+  global:                            # disables the whole cascade
+    enabled: false                   # by default the switch is NOT engaged
+  per_stage:                         # disables one layer
     hygiene: false
     reputation: false
     tls_fp: false                    # Phase 2+
     rate_limits: false
     verification: false              # Phase 4+
 
-# attack_mode — только per-host, живет внутри policy[host].attack_mode.
-# Глобального тоггла на весь пул нет. Для инфра-уровня инцидентов — kill-switch.
+# attack_mode is per host only and lives in policy[host].attack_mode.
+# There is no global toggle for the whole pool. For infrastructure-level incidents, use the kill switch.
 ```
 
 ---
 
-## 2. `whitelist_ip.conf` — системный IP-whitelist
+## 2. `whitelist_ip.conf` — the system IP whitelist
 
-Список IP и CIDR-подсетей нашего мониторинга, чек-сервисов, доверенных системных клиентов. Используется правилом `ip_whitelist` (категория `allow`).
+A list of the IPs and CIDR subnets of our monitoring, check services and trusted system clients. Used by the `ip_whitelist` rule (category `allow`).
 
 ```
-# whitelist_ip.conf — системный IP-whitelist (Phase 1+)
-# Заполнен на старте. PR для изменений.
+# whitelist_ip.conf — the system IP whitelist (Phase 1+)
+# Populated at launch. Changes go through a PR.
 
-# Внутренние сервисы мониторинга
-10.0.1.0/24   # мониторинговая подсеть
+# Internal monitoring services
+10.0.1.0/24   # the monitoring subnet
 10.0.2.5      # health-checker
 
-# Внешние uptime-мониторинги (с письменным согласованием)
+# External uptime monitoring (with written agreement)
 # UptimeRobot:
 69.162.124.0/24
 63.143.42.0/24
 
 # Healthchecks.io:
-# (добавить актуальный CIDR при подключении)
+# (add the current CIDR when onboarding)
 ```
 
 ---
 
-## 3. `blocklist_ip.conf` — кураторский IP-blocklist
+## 3. `blocklist_ip.conf` — the curated IP blocklist
 
-Пустой на старте. Наполняется через PR по результатам анализа логов или жалоб. Используется правилом `ip_blocklist` (категория `blocking`).
+Empty at launch. Populated through PRs from log analysis or complaints. Used by the `ip_blocklist` rule (category `blocking`).
 
 ```
 # blocklist_ip.conf — IP-blocklist (Phase 1+)
-# Пустой на старте. PR для добавления, обязательно через staged rollout (см. ниже).
+# Empty at launch. Additions go through a PR, always via staged rollout (see below).
 
-# Формат:
+# Format:
 # <ip-or-cidr>  status=staging|active  reason=<short>
 
-# Примеры (после первых PR):
+# Examples (after the first PRs):
 # 203.0.113.42  status=active  reason=brute-force /login
 # 198.51.100.0/24  status=staging  reason=scanner-pattern
 ```
 
-**Staged rollout:** новые IP сначала добавляются с `status=staging` — матчатся, пишутся в `staging_match` лога, но не блокируют. После 24-48ч анализа FP-rate (отсутствие срабатываний на легитимном трафике) — отдельный PR с переводом в `status=active`.
+**Staged rollout:** new IPs are first added with `status=staging` — they match and are written to the log's `staging_match`, but block nothing. After 24–48 h of false-positive analysis (no hits on legitimate traffic), a separate PR moves them to `status=active`.
 
 ---
 
-## 4. `ua_blacklist.conf` — UA-паттерны
+## 4. `ua_blacklist.conf` — UA patterns
 
-Пустой на старте. Наполняется через PR по результатам анализа топа UA в логах. Поддерживает staged rollout.
+Empty at launch. Populated through PRs from analysis of the top UAs in the logs. Supports staged rollout.
 
 ```
-# ua_blacklist.conf — UA-паттерны (Phase 1+)
-# Пустой на старте. PR для добавления, обязательно через staged rollout.
+# ua_blacklist.conf — UA patterns (Phase 1+)
+# Empty at launch. Additions go through a PR, always via staged rollout.
 
-# Формат:
+# Format:
 # <regex-pattern>  status=staging|active  reason=<short>
 
-# Примеры (после первых PR):
+# Examples (after the first PRs):
 # (?i)\bsqlmap/[\d\.]+   status=active  reason=SQL-scanner
 # (?i)\bAhrefsBot\b      status=staging  reason=SEO-crawler-competitor
 ```
 
-**Подсказка по составлению:** на стороне backend паттерны склеиваются в один combined regex для O(1)-матчинга на proxy. Формат на стороне backend.
+**A hint on writing them:** on the backend side the patterns are joined into one combined regex for O(1) matching on the proxy. That format lives on the backend side.
 
 ---
 
-## 5. `asn_datacenters.conf` — ASN-номера датацентров
+## 5. `asn_datacenters.conf` — datacenter ASN numbers
 
-Заполнен на старте базовым стабильным списком. Используется для тега `reputation:asn_dc` (информационный, не правило).
+Populated at launch with a stable baseline list. Used for the `reputation:asn_dc` tag (informational, not a rule).
 
 ```
-# asn_datacenters.conf — ASN ДЦ (Phase 1+)
-# Заполнен базовым. Меняется редко (новые провайдеры или передача номеров).
-# Источник: публичные данные.
+# asn_datacenters.conf — datacenter ASNs (Phase 1+)
+# Populated with a baseline. Rarely changes (new providers or transferred numbers).
+# Source: public data.
 
 # Cloud providers
 14618    # Amazon AWS
@@ -294,43 +294,43 @@ kill_switch:
 63949    # Linode
 14955    # Linode
 
-# Альтернативные облака и VPS
+# Alternative clouds and VPS providers
 51167    # Contabo
 197540   # netcup
 210558   # 1984 Hosting
 
-# Список меняется через PR.
+# The list is changed through a PR.
 ```
 
 ---
 
 ## 6. `tls_fp_blocklist.conf` — TLS-fingerprint blocklist (Phase 2+)
 
-Пустой на старте. Наполняется через PR. Поддерживает staged rollout.
+Empty at launch. Populated through PRs. Supports staged rollout.
 
 ```
-# tls_fp_blocklist.conf — TLS-fingerprints известных ботов (Phase 2+)
-# Пустой на старте. PR для добавления, через staged rollout.
+# tls_fp_blocklist.conf — TLS fingerprints of known bots (Phase 2+)
+# Empty at launch. Additions go through a PR, via staged rollout.
 
-# Формат:
+# Format:
 # <fp-string>  status=staging|active  reason=<short>
 
-# Примеры (после первых PR):
+# Examples (after the first PRs):
 # L12d11h1_abc123def456_xyz789  status=active  reason=scrapy-3.x
 # L13d15h2_qweasdzxc987_lmnopq  status=staging  reason=newly-seen-pattern
 ```
 
 ---
 
-## 7. `tls_fp_catalog.conf` — сигнатуры автоматизации для impersonator-детекции (Phase 2+)
+## 7. `tls_fp_catalog.conf` — automation signatures for impersonator detection (Phase 2+)
 
-Пустой на старте. Map `hash_b → семейство автоматизации`. Используется правилом `tls_fp_impersonator`.
+Empty at launch. A map `hash_b → automation family`. Used by the `tls_fp_impersonator` rule.
 
 ```yaml
 # tls_fp_catalog.conf — Phase 2+
-# Пустой на старте. PR для добавления, через staged rollout.
+# Empty at launch. Additions go through a PR, via staged rollout.
 
-# Каждая запись:
+# Each entry:
 # hash_b: <12-hex-chars>
 # family: <name>
 # status: staging | active
@@ -347,13 +347,13 @@ entries:
 
 ---
 
-## 8. `tls_fp_browser_profiles.conf` — ожидаемые cipher_cnt для браузеров (Phase 2+)
+## 8. `tls_fp_browser_profiles.conf` — expected cipher_cnt per browser (Phase 2+)
 
-Заполнен базовым на старте. Используется правилом `tls_fp_suspicious_ciphers`.
+Populated with a baseline at launch. Used by the `tls_fp_suspicious_ciphers` rule.
 
 ```yaml
 # tls_fp_browser_profiles.conf — Phase 2+
-# Заполнен базовым набором. Корректируется по мере появления новых версий браузеров.
+# Populated with a baseline set. Corrected as new browser versions appear.
 
 profiles:
   chrome:
@@ -369,81 +369,81 @@ profiles:
     status: active
 
   proxy:
-    expected_cipher_cnt: 15           # обычно совпадает с Chrome
+    expected_cipher_cnt: 15           # usually matches Chrome
     status: active
 ```
 
-Если у браузера обновилась версия и cipher_cnt сдвинулся — продакт сначала добавляет новое значение с `status: staging` (для тестирования рядом со старым), потом промоутит после калибровки.
+If a browser's version updates and its cipher_cnt shifts, product first adds the new value with `status: staging` (for testing alongside the old one) and promotes it after calibration.
 
 ---
 
-## 9. `challenge_secret` — HMAC secret для clearance cookie (Phase 4+)
+## 9. `challenge_secret` — the HMAC secret for the clearance cookie (Phase 4+)
 
-Не файл со списком — это одна строка секрета. Доставляется через Puppet (Channel A) как env-переменная или защищенный файл. Один общий для всего эдж-пула.
+Not a list file — a single secret string. Delivered through Puppet (Channel A) as an env variable or a protected file. One secret shared across the whole edge pool.
 
 ```bash
-# Пример доставки через env (на proxy при старте nginx):
+# An example of delivery through env (on the proxy at nginx startup):
 # CHALLENGE_HMAC_SECRET=<32-bytes-base64-encoded-random-string>
 
-# Или через файл (Puppet хранит content шифрованно):
+# Or through a file (Puppet stores the content encrypted):
 # /etc/antibot/challenge_secret.key
-# (chmod 600, читается только nginx user)
+# (chmod 600, readable only by the nginx user)
 ```
 
-**Ротация:** Краткая схема:
+**Rotation:** in brief:
 
-- *Плановая* — раз в квартал, через PR в Puppet + reload nginx по пулу.
-- *Экстренная* (компрометация) — через эскалацию к эдж-админам по incident-процедуре.
-Любая ротация инвалидирует все ранее выданные clearance cookie (by design).
+- *Scheduled* — quarterly, through a PR to Puppet plus an nginx reload across the pool.
+- *Emergency* (compromise) — escalated to the edge admins through the incident procedure.
+Any rotation invalidates every clearance cookie issued so far (by design).
 
 ---
 
 ## 10. `policy/<host>.yaml` — per-resource policy (Phase 3+)
 
-**Не хранится на proxy как файл** — приходит из backend через Channel C как часть каталога `policy`. Каталог = map `host → policy_json`. Здесь — структура одной записи в map'е для информации.
+**It is not stored on the proxy as a file** — it arrives from the backend over Channel C as part of the `policy` catalog. The catalog is a map `host → policy_json`. What follows is the structure of one entry in that map, for information.
 
-**Покрытие домена (parent-domain fallback, 86exrefdz).** Запись для домена покрывает и его поддомены: эдж при чтении policy для хоста сначала ищет точную запись, а если её нет — поднимается вверх по доменным меткам до первой существующей (`www.example.com` → `example.com`). То есть регистрация `example.com` автоматически защищает `www.example.com`, `app.example.com` и т.д. с тем же `mode`/`strictness`/`origin_ip`. Более специфичная запись (`api.example.com`) переопределяет родительскую. На public-suffix (`com`, `рф`) walk-up не «протекает» — матчатся только реально заведённые записи.
+**Domain coverage (parent-domain fallback).** An entry for a domain also covers its subdomains: when reading the policy for a host, the edge first looks for an exact entry and, failing that, walks up the domain labels to the first one that exists (`www.example.com` → `example.com`). So registering `example.com` automatically protects `www.example.com`, `app.example.com` and so on with the same `mode`/`strictness`/`origin_ip`. A more specific entry (`api.example.com`) overrides the parent. The walk-up does not leak into a public suffix (`com`, `co.uk`) — only entries that really exist are matched.
 
 ```yaml
-# Пример per-resource policy для одного домена
-# Формат внутри каталога backend; на proxy приходит как часть policy каталога
+# An example per-resource policy for one domain
+# The format inside the backend catalog; it arrives at the proxy as part of the policy catalog
 
 example.com:
   mode: active                       # shadow | active
   strictness: standard               # standard | permissive
-  attack_mode: false                 # тоггл "Under Attack mode"
+  attack_mode: false                 # the "Under Attack mode" toggle
 
-  # origin_ip — bare IPv4/IPv6 бэкенда клиента. Маркер проксируемого тенанта
-  # (multi-tenant routing, 86exrefdz): эдж матчит входящий Host с записью
-  # policy и проксирует на этот IP (хостнейм в upstream подменяется на IP,
-  # loop-safe; Host/SNI наверх остаются example.com). Пусто = хост не
-  # тенант и не проксируется (эдж tenant-only: не-тенант отбрасывается
-  # через 444). Без CIDR — это destination одного
-  # бэкенда. Схема апстрима — https/443 (per-host scheme/port — отдельный тикет).
+  # origin_ip — the bare IPv4/IPv6 of the customer's backend. The marker of a proxied tenant
+  # (multi-tenant routing): the edge matches the incoming Host against the policy
+  # entry and proxies to this IP (the upstream hostname is substituted with the IP,
+  # loop-safe; the Host and SNI sent upstream stay example.com). Empty means the host is
+  # not a tenant and is not proxied (the edge is tenant-only: a non-tenant is dropped
+  # with 444). No CIDR — this is the destination of a single
+  # backend. The upstream scheme is https/443 (per-host scheme/port is a separate ticket).
   origin_ip: 203.0.113.9
 
-  # IP-whitelist легитимных серверных интеграций клиента
+  # The IP whitelist of the customer's legitimate server-side integrations
   ip_whitelist:
-    - 203.0.113.10/32                # бэкенд клиента
-    - 198.51.100.0/24                # пул его микросервисов
+    - 203.0.113.10/32                # the customer's backend
+    - 198.51.100.0/24                # the pool of their microservices
 
-  # ASN-блок клиента
+  # The customer's ASN block
   asn_block:
-    - 12345                          # ASN, который клиент решил блокировать
+    - 12345                          # an ASN the customer chose to block
     - 67890
 
-  # Whitelist стран (если задан — все остальные блокируются geo_blocklist)
+  # A country whitelist (when set, every other country is blocked by geo_blocklist)
   geo_whitelist:
     - RU
     - BY
     - KZ
-    # пусто = разрешены все страны
+    # empty means all countries are allowed
 
-  # Custom UA-паттерны клиента (применяются поверх глобального ua_blacklist)
+  # The customer's custom UA patterns (applied on top of the global ua_blacklist)
   custom_ua_blacklist:
     - "(?i)\\bcompetitor-scraper\\b"
 
-  # Клиентские rate-rules (per-path)
+  # Customer rate rules (per path)
   rate_rules:
     - path: /login*
       methods: [POST]
@@ -461,22 +461,22 @@ example.com:
       burst: 20
       action: challenge
 
-  # Кастомное имя API-key header — если клиенту нужна интеграция с собственным auth
-  # (в v1 OOS, но место в schema зарезервировано)
+  # A custom API key header name — for a customer who needs an integration with their own auth
+  # (out of scope in v1, but the slot is reserved in the schema)
   # api_key_header: X-Client-Token
 ```
 
 ---
 
-## Соглашения по staged rollout
+## Staged rollout conventions
 
-Для всех каталогов с `status` field (ua_blacklist, ip_blocklist, tls_fp_blocklist, tls_fp_catalog, tls_fp_browser_profiles):
+For every catalog with a `status` field (ua_blacklist, ip_blocklist, tls_fp_blocklist, tls_fp_catalog, tls_fp_browser_profiles):
 
-1. **Новые паттерны/записи всегда добавляются с `status: staging`.**
-2. Период наблюдения — минимум 24 часа после доставки на proxy (что-то более коротковременное не даст репрезентативной выборки).
-3. После наблюдения — отдельный PR с переводом `status: staging` → `status: active`.
-4. Если в `staging`-периоде паттерн дал false-positive — revert исходного PR (не оставляем в staging, чтобы не накапливать «забытые» записи).
+1. **New patterns and entries are always added with `status: staging`.**
+2. The observation period is at least 24 hours after delivery to the proxy (anything shorter gives an unrepresentative sample).
+3. After the observation, a separate PR moves `status: staging` → `status: active`.
+4. If the pattern produced a false positive during the `staging` period, revert the original PR (do not leave it in staging, so that forgotten entries do not pile up).
 
-Промоут паттерна — это отдельный, осознанный этап, не автоматический.
+Promoting a pattern is a separate, deliberate step, never automatic.
 
 ---
