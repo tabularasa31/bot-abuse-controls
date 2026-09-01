@@ -1,8 +1,4 @@
-// Package config gathers env-driven settings for the antibot-backend skeleton.
-//
-// Only the knobs the [B2] skeleton actually consumes live here. Per-feature
-// settings (catalog ETag policy, log-receiver batch sizes, rDNS strategy)
-// belong to B3/B6/B7/B9 and will land alongside those features.
+// Package config gathers the env-driven settings for the backend.
 package config
 
 import (
@@ -23,11 +19,8 @@ type Config struct {
 	// (skeleton mode: the service comes up and passes the B1 acceptance, but any
 	// future B3/B6/B7 features that need the DB must check for it explicitly).
 	PostgresDSN string
-	// RDNSInterval — a deprecated knob from the B2 skeleton (a background worker tick).
-	// In B7 the worker is reactive — there are no periodic ticks over the queue and the
-	// trigger is the log stream. It is kept for backward compatibility with
-	// compose files; the actual value is ignored. It will be removed in B15
-	// (the config migration).
+	// Deprecated and ignored: the worker is driven by the log stream, not by a
+	// tick. Kept so existing compose files still parse.
 	RDNSInterval time.Duration
 	// RDNSQueueSize — the reactive queue buffer (Enqueue → consumer).
 	// An overflow means the receiver gets a dropped task in a metric, and the edge
@@ -43,35 +36,21 @@ type Config struct {
 	RDNSGCInterval time.Duration
 	// ShutdownTimeout — the graceful shutdown timeout of the HTTP server.
 	ShutdownTimeout time.Duration
-	// CatalogsDir — the root directory of the slow catalogs from the git repo (ADR-006).
-	// The backend reads tls_fp_blocklist.yaml / ua_blacklist.yaml / etc. from there on
-	// every reloader tick; the reloader's mtime cache guards against needless
-	// YAML parsing when the files have not moved. The source is mandatory — without the
-	// files the slow catalogs are empty and the edge gets a "successful" payload without
-	// the records product has already added (a silent regression).
+	// Mandatory: without the files the slow catalogs would be empty and the edge
+	// would accept a successful response missing every entry product added.
 	CatalogsDir string
 
-	// CatalogReloadInterval — how often the backend rereads the catalogs
-	// (filesource plus dbloader runtime → Merge → Store). The default of 5 s is shorter
-	// than the edge poll (30 s), so that a dashboard edit reliably reaches the
-	// edge in ≤30 s (acceptance B4/B13). The same interval is used as the
-	// per-tick deadline in Reloader.Run.
+	// Deliberately shorter than the edge's poll, so a fresh snapshot is always
+	// waiting when the edge asks. Doubles as the per-tick deadline.
 	CatalogReloadInterval time.Duration
 
-	// MigrateOnStartup — when true and POSTGRES_DSN is set, the backend applies the
-	// built-in migrations before the reloader's Bootstrap. The default is true: the migrations are
-	// idempotent (CREATE TABLE IF NOT EXISTS), and a manual step before B15
-	// would add an external failure mode, "we forgot to apply them".
+	// On by default: the migrations are idempotent, and a manual step would only
+	// add a way to forget it.
 	MigrateOnStartup bool
 
-	// LogsSinkSpoolDir — where to put NDJSON BAC_LOG batches during a
-	// PostgreSQL outage ([B9]). An empty string disables the spill (the sink will lose
-	// lines while the DB is unavailable — acceptable for dev/CI; in production a
-	// persistent volume must be set in compose, otherwise the B9 acceptance "a disk queue
-	// in the backend" is not met). There is deliberately NO default: a default
-	// /var/lib/... under root would upset a dev run without root, while the
-	// edge case "forgot to set it in production" is visible in the log as an explicit
-	// WARN at initialisation.
+	// Where batches land during a database outage; empty disables the spill and
+	// accepts the loss. No default on purpose — a root-owned path would break a
+	// dev run, and forgetting it in production is logged loudly at startup.
 	LogsSinkSpoolDir string
 	// LogsSinkBatchSize / LogsSinkFlushInterval — the flush thresholds towards the DB.
 	LogsSinkBatchSize     int
@@ -128,7 +107,7 @@ func Load() (Config, error) {
 		//     0/f/F/FALSE/false/False — idiomatic for YAML and k8s secrets);
 		//   - the historical 'yes'/'no' (case-insensitive) — which the previous
 		//     hand-written switch accepted and ParseBool does not know. We do not break other people's
-		//     compose files and manifests for the sake of a pure Go parser. From review.
+		//     compose files and manifests for the sake of a pure Go parser.
 		b, err := parseBoolWithYesNo(v)
 		if err != nil {
 			return cfg, fmt.Errorf("MIGRATE_ON_STARTUP: %w", err)
@@ -138,7 +117,7 @@ func Load() (Config, error) {
 	// RDNS_INTERVAL — deprecated after B7 (the worker is reactive, with no periodic tick).
 	// We accept any value, invalid / 0 / -1 included, so that old
 	// compose files from the B2 era do not break startup. It is never actually read.
-	// PR #53 review.
+	//
 	_ = os.Getenv("RDNS_INTERVAL")
 	if v := os.Getenv("RDNS_QUEUE_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -230,7 +209,6 @@ func Load() (Config, error) {
 // parseBoolWithYesNo extends strconv.ParseBool — it adds the
 // case-insensitive 'yes'/'no' the previous hand-written switch accepted
 // and which still turn up in k8s/YAML configs.
-// PR #43 follow-up.
 func parseBoolWithYesNo(v string) (bool, error) {
 	switch strings.ToLower(v) {
 	case "yes":

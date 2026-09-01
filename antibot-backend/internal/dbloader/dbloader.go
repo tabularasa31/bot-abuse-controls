@@ -1,16 +1,8 @@
-// Package dbloader — the source of the catalogs' runtime layer from PostgreSQL.
+// Package dbloader reads the catalogs' runtime layer from PostgreSQL.
 //
-// After ADR-006 the database holds only the data that changes automatically
-// (SLA ≤ 30 s) and does not suit files by nature: `verified_bot_ips`
-// is written by the rDNS worker ([B7]), and `policy` by antibotapi from the dashboard ([B10]).
-// The product-curated "slow" catalogs (tls_fp_blocklist, ua_blacklist,
-// ip_blocklist, ip_whitelist, asn_datacenters) moved into the catalogs/ git
-// repo and are loaded through internal/filesource.
-//
-// LoadRuntime reads only the runtime tables in a single read-only transaction.
-// The reloader merges its result with the *catalog.SlowData from filesource and
-// publishes the combined snapshot through Store.Replace — the
-// Store/Snapshot/build* contract is unchanged.
+// The database holds only what changes on its own: the verified-bot verdicts
+// written by the rDNS worker, and the per-host policy written by the dashboard.
+// The product-curated catalogs live in git and are loaded elsewhere.
 package dbloader
 
 import (
@@ -29,29 +21,17 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// migrateAdvisoryLockKey — an arbitrary 64-bit constant for
-// `pg_advisory_lock`. Isolation from other people's locks comes from the random magic;
-// we do not use a `crc64(...)`-style scheme, so as not to depend on how
-// exactly the key is generated.
+// An arbitrary constant: isolation comes from the value being random, not from
+// any derivation scheme.
 const migrateAdvisoryLockKey int64 = 0x616E7469626F7402 // "antibo\x02"
 
-// Migrate runs the embedded SQL files from migrations/ in lexicographic
-// order. The files are written idempotently through CREATE TABLE IF NOT EXISTS,
-// so reapplying them is safe. Heavier migration infrastructure
-// (a version schema, down steps) arrives with B15 — for now a cheap ratchet is enough.
+// Migrate applies the embedded SQL files in order; they are idempotent.
 //
-// Concurrency: the HA pair of backends from `infra/demo-backend/` starts both
-// replicas at once. With today's 0001 that is harmless (only
-// IF NOT EXISTS plus ON CONFLICT DO NOTHING), but the first non-idempotent DDL
-// in 0002 would give one replica a 'relation already exists' and a crash loop.
-// We take a session-scoped pg_advisory_lock — the second replica blocks
-// until the first finishes, then simply sees that everything is already there.
-// PR #43 review (Angle B).
+// Both replicas start at once, so an advisory lock serialises them — otherwise
+// the first non-idempotent statement would crash-loop one of them.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	// We take one connection from the pool and hold the advisory lock in its scope;
-	// a deferred pg_advisory_unlock guarantees the lock is released even
-	// if the migration failed (and if the connection is dropped anyway, Postgres
-	// releases session locks automatically on close).
+	// The lock is session-scoped, so it lives on this one connection and is
+	// released even if the migration fails.
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire conn for migrate: %w", err)
@@ -62,16 +42,8 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("pg_advisory_lock: %w", err)
 	}
 	defer func() {
-		// A best-effort unlock. We use OUR OWN short ctx rather than the parent
-		// (the parent may already be cancelled — a SIGTERM in the middle of a
-		// migration), otherwise `conn.Exec(canceled, …)` quietly returns an error
-		// WITHOUT sending the SQL, the lock stays on the session, the connection goes back into
-		// the pool alive → and the neighbouring replica blocks until pgxpool
-		// releases the connection (MaxConnLifetime, an hour or more by default). From
-		// review (Angle B).
-		// context.WithoutCancel: we keep the parent's values (tracing,
-		// logger keys) but break the cancellation — which is exactly what keeps a
-		// cancelled parent from strangling the unlock Exec.
+		// Its own context: on a cancelled parent the unlock would never be sent,
+		// leaving the lock held and the other replica blocked.
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
 		_, _ = conn.Exec(releaseCtx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
@@ -99,19 +71,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// LoadRuntime reads only the runtime tables (verified_bot_ips, policy)
-// in a single read-only transaction. The slow-catalog layer now lives in
-// files (see internal/filesource) and is merged into *catalog.Data in the reloader.
+// LoadRuntime reads the runtime tables in a single read-only transaction.
 //
-// The catalog version (for X-Catalog-Version) comes from the
-// catalogs/version file rather than the database — the `catalog_version` table was dropped in
-// migration 0004.
-//
-// Regex and CIDR validation for the per-host policy remains: an operator can
-// write a broken policy.ua_blacklist through antibotapi, and without the check at
-// this step the combined regex would take the UA stage down across the edge pool.
-// Store.Replace is not called when LoadRuntime returns an error — the edge
-// keeps working from the previous good snapshot (fail-stale).
+// Per-host policy is still validated here: a broken regex written through the
+// API would otherwise take the UA stage down across the whole pool. On an error
+// nothing is published and the edge keeps its previous snapshot.
 func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
@@ -127,14 +91,9 @@ func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData,
 		Policy:         map[string]catalog.Policy{},
 	}
 
-	// verified_bot_ips: the rDNS worker ([B7]) writes BOTH outcomes — verified and rejected
-	// (vision §Stage 2.2 plus entities-reference.md bot_verification_status). The edge
-	// tells them apart by the value — hence the payload carries "<status>:<family>"
-	// rather than just the family. expires_at > NOW() cuts expired records at the
-	// database level: the edge sees "no key" and takes the provisional fastpath rather
-	// than an out-of-date verdict. Deleting expired rows is the worker's job
-	// (the GC tick); the filter here is defence in depth, so that correctness does not
-	// depend on whether the GC kept up. Migration 0002 introduced status/expires_at.
+	// Expired rows are filtered here as well as collected by the worker, so
+	// correctness does not depend on the GC keeping up: the edge sees no key and
+	// takes the provisional fastpath rather than a stale verdict.
 	if err := loadKVString(ctx, tx, &r.VerifiedBotIPs,
 		`SELECT ip, status || ':' || bot_name FROM verified_bot_ips
 		 WHERE expires_at > NOW() ORDER BY ip`); err != nil {
@@ -144,9 +103,8 @@ func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData,
 		return nil, err
 	}
 
-	// Per-host policy regexes and CIDRs are validated right away: before Store.Replace
-	// nobody sees this payload. The slow-catalog layer arrives from
-	// filesource (validated there); the final merge in the
+	// Validated before anything is published. The slow layer is validated in
+	// filesource; the merge in the
 	// reloader also runs catalog.Validate as defence in depth.
 	if err := catalog.Validate(catalog.Merge(nil, r)); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
@@ -206,8 +164,8 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, r *catalog.RuntimeData) error {
 		if err := unmarshalIfNonEmpty(ipBLJSON, &p.IPBlocklist); err != nil {
 			return fmt.Errorf("policy[%s].ip_blocklist: %w", host, err)
 		}
-		// asn_block: a defensive decode through []*int64 plus per-element filtering
-		// (from review). A direct Unmarshal into []uint32 failed on any
+		// asn_block: a defensive decode through []*int64 plus per-element
+		// filtering. A direct Unmarshal into []uint32 failed on any
 		// -1 / >2^32 value in one row and took the whole catalog tick down →
 		// Store.Replace was never called → the edge failed stale for ALL customers.
 		// A write through the admin API is already caught by `antibotapi.ValidateASN`, but

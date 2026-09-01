@@ -27,7 +27,7 @@ func TestDecodeASNBlock(t *testing.T) {
 		{"negative skipped", "[-1, 100, -5, 200]", []uint32{100, 200}, false},
 		{"too big skipped", "[5000000000, 100]", []uint32{100}, false},
 		{"all out of range", "[-1, 5000000000]", []uint32{}, false},
-		// A JSON null: we do NOT map it to 0 (the default-zero trap). From review.
+		// A JSON null: we do NOT map it to 0 (the default-zero trap).
 		{"single null skipped", "[null]", []uint32{}, false},
 		{"null mixed with valid", "[null, 100, null, 200]", []uint32{100, 200}, false},
 		// Broken JSON → an error (that is no longer "one broken element", it is a broken
@@ -52,8 +52,8 @@ func TestDecodeASNBlock(t *testing.T) {
 	}
 }
 
-// TestDecodeASNBlock_EmptyResetsDst — PR-58 review #6: contract «empty
-// input → nil output" must hold even for a caller that reuses it.
+// TestDecodeASNBlock_EmptyResetsDst pins the contract that an empty input
+// yields a nil output, which must hold even for a caller that reuses dst.
 // The function used to leave dst untouched on an empty input → a future refactor
 // reusing a Policy struct would silently leak a stale ASN.
 func TestDecodeASNBlock_EmptyResetsDst(t *testing.T) {

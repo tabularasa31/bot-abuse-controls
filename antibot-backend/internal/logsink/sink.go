@@ -1,29 +1,15 @@
-// Package logsink — the BAC_LOG receiver into PostgreSQL for analytics ([B9]).
+// Package logsink ingests the edge's structured log stream into PostgreSQL.
 //
-// vision §"The log receiver" plus phase1-spec §"Open questions (the telemetry
-// sink)" — where to send the structured log stream. The initial sink is
-// the same PostgreSQL that holds the catalogs (B1/B4), the `logs` table from
-// migration 0003_logs.sql. When the volume outgrows Postgres, we swap to
-// DuckDB/ClickHouse behind the "receiver→sink" boundary: the edge side and the schema
-// (thanks to the raw JSONB) stay unchanged.
+// Submit is non-blocking and feeds a bounded queue; a consumer batches from it
+// and writes with CopyFrom, flushing on size or on a timer. A failed write
+// spills the whole batch to disk as one file, and a drainer retries the oldest
+// spool file later. That is what keeps a sink outage from losing logs.
 //
-// The package contract:
+// The spool is bounded: past the limit the oldest files are dropped and
+// counted, so a long outage cannot fill the disk.
 //
-//   - Submit(line) — non-blocking; the receiver calls it on the POST /v1/logs hot path.
-//     The queue is bounded; an overflow → a drop with the `…_submit_dropped_total` metric,
-//     the edge keeps working, and the NDJSON settles into the next batch.
-//
-//   - Run(ctx) — runs two goroutines:
-//     (a) the consumer: it batches from the channel and flushes by size or timer through CopyFrom.
-//     On a write error it spills the whole batch to disk (one NDJSON spool file
-//     = one batch) and the consumer keeps accepting new lines.
-//     (b) the drainer: it periodically picks up the oldest spool file and tries
-//     the insert again; on an error it backs off (deleting nothing).
-//
-//   - The disk queue: the guarantee "a sink outage loses no logs" (acceptance B9).
-//     The bound is SpoolMaxBytes; above it we delete the oldest spool files
-//     with the `…_spool_dropped_files_total` metric (protection from unbounded growth
-//     during a long sink outage).
+// Storing the payload as JSONB keeps the schema stable, so the sink can be
+// swapped for a column store later without touching the edge.
 package logsink
 
 import (
@@ -54,11 +40,9 @@ type Config struct {
 	BatchSize int
 	// FlushInterval — the flush threshold by time (when BatchSize is not reached).
 	FlushInterval time.Duration
-	// QueueSize — the bound on the in-memory Submit→consumer queue. It is sized
-	// for the peak POST rate from the edges; on an overflow we drop
-	// (the acceptance criterion is "no loss during a sink outage", not "during overload";
-	// overloading the in-memory queue means the receiver falls into backpressure,
-	// which is far worse).
+	// Bounded, and dropping on overflow is deliberate: the guarantee covers a
+	// sink outage, not overload, and blocking here would push backpressure onto
+	// the receiver.
 	QueueSize int
 	// SpoolDir — where to put NDJSON batches during a sink outage. An empty
 	// string disables the spill (for tests and a dev mode without disk).
@@ -71,10 +55,8 @@ type Config struct {
 	DrainInterval time.Duration
 }
 
-// DefaultConfig — sensible values for the demo stand.
-// BatchSize/FlushInterval: 500 lines OR 2 s — pgx CopyFrom takes one RTT
-// per batch; at the edge's moderate QPS (tens of RPS per instance) that is a second of
-// ingest visibility delay, which is fine for analytics.
+// DefaultConfig trades a second or so of ingest latency for one round trip per
+// batch, which is the right side of the trade for analytics.
 func DefaultConfig() Config {
 	return Config{
 		BatchSize:     500,
@@ -124,10 +106,8 @@ type Sink struct {
 	queueDepth   prometheus.GaugeFunc
 }
 
-// New creates the sink. If cfg.SpoolDir is set and exists it creates the subdirectory
-// when needed. Returning an error means an unrecoverable environment problem (no permission
-// on the spool directory) — the receiver/app decides whether to fail the process or work
-// without a sink.
+// New creates the sink, preparing the spool directory. An error means the
+// environment is unusable, such as a spool directory that cannot be written.
 func New(cfg Config, pool *pgxpool.Pool, logger *slog.Logger, reg prometheus.Registerer) (*Sink, error) {
 	if pool == nil {
 		return nil, errors.New("logsink: pool is nil")
@@ -219,17 +199,9 @@ func NewWithWriter(cfg Config, w Writer, logger *slog.Logger, reg prometheus.Reg
 	return s, nil
 }
 
-// Submit — non-blocking, called from the receiver hot path. A copy of line — the
-// owner already made one through bufio.Scanner and it is safe for us to hold a reference, but
-// the scanner reuses its buffer on the next iteration → so we must copy.
-//
-// The stopped check is best effort: formally there is a window between the Load and the select write
-// in which consume may already have left the drain loop, leaving the
-// written line orphaned in the buffer. In app.shutdown the HTTP server is
-// drained BEFORE cancelWorkers (see app/app.go shutdown), so the
-// receiver goroutines finish before consume sees ctx.Done —
-// the window never occurs in production. A mutex here would add contention on
-// every log line for a scenario the shutdown order rules out.
+// Submit is non-blocking and copies the line, since the caller's scanner reuses
+// its buffer. The stopped check is best effort: the server is drained before the
+// workers are cancelled, and a lock here would cost on every line.
 func (s *Sink) Submit(line []byte) {
 	if s.stopped.Load() {
 		return
@@ -271,15 +243,8 @@ func (s *Sink) consume(ctx context.Context) {
 		batch = batch[:0]
 	}
 
-	// detachedFlush — the shared helper for every flush in the shutdown phase:
-	// ctx is already cancelled, but writer.Insert must have a chance to hand the batch to the
-	// DB (otherwise the batch goes to the spill even though the DB is healthy). WithoutCancel breaks
-	// the cancellation; WithTimeout gives a hard bound — otherwise a hung
-	// CopyFrom against a dead DB would outlive ShutdownTimeout, wg.Wait
-	// would abandon the worker, pool.Close would race with the in-flight
-	// CopyFrom, and the final batch would be lost from both the DB and the spool
-	// (from code review). FlushInterval is an acceptable budget: it already sets
-	// the order of "how long we wait for the sink to answer" in normal operation.
+	// Shutdown flushes need an uncancelled context, or a healthy database would
+	// still spill. The timeout keeps a hung write from outliving the shutdown.
 	detachedFlush := func(b [][]byte) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.FlushInterval)
 		defer cancel()
@@ -289,20 +254,17 @@ func (s *Sink) consume(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// stopped=true BEFORE the drain: the window between ctx.Done and the Store
-			// must be zero, otherwise a Submit that passed the Load before the
-			// Store could write into the channel after the drain and orphan the
-			// line. See also the comment in Submit.
+			// Set before draining, or a Submit already past its check could write
+			// after the drain and orphan the line.
 			s.stopped.Store(true)
 			for {
 				select {
 				case line := <-s.ch:
 					batch = append(batch, line)
 					if len(batch) >= s.cfg.BatchSize {
-						// Every flush in the shutdown phase goes through detachedFlush
-						// (not just the final one): a mid-drain batch with a
-						// cancelled ctx would spill immediately without trying
-						// the DB (from code review).
+						// Every flush here, not only the last: otherwise a
+						// mid-drain batch spills without ever trying the
+						// database.
 						detachedFlush(batch)
 						batch = batch[:0]
 					}
@@ -354,10 +316,8 @@ func (s *Sink) insert(ctx context.Context, lines [][]byte) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	// An error on any line rolls the whole transaction back; we then hand the
-	// whole batch to the spill rather than trying to localise the guilty line (which is
-	// acceptable for analytics during rare outages; individual line parsing
-	// is already filtered above).
+	// The whole batch spills rather than hunting for the offending line: for
+	// analytics that is an acceptable trade during a rare outage.
 	if err := s.writer.Insert(ctx, rows); err != nil {
 		return fmt.Errorf("writer insert: %w", err)
 	}
@@ -365,10 +325,8 @@ func (s *Sink) insert(ctx context.Context, lines [][]byte) error {
 	return nil
 }
 
-// spill writes the batch as a single NDJSON file into SpoolDir. If SpoolDir is unset we
-// simply drop the lines (the dropped metric no longer fits, sink_insert_errors
-// has already been incremented, and the orphaned lines show up as the difference). In a real
-// demo-VM configuration SpoolDir is always set.
+// spill writes the batch as one file. With no spool directory configured the
+// lines are dropped, which shows up as the gap between accepted and inserted.
 func (s *Sink) spill(lines [][]byte) {
 	if s.cfg.SpoolDir == "" {
 		return
@@ -409,11 +367,8 @@ func (s *Sink) spill(lines [][]byte) {
 	}
 	s.spooledFiles.Inc()
 	s.spooledLines.Add(float64(len(lines)))
-	// Post-write we run the budget again: the pre-write enforcement left
-	// only "room for the next batch", but the batch itself could be larger than the
-	// freed window and leave the directory over the cap until the next
-	// spill (from review). The hard bound is guaranteed
-	// precisely by this second pass.
+	// Enforced again after the write: the batch can be larger than the room the
+	// first pass made, and this second pass is what makes the bound hard.
 	if err := s.enforceSpoolBudget(); err != nil {
 		s.logger.Warn("logsink: post-write budget check failed", "err", err)
 	}
@@ -461,13 +416,9 @@ func (s *Sink) drainOnce(ctx context.Context) {
 			return
 		}
 		if err := os.Remove(path); err != nil {
-			// The file is already in the DB — without quarantine the next drain tick
-			// would reread it and insert duplicates (logs has no natural key
-			// on request_id, only a BIGSERIAL id; from code review).
-			// We rename it to .quarantine — listSpoolFiles filters by the
-			// `batch-` prefix and the `.ndjson` suffix, so
-			// quarantine files no longer reach the drain. If the
-			// rename fails too, we hand the operation to the operator.
+			// The rows are already in the database and the table has no natural
+			// key, so leaving the file in place would duplicate them on the next
+			// tick. Renaming takes it out of the drain's view.
 			quar := path + ".quarantine"
 			if rerr := os.Rename(path, quar); rerr != nil {
 				s.logger.Error("logsink: drain remove AND quarantine-rename failed — RISK OF DUPLICATES on next tick",
@@ -504,12 +455,9 @@ func (s *Sink) enforceSpoolBudget() error {
 		}
 		total += info.Size()
 	}
-	// We never evict the last remaining file: if total>cap
-	// with len(files)==1, then one batch by itself is larger than the cap
-	// (a misconfiguration: SpoolMaxBytes < the expected batch size). Deleting
-	// that file would turn a "hard bound" into "guaranteed loss of every
-	// spill", even with an empty disk. We log it as an error
-	// and leave it — the operator should raise SpoolMaxBytes.
+	// Never evict the last file. If one batch alone exceeds the cap the limit is
+	// misconfigured, and deleting it would turn a bound into guaranteed loss of
+	// every spill even on an empty disk.
 	for total > s.cfg.SpoolMaxBytes && len(files) > 1 {
 		victim := files[0]
 		path := filepath.Join(s.cfg.SpoolDir, victim.Name())
@@ -569,13 +517,9 @@ var copyColumns = []string{
 	"raw",
 }
 
-// rawRecord — a flexible representation of a JSON log line. Every field is a
-// nullable pointer: the edge sets null for whatever does not apply
-// (entities-reference: resource_id, tls_*, asn, geo and so on).
-//
-// json.Number for status — the field arrives as an int, but through a float64 in a
-// generic decoder it loses precision; we store it as a Number and parse it
-// by hand. The same goes for tls_cipher_count and latency_ms.
+// rawRecord mirrors a log line. Every field is a pointer, since the edge sends
+// null for whatever did not apply. The numbers are json.Number: a generic decode
+// through float64 would lose precision.
 type rawRecord struct {
 	RequestID      string      `json:"request_id"`
 	Timestamp      string      `json:"timestamp"`
@@ -612,7 +556,7 @@ func parseRow(line []byte) ([]any, error) {
 	// line as jsonb in PostgreSQL is rejected and the whole CopyFrom batch
 	// fails; the sink carries it into the spool, the drainer returns it to the DB,
 	// CopyFrom fails again — and sink throughput dies on one malformed
-	// line (from review, P1). So after the Decode we check that
+	// line. So after the Decode we check that
 	// only whitespace remains in the buffer up to EOF.
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.UseNumber()
@@ -747,7 +691,7 @@ func readNDJSON(path string) ([][]byte, error) {
 // We accept only `batch-*.ndjson` — WITHOUT the exact suffix check, `.quarantine`
 // files (created by drainOnce when Remove is unavailable) and `.partial` (unfinished
 // spills) also carry the `batch-` prefix, and without checking the .ndjson suffix the
-// drainer would reread them and insert duplicates (from review, a P1 blocker).
+// drainer would reread them and insert duplicates.
 func listSpoolFiles(dir string) ([]os.DirEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

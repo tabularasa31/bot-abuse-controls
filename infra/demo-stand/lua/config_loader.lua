@@ -9,9 +9,8 @@
 --                  catalog/profiles. "[a.b]" opens nested table root.a.b;
 --                  "key = value" assigns into the current section.
 --
--- docs/product/config-templates.md shows these configs as illustrative
--- YAML; the doc states the concrete syntax is not the point, only the
--- structure/semantics. These parsers reproduce that structure.
+-- config-templates.md renders the same structure as illustrative YAML; only
+-- the shape is normative, not the syntax.
 
 local _M = {}
 
@@ -19,10 +18,8 @@ local function trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
--- Drop a "#" comment (full-line or trailing) and surrounding whitespace.
--- A "#" only starts a comment at line start or when preceded by
--- whitespace, so it survives inside a value — e.g. the PR link in
--- "pr=#42" or a "#" in a UA regex.
+-- A "#" only opens a comment at line start or after whitespace, so it survives
+-- inside a value such as a UA regex.
 local function strip_comment(s)
     local hash = s:find("^#") or s:find("%s+#")
     if hash then s = s:sub(1, hash - 1) end
@@ -38,11 +35,8 @@ local function read_lines(path)
     return lines
 end
 
--- Coerce a scalar string into the most useful Lua type: "true"/"false"
--- become booleans (so a consumer's `if cfg.kill_switch.enabled then`
--- isn't fooled by the truthy string "false"), comma-separated values
--- become an array, purely-numeric values become a number, the rest stay
--- strings.
+-- Coerce to the useful Lua type. Booleans matter most: the string "false" is
+-- truthy, which would silently arm every kill switch.
 local function coerce(v)
     if v == "true" then return true end
     if v == "false" then return false end

@@ -54,7 +54,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, string) {
 
 	// A clean schema — DROP plus Migrate. The tests must not depend on their neighbours.
 	tables := []string{
-		// From audit: the legacy DB table is `fp_blocklist` (from 0001_init.sql),
+		// the legacy DB table is `fp_blocklist` (from 0001_init.sql),
 		// NOT `tls_fp_blocklist` (the file-system name from the rename).
 		"catalog_version", "fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",
@@ -386,7 +386,7 @@ func TestPatchOriginIP_Invalid_NotWritten(t *testing.T) {
 }
 
 func TestASNBlock_MissingAsnField_400(t *testing.T) {
-	// From review: an empty body `{}` → asn=0 without an explicit required check
+	// an empty body `{}` → asn=0 without an explicit required check
 	// silently mutated ASN 0. Now it is an *int64 pointer plus a nil check.
 	ts, pool, tok := newTestServer(t)
 	cases := []struct{ name, body string }{
@@ -607,7 +607,7 @@ func TestRemoveASN_ConcurrentAppendNotLost(t *testing.T) {
 // tear transactions apart, or leave a row written in a "holed" state.
 // The invariant checked: "the row exists ⟹ the value was written".
 //
-// NOTE — this is NOT a regression guard for the silent-loss bug from review.
+// NOTE — this is NOT a regression guard for the silent-loss bug
 // The real guarantee is the row lock in ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`,
 // see store.go), not this test. That bug showed up as "the append returned 200
 // changed:false while the row ended up deleted"; under the buggy code EVERY

@@ -1,11 +1,9 @@
--- log_by_lua handler. Two jobs:
---   1. Emit the single Phase 1 structured JSON record (via bac_log).
---   2. Increment the metrics shared_dict counters that /metrics serves.
+-- log_by_lua handler: emits the structured record and increments the counters
+-- edge_stats reports.
 --
--- Runs AFTER access_by_lua, so ngx.ctx.bac is populated. Requests that
--- bypass verdict.lua (e.g. /__health, /metrics) never called init, have
--- no ctx, and are skipped — counters and the log stream reflect only
--- requests that actually went through the pipeline.
+-- Requests that never entered the cascade (/__health and friends) have no ctx
+-- and are skipped, so both the log stream and the counters cover only traffic
+-- that was actually judged.
 
 local bac_log = require "bac_log"
 local recent  = require "recent"
@@ -16,32 +14,23 @@ if not ctx then return end
 local m = ngx.shared.metrics
 m:incr("requests_total", 1, 0)
 m:incr("verdict_" .. ctx.verdict .. "_total", 1, 0)
--- Tri-state: bac_cache_hit is explicitly set to true/false in verdict.lua
--- only when the verdict_cache was actually consulted (L3 tls_fp path). It
--- stays `nil` when the cache lookup was skipped — currently that's the C3
--- clearance fastpath (`ngx.ctx.clearance_valid` → tls_fp blocklist/cache
--- block bypassed; fp itself is still computed for L4 rate_tls_fp). Counting
--- nil as a miss would pollute antibot_cache_hit_ratio with cookie-fastpath
--- traffic that never touched the cache.
+-- Tri-state: nil means the cache was never consulted (the clearance fastpath
+-- skips it). Counting that as a miss would skew the hit ratio with traffic
+-- that never touched the cache.
 if ngx.ctx.bac_cache_hit == true then
     m:incr("cache_hit_total", 1, 0)
 elseif ngx.ctx.bac_cache_hit == false then
     m:incr("cache_miss_total", 1, 0)
 end
 
--- Per-rule counter (which rule fired, on which stage). Key shape
--- "rule:<stage>:<rule>" — metrics.lua parses it back out. Rule codes and
--- stage codes contain no ":", so the split is unambiguous.
+-- Key shape "rule:<stage>:<rule>"; neither code contains ":", so the split
+-- back out is unambiguous.
 if ctx.rule then
     m:incr("rule:" .. ctx.stage .. ":" .. ctx.rule, 1, 0)
 end
 
--- Soft-flag and tag counters (A9). Flags are soft challenge signals
--- (tls_fp_impersonator / tls_fp_suspicious_ciphers) that may be overwritten as
--- the terminal `rule`, so they need their own counter to stay observable;
--- tags (tls_fp:*, reputation:*, hygiene:*) likewise never become `rule`. Key
--- shapes "flag:<flag>" / "tag:<tag>" — metrics.lua parses them back out. Both
--- code-spaces are tiny, so iterating the (usually empty) arrays is cheap.
+-- Flags and tags need their own counters because neither survives as the
+-- terminal `rule`, and both would otherwise be invisible.
 for _, flag in ipairs(ctx.flags) do
     m:incr("flag:" .. flag, 1, 0)
 end
@@ -49,16 +38,13 @@ for _, tag in ipairs(ctx.tags) do
     m:incr("tag:" .. tag, 1, 0)
 end
 
--- Staged-pattern match counter (A11). Each entry is already "<catalog>:
--- <pattern_id>"; key shape "staging:<catalog>:<pattern_id>" (metrics.lua parses
--- it back out). Staging matches feed the promotion workflow, not the verdict,
--- so they get their own counter like flags/tags. Usually empty → cheap.
+-- Staging matches feed the promotion decision rather than the verdict, so they
+-- are counted separately.
 for _, entry in ipairs(ctx.staging_match) do
     m:incr("staging:" .. entry, 1, 0)
 end
 
--- fp cardinality: dict:add succeeds only the first time we see an fp, so it
--- doubles as a first-seen signal for the unique-fp gauge.
+-- dict:add succeeds only on first sight, which is exactly the unique-fp gauge.
 local fp = ctx.tls_fp
 local seen = ngx.shared.fp_seen
 if fp and seen then
@@ -69,11 +55,8 @@ if fp and seen then
     end
 end
 
--- Live ring buffer for /__admin. host + flags added for [C6] recovery
--- widget — host picks the per-resource policy to whitelist into, flags
--- explain to the operator WHY the request was blocked (e.g. tls_fp soft
--- rule worth recovering vs UA-blacklist hit that whitelisting the IP
--- wouldn't unstick).
+-- host and flags are carried so a reader can tell which policy a block belongs
+-- to and why it fired.
 recent.record({
     t       = ngx.time(),
     fp      = fp,

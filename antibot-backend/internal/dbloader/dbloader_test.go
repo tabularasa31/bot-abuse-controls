@@ -55,7 +55,7 @@ func resetSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		// The current runtime tables.
 		"verified_bot_ips", "policy", "logs",
 		// Dropped by 0004, but possible in older databases — IF EXISTS protects us.
-		// From audit: the legacy DB table name is `fp_blocklist` (from 0001),
+		// the legacy DB table name is `fp_blocklist` (from 0001),
 		// NOT `tls_fp_blocklist` (that is the file-system / wire name from the rename).
 		"catalog_version", "fp_blocklist", "ua_blacklist",
 		"ip_blocklist", "ip_whitelist", "asn_datacenters",

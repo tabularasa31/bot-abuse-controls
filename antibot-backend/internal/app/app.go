@@ -1,10 +1,6 @@
-// Package app — the assembly of the antibot-backend process.
-//
-// main() here deals only with the signal context and the logger; everything to do with
-// the config, the database, the catalog, the HTTP server and the background workers is
-// assembled in App.New and driven from App.Run. If tomorrow we need to
-// bring the backend up from tests or from a wrapper (for an integration test
-// against a real Postgres, say), the call stays identical to main.
+// Package app assembles the process: config, database, catalog, HTTP server and
+// background workers. main only sets up the signal context and the logger, so
+// the same assembly can be driven from a test or a wrapper.
 package app
 
 import (
@@ -33,10 +29,8 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/rdns"
 )
 
-// App — an assembled but not yet started process. Every dependency is initialised
-// (the config is read, the database is connected, the catalog is bootstrapped, the HTTP server is built);
-// Run() starts the workers and blocks until a signal or an HTTP error, after which
-// it performs a graceful shutdown itself.
+// App is an assembled but not yet started process. Run starts the workers and
+// blocks until a signal or a server error, then shuts down gracefully.
 type App struct {
 	cfg      config.Config
 	logger   *slog.Logger
@@ -49,18 +43,12 @@ type App struct {
 	logSink  *logsink.Sink      // nil without a database (skeleton) or on a spool initialisation error
 }
 
-// New assembles the dependency graph. It returns an error if the config cannot be read,
-// the database cannot be opened, the migrations do not apply or the catalog does not bootstrap —
-// we prefer to catch all of those BEFORE opening the listening socket,
-// so that the process does not hang "successfully" with a broken subsystem.
+// New assembles the dependency graph, failing before the listening socket opens
+// rather than leaving the process up with a broken subsystem.
 //
-// Ctx is used only during the bootstrap (migrations, the first Load); the background
-// workers get their own ctx in Run.
-//
-// A named return — so that a defer can clean up the pgxpool on any error path AFTER
-// db.Open. In main() that is mostly masked by os.Exit(1), but App.New
-// is positioned as callable from tests and wrappers, where leaking goroutines or
-// pool connections would be real.
+// The context covers bootstrap only; the workers get their own in Run. The
+// return is named so a defer can close the pool on any later error path, which
+// matters when New is called from a test rather than from main.
 func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -85,13 +73,9 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 			return nil, fmt.Errorf("postgres open: %w", err)
 		}
 		a.pool = pool
-		// Cleanup on error: any return with retErr != nil after this point
-		// (migrations, reloader init, the catalog bootstrap) must close the pool —
-		// otherwise an in-process caller (a test or a wrapper) drags live connections
-		// and background pgx goroutines along. We close over the local `pool` rather than
-		// `a.pool`: the function body does `return nil, err`, which zeroes the
-		// named return `a`, and touching `a.pool` in the defer would give a
-		// nil-deref panic on exactly the error path we are trying to clean up.
+		// Closes over the local pool, not the field: the error paths return a nil
+		// App, so reaching through it here would panic on exactly the path this
+		// cleanup exists for.
 		defer func() {
 			if retErr != nil {
 				pool.Close()
@@ -118,10 +102,8 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		return nil, err
 	}
 
-	// The rDNS worker ([B7]) exists only when there is a database and a catalog — it writes
-	// verified_bot_ips and reads "already in the catalog" from catalog.Store.
-	// Without a pool (a skeleton with no database) the worker stays nil; the receiver is then
-	// left without enqueue and works as a counter.
+	// Needs both a database to write to and a catalog to deduplicate against.
+	// Without them the receiver still counts, but enqueues nothing.
 	if a.pool != nil && a.store != nil {
 		a.rdns = rdns.New(
 			a.reg, logger,
@@ -130,10 +112,8 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 				Workers:    cfg.RDNSWorkers,
 				DNSTimeout: cfg.RDNSDNSTimeout,
 				GCInterval: cfg.RDNSGCInterval,
-				// PostWriteHold covers the window between "the worker wrote it"
-				// and "the reloader put a fresh Data into the Store". Without the buffer a
-				// hot IP inside that window would pass Enqueue again and
-				// do a repeat DNS lookup. +2 s of headroom for pgx latency.
+				// Covers the gap until the reloader publishes the write, plus
+				// headroom for database latency.
 				PostWriteHold: cfg.CatalogReloadInterval + 2*time.Second,
 			},
 			rdns.NetResolver{},
@@ -192,10 +172,8 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		logs.New(a.reg).Register(mux)
 	}
 
-	// The Policy API ([B10]) — the write side for the dashboard backend. We bring it up only
-	// if there is a DB AND a token is set: with no token /antibot/v1/* is not registered
-	// (fail-closed; the dashboard gets a 404, which immediately shows that the secret was not
-	// passed through env).
+	// Fail-closed: with no token the routes are never registered, so a missing
+	// secret shows up immediately as a 404 rather than as an open write API.
 	if a.pool != nil {
 		auth := antibotapi.NewAuthenticator(a.cfg.DashboardAPIToken, a.reg)
 		if auth != nil {
@@ -220,25 +198,16 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	return a, nil
 }
 
-// buildCatalog assembles the Channel C sources and registers the HTTP routes.
-// There are now two sources, both mandatory when a database is present (per ADR-006):
-//
-//   - filesource (catalogs/): the slow catalogs from product. Without the files it is
-//     impossible to assemble a meaningful slow layer — the Store will not come up.
-//   - dbloader.LoadRuntime: verified_bot_ips, policy. Without a database (skeleton
-//     mode) both are empty and /catalog/* answers 503.
-//
-// The reloader ticks both sources on one interval, merges them into a *catalog.Data and
-// publishes into the Store through an atomic Replace.
+// buildCatalog wires the two sources — the slow catalogs from files and the
+// runtime state from the database — and registers the routes. The reloader ticks
+// both on one interval, merges them and publishes the result atomically.
 func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	catalogSrv := catalog.New()
 	a.store = catalogSrv.Store()
 
 	if a.pool == nil {
-		// Skeleton mode without a database: Channel C stays in the not-loaded state
-		// (503 on any /catalog/*). That is an explicit sign to the operator — with no database the
-		// rDNS worker does not write verified_bot_ips, antibotapi does not accept a
-		// policy, and serving an empty runtime part would be worse than a 503.
+		// Without a database the catalogs stay unloaded and answer 503, which is
+		// the honest signal: serving an empty runtime layer would be worse.
 		a.logger.Warn("no POSTGRES_DSN — Channel C stays not-loaded (returns 503); set POSTGRES_DSN + CATALOGS_DIR to enable")
 		catalogSrv.Register(mux)
 		return nil
@@ -273,12 +242,8 @@ func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	return nil
 }
 
-// Run starts the background workers and the HTTP server, blocks until ctx is cancelled or a
-// fatal HTTP error occurs, and then performs a graceful shutdown itself. It returns
-// the HTTP server's error (if it fell over), otherwise nil.
-//
-// Ctx must be cancelled by a signal (see signal.NotifyContext in main) —
-// its cancellation is what triggers the start of the shutdown.
+// Run starts the workers and the server and blocks until the context is
+// cancelled or the server fails, then shuts down gracefully.
 func (a *App) Run(ctx context.Context) error {
 	// workerCtx lives under Run and is closed on exit, so that the workers
 	// get the stop signal even when Run returns through an
@@ -332,12 +297,9 @@ func (a *App) Run(ctx context.Context) error {
 		runErr = err
 	case <-ctx.Done():
 		a.logger.Info("shutdown signal received")
-		// A race: between the signal closing ctx.Done and us calling
-		// srv.Shutdown, the listener could have returned a NON-ErrServerClosed
-		// error (an EMFILE in the accept loop, a network fault, a recovered panic).
-		// The HTTP goroutine writes it into the buffered serverErr (cap=1),
-		// but nobody reads it any more — without a drain the error is quietly lost,
-		// Run returns nil, and after the incident the operator cannot find the cause.
+		// The listener may have failed for a real reason between the signal and
+		// the shutdown call. Without this drain that error is lost and Run
+		// returns nil, leaving nothing to investigate.
 		select {
 		case err := <-serverErr:
 			a.logger.Error("late http server error during shutdown", "err", err)
@@ -351,14 +313,9 @@ func (a *App) Run(ctx context.Context) error {
 	return runErr
 }
 
-// shutdown — an ordered termination under the shared cfg.ShutdownTimeout budget.
-// The steps run in sequence and each knows about the shared deadline:
-//  1. HTTP: srv.Shutdown drains what is in flight; if it does not fit, srv.Close()
-//     tears down the tail, otherwise systemd kills us with SIGKILL without grace.
-//  2. cancelWorkers: it stops the background workers (rDNS now, the B6 disk queue
-//     later).
-//  3. wg.Wait under the deadline: B7 brings real DNS lookups that can
-//     hang on the network — we do not let them delay the exit.
+// shutdown terminates in order under one shared deadline: drain the server, then
+// cancel the workers, then wait for them — bounded, because a DNS lookup can
+// hang on the network.
 //  4. pgxpool.Close under the deadline: it blocks on active connections, which B3/B7
 //     bring — we bound it by the same budget.
 func (a *App) shutdown(parent context.Context, cancelWorkers context.CancelFunc, wg *sync.WaitGroup) {

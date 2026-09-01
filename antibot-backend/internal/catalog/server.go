@@ -1,20 +1,10 @@
-// Package catalog — the Channel C HTTP server ([B3]).
+// Package catalog serves the catalogs to the edges.
 //
-// The contract per docs/architecture/config-distribution.md §"The 'catalog' concept"
-// + §"Channel C — antibot-backend HTTP pull (runtime data)":
-//
-//   - GET /catalog/{name}            — a snapshot of the catalog.
-//   - ?site=<host>                   — per-tenant filtering (the combined UA regex,
-//     per-resource ip_*, policy/attack_mode).
-//   - If-None-Match: "<etag>"        — a 304 with no body when the payload has not changed.
-//   - X-Catalog-Version: <semver>    — the payload schema version (RFC §C1).
-//   - ETag: "<sha256-hex>"           — strong, content-hash.
-//   - 503 Service Unavailable        — the Store is empty (nobody called Replace);
-//     fail-closed, so that the edge does not "successfully" accept empty catalogs.
-//
-// The storage is a *Store (in-memory, atomic swap). The real YAML/Postgres
-// loader is supplied from outside: B3 provides in-memory plus YAML, and B4 replaces it with pgx
-// without changing the interface.
+//   - GET /catalog/{name}  — the catalog snapshot, optionally filtered by ?site.
+//   - ETag / If-None-Match — a strong content hash, answering 304 unchanged.
+//   - X-Catalog-Version    — the payload schema version.
+//   - 503                  — nothing loaded yet; fail closed, so the edge never
+//     mistakes an empty catalog for a successful one.
 package catalog
 
 import (
@@ -74,10 +64,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// site is optional. Empty means the global payload. Validation: length
-	// only (protection from an accidental gigantic ?site=) — there is no point
-	// checking the host format, since an unknown host for policy/attack_mode
-	// legitimately returns the default.
+	// Only the length is validated: an unknown host legitimately returns the
+	// default, so the format does not matter.
 	site := r.URL.Query().Get("site")
 	if len(site) > 253 {
 		// RFC 1035 §2.3.4: the maximum length of a domain name is 253 octets.
@@ -96,18 +84,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// json.Marshal must not fail on our shape; if it does, an explicit
-		// 500 is better than a process panic (from review).
+		// 500 is better than a process panic.
 		writeErr(w, http.StatusInternalServerError, "serialize_failed", name)
 		return
 	}
 
-	// Fail-closed: Replace was never called on the Store → 503 Service Unavailable.
-	// By the fail-stale logic (docs/architecture/config-distribution.md
-	// §"Channel C / Failure mode") the edge keeps the last good catalog rather than
-	// overwriting it with our "successful" empty response (from review).
-	// The check goes through the Store.IsLoaded flag rather than comparing Version with
-	// defaultVersion — otherwise an operator who set `version: "0.0.0"` in the YAML
-	// would see a 503 on a legitimate payload.
+	// Nothing loaded yet: answer 503 so the edge keeps its last good catalog
+	// instead of replacing it with a successful-looking empty one.
 	if !s.store.IsLoaded() {
 		w.Header().Set("X-Catalog-Version", snap.Version)
 		w.Header().Set("Retry-After", "5")
@@ -134,10 +117,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(snap.Body)
 }
 
-// anyETagMatches checks a match per RFC 7232 §3.2 across ALL the values of
-// If-None-Match. A client may send the header several times
-// (http.Header.Values returns them separately) or once with a comma-separated
-// list — we support both.
+// anyETagMatches handles both forms a client may use: the header repeated, or
+// one header carrying a comma-separated list.
 func anyETagMatches(headers []string, etag string) bool {
 	for _, h := range headers {
 		if etagMatches(h, etag) {
@@ -147,11 +128,9 @@ func anyETagMatches(headers []string, etag string) bool {
 	return false
 }
 
-// etagMatches parses one If-None-Match per RFC 7232 §3.2: a comma-separated
-// list, "*", an optional `W/` prefix. Crucially: a comma INSIDE a
-// quoted-string does not separate tokens — the ETag `"foo,bar"` is valid. So the
-// tokeniser runs a state machine over DQUOTE rather than slicing by indexByte
-// (PR #42 review).
+// etagMatches parses one header value per RFC 7232 §3.2. A comma inside a
+// quoted string does not separate tokens, so this walks the quotes rather than
+// splitting on commas.
 func etagMatches(header, etag string) bool {
 	header = strings.TrimSpace(header)
 	if header == "*" {

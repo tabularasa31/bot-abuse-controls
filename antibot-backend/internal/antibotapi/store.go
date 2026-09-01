@@ -18,10 +18,8 @@ import (
 // ErrNotFound — there is no row for the site (on GET; for an array DELETE, the element did not exist).
 var ErrNotFound = errors.New("not found")
 
-// allowedStringArrayFields — the whitelist of JSONB fields the array endpoints
-// work with. Hardcoded rather than dynamic: otherwise a client could pass
-// `; DROP TABLE policy;--` in the URL path. The field name is assembled into SQL through
-// fmt.Sprintf — and the only protection from injection is the whitelist.
+// The field name is interpolated into SQL, so this whitelist is the only thing
+// standing between a URL path segment and an injection.
 var allowedStringArrayFields = map[string]struct{}{
 	"ua_blacklist":  {},
 	"ip_blocklist":  {},
@@ -32,14 +30,9 @@ var allowedStringArrayFields = map[string]struct{}{
 // allowedASNField — the only JSONB field holding numbers.
 const allowedASNField = "asn_block"
 
-// The PoolDefaults for INSERTing a new row — the JSONB arrays are marshalled once
-// at startup and then travel as byte slices in Exec. This used to happen on every
-// PatchScalars/ensureRow call (from review).
-//
-// PoolDefault() guarantees non-nil empty slices, and json.Marshal on them gives
-// "[]" — we deliberately do NOT use literals (a `[]` jsonb literal in SQL),
-// so that initialisation goes through the same typed point as the comparison
-// logic in the dashboard and the reloader.
+// Marshalled once at startup rather than per insert. Going through the same
+// typed defaults as everything else, instead of a SQL literal, is what keeps a
+// new row identical to what the reloader and the dashboard expect.
 var (
 	poolDefaultUAJSON   = mustMarshalAtInit(catalog.PoolDefault().UABlacklist)
 	poolDefaultIPWLJSON = mustMarshalAtInit(catalog.PoolDefault().IPWhitelist)
@@ -78,42 +71,16 @@ func (p PolicyPatch) IsEmpty() bool {
 	return p.Mode == nil && p.Strictness == nil && p.AttackMode == nil && p.OriginIP == nil
 }
 
-// PatchScalars applies the patch. It returns (changed, changedFields, err).
+// PatchScalars applies a patch and reports whether anything changed; a patch
+// matching the current values leaves updated_at alone.
 //
-// The scenarios:
-//   - the row does not exist → an atomic UPSERT (ON CONFLICT DO UPDATE
-//     SET host=EXCLUDED.host) creates it with PoolDefault AND takes a row lock
-//     in one statement; RETURNING (xmax=0) yields the inserted flag.
-//   - the row exists and every passed field matches → a no-op (changed=false,
-//     and updated_at is NOT touched).
-//   - the row exists and at least one field differs → an UPDATE under that same lock,
-//     changed=true.
+// The self-assignment in the conflict clause looks pointless but is what takes
+// the row lock, so concurrent patches to different fields serialise instead of
+// clobbering each other. `xmax = 0` then distinguishes a real insert from the
+// update branch.
 //
-// Concurrency: EVERYTHING happens inside one transaction (Read Committed by default).
-// The UPSERT with `DO UPDATE SET host=EXCLUDED.host` is a no-op assignment, but
-// it triggers the UPDATE branch, which takes a ROW SHARE+EXCLUSIVE lock on the
-// conflicting row. Parallel PATCHes to the same host now block
-// each other on that lock (with no 40001 — that is a RepeatableRead-only artefact);
-// the loser waits, then reads the already-updated state and computes its diff against
-// it. A lost update between independent fields is impossible (from review,
-// finding #1: before this, `mode=$2, strictness=$3, attack_mode=$4` silently
-// clobbered a concurrent PATCH to a neighbouring field).
-//
-// `xmax = 0` is a Postgres trick: freshly inserted rows have xmax=0, while
-// rows that took the DO UPDATE branch have xmax = the current xid. So one
-// statement yields both the current values and "was there a real insert".
-//
-// Trade-off (PR-58 round 2 review #5): `DO UPDATE SET host=EXCLUDED.host`
-// — a deliberate self-assignment, to take a row lock on the conflict. In the
-// DO UPDATE branch Postgres ALWAYS writes a new heap tuple, even when the SET assigns
-// the same value (there is no SET-to-same-value short circuit). That means every
-// PATCH (a no-op one included) generates one dead tuple → autovacuum bytes
-// under a high rate of idempotent PATCHes. The alternative (`DO NOTHING` plus a
-// fallback `SELECT FOR UPDATE`) is more complex and loses the UPSERT's atomicity;
-// we deliberately chose the churn over a retry loop. If the dashboard starts
-// hammering the same payload (which the current design does not anticipate),
-// this will have to be revisited. updated_at is preserved (see below) — the heap churn
-// is invisible through X-Catalog-Version.
+// The cost is a dead tuple per patch, no-ops included — worth revisiting if
+// idempotent patches ever become frequent.
 func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (bool, []string, error) {
 	if p.IsEmpty() {
 		return false, nil, fmt.Errorf("empty patch")
@@ -217,19 +184,11 @@ func patchFields(p PolicyPatch) []string {
 	return out
 }
 
-// AppendStringArray performs an idempotent append into a JSONB string array.
-// It creates the row with PoolDefault when the site is absent. changed=false means the value was already there.
+// AppendStringArray is an idempotent append, creating the row if needed.
 //
-// COALESCE(field, '[]'::jsonb) is defence in depth against rows with a JSONB null
-// (legacy / manual SQL / test fixtures). Without it `null || x = null` → WHERE NOT
-// (null @> ...) yields null → false → a silent no-op (from review).
-//
-// Tx: ensureRow plus the UPDATE in one transaction (from the security audit).
-// A DELETE site endpoint now exists, so a concurrent
-// site DELETE between ensureRow and the UPDATE is a real race, not a theoretical one.
-// It is closed by the row lock in ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`),
-// which serialises the append against the DELETE; without it the UPDATE would see RowsAffected=0
-// and silently lose the append. See ensureRowTx.
+// The COALESCE guards a JSONB null, where concatenation would silently do
+// nothing. Creation and update share a transaction, or a concurrent site delete
+// between them would lose the append.
 func (s *Store) AppendStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -258,12 +217,9 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 	return tag.RowsAffected() == 1, nil
 }
 
-// RemoveStringArray removes an element. existed=false means the element was absent and the
-// handler returns 404 (separating "it was not there" from "it was there and we deleted it").
-// The COALESCE against jsonb-null rows — see AppendStringArray (from review).
-// No tx — a single-statement UPDATE is atomic by itself; ensureRow is not
-// needed here (a delete on a non-existent site → RowsAffected=0 → 404, which is
-// semantically correct).
+// RemoveStringArray deletes an element, reporting whether it was there so the
+// handler can answer 404. A single statement is atomic on its own, and deleting
+// from a site that does not exist is correctly a 404.
 func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -307,22 +263,14 @@ func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, e
 
 // RemoveASN removes an ASN from the array.
 //
-// From review: the previous implementation computed new_arr in a CTE before the UPDATE's
-// lock, so a concurrent AppendASN that committed between the CTE
-// and the UPDATE was silently clobbered — Read Committed re-locks the row but does NOT re-evaluate
-// the CTE. The new version computes new_arr in a subquery INSIDE the SET — that subquery
-// executes AFTER the row lock, against the current state.
+// The new array is computed in a subquery inside the SET, so it runs after the
+// row lock against current state. Computing it in a CTE would silently clobber a
+// concurrent append: Read Committed re-locks the row but does not re-evaluate
+// the CTE.
 //
-// jsonb-null protection through COALESCE (from review): without it
-// jsonb_array_elements(null) raises 'cannot extract elements from a scalar'.
-//
-// jsonb_typeof = 'number' (from review): the schema does not constrain the
-// element types of a JSONB array; legacy or manual SQL can leave a string
-// (`'[15169, "13335"]'::jsonb`). A direct cast `(elem)::bigint` then raises
-// "invalid input syntax for type bigint", and DELETE for the whole site returns a
-// 500 until the database is fixed by hand. The jsonb_typeof filter keeps numbers only;
-// strings, nulls and arrays are dropped (defensive — but this is exactly the legacy zone
-// that decodeASNBlock on the loader side also guards).
+// The type filter keeps numbers only: the schema does not constrain the element
+// types, and a string left by manual SQL would make every delete for that site
+// fail until the database was fixed by hand.
 func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, error) {
 	q := `UPDATE policy
 		  SET asn_block = COALESCE(
@@ -343,12 +291,12 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 // AND takes a row lock on the conflicting row through `DO UPDATE SET
 // host = EXCLUDED.host` (a self-assignment, as in PatchScalars).
 //
-// The lock is mandatory rather than cosmetic (from review): `DO NOTHING` does NOT lock the
+// The lock is mandatory rather than cosmetic: `DO NOTHING` does NOT lock the
 // existing row on a conflict, so a concurrent DeletePolicy could
 // commit its DELETE between ensureRow (a no-op) and the subsequent UPDATE in
 // AppendStringArray/AppendASN — that UPDATE would see RowsAffected=0 and return
 // 200 changed:false, silently losing the append (the row was deleted and the value never written).
-// Wrapping ensure+UPDATE in one tx (from the audit) did NOT by itself
+// Wrapping ensure+UPDATE in one tx did NOT by itself
 // close it — the lock is what is needed. `DO UPDATE` takes a ROW SHARE+EXCLUSIVE lock,
 // so a concurrent DELETE waits on it; the append commits a real record
 // (changed:true), and only then does the DELETE remove the host — with no silent no-op.

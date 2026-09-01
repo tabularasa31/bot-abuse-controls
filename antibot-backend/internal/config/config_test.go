@@ -6,7 +6,7 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/config"
 )
 
-// TestLoad_MigrateOnStartup_AcceptsCaseVariants — PR #43 review (Angle A):
+// TestLoad_MigrateOnStartup_AcceptsCaseVariants —
 // the earlier switch over literals refused 'True'/'False'/'FALSE', even though
 // they are idiomatic for YAML and k8s secrets. It now goes through strconv.ParseBool.
 func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
@@ -20,7 +20,7 @@ func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
 		{"1", true},
 		{"t", true},
 		{"T", true},
-		{"yes", true}, // legacy — PR #43 follow-up
+		{"yes", true}, // legacy spelling
 		{"YES", true},
 		{"false", false},
 		{"False", false},

@@ -1,11 +1,9 @@
-// Typed data for the eight Channel C catalogs the backend serves to the
-// edges, per the contract in docs/architecture/config-distribution.md
-// (§"The 'catalog' concept"). Only the in-memory representation and the YAML
-// loader live here; HTTP delivery is in server.go and snapshot assembly in store.go.
+// Typed data for the catalogs the backend serves to the edges. This file holds
+// the in-memory representation and the loader; delivery and snapshot assembly
+// live alongside it.
 //
-// Per-resource data (`policy`, custom UA patterns, attack_mode) lives
-// in map[host]Policy; the shared lists are flat structures. Per the config-
-// distribution decision, the per-resource key is `host`, not `cdn_resource_id`.
+// Per-resource data is keyed by host rather than by a provider-side resource
+// id, so the edge can look it up straight from the request.
 package catalog
 
 import (
@@ -15,20 +13,16 @@ import (
 	"sort"
 )
 
-// defaultVersion — the semver Store serves before the first load. It also
-// goes into X-Catalog-Version (the header is always set — the §C1 contract).
-// "0.0.0" in semver means "pre-release / empty"; the edge can rely on a
-// change of the major segment to detect a breaking change in the payload schema.
+// What is served before the first load. The header is always set, so the edge
+// never has to distinguish a missing one from an empty catalog.
 const defaultVersion = "0.0.0"
 
 // Data — a snapshot of the whole catalog store. It changes atomically as a whole through
 // Store.Replace; references to an old *Data stay correct for the duration of a read, and there are no
 // partial updates across catalogs.
 type Data struct {
-	// Version — the semver placed into X-Catalog-Version on every response.
-	// It is changed by hand or by the dashboard, not generated: the edge needs to distinguish
-	// "the same schema, new content" (only the ETag changes) from "a new schema"
-	// (the parser needs updating). Content freshness is the ETag's job, not Version's.
+	// Deliberately hand-maintained rather than generated: it marks a schema
+	// change, while content freshness is the ETag's job.
 	Version string `yaml:"version"`
 
 	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → status (active|staging); wire format "<status>:block" (A11)
@@ -43,31 +37,21 @@ type Data struct {
 	Policy               map[string]Policy         `yaml:"policy"`                  // host → policy (including attack_mode)
 }
 
-// TLSFPCatalog — one entry of the automation signature catalog (Phase 2+).
-// Used by the tls_fp_impersonator rule in [tls_fp.lua].
-//
-// The Channel C wire format of the payload is `<status>:<family>` (symmetric with
-// verified_bot_ips, so that the edge's shared_dict stores strings with no per-entry
-// JSON parsing). See buildTLSFPCatalog in store.go.
+// TLSFPCatalog is one automation signature. It goes over the wire as
+// "<status>:<family>", so the edge can store it without parsing JSON per entry.
 type TLSFPCatalog struct {
 	Family string `yaml:"family" json:"family"`
 	Status string `yaml:"status" json:"status"` // active | staging
 }
 
-// BrowserProfile — the expected cipher_cnt for a browser family (Phase 2+).
-// Used by the tls_fp_suspicious_ciphers rule.
-//
-// The wire format is `<status>:<expected_cipher_cnt>` (the number as a decimal string).
+// BrowserProfile is the cipher count a browser family is expected to offer.
 type BrowserProfile struct {
 	ExpectedCipherCnt int    `yaml:"expected_cipher_cnt" json:"expected_cipher_cnt"`
 	Status            string `yaml:"status" json:"status"` // active | staging
 }
 
-// Policy — the per-resource settings of one host. NO field carries omitempty:
-// the `/catalog/policy?site=…` contract promises map(host → policy json) with a
-// predictable shape; a consumer (the dashboard or the edge) must see "field = zero"
-// and "field absent" identically, without distinguishing them. If a field appears later,
-// we will give it its own major Version bump.
+// Policy holds one host's settings. No field is omitempty: consumers rely on a
+// predictable shape, where an absent field and a zero value read the same.
 type Policy struct {
 	Mode         string     `yaml:"mode" json:"mode"`                   // shadow / active
 	Strictness   string     `yaml:"strictness" json:"strictness"`       // standard / permissive
@@ -92,13 +76,9 @@ type RateRule struct {
 	Action  string   `yaml:"action" json:"action"` // block | challenge | log_only
 }
 
-// SlowData — the catalog layer product maintains through PRs to the
-// catalogs/ git repo. Per ADR-006 it is the single source of truth for the slow
-// catalogs; the database is no longer used for them. It is parsed from the YAML files
-// by the filesource package and merged into *Data on every reloader tick.
-//
-// The catalog version (for X-Catalog-Version) comes from the catalogs/version file
-// and is stored here: it is part of the "config" rather than runtime state.
+// SlowData is the layer product maintains through pull requests. The git repo
+// is its only source of truth, and the version travels with it as config rather
+// than as runtime state.
 type SlowData struct {
 	Version              string
 	TLSFPBlocklist       map[string]string // fp → status (active|staging)
@@ -111,24 +91,17 @@ type SlowData struct {
 	TLSFPBrowserProfiles map[string]BrowserProfile
 }
 
-// RuntimeData — the layer of runtime state written by the backend's other
-// subsystems: policy through antibotapi (the dashboard), verified_bot_ips through the
-// rDNS worker. This is NOT config — the data changes automatically, SLA ≤ 30 s.
-// It stays in the database (see ADR-005 §Variant 3 rejected — files do not
-// suit its cadence).
+// RuntimeData is written by the system itself — policy by the dashboard,
+// verified bots by the rDNS worker. It changes on its own and lives in the
+// database, which files would not suit.
 type RuntimeData struct {
 	VerifiedBotIPs map[string]string
 	Policy         map[string]Policy
 }
 
-// Merge assembles a *Data from the two partial snapshots. It accepts nil pointers
-// (as a stand-in for "the layer has not loaded yet") and returns a correct *Data
-// with empty collections instead of a panic — the handler above answers 503 by
-// IsLoaded when both layers are empty at startup.
-//
-// The catalog version comes from SlowData (which also holds the version file). If
-// SlowData == nil we set defaultVersion — semantically "we have not read it
-// yet", the same signal as in emptyData().
+// Merge combines the two layers. A nil layer means it has not loaded yet and
+// yields empty collections rather than a panic; the handler answers 503 while
+// both are empty.
 func Merge(s *SlowData, r *RuntimeData) *Data {
 	d := &Data{
 		Version:              defaultVersion,
@@ -171,12 +144,8 @@ func Merge(s *SlowData, r *RuntimeData) *Data {
 	return d
 }
 
-// PoolDefault — what is served for an unregistered host:
-// "a new domain with no record → the pool default (mode=shadow, observe-only)"
-// (config-distribution §"Per-resource lookup", task B4). It is implemented
-// as a function rather than a global variable: every call yields a fresh
-// nil-zero slice — so no caller can accidentally mutate a
-// shared object.
+// PoolDefault is what an unregistered host gets: observe-only. A function
+// rather than a variable, so no caller can mutate a shared instance.
 func PoolDefault() Policy {
 	return Policy{
 		Mode:         "shadow",
@@ -190,10 +159,8 @@ func PoolDefault() Policy {
 	}
 }
 
-// emptyData — a deterministic zero for Store before the first Replace.
-// Version=defaultVersion (not ""), so that X-Catalog-Version is a valid
-// semver even on an empty instance — the edge must not have to distinguish "header
-// present" from "header absent" on the wire.
+// emptyData is the deterministic zero value, carrying a valid version so the
+// header is well-formed even on an empty instance.
 func emptyData() *Data {
 	return &Data{
 		Version:              defaultVersion,
@@ -209,29 +176,18 @@ func emptyData() *Data {
 	}
 }
 
-// normalize brings Data into canonical form: it sorts every slice and
-// deduplicates them (for a deterministic payload and a stable ETag —
-// two identical records must not inflate the combined regex and must not
-// produce a different ETag from a single record).
-//
-// Called from Store.Replace on every merge (filesource plus dbloader).
-// Idempotent.
+// normalize sorts and deduplicates every slice, so the payload and its ETag are
+// deterministic. Idempotent.
 func normalize(d *Data) {
-	// The system slices: dedup+sort plus a nil coercion. Without ensure*, json.Marshal
-	// would emit `null` on an empty database (the DB loader does not initialise empty
-	// slices — the append loop is empty), and the ETag would drift between "there were never
-	// any records" and "there was one and it was deleted". From review (a follow-up).
+	// The nil coercion matters: json.Marshal writes `null` for a nil slice, so
+	// the ETag would differ between "never had records" and "had one, deleted".
 	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
 	d.UABlacklistStaging = ensureStringSlice(dedupSortStrings(d.UABlacklistStaging))
 	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
 	d.ASNDatacenters = ensureUint32Slice(dedupSortUint32(d.ASNDatacenters))
 	for h, p := range d.Policy {
-		// Every []T field: dedup+sort, then nil → an empty slice. The nil →
-		// `[]T{}` coercion is critical for JSON stability: an operator writing
-		// `ua_blacklist = 'null'::jsonb` through the DB loader arrives as a
-		// nil slice; json.Marshal serialises it as `null`, and the ETag differs
-		// from the logically equivalent record with an empty array and from
-		// `PoolDefault()`. This closes the review point.
+		// Same coercion per field: a JSONB null arrives as a nil slice and would
+		// serialise differently from the equivalent empty array.
 		p.UABlacklist = ensureStringSlice(dedupSortStrings(p.UABlacklist))
 		p.IPWhitelist = ensureStringSlice(dedupSortStrings(p.IPWhitelist))
 		p.IPBlocklist = ensureStringSlice(dedupSortStrings(p.IPBlocklist))
@@ -289,28 +245,15 @@ func dedupSortUint32(s []uint32) []uint32 {
 	return out
 }
 
-// Validate checks:
-//   - UA regexes (system and per host) through regexp.Compile;
-//   - CIDR strings (the system ip_blocklist / ip_whitelist and the per-host
-//     variants) through `ValidateCIDR`, which mirrors the tolerance of
-//     lua-resty-ipmatcher: a bare IP with no `/N` is accepted as a host route
-//     (/32 for v4, /128 for v6), and a CIDR with host bits set
-//     (`10.0.0.5/8`) is valid too, since ipmatcher masks them anyway.
+// Validate compiles every UA regex and parses every CIDR.
 //
-// Regexes: the RE2 grammar — not PCRE, but the edge is on ngx.re (PCRE) with a common
-// subset; syntax errors (`bot[a-z`, an unbalanced `(`, a
-// trailing `\`) are caught identically. If the edge ever wants a PCRE-specific feature
-// (lookarounds), it must be gated separately in the spec.
+// CIDR validation deliberately mirrors what the edge matcher accepts — a bare
+// IP, or a prefix with host bits set — so the backend is never the stricter of
+// the two and an operator cannot hit fail-stale on a record the edge would have
+// taken.
 //
-// CIDR: migration 0001 does NOT hold `inet` columns (the schema comment says
-// "validation lives in the loader" — review closed that promise).
-// The validation is deliberately symmetric with the edge: otherwise the backend would be stricter,
-// and an operator inserting `203.0.113.5` without a `/32` would hit fail-stale
-// even though ipmatcher would have accepted the record.
-//
-// It is exported so that any source of *Data (LoadYAML, dbloader.Load, a
-// future B10 admin API) is obliged to call it before Store.Replace —
-// fail-stale only works if a broken pattern is caught BEFORE publication.
+// Exported so every source of *Data must call it before publishing: fail-stale
+// only works if a broken pattern is caught first.
 func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
@@ -355,10 +298,7 @@ func Validate(d *Data) error {
 			return fmt.Errorf("policy[%s].origin_ip %q: %w", host, pol.OriginIP, err)
 		}
 	}
-	// tls_fp_catalog (Phase 2+, ADR-006): hash_b → {family, status}. Family
-	// must be non-empty (on the edge it goes into attrs.family for is_impersonator);
-	// status is active | staging. A broken status or an empty family is caught here
-	// before Store.Replace, otherwise the edge would hash pending deductions.
+	// The family must be non-empty: the edge uses it for the impersonator rule.
 	for hb, entry := range d.TLSFPCatalog {
 		if hb == "" {
 			return fmt.Errorf("tls_fp_catalog: empty hash_b key")
@@ -436,7 +376,7 @@ func ValidateOriginIP(s string) error {
 	// Reject a zone-scoped address (`fe80::1%eth0`): netip.ParseAddr accepts
 	// it, but the `%` is a non-routable scope id AND it would be treated as a
 	// Lua gsub replacement escape when origin_resolve.resolve() builds the
-	// proxy URL, corrupting the upstream for that tenant (codex P2 on PR #94).
+	// proxy URL, corrupting the upstream for that tenant.
 	if addr.Zone() != "" {
 		return fmt.Errorf("must not carry an IPv6 zone (got %q)", s)
 	}
@@ -449,7 +389,7 @@ func ValidateOriginIP(s string) error {
 	//     cloud metadata (SSRF-style misroute)
 	//   - multicast — not a unicast backend
 	// Private/global unicast stay allowed: a tenant origin may legitimately
-	// be a private IP (gemini/codex review on PR #94). Operators set this via
+	// be a private IP. Operators set this via
 	// the authenticated dashboard, but validating here is cheap defence.
 	switch {
 	case addr.IsUnspecified():

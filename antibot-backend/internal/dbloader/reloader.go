@@ -1,23 +1,13 @@
-// Reloader ticks (filesource.Load plus dbloader.LoadRuntime → Merge →
-// Store.Replace) on a given interval.
+// Reloader periodically reloads both catalog layers, merges them and publishes
+// the result.
 //
-// The edge contract from config-distribution.md §"Channel C / Cadence":
-// the edge polls /catalog/* every 30 s. For a dashboard edit to reach the
-// edge in ≤30 s (acceptance B4 / B13), the backend must have a fresh
-// *catalog.Data in the Store BEFORE the edge tick arrives — hence the backend's
-// interval is shorter by default (5 s). A stale payload is possible between two
-// ticks, but within the window "the edge sees the edit within ≤ edgeInterval
-// + backendInterval" — which is enough for the dashboard UX.
+// Its interval is shorter than the edge's poll, so a fresh snapshot is already
+// in place when the edge asks — which is what bounds how long an edit takes to
+// reach the edge.
 //
-// The data sources:
-//   - filesource (the slow catalogs from the catalogs/ git repo, ADR-006).
-//     An mtime cache: we reparse the YAML only when something changed, otherwise
-//     we reuse the cached *catalog.SlowData.
-//   - dbloader.LoadRuntime (verified_bot_ips, policy from the database).
-//
-// An error from either source does NOT zero the Store: fail-stale. The edge
-// keeps seeing the last good catalog and the operator sees the
-// `*_failures_total` metric (with a source label).
+// The slow layer is only reparsed when the files change; the runtime layer is
+// read every tick. An error from either source leaves the previous snapshot in
+// place and shows up in the failure counter.
 package dbloader
 
 import (
@@ -33,12 +23,9 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/filesource"
 )
 
-// bootstrapTimeout — a separate (more generous) budget for the first
-// synchronous Reload in Bootstrap. A cold pool does a TCP plus TLS handshake plus
-// pgxpool session setup plus eight SELECTs, which on a slow link or a cold cache
-// easily exceeds r.interval (typically 5 s). For the periodic tick the
-// per-tick deadline = r.interval (see tickContext) remains — so that a
-// hung Postgres does not freeze the Run goroutine. A follow-up from review.
+// The first load is more generous than a tick: a cold pool pays for handshakes
+// and session setup before its first query. Later ticks keep the tighter
+// deadline so a hung database cannot stall the loop.
 const bootstrapTimeout = 60 * time.Second
 
 type Reloader struct {
@@ -48,18 +35,15 @@ type Reloader struct {
 	logger     *slog.Logger
 	fileLoader *filesource.Loader
 
-	// slowCache — the last successfully parsed snapshot of the slow
-	// catalogs from filesource. It is reused on ticks where the files'
-	// mtime has not changed, so as not to spend time parsing YAML for nothing
-	// (the typical case: a per-tick LoadRuntime brings a new verified_bot while
-	// the files sit still).
+	// Reused while the files are untouched, which is the common case: the
+	// runtime layer changes every tick, the files rarely.
 	slowCache *catalog.SlowData
 
 	reloadOK   prometheus.Counter
 	reloadFail prometheus.Counter
 	// reloadDur — labelled `outcome={success,failure}`, so that the p99 in dashboards
 	// does not mix good ticks with ones where the Load hung until the per-tick deadline
-	// (see the tick and its context.WithTimeout). From review.
+	// (see the tick and its context.WithTimeout).
 	reloadDur  *prometheus.HistogramVec
 	lastReload prometheus.Gauge // unix seconds, for debugging "when was the last one"
 }
@@ -73,17 +57,13 @@ func NewReloader(
 	reg prometheus.Registerer,
 ) (*Reloader, error) {
 	if interval <= 0 {
-		// Defence in depth: the config layer validates this already, but alternative
-		// callers (tests, future hot-reload code) can get it wrong.
-		// `time.NewTicker(0)` panics and `context.WithTimeout(ctx, 0)` is immediately
-		// expired — both branches give junk messages. Better an explicit refusal.
+		// A zero interval panics the ticker and expires every context instantly,
+		// so refuse it explicitly rather than fail obscurely later.
 		return nil, fmt.Errorf("dbloader: reload interval must be > 0, got %s", interval)
 	}
 	if fileLoader == nil {
-		// The source of truth for the slow catalogs is now mandatory. Without
-		// it the merge would produce empty tls_fp_blocklist / ua_blacklist / etc.,
-		// and the edge would get a "successful" payload missing the records already added
-		// to catalogs/ — a silent regression in production.
+		// Mandatory: without it the edge would get a successful payload missing
+		// every record product has added.
 		return nil, fmt.Errorf("dbloader: fileLoader is required (catalogs dir source)")
 	}
 	r := &Reloader{
@@ -114,13 +94,9 @@ func NewReloader(
 	return r, nil
 }
 
-// Run blocks until ctx.Done(), reloading the catalogs periodically at the
-// r.interval. We do NOT run the first tick — it already happened in Bootstrap
-// synchronously before the HTTP server started; repeating it immediately would mean going
-// to the database twice at startup for nothing.
-//
-// A tick error: log and continue (fail-stale). The edge stays on the last
-// good catalog and the operator sees it through `_failures_total`.
+// Run reloads until the context is cancelled. The first tick is skipped:
+// Bootstrap already ran one synchronously. A failed tick logs and continues, so
+// the edge stays on its last good catalog.
 func (r *Reloader) Run(ctx context.Context) {
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
@@ -129,10 +105,8 @@ func (r *Reloader) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// The per-tick deadline = r.interval is applied ONLY on the hot
-			// Run path: without it a hung pgx (a half-open TCP connection or a NAT timeout)
-			// would block the goroutine, the tickers would coalesce, and
-			// reloadFail would never increment — leaving the operator with no signal.
+			// Without a deadline a half-open connection would block the loop,
+			// the ticks would coalesce, and the failure counter would never move.
 			if err := r.tickWith(ctx, r.interval); err != nil {
 				r.logger.Error("catalog reload failed", "err", err)
 			}
@@ -140,15 +114,13 @@ func (r *Reloader) Run(ctx context.Context) {
 	}
 }
 
-// Bootstrap — the synchronous first Reload before the HTTP server starts. If the database
-// is empty or broken, main fails; that is deliberate: a backend with no catalogs
-// must not accept traffic from the edge.
-//
-// The budget is bootstrapTimeout (60 s), NOT r.interval: a cold pool plus
+// Bootstrap runs the first reload synchronously, before the server starts. A
+// failure is fatal on purpose: a backend with no catalogs must not accept
+// traffic.
 // the first Acquire with a TCP/TLS handshake plus eight SELECTs on a cold
 // buffer cache easily exceed the periodic 5-second tick. Sharing that
 // budget with the hot path would mean crashing the backend at startup on a
-// slow link. A follow-up from review.
+// slow link.
 func (r *Reloader) Bootstrap(ctx context.Context) error {
 	return r.tickWith(ctx, bootstrapTimeout)
 }

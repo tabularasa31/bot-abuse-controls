@@ -1,64 +1,22 @@
--- Channel C client on the edge (B5, RFC §C1).
+-- The Channel C client: one timer per catalog does a conditional GET, writes
+-- the payload under a new generation, flips it and sweeps the old one.
 --
--- Background ngx.timer.every per catalog: conditional GET against
--- antibot-backend, atomic generation swap into the catalog's
--- lua_shared_dict, explicit cleanup of the old generation. Fail-stale:
--- any transport / status / decode / version error is logged and skipped;
--- the previous generation stays in the dict, the timer keeps ticking.
+-- Fail-stale throughout: any error is logged and skipped, leaving the previous
+-- generation in place.
 --
--- Layout:
---   _M.catalogs     — per-catalog descriptors (endpoint, dict name, apply +
---                     sweep functions, meta-key names).
---   _M.handle_response(cat, dict, meta, res, err)
---                   — pure-ish response handler used both by fetch() and by
---                     tests. Returns "ok" / "not_modified" / "skip".
---   _M.fetch(name)  — one tick: build httpc, request, dispatch to
---                     handle_response.
---   _M.start(opts)  — wire ngx.timer.every per catalog in
---                     init_worker_by_lua_block. Guarded to worker 0 so a
---                     pool with N workers does N× fewer pulls, not N×.
---
--- Catalogs wired today (each has an edge consumer):
---   * tls_fp_blocklist        — verdict.lua (§A1 `fp:gen` lookup) + tls_fp
---                               staging (tls_fp.refresh, A11).
---   * verified_bot_ips        — verified_bots.lua (B8) bot_verified / pending.
---   * tls_fp_catalog          — tls_fp.lua tls_fp_impersonator (+ staging).
---   * tls_fp_browser_profiles — tls_fp.lua tls_fp_suspicious_ciphers (+ staging).
---   * ua_blacklist            — hygiene.lua (active + staging, A11 86exrtjpc).
---                               Object payload {active:<combined>, staging:[…]},
---                               stored as `active:<gen>` / `staging:<gen>`.
---   * ip_blocklist            — reputation.lua (active + staging, A11 86exrtjpc).
---                               Per-key `<cidr>:<gen>` → "<status>:block".
---   * ip_whitelist            — reputation.lua (B12 86ext2zb4). Flat array of
---                               CIDRs, per-key `<cidr>:<gen>` → "1" (no status).
---   * asn_datacenters         — reputation.lua asn_dc tag (B12 86ext2zb4). Map
---                               (asn → 1), per-key `<asn>:<gen>` → "1" (no status).
---   * policy                  — policy.lua / policy_matchers (B11).
+-- `name` is kept separate from `dict_name` because the metrics are keyed by
+-- catalog name, and for some catalogs the two differ.
 
 local cjson        = require "cjson.safe"
 local fp_state     = require "tls_fp_blocklist_state"
 
 local _M = {}
 
--- Major version of the X-Catalog-Version header we accept. Bump in lockstep
--- with backend B3 payload-shape changes; an incompatible major keeps the
--- previous generation and bumps edge_sidecar_version_mismatch_total.
+-- An incompatible major keeps the previous generation and counts a mismatch.
 _M.SUPPORTED_VERSION_MAJOR = "1"
 
--- Per-catalog payload writers / sweepers. `apply` writes the decoded body
--- into the dict under the NEW generation; `sweep` deletes the OLD gen's keys
--- after the gen flip (RFC §C1 explicit cleanup — per-entry TTL is wrong here
--- because the 304 short-circuit means entries never get re-written and would
--- silently age out, see §C1 "Why explicit cleanup instead of per-entry TTL").
--- Each descriptor carries `name` = the catalog-identifier (key in this
--- table) duplicated as a field, so handle_response can stamp metrics under
--- the CATALOG name rather than the dict name. metrics.lua iterates the
--- known catalogs by name and reads `catalog_last_pull_ts:<name>` /
--- `edge_sidecar_version_mismatch_total:<name>` — for tls_fp_blocklist the two
--- are the same string and the bug was invisible; verified_bot_ips
--- (dict_name=verified_bots) is the case that surfaced it (PR #55 review P1).
--- Keeping `name` and `dict_name` distinct also leaves room for two catalogs
--- to share a dict in the future (none today).
+-- Cleanup is explicit rather than a TTL: the 304 short-circuit means entries
+-- are never rewritten, so a TTL would age out an unchanged catalog.
 _M.catalogs = {
     tls_fp_blocklist = {
         name        = "tls_fp_blocklist",
@@ -67,12 +25,8 @@ _M.catalogs = {
         gen_key     = fp_state.META_GEN_KEY,   -- "tls_fp_blocklist_gen"
         etag_key    = fp_state.META_ETAG_KEY,
         version_key = "tls_fp_blocklist_version",
-        -- Returns (ok, count). `ok=false` if even one dict:set failed
-        -- (typically "no memory" from shared_dict fragmentation, or a key longer
-        -- than 255 bytes). In that case handle_response rolls back before the flip and
-        -- does NOT move to a broken generation — otherwise the sweep would delete the old gen,
-        -- and in the worst case the edge would be left with a partially written or empty catalog
-        -- (gemini/codex review: violation of fail-stale).
+        -- One failed write fails the apply, so the caller can roll back before
+        -- the flip rather than leave a half-written catalog.
         apply = function(dict, entries, new_gen)
             local n = 0
             for fp, verdict in pairs(entries) do
@@ -86,23 +40,13 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- get_keys(0) locks the whole shared_dict for the scan. At the current
-        -- catalog size (dozens to hundreds of fingerprints) that is microseconds; review
-        -- noted that at tens of thousands of keys the lock becomes visible on
-        -- p99 — at which point we move to a "keys-of-gen-N" side index in a separate
-        -- meta key. For now it is 100% the RFC §C1 algorithm plus this comment.
-        --
-        -- We match through fp_state.match() (the typed inverse of key()) rather than a
-        -- raw `:<gen>` suffix: if anything else ever starts writing into this dict
-        -- (admin.lua, a co-tenant catalog), a raw suffix would
-        -- delete their keys by a tail match (`manual_override:1`
-        -- during sweep(1), say). fp_state.match returns nil for any key whose
-        -- tail does not match EXACTLY the tls_fp_blocklist format — so the sweep
-        -- stays focused on its own records.
+        -- The scan locks the dict; past tens of thousands of keys this would
+        -- need an index per generation. Matched through the typed inverse of
+        -- key(), so a future second writer's keys cannot be caught by a tail
+        -- match.
         sweep = function(dict, old_gen)
-            -- old_gen == 0 is the static seed from init.lua; sweeping it on
-            -- the first pull is intentional — once the live catalog lands,
-            -- the seed becomes redundant.
+            -- Generation 0 is the static seed; sweeping it once the live
+            -- catalog lands is intentional.
             if old_gen < 0 then return 0 end
             local n = 0
             for _, k in ipairs(dict:get_keys(0)) do
@@ -115,14 +59,7 @@ _M.catalogs = {
         end,
     },
 
-    -- verified_bot_ips (B8) — map(ip → "<status>:<family>") with status
-    -- in {verified, rejected} (config-distribution.md §catalogs). Stored
-    -- key is `<ip>:<gen>`, mirroring tls_fp_blocklist's §C1 atomic-swap shape
-    -- so two generations coexist during the write→flip→sweep window.
-    -- Reader: verified_bots.classify(ip) composes the key from
-    -- meta:get("verified_bots_gen"). Empty dict ⇒ all searchbot UAs land
-    -- in provisional fastpath (bot_verified_pending), which is the
-    -- SEO-safe default for a stand without backend (vision §Stage 2.2).
+    -- An empty dict means every searchbot UA gets the provisional fastpath.
     verified_bot_ips = {
         name        = "verified_bot_ips",
         endpoint    = "/catalog/verified_bot_ips",
@@ -143,31 +80,9 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- Suffix-match `:<old_gen>` to find this generation's keys. The
-        -- dict is written exclusively by this catalog (no admin.lua / no
-        -- co-tenant), so the IP-shaped prefix has no collisions to worry
-        -- about; if a future writer joins, switch to a typed match the
-        -- way fp_state.match() guards tls_fp_blocklist (see tls_fp_blocklist's
-        -- sweep comment for the worked example).
-        --
-        -- The performance trade-off is the same as in the tls_fp_blocklist sweep:
-        -- `dict:get_keys(0)` locks the whole shared_dict for the scan.
-        -- nginx.demo.conf sizes verified_bots for "tens of thousands
-        -- of IPs", where the lock becomes visible on p99 (raised in review
-        -- B5 and again on this PR). The plan is the same: a "keys-of-gen-N" side index
-        -- in a separate `meta` key, so that the sweep walks a narrow list
-        -- instead of a full scan. For now we deliberately keep symmetry with
-        -- tls_fp_blocklist (the RFC §C1 algorithm) — we will migrate both catalogs
-        -- in one task once the real size of verified_bot_ips crosses
-        -- that threshold (on a stand without a backend the dict is empty, so there is no
-        -- actual risk).
+        -- A suffix match is safe: this catalog is the dict's only writer.
         sweep = function(dict, old_gen)
-            -- The suffix-string match below is only safe for numeric, small,
-            -- monotonically-growing generation IDs (no `:` inside, no
-            -- string-typed gens). Lock that assumption load-bearing so a
-            -- future change to non-numeric gens (e.g. a content hash to
-            -- dedupe identical pulls) fails LOUD here instead of silently
-            -- shadowing IP-shaped keys (review #5 on PR #55).
+            -- The suffix match only holds for numeric generations.
             assert(type(old_gen) == "number",
                 "verified_bot_ips.sweep: old_gen must be a number, got " ..
                 type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
@@ -184,11 +99,6 @@ _M.catalogs = {
         end,
     },
 
-    -- tls_fp_catalog (PR2, ADR-006) — the catalog of automation signatures for
-    -- tls_fp_impersonator (Phase 2+). Wire-payload: map(hash_b →
-    -- "<status>:<family>"), symmetrically with verified_bot_ips. status ∈
-    -- {active, staging}; staging is read but only emits staging_match,
-    -- never a verdict (A11 staged rollout). The reader is tls_fp.read_entry().
     tls_fp_catalog = {
         name        = "tls_fp_catalog",
         endpoint    = "/catalog/tls_fp_catalog",
@@ -209,9 +119,7 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- The same suffix-match approach as verified_bot_ips: the gen is numeric and
-        -- hash_b is hex without a `:`. We keep the contract explicit with an assert, in case
-        -- somebody later decides to make the gen a string (a content hash).
+        -- Same suffix match: the generation is numeric and hash_b has no `:`.
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "tls_fp_catalog.sweep: old_gen must be a number, got " ..
@@ -229,11 +137,6 @@ _M.catalogs = {
         end,
     },
 
-    -- tls_fp_browser_profiles (PR2, ADR-006) — the catalog of expected cipher_cnt
-    -- values per browser family (tls_fp_suspicious_ciphers, Phase 2+).
-    -- The wire payload: map(family → "<status>:<expected_cipher_cnt>"). It is small
-    -- (a handful of entries), but uses the same atomic-swap model for
-    -- consistency with the other Channel C catalogs.
     tls_fp_browser_profiles = {
         name        = "tls_fp_browser_profiles",
         endpoint    = "/catalog/tls_fp_browser_profiles",
@@ -271,13 +174,8 @@ _M.catalogs = {
         end,
     },
 
-    -- ua_blacklist (A11, 86exrtjpc) — Channel C catalog of system UA patterns.
-    -- Wire-payload is an OBJECT, not a per-key map: { "active": "<combined
-    -- regex>", "staging": ["<pattern>", …] } (store.buildUABlacklist). We stash
-    -- two keys per generation: `active:<gen>` (the combined string, used by
-    -- hygiene with ngx.re "jo") and `staging:<gen>` (cjson array, matched
-    -- per-pattern for staging_match attribution). hygiene.refresh() reads both
-    -- on a gen flip. Reader builds nothing per-request beyond a gen compare.
+    -- An object, not a per-key map: one combined regex plus a staged list
+    -- matched per pattern, so two keys per generation.
     ua_blacklist = {
         name        = "ua_blacklist",
         endpoint    = "/catalog/ua_blacklist",
@@ -286,10 +184,8 @@ _M.catalogs = {
         etag_key    = "ua_blacklist_etag",
         version_key = "ua_blacklist_version",
         apply = function(dict, entries, new_gen)
-            -- entries = { active = "<combined>", staging = { ... } }. A missing
-            -- field is tolerated (treated as empty) so a partial payload can't
-            -- crash the pull — handle_response already type-checked `entries`
-            -- is a table.
+            -- A missing field is treated as empty, so a partial payload cannot
+            -- crash the pull.
             local active = entries.active
             if type(active) ~= "string" then active = "" end
             local ok1, err1 = dict:set("active:" .. new_gen, active)
@@ -314,8 +210,7 @@ _M.catalogs = {
             end
             return true, 2
         end,
-        -- Fixed two-key layout per gen, so sweep just deletes the old gen's
-        -- `active:` and `staging:` keys (no get_keys scan needed).
+        -- Fixed two-key layout, so the sweep needs no scan.
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "ua_blacklist.sweep: old_gen must be a number, got " ..
@@ -332,13 +227,8 @@ _M.catalogs = {
         end,
     },
 
-    -- ip_blocklist (A11, 86exrtjpc) — Channel C catalog of system IP/CIDR
-    -- blocks. Wire-payload: map(cidr → "<status>:block") (store.buildIPBlocklist).
-    -- Keys `<cidr>:<gen>` (suffix-match sweep, same shape as verified_bot_ips —
-    -- CIDR may contain `:` for IPv6, but the gen is always the last `:`-segment).
-    -- reputation.refresh() rebuilds the active matcher + staging matcher on a
-    -- gen flip. The per-host policy ip_blocklist is a SEPARATE catalog (policy)
-    -- applied via policy_matchers — not merged here.
+    -- An IPv6 CIDR contains colons, but the generation is always the last
+    -- segment. The per-host list is a separate catalog.
     ip_blocklist = {
         name        = "ip_blocklist",
         endpoint    = "/catalog/ip_blocklist",
@@ -376,15 +266,7 @@ _M.catalogs = {
         end,
     },
 
-    -- ip_whitelist (B12) — Channel C catalog of system allow CIDRs.
-    -- Wire-payload is a flat JSON ARRAY of CIDR strings (store.buildIPWhitelist),
-    -- NOT a per-key map: there is no per-entry status (staged rollout does not
-    -- apply to the allow list — a whitelist entry either allows or it doesn't).
-    -- We store each CIDR as `<cidr>:<gen>` → "1" so it mirrors ip_blocklist's
-    -- §C1 atomic-swap shape (suffix-match sweep, gen always the last `:`-segment
-    -- even for IPv6 CIDRs). reputation.refresh_whitelist() rebuilds the active
-    -- matcher on a gen flip. The per-host policy ip_whitelist is a SEPARATE
-    -- catalog (policy) applied via policy_matchers — not merged here.
+    -- A flat array: an allow list has no status, since staging cannot apply.
     ip_whitelist = {
         name        = "ip_whitelist",
         endpoint    = "/catalog/ip_whitelist",
@@ -393,7 +275,6 @@ _M.catalogs = {
         etag_key    = "ip_whitelist_etag",
         version_key = "ip_whitelist_version",
         apply = function(dict, entries, new_gen)
-            -- entries is a JSON array → a Lua sequence; iterate with ipairs.
             -- A non-string element (malformed payload) is skipped rather than
             -- crashing the pull — handle_response already type-checked the
             -- top-level value is a table.
@@ -428,14 +309,8 @@ _M.catalogs = {
         end,
     },
 
-    -- asn_datacenters (B12) — Channel C catalog of datacenter ASNs feeding the
-    -- reputation:asn_dc informational tag. Wire-payload is a JSON OBJECT
-    -- map(asn → 1) (store.buildASNDatacenters — written by hand for numeric key
-    -- order). No per-entry status (flat list, no staged rollout). We store each
-    -- ASN as `<asn>:<gen>` → "1" (suffix-match sweep, same shape as ip_blocklist;
-    -- ASN keys are decimal digits with no `:`). reputation.refresh_asn() rebuilds
-    -- the membership set on a gen flip. The value side of the wire map (always 1)
-    -- is dropped — only key membership matters for the tag.
+    -- The datacenter ASNs behind the asn_dc tag. Only key membership matters,
+    -- so the wire value is dropped.
     asn_datacenters = {
         name        = "asn_datacenters",
         endpoint    = "/catalog/asn_datacenters",
@@ -479,22 +354,12 @@ _M.catalogs = {
         end,
     },
 
-    -- policy (B11) — per-host Policy table delivered by Channel C as a
-    -- single map(host → Policy). Wire-payload: JSON object where each
-    -- value is the full Policy struct (mode/strictness/ua_blacklist/
-    -- ip_blocklist/.../attack_mode). We re-encode each value as JSON
-    -- before stashing under `<host>:<gen>` so the reader (policy.lua)
-    -- does one cjson.decode per request — symmetric with verified_bots
-    -- and tls_fp_catalog but at table granularity. Endpoint is called
-    -- without `?site=` to pull the whole map at once; on the demo we
-    -- have ≤O(10) clients, fits comfortably in 1m antibot_policy dict.
+    -- The whole host → policy map in one pull. Each value is re-encoded so the
+    -- reader does exactly one decode per request.
     --
-    -- Host normalisation goes through policy.canonical_host so the
-    -- write key matches what policy.get() looks up at request time
-    -- (lowercased + length-capped). Backend may store a host with mixed
-    -- case via PATCH; without the same normalisation here, the edge
-    -- would silently miss and fall back to POOL_DEFAULT, masking active
-    -- mode for the affected client.
+    -- Hosts go through the same normalisation the reader uses. The backend
+    -- preserves case, so without it a mixed-case row would never be found and
+    -- the customer would silently fall back to the pool default.
     policy = {
         name        = "policy",
         endpoint    = "/catalog/policy",
@@ -504,18 +369,10 @@ _M.catalogs = {
         version_key = "antibot_policy_version",
         apply = function(dict, entries, new_gen)
             local canonical_host = require("policy").canonical_host
-            -- Pre-flight: backend ValidateSite is case-preserving
-            -- (validate.go:19-20), so two distinct policy rows whose
-            -- hosts differ only by case (`Foo.example.com` and
-            -- `foo.example.com`) collapse to the same shared_dict key
-            -- after canonical_host. Lua's pairs() iteration order is
-            -- unspecified, so picking "first-seen" would resolve which
-            -- mode wins arbitrarily and inconsistently across pulls.
-            -- Fail-stale instead: detect ALL collisions before any
-            -- write, return false → handle_response keeps the previous
-            -- gen, the operator sees an ERR for each duplicate and
-            -- collapses the rows at the backend (or fixes case there).
-            -- Skip empty keys (they were already silently ignored).
+            -- Two rows differing only in case collapse to one key here, and
+            -- iteration order is unspecified — so "first wins" would pick a
+            -- different mode on different pulls. Detect every collision before
+            -- writing anything and keep the previous generation instead.
             local seen = {}
             local collided = false
             for host, _ in pairs(entries) do
@@ -584,17 +441,8 @@ local function bump_metric(key)
     if m then m:incr(key, 1, 0) end
 end
 
--- bump_last_pull_ts — stamp `catalog_last_pull_ts:<name>` with the current
--- time, where `name` is the catalog identifier (descriptor key) — NOT the
--- dict_name. metrics.lua iterates `catalog_pull.catalogs` by key and reads
--- this metric under the same key; using `dict_name` makes the staleness
--- gauge stuck at -1 for any catalog whose dict has a different name (this
--- was invisible for tls_fp_blocklist where name==dict_name; PR #55 review P1
--- surfaced it via verified_bot_ips → dict verified_bots). Called from both
--- the 200 and 304 paths in handle_response (both are "successful contact
--- with backend" — see the 304 branch comment for why this is a liveness
--- rather than freshness signal). Missing metrics dict is silent for the
--- same test-harness reason as bump_metric.
+-- Keyed by catalog name, not dict name: the two differ for some catalogs, and
+-- using the wrong one leaves the staleness gauge stuck at -1.
 local function bump_last_pull_ts(cat)
     local m = ngx.shared.metrics
     if m then m:set("catalog_last_pull_ts:" .. cat.name, ngx.time()) end
@@ -611,14 +459,8 @@ function _M.version_compatible(version)
     return major == _M.SUPPORTED_VERSION_MAJOR
 end
 
--- handle_response — process one HTTP result and apply it (or skip) under
--- the catalog descriptor. Returns one of:
---   "ok"           — 200 applied, gen flipped, old gen swept.
---   "not_modified" — 304, nothing touched (regression guard from round-3
---                    review: NEVER zero entries on 304).
---   "skip"         — anything else (transport error, non-200 status,
---                    decode failure, wrong decoded type, version
---                    mismatch). Previous generation stays in the dict.
+-- Returns "ok" when a new generation was applied, "not_modified" on a 304, and
+-- "skip" for anything else — in which case the previous generation stays.
 function _M.handle_response(cat, dict, meta, res, err)
     -- Transport error: timeout, connection refused — lua-resty-http returns
     -- res=nil with err set.
@@ -629,23 +471,13 @@ function _M.handle_response(cat, dict, meta, res, err)
     end
 
     if res.status == 304 then
-        -- Round-3 regression: do NOT touch dict, do NOT bump gen. The 304
-        -- short-circuit is the steady state — without this guard a catalog
-        -- that hasn't changed for an hour would silently empty out.
+        -- Touch nothing: a 304 is the steady state, and emptying the catalog
+        -- here would wipe anything that had not changed recently.
         --
-        -- BUT do bump catalog_last_pull_ts. 304 means backend answered and
-        -- the ETag matched — Channel C is healthy, just no new data. The
-        -- staleness gauge is meant to drive alerting on a dead channel
-        -- (config-distribution §Channel C "edge_catalog_staleness_seconds
-        -- ... drives alerting" with the ≤30s / ≤15m SLA from the B6 spec),
-        -- not on stale-but-correct data. Skipping the bump here made the
-        -- gauge grow linearly between catalog updates — for a `tls_fp_blocklist`
-        -- that changes weekly via PR, the alert would fire 24/7 even with
-        -- a perfectly healthy backend. Bump on 304 so the gauge means
-        -- "seconds since the last successful contact" (the contract the
-        -- alert is actually checking), not "seconds since the last data
-        -- change" (a freshness signal that needs its own metric if we ever
-        -- want it).
+        -- The timestamp is still bumped. It measures time since successful
+        -- contact, not since the last data change — otherwise a catalog that
+        -- legitimately changes once a week would keep the staleness alert
+        -- firing around the clock.
         bump_last_pull_ts(cat)
         return "not_modified"
     end
@@ -682,19 +514,14 @@ function _M.handle_response(cat, dict, meta, res, err)
         return "skip"
     end
 
-    -- Order matters: write the new gen first, then flip the gen counter,
-    -- then sweep the old gen. A reader that read meta:gen before the flip
-    -- still resolves to old_gen and finds its entries; a reader that reads
-    -- after the flip resolves to new_gen and finds those. See RFC §C1
-    -- "Atomically flip readers" and verdict.lua's `fp:gen` lookup.
+    -- Write, then flip, then sweep. A reader that saw the old generation still
+    -- finds its entries, and one that sees the new generation finds those; no
+    -- reader ever looks at a generation that is not fully written.
     local old_gen = meta:get(cat.gen_key) or 0
     local new_gen = old_gen + 1
 
-    -- Apply: if even one dict:set failed (no memory / key too long) we
-    -- do NOT flip the gen and do NOT sweep the old one. In parallel we clean up the already
-    -- written keys of the new gen, so that they do not linger until the next pull
-    -- (occupying the shared_dict for nothing). The edge stays on the previous gen and
-    -- the next tick tries again — fail-stale (from review).
+    -- On a partial write, roll back the new generation and stay on the previous
+    -- one; the next tick tries again.
     local apply_ok, written = cat.apply(dict, entries, new_gen)
     if not apply_ok then
         ngx.log(ngx.ERR, "catalog ", cat.endpoint,
@@ -720,26 +547,17 @@ function _M.handle_response(cat, dict, meta, res, err)
 
     cat.sweep(dict, old_gen)
 
-    -- Last-successful-contact timestamp drives edge_catalog_staleness_seconds
-    -- in metrics.lua (gauge = now - last). Bumped on 200 (here) and on 304
-    -- (above) — both mean "backend answered". A long run of skips (transport
-    -- errors / non-200/304 statuses / decode failures) makes the gauge grow,
-    -- which is the alert condition.
+    -- A long run of skips lets this age, which is the alert condition.
     bump_last_pull_ts(cat)
 
     return "ok"
 end
 
--- Per-catalog in-flight guard. ngx.timer.every fires on its own schedule
--- regardless of whether the previous tick has finished; if a fetch takes
--- longer than the interval (slow backend, DNS retries, total per-step
--- timeout > interval), two ticks can run concurrently inside the worker
--- and interleave apply/flip/sweep on the same catalog. Worst observed
--- case: tick B's sweep(old_gen) deletes tick A's just-written entries
--- while requests already pinned to that gen are mid-lookup, briefly
--- falling through to "allow". Since OpenResty Lua is single-threaded
--- per worker (yields only on I/O), a plain table flag is enough — no
--- semaphore needed.
+-- The timer fires on schedule whether or not the previous tick finished. Two
+-- concurrent ticks would interleave apply, flip and sweep: one tick's sweep can
+-- delete the other's just-written entries while requests are mid-lookup,
+-- briefly falling through to allow. A plain flag suffices, since the Lua VM is
+-- single-threaded per worker.
 local in_flight = {}
 
 -- fetch — one tick for one catalog. Resolves shared dicts, builds the
@@ -792,11 +610,8 @@ function _M.fetch(catalog_name)
         headers  = headers,
         ssl_verify = _M.ssl_verify,
     }
-    -- [B6] mTLS — pass the pre-parsed client cert/key if start() managed to
-    -- load them. Either both or neither (verified at load time); a partial
-    -- parse leaves _M.parsed_cert == nil so we silently fall back to HTTPS
-    -- without a client cert, which the backend will reject with a handshake
-    -- error when AUTH_MODE=mtls — caught by the standard fail-stale path.
+    -- Either both or neither. Without them the backend refuses the handshake,
+    -- which the fail-stale path already handles.
     if _M.parsed_cert and _M.parsed_key then
         req_opts.ssl_client_cert = _M.parsed_cert
         req_opts.ssl_client_priv_key = _M.parsed_key
@@ -814,16 +629,9 @@ function _M.fetch(catalog_name)
     end
 end
 
--- load_mtls_material — read PEM files and parse into the cdata form
--- lua-resty-http expects (ssl_client_cert / ssl_client_priv_key, returned by
--- ngx.ssl.parse_pem_cert / parse_pem_priv_key). Called once from start() in
--- init_worker_by_lua_block where ngx.ssl is available.
---
--- Failure mode: any error (file missing, parse failed, ngx.ssl absent) logs
--- and returns nil — _M.parsed_cert stays nil and fetch() proceeds without
--- mTLS. If the backend's AUTH_MODE=mtls that handshake fails and falls into
--- the normal fail-stale path (skip + previous gen preserved); operator sees
--- the error in error.log + a stuck staleness gauge in /metrics.
+-- Parses the PEM files into the form the HTTP client expects. Any failure
+-- leaves mTLS disabled and surfaces as a handshake error plus a stalling
+-- staleness gauge.
 local function read_file(path)
     local f, ferr = io.open(path, "rb")
     if not f then return nil, ferr end
@@ -833,15 +641,9 @@ local function read_file(path)
     return data
 end
 
--- preload_mtls — call from init_by_lua (master, pre-privilege-drop). Reads
--- the PEM files as root, parses to cdata, and stashes on the module. Workers
--- forked from the master inherit `_M.parsed_cert` / `_M.parsed_key` (Lua
--- state + OpenSSL X509 cdata pointers are COW-shared on fork). Idempotent:
--- already-loaded material isn't re-read.
---
--- Why not just call from start() in init_worker: the worker phase runs after
--- nginx drops to the configured `user` (typically nobody), at which point
--- 0600 root-owned client keys are unreadable and mTLS silently disables.
+-- Called from the master before privileges are dropped, because the worker
+-- phase runs as nobody and could not read a 0600 root-owned key. Workers
+-- inherit the parsed material on fork.
 function _M.preload_mtls(cert_path, key_path)
     if _M.parsed_cert and _M.parsed_key then return end
     _M.parsed_cert, _M.parsed_key = _M.load_mtls_material(cert_path, key_path)
@@ -881,25 +683,18 @@ function _M.load_mtls_material(cert_path, key_path)
     return parsed_cert, parsed_key
 end
 
--- start — call from init_worker_by_lua_block. Wires one ngx.timer.every per
--- requested catalog, guarded to worker 0 so an N-worker pool issues N×
--- fewer pulls (each catalog has one timer per machine, not per worker;
--- shared dicts are process-wide so a single writer suffices).
--- nonempty — treat empty strings the same as nil. Docker Compose's
--- `${VAR:-}` substitution produces empty strings when an env-var is unset
--- in .env, and an empty backend URL would otherwise be truthy in Lua and
--- send fetch() into the "bad uri" loop every 30s on every stand that
--- doesn't actually have a backend wired.
+-- One timer per catalog, on worker 0 only: the dicts are process-wide, so one
+-- writer is enough and an N-worker pool does not multiply the pulls.
+-- Empty strings count as nil. Compose substitutes an empty string for an unset
+-- variable, and an empty URL is truthy in Lua — which would send every stand
+-- without a backend into a bad-uri loop every 30 seconds.
 local function nonempty(s)
     if s == nil or s == "" then return nil end
     return s
 end
 
--- truthy_env — coerce env strings to bool. Anything in (false|0|no|off) is
--- false; nil/empty/anything else is the default. Used for
--- ANTIBOT_BACKEND_SSL_VERIFY so the demo can opt into ssl_verify=false from
--- .env without on-host hacks in nginx.demo.conf (the previous approach made
--- update.sh's git merge --ff-only fragile).
+-- Coerces an env string to a boolean, so the certificate-verification toggle
+-- lives in .env rather than in an edited nginx config on the host.
 local function truthy_env(s, default)
     s = nonempty(s)
     if s == nil then return default end
@@ -910,11 +705,8 @@ end
 
 function _M.start(opts)
     opts = opts or {}
-    -- `nonempty()` is applied to opts as well as envs (gemini-review): a
-    -- caller passing `start({ backend_url = "" })` — typically because they
-    -- plumbed an env-var through code that didn't normalise it — should
-    -- fall through to env / hard default rather than produce a "bad uri"
-    -- loop. Same reasoning for the cert paths below.
+    -- Applied to the options too: a caller passing an empty string should fall
+    -- through to the default rather than loop on a bad uri.
     _M.backend_url         = nonempty(opts.backend_url)
                              or nonempty(os.getenv("ANTIBOT_BACKEND_URL"))
                              or "http://antibot-backend:8080"
