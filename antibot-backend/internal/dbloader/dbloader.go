@@ -1,16 +1,16 @@
-// Package dbloader — источник runtime-слоя каталогов из PostgreSQL.
+// Package dbloader — the source of the catalogs' runtime layer from PostgreSQL.
 //
-// После ADR-006 в БД лежат только данные, которые меняются автоматически
-// (SLA ≤ 30 сек) и не подходят файлам по природе: `verified_bot_ips`
-// пишет rDNS-воркер ([B7]), `policy` — antibotapi из дашборда ([B10]).
-// Курируемые продактом «медленные» каталоги (tls_fp_blocklist, ua_blacklist,
-// ip_blocklist, ip_whitelist, asn_datacenters) переехали в git-репо
-// catalogs/ и грузятся через internal/filesource.
+// After ADR-006 the database holds only the data that changes automatically
+// (SLA ≤ 30 s) and does not suit files by nature: `verified_bot_ips`
+// is written by the rDNS worker ([B7]), and `policy` by antibotapi from the dashboard ([B10]).
+// The product-curated "slow" catalogs (tls_fp_blocklist, ua_blacklist,
+// ip_blocklist, ip_whitelist, asn_datacenters) moved into the catalogs/ git
+// repo and are loaded through internal/filesource.
 //
-// LoadRuntime читает только runtime-таблицы одной read-only транзакцией.
-// Reloader мерджит её результат с *catalog.SlowData из filesource и
-// публикует объединённый snapshot через Store.Replace — контракт
-// Store/Snapshot/build* не меняется.
+// LoadRuntime reads only the runtime tables in a single read-only transaction.
+// The reloader merges its result with the *catalog.SlowData from filesource and
+// publishes the combined snapshot through Store.Replace — the
+// Store/Snapshot/build* contract is unchanged.
 package dbloader
 
 import (
@@ -29,29 +29,29 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// migrateAdvisoryLockKey — произвольный 64-битный const'a для
-// `pg_advisory_lock`. Изоляция от чужих lock'ов через random magic;
-// `crc64(...)`-подобной схемы не используем, чтобы не зависеть от того,
-// как именно генерируется ключ.
+// migrateAdvisoryLockKey — an arbitrary 64-bit constant for
+// `pg_advisory_lock`. Isolation from other people's locks comes from the random magic;
+// we do not use a `crc64(...)`-style scheme, so as not to depend on how
+// exactly the key is generated.
 const migrateAdvisoryLockKey int64 = 0x616E7469626F7402 // "antibo\x02"
 
-// Migrate выполняет встроенные SQL-файлы из migrations/ в лексикографическом
-// порядке. Файлы написаны идемпотентно через CREATE TABLE IF NOT EXISTS,
-// так что переприменение безопасно. Тяжёлую миграционную инфраструктуру
-// (схема версий, down-шаги) принесёт B15 — пока хватает дёшевого ratchet'a.
+// Migrate runs the embedded SQL files from migrations/ in lexicographic
+// order. The files are written idempotently through CREATE TABLE IF NOT EXISTS,
+// so reapplying them is safe. Heavier migration infrastructure
+// (a version schema, down steps) arrives with B15 — for now a cheap ratchet is enough.
 //
-// Concurrency: HA-пара backend'ов из `infra/demo-backend/` стартует обе
-// реплики одновременно. На сегодняшнем 0001 это безвредно (только
-// IF NOT EXISTS + ON CONFLICT DO NOTHING), но первая же non-idempotent DDL
-// в 0002 даст один реплике 'relation already exists' и crash-loop.
-// Берём session-scoped pg_advisory_lock — вторая реплика блокируется,
-// пока первая не закончит, потом просто видит, что всё уже есть.
+// Concurrency: the HA pair of backends from `infra/demo-backend/` starts both
+// replicas at once. With today's 0001 that is harmless (only
+// IF NOT EXISTS plus ON CONFLICT DO NOTHING), but the first non-idempotent DDL
+// in 0002 would give one replica a 'relation already exists' and a crash loop.
+// We take a session-scoped pg_advisory_lock — the second replica blocks
+// until the first finishes, then simply sees that everything is already there.
 // PR #43 review (Angle B).
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	// Берём один коннект из пула и держим advisory lock в его scope;
-	// pg_advisory_unlock на defer гарантирует, что лок отпустится даже
-	// если миграция упала (а если коннект всё равно дропается — Postgres
-	// автоматически снимает session-locks при close).
+	// We take one connection from the pool and hold the advisory lock in its scope;
+	// a deferred pg_advisory_unlock guarantees the lock is released even
+	// if the migration failed (and if the connection is dropped anyway, Postgres
+	// releases session locks automatically on close).
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire conn for migrate: %w", err)
@@ -62,16 +62,16 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("pg_advisory_lock: %w", err)
 	}
 	defer func() {
-		// Best-effort unlock. Используем СВОЙ короткий ctx, а не родительский
-		// (родительский может быть уже cancel'нут — SIGTERM в середине
-		// миграции), иначе `conn.Exec(canceled, …)` тихо возвращает ошибку
-		// БЕЗ отправки SQL, лок остаётся на сессии, conn уезжает обратно в
-		// пул живой → соседняя реплика блокируется до того, как pgxpool
-		// отпустит коннект (MaxConnLifetime, по умолчанию час+). PR #43
+		// A best-effort unlock. We use OUR OWN short ctx rather than the parent
+		// (the parent may already be cancelled — a SIGTERM in the middle of a
+		// migration), otherwise `conn.Exec(canceled, …)` quietly returns an error
+		// WITHOUT sending the SQL, the lock stays on the session, the connection goes back into
+		// the pool alive → and the neighbouring replica blocks until pgxpool
+		// releases the connection (MaxConnLifetime, an hour or more by default). From
 		// review (Angle B).
-		// context.WithoutCancel: сохраняем values из родителя (трейсинг,
-		// логгер-keys), но рвём cancellation — нужно ИМЕННО чтобы
-		// canceled-родитель не задушил unlock-Exec.
+		// context.WithoutCancel: we keep the parent's values (tracing,
+		// logger keys) but break the cancellation — which is exactly what keeps a
+		// cancelled parent from strangling the unlock Exec.
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
 		_, _ = conn.Exec(releaseCtx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
@@ -89,9 +89,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", e.Name(), err)
 		}
-		// Один Exec на весь файл — pgx умеет multi-statement strings.
-		// Если оператор ломает файл (синтаксис), валимся на старте,
-		// не делая backend живым с частично применённой схемой.
+		// One Exec for the whole file — pgx handles multi-statement strings.
+		// If the operator breaks a file (a syntax error) we fail at startup
+		// rather than making the backend live with a partially applied schema.
 		if _, err := conn.Exec(ctx, string(body)); err != nil {
 			return fmt.Errorf("apply %s: %w", e.Name(), err)
 		}
@@ -99,19 +99,19 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// LoadRuntime читает только runtime-таблицы (verified_bot_ips, policy)
-// одной read-only транзакцией. Слой медленных каталогов теперь живёт в
-// файлах (см. internal/filesource), мерджится в *catalog.Data в reloader.
+// LoadRuntime reads only the runtime tables (verified_bot_ips, policy)
+// in a single read-only transaction. The slow-catalog layer now lives in
+// files (see internal/filesource) and is merged into *catalog.Data in the reloader.
 //
-// Версия каталога (для X-Catalog-Version) приходит из файла
-// catalogs/version, не из БД — таблицу `catalog_version` дропнули в
-// миграции 0004.
+// The catalog version (for X-Catalog-Version) comes from the
+// catalogs/version file rather than the database — the `catalog_version` table was dropped in
+// migration 0004.
 //
-// Валидация regex/CIDR для per-host policy остаётся: оператор может
-// записать битый policy.ua_blacklist через antibotapi, и без проверки на
-// этом шаге combined regex положил бы UA-стадию на пуле эджей.
-// Store.Replace не вызовется, если LoadRuntime вернул ошибку — эдж
-// продолжит работать с предыдущим хорошим snapshot'ом (fail-stale).
+// Regex and CIDR validation for the per-host policy remains: an operator can
+// write a broken policy.ua_blacklist through antibotapi, and without the check at
+// this step the combined regex would take the UA stage down across the edge pool.
+// Store.Replace is not called when LoadRuntime returns an error — the edge
+// keeps working from the previous good snapshot (fail-stale).
 func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
@@ -127,14 +127,14 @@ func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData,
 		Policy:         map[string]catalog.Policy{},
 	}
 
-	// verified_bot_ips: rDNS-воркер ([B7]) пишет ОБА исхода — verified и rejected
-	// (vision §Шаг 2.2 + entities-reference.md bot_verification_status). Edge
-	// различает их по значению — поэтому в payload идёт "<status>:<family>",
-	// не просто family. expires_at > NOW() отсекает протухшие записи на
-	// уровне БД: edge видит "ключа нет" и идёт по provisional fastpath, а
-	// не по устаревшему verdict'у. Сам DELETE протухших строк — на воркере
-	// (GC-тик); фильтр здесь — defence-in-depth, чтобы корректность не
-	// зависела от того, успел ли GC. Миграция 0002 завела status/expires_at.
+	// verified_bot_ips: the rDNS worker ([B7]) writes BOTH outcomes — verified and rejected
+	// (vision §Stage 2.2 plus entities-reference.md bot_verification_status). The edge
+	// tells them apart by the value — hence the payload carries "<status>:<family>"
+	// rather than just the family. expires_at > NOW() cuts expired records at the
+	// database level: the edge sees "no key" and takes the provisional fastpath rather
+	// than an out-of-date verdict. Deleting expired rows is the worker's job
+	// (the GC tick); the filter here is defence in depth, so that correctness does not
+	// depend on whether the GC kept up. Migration 0002 introduced status/expires_at.
 	if err := loadKVString(ctx, tx, &r.VerifiedBotIPs,
 		`SELECT ip, status || ':' || bot_name FROM verified_bot_ips
 		 WHERE expires_at > NOW() ORDER BY ip`); err != nil {
@@ -144,10 +144,10 @@ func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData,
 		return nil, err
 	}
 
-	// Per-host policy regex/CIDR валидируем сразу: до Store.Replace
-	// никто не увидит этот payload. Слой медленных каталогов придёт из
-	// filesource (валидирован у себя); финальная сборка их merge'ом в
-	// reloader тоже прогоняет catalog.Validate как defense-in-depth.
+	// Per-host policy regexes and CIDRs are validated right away: before Store.Replace
+	// nobody sees this payload. The slow-catalog layer arrives from
+	// filesource (validated there); the final merge in the
+	// reloader also runs catalog.Validate as defence in depth.
 	if err := catalog.Validate(catalog.Merge(nil, r)); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
 	}
@@ -170,10 +170,10 @@ func loadKVString(ctx context.Context, tx pgx.Tx, dst *map[string]string, sql st
 	return rows.Err()
 }
 
-// loadPolicy читает строки `policy` и распаковывает JSONB-поля в срезы.
-// Каждое JSONB поле декодируется отдельно — это позволяет в будущем
-// добавлять поля без миграции (с осторожностью: новое поле должно быть
-// optional и иметь дефолт).
+// loadPolicy reads the `policy` rows and unpacks the JSONB fields into slices.
+// Each JSONB field is decoded separately — which allows fields to be added in
+// future without a migration (carefully: a new field must be
+// optional and have a default).
 func loadPolicy(ctx context.Context, tx pgx.Tx, r *catalog.RuntimeData) error {
 	rows, err := tx.Query(ctx, `
 		SELECT host, mode, strictness, attack_mode, origin_ip,
@@ -206,13 +206,13 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, r *catalog.RuntimeData) error {
 		if err := unmarshalIfNonEmpty(ipBLJSON, &p.IPBlocklist); err != nil {
 			return fmt.Errorf("policy[%s].ip_blocklist: %w", host, err)
 		}
-		// asn_block: defensive decode через []*int64 + per-element фильтрацию
-		// (PR-58 review #6). Прямой Unmarshal в []uint32 валился на любом
-		// значении -1 / >2^32 одной строки и ронял весь catalog tick →
-		// Store.Replace не вызывался → edge fail-stale для ВСЕХ клиентов.
-		// Запись через admin API уже ловится `antibotapi.ValidateASN`, но
-		// legacy/manual SQL/импорт могут оставить out-of-range или null —
-		// они тихо скипаются (см. doc-комментарий decodeASNBlock).
+		// asn_block: a defensive decode through []*int64 plus per-element filtering
+		// (from review). A direct Unmarshal into []uint32 failed on any
+		// -1 / >2^32 value in one row and took the whole catalog tick down →
+		// Store.Replace was never called → the edge failed stale for ALL customers.
+		// A write through the admin API is already caught by `antibotapi.ValidateASN`, but
+		// legacy or manual SQL and imports can leave an out-of-range value or a null —
+		// they are skipped silently (see the doc comment on decodeASNBlock).
 		if err := decodeASNBlock(asnJSON, &p.ASNBlock); err != nil {
 			return fmt.Errorf("policy[%s].asn_block: %w", host, err)
 		}
@@ -234,28 +234,28 @@ func unmarshalIfNonEmpty(b []byte, dst any) error {
 	return json.Unmarshal(b, dst)
 }
 
-// decodeASNBlock декодирует JSONB-массив ASN в []uint32 с per-element
-// фильтрацией. Возвращает ошибку только если сам JSON битый (не массив,
-// не числа).
+// decodeASNBlock decodes a JSONB array of ASNs into []uint32 with per-element
+// filtering. It returns an error only when the JSON itself is broken (not an array,
+// not numbers).
 //
-// Скипаются БЕЗ ошибки (loader не валит весь tick из-за одной битой
-// строки — иначе один out-of-range ASN кладёт edge для всего пула):
-//   - элементы с n < 0 или n > 2^32-1 (out of uint32 range)
-//   - JSON null (json.Unmarshal маппит null → zero-int64=0, что после
-//     попадания в out выглядит как валидный ASN-0; легитимный admin-API
-//     путь 0 принимает, но фантомные 0 из null-элементов — точно артефакт
-//     legacy/manual SQL, симметрично 0-фильтру не делаем — пусть operator
-//     явно вставит [0] если ему нужен ASN-0).
+// Skipped WITHOUT an error (the loader does not fail the whole tick because of one broken
+// row — otherwise one out-of-range ASN takes the edge down for the whole pool):
+//   - elements with n < 0 or n > 2^32-1 (out of uint32 range)
+//   - JSON null (json.Unmarshal maps null → a zero int64 of 0, which once it
+//     reaches out looks like a valid ASN 0; the legitimate admin API
+//     path accepts 0, but phantom 0s from null elements are definitely an artefact of
+//     legacy or manual SQL, and we do not add a symmetric 0 filter — let the operator
+//     insert [0] explicitly if they really want ASN 0).
 //
-// Скип молчаливый — оператор увидит расхождение через дашборд/аналитику,
-// не через логи backend'а. Сохранить host+raw-value для warn'а
-// потребовало бы пробросить host вглубь, плюс slog spam'ил бы на каждом
-// 5-секундном reloader-тике одно и то же — лучше fix-on-source.
+// The skip is silent — the operator sees the discrepancy through the dashboard or analytics
+// rather than through the backend logs. Keeping the host plus the raw value for a warn
+// would mean threading the host deep down, and slog would spam the same thing on every
+// 5-second reloader tick — better to fix it at the source.
 func decodeASNBlock(b []byte, dst *[]uint32) error {
 	if len(b) == 0 {
-		// Empty bytes = «поле не пришло» (NULL column из БД). Контракт:
-		// dst остаётся nil. Явно зануляем на случай, если caller
-		// переиспользует slice (decode_asn_test проверяет).
+		// Empty bytes mean "the field did not arrive" (a NULL column from the database). The contract:
+		// dst stays nil. We zero it explicitly in case the caller
+		// reuses the slice (decode_asn_test checks this).
 		*dst = nil
 		return nil
 	}
@@ -266,7 +266,7 @@ func decodeASNBlock(b []byte, dst *[]uint32) error {
 	out := make([]uint32, 0, len(raw))
 	for _, p := range raw {
 		if p == nil {
-			// JSON null — отбрасываем (не дефолтим в 0).
+			// A JSON null — discarded (not defaulted to 0).
 			continue
 		}
 		n := *p
