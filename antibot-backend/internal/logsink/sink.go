@@ -200,12 +200,8 @@ func NewWithWriter(cfg Config, w Writer, logger *slog.Logger, reg prometheus.Reg
 }
 
 // Submit is non-blocking and copies the line, since the caller's scanner reuses
-// its buffer.
-//
-// The stopped check is best effort. There is a formal window where a line could
-// be orphaned at shutdown, but the server is drained before the workers are
-// cancelled, so it cannot happen in practice — and a lock here would cost on
-// every log line.
+// its buffer. The stopped check is best effort: the server is drained before the
+// workers are cancelled, and a lock here would cost on every line.
 func (s *Sink) Submit(line []byte) {
 	if s.stopped.Load() {
 		return
@@ -247,10 +243,8 @@ func (s *Sink) consume(ctx context.Context) {
 		batch = batch[:0]
 	}
 
-	// Flushes during shutdown need a context that is no longer cancelled, or a
-	// healthy database would still spill. The timeout is what keeps a hung write
-	// against a dead database from outliving the shutdown, which would abandon
-	// the worker and lose the batch from both the database and the spool.
+	// Shutdown flushes need an uncancelled context, or a healthy database would
+	// still spill. The timeout keeps a hung write from outliving the shutdown.
 	detachedFlush := func(b [][]byte) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.FlushInterval)
 		defer cancel()
@@ -524,11 +518,8 @@ var copyColumns = []string{
 }
 
 // rawRecord mirrors a log line. Every field is a pointer, since the edge sends
-// null for whatever did not apply to that request.
-//
-// json.Number for status — the field arrives as an int, but through a float64 in a
-// generic decoder it loses precision; we store it as a Number and parse it
-// by hand. The same goes for tls_cipher_count and latency_ms.
+// null for whatever did not apply. The numbers are json.Number: a generic decode
+// through float64 would lose precision.
 type rawRecord struct {
 	RequestID      string      `json:"request_id"`
 	Timestamp      string      `json:"timestamp"`

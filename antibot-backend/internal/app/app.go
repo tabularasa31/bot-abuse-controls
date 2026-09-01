@@ -206,10 +206,8 @@ func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	a.store = catalogSrv.Store()
 
 	if a.pool == nil {
-		// Skeleton mode without a database: Channel C stays in the not-loaded state
-		// (503 on any /catalog/*). That is an explicit sign to the operator — with no database the
-		// rDNS worker does not write verified_bot_ips, antibotapi does not accept a
-		// policy, and serving an empty runtime part would be worse than a 503.
+		// Without a database the catalogs stay unloaded and answer 503, which is
+		// the honest signal: serving an empty runtime layer would be worse.
 		a.logger.Warn("no POSTGRES_DSN — Channel C stays not-loaded (returns 503); set POSTGRES_DSN + CATALOGS_DIR to enable")
 		catalogSrv.Register(mux)
 		return nil
@@ -244,12 +242,8 @@ func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	return nil
 }
 
-// Run starts the background workers and the HTTP server, blocks until ctx is cancelled or a
-// fatal HTTP error occurs, and then performs a graceful shutdown itself. It returns
-// the HTTP server's error (if it fell over), otherwise nil.
-//
-// Ctx must be cancelled by a signal (see signal.NotifyContext in main) —
-// its cancellation is what triggers the start of the shutdown.
+// Run starts the workers and the server and blocks until the context is
+// cancelled or the server fails, then shuts down gracefully.
 func (a *App) Run(ctx context.Context) error {
 	// workerCtx lives under Run and is closed on exit, so that the workers
 	// get the stop signal even when Run returns through an
@@ -303,12 +297,9 @@ func (a *App) Run(ctx context.Context) error {
 		runErr = err
 	case <-ctx.Done():
 		a.logger.Info("shutdown signal received")
-		// A race: between the signal closing ctx.Done and us calling
-		// srv.Shutdown, the listener could have returned a NON-ErrServerClosed
-		// error (an EMFILE in the accept loop, a network fault, a recovered panic).
-		// The HTTP goroutine writes it into the buffered serverErr (cap=1),
-		// but nobody reads it any more — without a drain the error is quietly lost,
-		// Run returns nil, and after the incident the operator cannot find the cause.
+		// The listener may have failed for a real reason between the signal and
+		// the shutdown call. Without this drain that error is lost and Run
+		// returns nil, leaving nothing to investigate.
 		select {
 		case err := <-serverErr:
 			a.logger.Error("late http server error during shutdown", "err", err)
@@ -322,14 +313,9 @@ func (a *App) Run(ctx context.Context) error {
 	return runErr
 }
 
-// shutdown — an ordered termination under the shared cfg.ShutdownTimeout budget.
-// The steps run in sequence and each knows about the shared deadline:
-//  1. HTTP: srv.Shutdown drains what is in flight; if it does not fit, srv.Close()
-//     tears down the tail, otherwise systemd kills us with SIGKILL without grace.
-//  2. cancelWorkers: it stops the background workers (rDNS now, the B6 disk queue
-//     later).
-//  3. wg.Wait under the deadline: B7 brings real DNS lookups that can
-//     hang on the network — we do not let them delay the exit.
+// shutdown terminates in order under one shared deadline: drain the server, then
+// cancel the workers, then wait for them — bounded, because a DNS lookup can
+// hang on the network.
 //  4. pgxpool.Close under the deadline: it blocks on active connections, which B3/B7
 //     bring — we bound it by the same budget.
 func (a *App) shutdown(parent context.Context, cancelWorkers context.CancelFunc, wg *sync.WaitGroup) {

@@ -71,20 +71,16 @@ func (p PolicyPatch) IsEmpty() bool {
 	return p.Mode == nil && p.Strictness == nil && p.AttackMode == nil && p.OriginIP == nil
 }
 
-// PatchScalars applies a patch and reports whether anything actually changed. A
-// patch that matches the current values is a no-op and leaves updated_at alone.
+// PatchScalars applies a patch and reports whether anything changed; a patch
+// matching the current values leaves updated_at alone.
 //
-// It all runs in one transaction. The self-assignment in the conflict clause
-// looks pointless but is what takes the row lock, so concurrent patches to
-// different fields of the same host serialise instead of clobbering each other.
-// The loser waits, re-reads and diffs against the updated row.
+// The self-assignment in the conflict clause looks pointless but is what takes
+// the row lock, so concurrent patches to different fields serialise instead of
+// clobbering each other. `xmax = 0` then distinguishes a real insert from the
+// update branch.
 //
-// `xmax = 0` distinguishes a real insert from the update branch, so a single
-// statement returns both the current values and whether the row was new.
-//
-// The cost is that the update branch always writes a new tuple, so even a no-op
-// patch produces one dead row. That is worth revisiting if idempotent patches
-// ever become frequent; the alternative loses the upsert's atomicity.
+// The cost is a dead tuple per patch, no-ops included — worth revisiting if
+// idempotent patches ever become frequent.
 func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (bool, []string, error) {
 	if p.IsEmpty() {
 		return false, nil, fmt.Errorf("empty patch")
@@ -190,12 +186,9 @@ func patchFields(p PolicyPatch) []string {
 
 // AppendStringArray is an idempotent append, creating the row if needed.
 //
-// The COALESCE guards rows carrying a JSONB null, where concatenation yields
-// null and the append would silently do nothing.
-//
-// Row creation and the update share a transaction: a concurrent site delete
-// between the two would otherwise leave the append affecting no rows and
-// silently lost.
+// The COALESCE guards a JSONB null, where concatenation would silently do
+// nothing. Creation and update share a transaction, or a concurrent site delete
+// between them would lose the append.
 func (s *Store) AppendStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -270,22 +263,14 @@ func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, e
 
 // RemoveASN removes an ASN from the array.
 //
-// the previous implementation computed new_arr in a CTE before the UPDATE's
-// lock, so a concurrent AppendASN that committed between the CTE
-// and the UPDATE was silently clobbered — Read Committed re-locks the row but does NOT re-evaluate
-// the CTE. The new version computes new_arr in a subquery INSIDE the SET — that subquery
-// executes AFTER the row lock, against the current state.
+// The new array is computed in a subquery inside the SET, so it runs after the
+// row lock against current state. Computing it in a CTE would silently clobber a
+// concurrent append: Read Committed re-locks the row but does not re-evaluate
+// the CTE.
 //
-// jsonb-null protection through COALESCE: without it
-// jsonb_array_elements(null) raises 'cannot extract elements from a scalar'.
-//
-// jsonb_typeof = 'number': the schema does not constrain the
-// element types of a JSONB array; legacy or manual SQL can leave a string
-// (`'[15169, "13335"]'::jsonb`). A direct cast `(elem)::bigint` then raises
-// "invalid input syntax for type bigint", and DELETE for the whole site returns a
-// 500 until the database is fixed by hand. The jsonb_typeof filter keeps numbers only;
-// strings, nulls and arrays are dropped (defensive — but this is exactly the legacy zone
-// that decodeASNBlock on the loader side also guards).
+// The type filter keeps numbers only: the schema does not constrain the element
+// types, and a string left by manual SQL would make every delete for that site
+// fail until the database was fixed by hand.
 func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, error) {
 	q := `UPDATE policy
 		  SET asn_block = COALESCE(

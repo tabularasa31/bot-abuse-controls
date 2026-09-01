@@ -119,13 +119,7 @@ func (rcv *Receiver) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/logs", rcv.handle)
 }
 
-// bufPool reuses scanner buffers between requests — otherwise, under
-// load from the edge, every POST would allocate 32 KiB and load the GC.
-//
-// make with length maxLineBytes (rather than a cap with zero length): bufio.Scanner.Buffer
-// does `buf[0:cap(buf)]`, so the cap alone would suffice; but `len=maxLineBytes`
-// makes the pool's contract explicit ("a full-size ready buffer") without depending
-// on Scanner's internals.
+// Reused between requests: otherwise every POST would allocate 32 KiB.
 var bufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, maxLineBytes)
@@ -141,10 +135,8 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = r.Body.Close() }()
 
 	n, err := rcv.consume(r.Body)
-	// received is always incremented by the number of lines processed, even when we
-	// return a 4xx afterwards: the dispatch may already have called Enqueue/parseErr/botSpotted
-	// for the lines BEFORE the error, and without received_total we would get metrics where
-	// botSpotted > received (an inversion that breaks capacity planning).
+	// Counted even when the response is a 4xx: lines before the error were
+	// already dispatched, and without this the counters could invert.
 	//
 	if n > 0 {
 		rcv.received.Add(float64(n))
@@ -156,10 +148,8 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, errOversizedLine) {
-			// One line of the batch is longer than maxLineBytes. We answer 202 —
-			// the edge must not retry because of one bad line
-			// (otherwise the Enqueue for every good line before it
-			// would be duplicated). parseErr was already incremented in consume().
+			// Accepted anyway: a retry over one bad line would duplicate every
+			// good line before it.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"status":"accepted","note":"oversized line skipped"}`))
@@ -176,12 +166,8 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"accepted","note":"sink/batching wiring lands in B6/B9"}`))
 }
 
-// consume reads the body line by line, parses each as JSON and, for lines with a
-// bot UA, calls enqueue. It returns the number of lines (invalid ones included —
-// the received counter counts "what arrived", and parseErr is a separate metric).
-//
-// The BAC_LOG contract from bac_log.lua: one JSON record per line,
-// separated by \n, and the last line may lack a \n.
+// consume returns the number of lines seen, invalid ones included. One JSON
+// record per line, and the last line may have no newline.
 func (rcv *Receiver) consume(body io.Reader) (int, error) {
 	bufPtr, _ := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)

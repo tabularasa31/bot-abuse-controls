@@ -367,13 +367,9 @@ func (w *Worker) process(ctx context.Context, t task) {
 	}
 	expiresAt := w.now().Add(VerificationTTL)
 
-	// The DB write: the parent ctx is already cancelled during a graceful shutdown
-	// (app.shutdown calls cancelWorkers() BEFORE wg.Wait). Using
-	// that ctx would make UpsertVerifiedBot return context.Canceled for every
-	// task that made it through classify before the cancel, spiking dbErr on
-	// every deploy. We detach the cancellation through context.WithoutCancel and
-	// set a short deadline of our own — the same trick as in
-	// dbloader.Migrate for pg_advisory_unlock.
+	// The parent context is already cancelled during a graceful shutdown, so
+	// using it would fail every write that made it through classification and
+	// spike the error counter on each deploy.
 	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), dbWriteTimeout)
 	defer writeCancel()
 	if err := w.db.UpsertVerifiedBot(writeCtx, t.ip, family, status, expiresAt); err != nil {
@@ -401,15 +397,12 @@ func (w *Worker) process(ctx context.Context, t task) {
 	)
 }
 
-// classify — the core of the decision. It returns status ∈ {verified, rejected} and
-// the family (for verified the genuinely confirmed one; for rejected the
-// claimedFamily, so that analytics can see what it claimed to be).
+// classify returns the status and the family — the confirmed one when verified,
+// the claimed one when rejected, so the analytics show what it pretended to be.
 //
-// The logic:
-//  1. A PTR on the IP. Empty or an error → rejected.
-//  2. At least one PTR must end with an official suffix of the
-//     claimed family (claimedFamily). If the PTR went into a foreign zone,
-//     this is not the bot the UA claims → rejected.
+//  1. A PTR on the IP; empty or an error is a rejection.
+//  2. At least one PTR must sit in an official zone of the claimed family. A
+//     PTR in a foreign zone is not the crawler the UA claims.
 //  3. Forward DNS on the name found. The original IP must be among the A/AAAA
 //     records. If not, that is a DNS mismatch (a PTR can be forged without a forward record)
 //     → rejected.

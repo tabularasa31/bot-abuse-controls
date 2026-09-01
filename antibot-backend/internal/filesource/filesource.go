@@ -94,15 +94,11 @@ func (l *Loader) Changed() bool {
 }
 
 // Load reads, validates and returns the whole slow layer. Any error leaves the
-// store untouched and the edge on its last good payload. The mtime cache is
-// updated only on success, so a partial failure does not lose the change signal.
+// edge on its last good payload, and the mtime cache is updated only on success.
 //
-// The load is deliberately atomic across every file: loading them individually
-// would let their ETags change in different orders, so the edge could see a new
-// IP blocklist against an old UA blacklist. Failing the whole layer is the
-// lesser evil, and it is visible in the reload-failure counter. The runtime
-// layer is a separate path and is unaffected.
-// state.
+// Atomic across every file on purpose: loading them individually would let their
+// ETags change in different orders, so the edge could see a new IP blocklist
+// against an old UA blacklist.
 func (l *Loader) Load() (*catalog.SlowData, error) {
 	mtimes := make(map[string]time.Time, len(trackedFiles))
 
@@ -206,10 +202,8 @@ func (l *Loader) Load() (*catalog.SlowData, error) {
 	slow.TLSFPBrowserProfiles = tlsProf
 	mtimes["tls_fp_browser_profiles.yaml"] = mt
 
-	// The final validation through catalog.Validate: regexes compile and
-	// CIDRs parse symmetrically with ipmatcher. The same model as in
-	// dbloader.Load: we fail before the Store ever sees a broken payload.
-	// Merging with a nil runtime part means Validate checks only the slow layer
+	// Fail before the store ever sees a broken payload. A nil runtime part means
+	// only the slow layer is checked
 	// (Policy is empty → the per-host validation is skipped).
 	if err := catalog.Validate(catalog.Merge(slow, nil)); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)

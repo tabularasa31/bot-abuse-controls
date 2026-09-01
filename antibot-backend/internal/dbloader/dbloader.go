@@ -25,12 +25,10 @@ var migrationsFS embed.FS
 // any derivation scheme.
 const migrateAdvisoryLockKey int64 = 0x616E7469626F7402 // "antibo\x02"
 
-// Migrate applies the embedded SQL files in order. They are written to be
-// idempotent, so reapplying them is safe.
+// Migrate applies the embedded SQL files in order; they are idempotent.
 //
-// Both replicas of the HA pair start at once, so an advisory lock serialises
-// them: the second waits and then finds the work already done. Without it the
-// first non-idempotent statement would crash-loop one of them.
+// Both replicas start at once, so an advisory lock serialises them — otherwise
+// the first non-idempotent statement would crash-loop one of them.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	// The lock is session-scoped, so it lives on this one connection and is
 	// released even if the migration fails.
@@ -44,10 +42,8 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("pg_advisory_lock: %w", err)
 	}
 	defer func() {
-		// Its own context: on a cancelled parent the unlock would return an error
-		// without ever sending the statement, leaving the lock held on a
-		// connection that goes back into the pool alive — and the other replica
-		// blocked until that connection eventually expires.
+		// Its own context: on a cancelled parent the unlock would never be sent,
+		// leaving the lock held and the other replica blocked.
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
 		_, _ = conn.Exec(releaseCtx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)
@@ -75,19 +71,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// LoadRuntime reads only the runtime tables (verified_bot_ips, policy)
-// in a single read-only transaction. The slow-catalog layer now lives in
-// files (see internal/filesource) and is merged into *catalog.Data in the reloader.
+// LoadRuntime reads the runtime tables in a single read-only transaction.
 //
-// The catalog version (for X-Catalog-Version) comes from the
-// catalogs/version file rather than the database — the `catalog_version` table was dropped in
-// migration 0004.
-//
-// Regex and CIDR validation for the per-host policy remains: an operator can
-// write a broken policy.ua_blacklist through antibotapi, and without the check at
-// this step the combined regex would take the UA stage down across the edge pool.
-// Store.Replace is not called when LoadRuntime returns an error — the edge
-// keeps working from the previous good snapshot (fail-stale).
+// Per-host policy is still validated here: a broken regex written through the
+// API would otherwise take the UA stage down across the whole pool. On an error
+// nothing is published and the edge keeps its previous snapshot.
 func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
@@ -103,14 +91,9 @@ func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData,
 		Policy:         map[string]catalog.Policy{},
 	}
 
-	// verified_bot_ips: the rDNS worker ([B7]) writes BOTH outcomes — verified and rejected
-	// (vision §Stage 2.2 plus entities-reference.md bot_verification_status). The edge
-	// tells them apart by the value — hence the payload carries "<status>:<family>"
-	// rather than just the family. expires_at > NOW() cuts expired records at the
-	// database level: the edge sees "no key" and takes the provisional fastpath rather
-	// than an out-of-date verdict. Deleting expired rows is the worker's job
-	// (the GC tick); the filter here is defence in depth, so that correctness does not
-	// depend on whether the GC kept up. Migration 0002 introduced status/expires_at.
+	// Expired rows are filtered here as well as collected by the worker, so
+	// correctness does not depend on the GC keeping up: the edge sees no key and
+	// takes the provisional fastpath rather than a stale verdict.
 	if err := loadKVString(ctx, tx, &r.VerifiedBotIPs,
 		`SELECT ip, status || ':' || bot_name FROM verified_bot_ips
 		 WHERE expires_at > NOW() ORDER BY ip`); err != nil {
@@ -120,9 +103,8 @@ func LoadRuntime(ctx context.Context, pool *pgxpool.Pool) (*catalog.RuntimeData,
 		return nil, err
 	}
 
-	// Per-host policy regexes and CIDRs are validated right away: before Store.Replace
-	// nobody sees this payload. The slow-catalog layer arrives from
-	// filesource (validated there); the final merge in the
+	// Validated before anything is published. The slow layer is validated in
+	// filesource; the merge in the
 	// reloader also runs catalog.Validate as defence in depth.
 	if err := catalog.Validate(catalog.Merge(nil, r)); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)

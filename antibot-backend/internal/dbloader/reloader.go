@@ -62,10 +62,8 @@ func NewReloader(
 		return nil, fmt.Errorf("dbloader: reload interval must be > 0, got %s", interval)
 	}
 	if fileLoader == nil {
-		// The source of truth for the slow catalogs is now mandatory. Without
-		// it the merge would produce empty tls_fp_blocklist / ua_blacklist / etc.,
-		// and the edge would get a "successful" payload missing the records already added
-		// to catalogs/ — a silent regression in production.
+		// Mandatory: without it the edge would get a successful payload missing
+		// every record product has added.
 		return nil, fmt.Errorf("dbloader: fileLoader is required (catalogs dir source)")
 	}
 	r := &Reloader{
@@ -96,13 +94,9 @@ func NewReloader(
 	return r, nil
 }
 
-// Run blocks until ctx.Done(), reloading the catalogs periodically at the
-// r.interval. We do NOT run the first tick — it already happened in Bootstrap
-// synchronously before the HTTP server started; repeating it immediately would mean going
-// to the database twice at startup for nothing.
-//
-// A tick error: log and continue (fail-stale). The edge stays on the last
-// good catalog and the operator sees it through `_failures_total`.
+// Run reloads until the context is cancelled. The first tick is skipped:
+// Bootstrap already ran one synchronously. A failed tick logs and continues, so
+// the edge stays on its last good catalog.
 func (r *Reloader) Run(ctx context.Context) {
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
@@ -111,10 +105,8 @@ func (r *Reloader) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// The per-tick deadline = r.interval is applied ONLY on the hot
-			// Run path: without it a hung pgx (a half-open TCP connection or a NAT timeout)
-			// would block the goroutine, the tickers would coalesce, and
-			// reloadFail would never increment — leaving the operator with no signal.
+			// Without a deadline a half-open connection would block the loop,
+			// the ticks would coalesce, and the failure counter would never move.
 			if err := r.tickWith(ctx, r.interval); err != nil {
 				r.logger.Error("catalog reload failed", "err", err)
 			}
@@ -122,11 +114,9 @@ func (r *Reloader) Run(ctx context.Context) {
 	}
 }
 
-// Bootstrap — the synchronous first Reload before the HTTP server starts. If the database
-// is empty or broken, main fails; that is deliberate: a backend with no catalogs
-// must not accept traffic from the edge.
-//
-// The budget is bootstrapTimeout (60 s), NOT r.interval: a cold pool plus
+// Bootstrap runs the first reload synchronously, before the server starts. A
+// failure is fatal on purpose: a backend with no catalogs must not accept
+// traffic.
 // the first Acquire with a TCP/TLS handshake plus eight SELECTs on a cold
 // buffer cache easily exceed the periodic 5-second tick. Sharing that
 // budget with the hot path would mean crashing the backend at startup on a

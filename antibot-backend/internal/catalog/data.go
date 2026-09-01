@@ -176,29 +176,18 @@ func emptyData() *Data {
 	}
 }
 
-// normalize brings Data into canonical form: it sorts every slice and
-// deduplicates them (for a deterministic payload and a stable ETag —
-// two identical records must not inflate the combined regex and must not
-// produce a different ETag from a single record).
-//
-// Called from Store.Replace on every merge (filesource plus dbloader).
-// Idempotent.
+// normalize sorts and deduplicates every slice, so the payload and its ETag are
+// deterministic. Idempotent.
 func normalize(d *Data) {
-	// The system slices: dedup+sort plus a nil coercion. Without ensure*, json.Marshal
-	// would emit `null` on an empty database (the DB loader does not initialise empty
-	// slices — the append loop is empty), and the ETag would drift between "there were never
-	// any records" and "there was one and it was deleted".
+	// The nil coercion matters: json.Marshal writes `null` for a nil slice, so
+	// the ETag would differ between "never had records" and "had one, deleted".
 	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
 	d.UABlacklistStaging = ensureStringSlice(dedupSortStrings(d.UABlacklistStaging))
 	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
 	d.ASNDatacenters = ensureUint32Slice(dedupSortUint32(d.ASNDatacenters))
 	for h, p := range d.Policy {
-		// Every []T field: dedup+sort, then nil → an empty slice. The nil →
-		// `[]T{}` coercion is critical for JSON stability: an operator writing
-		// `ua_blacklist = 'null'::jsonb` through the DB loader arrives as a
-		// nil slice; json.Marshal serialises it as `null`, and the ETag differs
-		// from the logically equivalent record with an empty array and from
-		// `PoolDefault()`. This closes the review point.
+		// Same coercion per field: a JSONB null arrives as a nil slice and would
+		// serialise differently from the equivalent empty array.
 		p.UABlacklist = ensureStringSlice(dedupSortStrings(p.UABlacklist))
 		p.IPWhitelist = ensureStringSlice(dedupSortStrings(p.IPWhitelist))
 		p.IPBlocklist = ensureStringSlice(dedupSortStrings(p.IPBlocklist))
@@ -256,28 +245,15 @@ func dedupSortUint32(s []uint32) []uint32 {
 	return out
 }
 
-// Validate checks:
-//   - UA regexes (system and per host) through regexp.Compile;
-//   - CIDR strings (the system ip_blocklist / ip_whitelist and the per-host
-//     variants) through `ValidateCIDR`, which mirrors the tolerance of
-//     lua-resty-ipmatcher: a bare IP with no `/N` is accepted as a host route
-//     (/32 for v4, /128 for v6), and a CIDR with host bits set
-//     (`10.0.0.5/8`) is valid too, since ipmatcher masks them anyway.
+// Validate compiles every UA regex and parses every CIDR.
 //
-// Regexes: the RE2 grammar — not PCRE, but the edge is on ngx.re (PCRE) with a common
-// subset; syntax errors (`bot[a-z`, an unbalanced `(`, a
-// trailing `\`) are caught identically. If the edge ever wants a PCRE-specific feature
-// (lookarounds), it must be gated separately in the spec.
+// CIDR validation deliberately mirrors what the edge matcher accepts — a bare
+// IP, or a prefix with host bits set — so the backend is never the stricter of
+// the two and an operator cannot hit fail-stale on a record the edge would have
+// taken.
 //
-// CIDR: migration 0001 does NOT hold `inet` columns (the schema comment says
-// "validation lives in the loader" — review closed that promise).
-// The validation is deliberately symmetric with the edge: otherwise the backend would be stricter,
-// and an operator inserting `203.0.113.5` without a `/32` would hit fail-stale
-// even though ipmatcher would have accepted the record.
-//
-// It is exported so that any source of *Data (LoadYAML, dbloader.Load, a
-// future B10 admin API) is obliged to call it before Store.Replace —
-// fail-stale only works if a broken pattern is caught BEFORE publication.
+// Exported so every source of *Data must call it before publishing: fail-stale
+// only works if a broken pattern is caught first.
 func Validate(d *Data) error {
 	for i, p := range d.UABlacklist {
 		if _, err := regexp.Compile(p); err != nil {
@@ -322,10 +298,7 @@ func Validate(d *Data) error {
 			return fmt.Errorf("policy[%s].origin_ip %q: %w", host, pol.OriginIP, err)
 		}
 	}
-	// tls_fp_catalog (Phase 2+, ADR-006): hash_b → {family, status}. Family
-	// must be non-empty (on the edge it goes into attrs.family for is_impersonator);
-	// status is active | staging. A broken status or an empty family is caught here
-	// before Store.Replace, otherwise the edge would hash pending deductions.
+	// The family must be non-empty: the edge uses it for the impersonator rule.
 	for hb, entry := range d.TLSFPCatalog {
 		if hb == "" {
 			return fmt.Errorf("tls_fp_catalog: empty hash_b key")
