@@ -1,14 +1,10 @@
-// Package antibotapi — the HTTP endpoints of the policy API ([B10]).
+// Package antibotapi is the write side of the policy, called only by the
+// dashboard backend.
 //
-// A server-to-server contract: the only consumer is the dashboard backend.
-// Authenticating the end client is the dashboard's concern; here there is only bearer auth
-// between the two services plus payload validation before a transaction is opened.
-//
-// The routes live under `/antibot/v1/policy/{site}` (`{site}` is the customer host,
-// validated at ≤253 bytes). Every mutation handler writes an slog record with the fields
-// actor=dashboard, action, site, was_noop — a single point for a log
-// aggregator once one exists. We do not introduce an audit table in the database (the rationale is in
-// the B10 plan).
+// Authenticating the end user is the dashboard's job; this is a
+// server-to-server contract with bearer auth and validation before any
+// transaction opens. Every mutation writes an slog record, which is the audit
+// trail — there is a single machine actor here, so a table would add nothing.
 package antibotapi
 
 import (
@@ -106,13 +102,9 @@ func (s *Server) timed(action string, h func(action, site string, w http.Respons
 	}
 }
 
-// requestAttrs collects forensic fields for the slog record of every mutation
-// (from the security audit): if the token leaked, an audit log without a source IP or a
-// request_id would not let us tell legitimate mutations from an attacker's.
-// The IP source is X-Forwarded-For (our LB, nginx, sets it; see
-// infra/demo-backend/nginx/lb.conf), falling back to r.RemoteAddr. The request id is the
-// X-Request-Id header (when the dashboard backend sets it), and an empty
-// string otherwise.
+// requestAttrs collects the forensic fields for the audit record. Without a
+// source address and request id, a leaked token would leave no way to separate
+// legitimate mutations from an attacker's.
 func requestAttrs(r *http.Request) []any {
 	src := r.Header.Get("X-Forwarded-For")
 	if src == "" {
@@ -193,10 +185,8 @@ func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r
 	s.writeJSON(w, map[string]any{"changed": changed, "diff": orEmpty(fields)})
 }
 
-// handleDeletePolicy removes a host's policy record entirely. There is no body (DELETE
-// identifies the resource through the path). A missing record → 404, idempotently
-// like the array DELETE. After the deletion, within ≤30 s the edge returns through Channel C to
-// pool default (mode=shadow, observe-only).
+// handleDeletePolicy removes a host's policy entirely; the edge falls back to
+// the pool default on its next pull.
 func (s *Server) handleDeletePolicy(action, site string, w http.ResponseWriter, r *http.Request) {
 	existed, err := s.store.DeletePolicy(r.Context(), site)
 	if err != nil {
@@ -330,10 +320,8 @@ func (s *Server) handleGetASN(action, site string, w http.ResponseWriter, r *htt
 	s.mutations.WithLabelValues(action, "ok").Inc()
 }
 
-// asnBody — the ASN as an *int64, to tell "unset" from "0". ValidateASN(0)
-// accepts it (RFC 6793 — 0 is reserved, but we do not block it as an explicit operator choice),
-// so without the pointer an empty body `{}` would silently mutate ASN 0
-// (PR-58 review #4).
+// A pointer, to tell an unset field from zero: ASN 0 is accepted, so an empty
+// body would otherwise silently act on it.
 type asnBody struct {
 	ASN *int64 `json:"asn"`
 }

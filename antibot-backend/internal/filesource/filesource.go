@@ -1,30 +1,21 @@
-// Package filesource — the catalogs git repo as the source of the slow
-// Channel C catalogs (ADR-006).
+// Package filesource loads the slow catalogs from the git repo that holds them.
 //
-// The contract matches what dbloader used to do for the slow
-// tables: on every reloader tick, Load returns a *catalog.SlowData;
-// the reloader merges it with the runtime part (verified_bot_ips, policy) from
-// the database and publishes it into the Store. Regex/CIDR validation is the same as in dbloader:
-// one broken record fails the whole Load (fail-stale) and the Store is left alone.
+// Load returns a snapshot on every reloader tick, which the reloader merges with
+// the runtime layer from the database. One broken record fails the whole load
+// and leaves the store untouched.
 //
-// The file layout:
+// Layout, one file per catalog:
 //
-//	<dir>/version                 — a singleton semver (text, one line).
-//	<dir>/tls_fp_blocklist.yaml   — map(fp → "active"|"staging").
-//	<dir>/ua_blacklist.yaml       — map(pattern → "active"|"staging").
-//	<dir>/ip_blocklist.yaml       — map(cidr → "active"|"staging").
-//	<dir>/ip_whitelist.yaml       — a sequence of cidr (no status).
-//	<dir>/asn_datacenters.yaml    — a sequence of uint32 (no status).
+//	<dir>/version                 — a semver, one line.
+//	<dir>/tls_fp_blocklist.yaml   — map(fp → status).
+//	<dir>/ua_blacklist.yaml       — map(pattern → status).
+//	<dir>/ip_blocklist.yaml       — map(cidr → status).
+//	<dir>/ip_whitelist.yaml       — a sequence of cidr.
+//	<dir>/asn_datacenters.yaml    — a sequence of uint32.
 //
-// `status` for the catalogs supporting staged rollout (A11): both "active" and
-// "staging" land in SlowData with the status preserved. Serialisation into Channel
-// C carries the status in the payload ("<status>:block" for fp/ip; a separate staging
-// combined regex for ua), and the edge separates active from staging itself: active →
-// verdict=block, staging → staging_match with no block. (Staging used to be
-// filtered out here — now it is delivered, see the build* functions in store.go.)
-//
-// An empty file, or one holding only comments, means an empty catalog. A missing file is
-// an error (protection from a typo in the name).
+// Staged entries are loaded with their status intact and delivered to the edge,
+// which decides what to do with them. An empty file means an empty catalog; a
+// missing one is an error, which catches a typo in the name.
 package filesource
 
 import (
@@ -81,10 +72,8 @@ func New(dir string) *Loader {
 // Dir returns the catalogs' root directory. Useful for logs and health checks.
 func (l *Loader) Dir() string { return l.dir }
 
-// Changed returns true when at least one file's mtime differs from the
-// cached one, OR the cache is still empty (the first call). Reading the mtime does not
-// raise an error — a missing file reaches Load as an explicit fail-stale there,
-// the reloader sees the error, and the operator sees it in the logs plus reload_failures.
+// Changed reports whether any file's mtime moved, or the cache is still empty.
+// A missing file is not an error here; Load reports it properly.
 func (l *Loader) Changed() bool {
 	if len(l.mtimes) == 0 {
 		return true
@@ -104,22 +93,15 @@ func (l *Loader) Changed() bool {
 	return false
 }
 
-// Load reads every catalog, validates it and returns a *catalog.SlowData with the
-// active records. On any error (IO, parse, validate) it returns
-// it — the caller (the reloader) does NOT touch the Store and the edge keeps working from the
-// previous good payload. It updates the mtime cache only on success:
-// a partial success (version was read but ua_blacklist failed) must not
-// "lose" the change signal on the next tick.
+// Load reads, validates and returns the whole slow layer. Any error leaves the
+// store untouched and the edge on its last good payload. The mtime cache is
+// updated only on success, so a partial failure does not lose the change signal.
 //
-// Blast radius (from audit): Load is atomic across the whole slow layer — one
-// broken record in any of the 8 files fails the publication of ALL the slow catalogs
-// (ua/ip/asn/fp/tls_fp_*) at once. The runtime layer (policy,
-// verified_bot_ips) is NOT affected; dbloader.LoadRuntime is an independent
-// path. That is deliberate: per-catalog loading would create a window of partial
-// consistency where the ETags of different files change in a different order —
-// the edge would see an old UA blacklist with a new IP blacklist, or the reverse.
-// Better an explicit fail-stale: the operator sees `antibot_backend_catalog_reload_failures_total`
-// plus a log error, fixes it in one PR, and on the edge everything stays in the last good
+// The load is deliberately atomic across every file: loading them individually
+// would let their ETags change in different orders, so the edge could see a new
+// IP blocklist against an old UA blacklist. Failing the whole layer is the
+// lesser evil, and it is visible in the reload-failure counter. The runtime
+// layer is a separate path and is unaffected.
 // state.
 func (l *Loader) Load() (*catalog.SlowData, error) {
 	mtimes := make(map[string]time.Time, len(trackedFiles))

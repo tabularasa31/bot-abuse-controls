@@ -1,16 +1,8 @@
-// Package dbloader — the source of the catalogs' runtime layer from PostgreSQL.
+// Package dbloader reads the catalogs' runtime layer from PostgreSQL.
 //
-// After ADR-006 the database holds only the data that changes automatically
-// (SLA ≤ 30 s) and does not suit files by nature: `verified_bot_ips`
-// is written by the rDNS worker ([B7]), and `policy` by antibotapi from the dashboard ([B10]).
-// The product-curated "slow" catalogs (tls_fp_blocklist, ua_blacklist,
-// ip_blocklist, ip_whitelist, asn_datacenters) moved into the catalogs/ git
-// repo and are loaded through internal/filesource.
-//
-// LoadRuntime reads only the runtime tables in a single read-only transaction.
-// The reloader merges its result with the *catalog.SlowData from filesource and
-// publishes the combined snapshot through Store.Replace — the
-// Store/Snapshot/build* contract is unchanged.
+// The database holds only what changes on its own: the verified-bot verdicts
+// written by the rDNS worker, and the per-host policy written by the dashboard.
+// The product-curated catalogs live in git and are loaded elsewhere.
 package dbloader
 
 import (
@@ -29,29 +21,19 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// migrateAdvisoryLockKey — an arbitrary 64-bit constant for
-// `pg_advisory_lock`. Isolation from other people's locks comes from the random magic;
-// we do not use a `crc64(...)`-style scheme, so as not to depend on how
-// exactly the key is generated.
+// An arbitrary constant: isolation comes from the value being random, not from
+// any derivation scheme.
 const migrateAdvisoryLockKey int64 = 0x616E7469626F7402 // "antibo\x02"
 
-// Migrate runs the embedded SQL files from migrations/ in lexicographic
-// order. The files are written idempotently through CREATE TABLE IF NOT EXISTS,
-// so reapplying them is safe. Heavier migration infrastructure
-// (a version schema, down steps) arrives with B15 — for now a cheap ratchet is enough.
+// Migrate applies the embedded SQL files in order. They are written to be
+// idempotent, so reapplying them is safe.
 //
-// Concurrency: the HA pair of backends from `infra/demo-backend/` starts both
-// replicas at once. With today's 0001 that is harmless (only
-// IF NOT EXISTS plus ON CONFLICT DO NOTHING), but the first non-idempotent DDL
-// in 0002 would give one replica a 'relation already exists' and a crash loop.
-// We take a session-scoped pg_advisory_lock — the second replica blocks
-// until the first finishes, then simply sees that everything is already there.
-// PR #43 review (Angle B).
+// Both replicas of the HA pair start at once, so an advisory lock serialises
+// them: the second waits and then finds the work already done. Without it the
+// first non-idempotent statement would crash-loop one of them.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	// We take one connection from the pool and hold the advisory lock in its scope;
-	// a deferred pg_advisory_unlock guarantees the lock is released even
-	// if the migration failed (and if the connection is dropped anyway, Postgres
-	// releases session locks automatically on close).
+	// The lock is session-scoped, so it lives on this one connection and is
+	// released even if the migration fails.
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire conn for migrate: %w", err)
@@ -62,16 +44,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("pg_advisory_lock: %w", err)
 	}
 	defer func() {
-		// A best-effort unlock. We use OUR OWN short ctx rather than the parent
-		// (the parent may already be cancelled — a SIGTERM in the middle of a
-		// migration), otherwise `conn.Exec(canceled, …)` quietly returns an error
-		// WITHOUT sending the SQL, the lock stays on the session, the connection goes back into
-		// the pool alive → and the neighbouring replica blocks until pgxpool
-		// releases the connection (MaxConnLifetime, an hour or more by default). From
-		// review (Angle B).
-		// context.WithoutCancel: we keep the parent's values (tracing,
-		// logger keys) but break the cancellation — which is exactly what keeps a
-		// cancelled parent from strangling the unlock Exec.
+		// Its own context: on a cancelled parent the unlock would return an error
+		// without ever sending the statement, leaving the lock held on a
+		// connection that goes back into the pool alive — and the other replica
+		// blocked until that connection eventually expires.
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
 		_, _ = conn.Exec(releaseCtx, `SELECT pg_advisory_unlock($1)`, migrateAdvisoryLockKey)

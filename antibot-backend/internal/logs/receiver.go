@@ -1,16 +1,11 @@
-// Package logs accepts the BAC_LOG stream from the edges (the backend's second function per
-// ADR-005).
+// Package logs accepts the log stream from the edges.
 //
-// The B2 skeleton level only counted lines and returned 202. In B7 the receiver
-// gained one more responsibility — it is the backend's only point through
-// which the rDNS worker learns about new IPs with a search engine UA (see vision §"The reverse-
-// DNS worker": the check is triggered by the log stream itself, with no pre-emptive
-// sweeping). The receiver parses every line as JSON and, when it sees an IP plus a
-// bot UA, calls the Enqueuer (rdns.Worker).
+// It is also the only place the rDNS worker learns about new IPs: a line
+// carrying a search-engine User-Agent enqueues its address for verification.
+// The check is driven by real traffic rather than by a sweep.
 //
-// The sink side (validation for analytics, batching, the disk queue) lives in the
-// internal/logsink package ([B9]); the receiver simply calls LogSink.Submit on every
-// line. The edge side (sending the log) is part of [A2]/[B6].
+// Everything else about the line — validation, batching, storage — belongs to
+// the sink, which the receiver simply hands each line to.
 package logs
 
 import (
@@ -24,17 +19,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// errOversizedLine — one line of the batch is longer than maxLineBytes. bufio.Scanner
-// raises bufio.ErrTooLong; for the receiver that is "one broken line", not
-// "a broken batch" — we answer 202 and increment parseErr, so that the edge does not
-// retry the whole batch (which would duplicate the Enqueue for every good
-// line before the bad one). See review.
+// One oversized line is a broken line, not a broken batch: the batch is still
+// accepted, or a retry would duplicate every good line that preceded it.
 var errOversizedLine = errors.New("logs: oversized line in batch")
 
-// maxBodyBytes — the ceiling on one request body. The edge batches BAC_LOG as short
-// lines; 10 MiB leaves room for a batch of hundreds of thousands of records while being a
-// hard fuse against an accidental or malicious enormous POST.
-// B6 will refine it once the real batch size is known.
+// Room for a batch of hundreds of thousands of lines, and a hard fuse against
+// an enormous POST.
 const maxBodyBytes = 10 * 1024 * 1024
 
 // maxLineBytes — the ceiling on one JSON line. The UA is capped at 2 KiB in bac_log.lua,
@@ -49,18 +39,14 @@ type Enqueuer interface {
 	Enqueue(ip, claimedFamily string)
 }
 
-// LogSink — the BAC_LOG receiver ([B9]). The receiver submits every line
-// here; the sink package parses, batches and writes into PostgreSQL with a disk-queue
-// fallback of its own. The interface exists so that the receiver does not depend on logsink (impl
-// — *logsink.Sink).
+// LogSink takes each accepted line. An interface, so the receiver does not
+// depend on the sink implementation.
 type LogSink interface {
 	Submit(line []byte)
 }
 
-// FamilyClassifier — a function turning a UA string into a canonical bot
-// family, or "" when the UA does not look like a search engine. The implementation is
-// rdns.FamilyOfUA. It is injected through the constructor for the same reason as
-// Enqueuer (dependency isolation).
+// FamilyClassifier maps a User-Agent to a crawler family, or "" if it does not
+// claim to be one.
 type FamilyClassifier func(ua string) string
 
 // logLine — the BAC_LOG fields the rDNS worker needs. The JSON arrives with far more
@@ -94,11 +80,8 @@ func NewWithEnqueuer(reg prometheus.Registerer, enqueue Enqueuer, classify Famil
 	return NewWithDeps(reg, enqueue, classify, nil)
 }
 
-// NewWithDeps — a receiver with both optional dependencies. Either of
-// them may be nil:
-//   - enqueue+classify both set → dispatch into the rDNS worker (the B7 function);
-//   - sink set → every line goes to logsink (the B9 function);
-//   - everything nil → skeleton mode, only the received counter.
+// NewWithDeps builds a receiver whose dependencies are all optional: without
+// them it simply counts what it receives.
 func NewWithDeps(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyClassifier, sink LogSink) *Receiver {
 	r := &Receiver{
 		received: prometheus.NewCounter(prometheus.CounterOpts{
@@ -110,11 +93,8 @@ func NewWithDeps(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyCla
 		sink:     sink,
 	}
 	reg.MustRegister(r.received)
-	// parsed/parseErr/botSpotted are metrics of the dispatch path. In skeleton
-	// mode (enqueue==nil) the dispatch returns early and these counters
-	// would never move while sitting at zero in /metrics — the operator
-	// would see a flatline and think the receiver was broken. We register them
-	// only when the dispatch really works. From review.
+	// Registered only when the dispatch is actually wired: a counter that can
+	// never move reads as a broken receiver rather than as a disabled one.
 	if enqueue != nil && classify != nil {
 		r.parsed = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "antibot_backend_log_lines_parsed_total",

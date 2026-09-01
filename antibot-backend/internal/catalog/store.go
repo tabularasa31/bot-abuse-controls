@@ -1,18 +1,13 @@
-// Store — the atomic holder of *Data plus the deterministic assembler of snapshots
-// for the HTTP response. Reads are lock-free through atomic.Pointer; writes (Replace)
-// are sequential and replace the pointer wholesale — a read never sees a partial update
-// across catalogs.
+// Store holds the catalog data and assembles the payloads served over HTTP.
+// Reads are lock-free; a write replaces the whole pointer, so a reader never
+// sees a partially updated set of catalogs.
 //
-// A snapshot is assembled on every read: at ~12 req/s (config-distribution
-// §Channel C / Load) caching to save a hash buys nothing, and an ETag cache
-// would add invalidation.
+// A snapshot is assembled per read: at this request rate caching one would only
+// buy an invalidation problem.
 //
-// A deterministic payload is needed for ETag stability and rests on two
-// invariants:
-//   - every slice in Data is sorted by Normalize() on input (once per
-//     load, not per request — see review);
-//   - every map is serialised through json.Marshal — encoding/json
-//     documentedly writes map keys in lexicographic order.
+// Payloads must be byte-stable or the ETag would change on every request. That
+// rests on slices being sorted once at load time and on maps being marshalled
+// by encoding/json, which orders keys.
 
 package catalog
 
@@ -34,17 +29,13 @@ type Snapshot struct {
 	Version string
 }
 
-// Store — read-mostly storage. It is created with empty catalogs and
-// Version=defaultVersion ("0.0.0"); with that version the server answers 503
-// until Replace puts a real snapshot in — otherwise the edge would be stuck on empty
-// data while seeing a "successful" 200 (see server.handle).
+// Store starts empty, and the server answers 503 until real data arrives —
+// otherwise the edge would take an empty catalog for a successful response.
 type Store struct {
 	data atomic.Pointer[Data]
-	// loaded — a separate "data was put in at least once" signal rather than comparing
-	// Version with defaultVersion. Otherwise an operator who legitimately sets
-	// `version: "0.0.0"` in the YAML (a bootstrap or pre-release) would get a 503
-	// forever — the handler could not tell "not loaded yet" from "we loaded
-	// data carrying that version" (a follow-up from review).
+	// A separate flag rather than comparing against the default version: an
+	// operator may legitimately publish that version, and would then be stuck on
+	// 503 forever.
 	loaded atomic.Bool
 }
 
@@ -54,10 +45,8 @@ func NewStore() *Store {
 	return s
 }
 
-// Replace swaps the data wholesale. It is safe from any number of goroutines (though in the
-// real topology there is one writer — the YAML reloader / the B4 DB poller).
-// It normalises d before publishing: it sorts every slice and deduplicates ASNs,
-// so that the build* functions on the hot path simply read an already-prepared array.
+// Replace swaps the data wholesale, normalising it first so the builders on the
+// read path work from already-sorted input.
 func (s *Store) Replace(d *Data) {
 	if d == nil {
 		d = emptyData()
@@ -67,14 +56,8 @@ func (s *Store) Replace(d *Data) {
 	s.loaded.Store(true)
 }
 
-// HasVerifiedBotIP — whether there is a record (verified OR rejected) for an IP in the
-// verified_bot_ips catalog. The rDNS worker (B7) uses it so as
-// not to touch DNS again — no record means we have not checked yet
-// (provisional on the edge); any status means we already know the verdict
-// within the TTL and there is no point rechecking.
-//
-// Lock-free: data.Load() is atomic, a map[string]string is replaced
-// wholesale by Replace, and reading without locks is safe.
+// HasVerifiedBotIP reports whether an IP has any verdict yet. The rDNS worker
+// uses it to avoid resolving an address it has already decided about.
 func (s *Store) HasVerifiedBotIP(ip string) bool {
 	d := s.data.Load()
 	if d == nil {
@@ -89,11 +72,8 @@ func (s *Store) HasVerifiedBotIP(ip string) bool {
 // sentinel, so as not to fail on a legitimate version: "0.0.0".
 func (s *Store) IsLoaded() bool { return s.loaded.Load() }
 
-// Snapshot assembles the payload for (catalog, site). err != nil for an unknown
-// catalog name or a serialisation error; the handler separates 404 from 500.
-//
-// site="" means the global payload (for catalogs where per-tenant does not apply, the
-// payload is identical to a request with any site).
+// Snapshot assembles the payload for one catalog. An empty site means the
+// global payload.
 func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 	d := s.data.Load()
 	if d == nil {
@@ -147,16 +127,11 @@ type errUnknownCatalog struct{ name string }
 
 func (e errUnknownCatalog) Error() string { return "unknown catalog: " + e.name }
 
-// ----- builders -------------------------------------------------------------
-//
-// Every builder must be deterministic in the content of Data+site —
-// otherwise the ETag would "jitter" on every request and If-None-Match would break.
+// Every builder below must be deterministic, or the ETag would change on every
+// request and conditional requests would stop working.
 
-// buildUABlacklist returns the JSON object `{"active": "<combined-regex>",
-// "staging": ["<pattern>", …]}` (A11). The shape used to be a single combined-regex
-// string (config-distribution.md §"The 'catalog' concept"); to deliver
-// staging, the payload became an object. The wire-schema change is minor
-// (X-Catalog-Version 1.2.0), and the edge parser is updated in the same change.
+// buildUABlacklist returns the active combined regex alongside the staged
+// patterns, which are matched individually so a staging hit can be attributed.
 //
 //   - active  — the combined regex (the global UABlacklist plus, when a site is given,
 //     the per-resource policy[site].UABlacklist). The edge compiles it once per swap
