@@ -1,18 +1,18 @@
-// Store — атомарный держатель *Data + детерминированный сборщик snapshot'ов
-// для HTTP-ответа. Чтения lock-free через atomic.Pointer; запись (Replace)
-// последовательная, заменяет указатель целиком — никаких частичных обновлений
-// между каталогами не видно из-под чтения.
+// Store — the atomic holder of *Data plus the deterministic assembler of snapshots
+// for the HTTP response. Reads are lock-free through atomic.Pointer; writes (Replace)
+// are sequential and replace the pointer wholesale — a read never sees a partial update
+// across catalogs.
 //
-// Snapshot собирается на каждое чтение: при ~12 req/s (config-distribution
-// §Channel C / Load) кэшировать ради экономии хэша смысла нет, а ETag-кэш
-// добавил бы инвалидацию.
+// A snapshot is assembled on every read: at ~12 req/s (config-distribution
+// §Channel C / Load) caching to save a hash buys nothing, and an ETag cache
+// would add invalidation.
 //
-// Детерминизм payload'а нужен для ETag-стабильности и работает за счёт двух
-// инвариантов:
-//   - все срезы в Data отсортированы Normalize()'ом на входе (один раз на
-//     load, не на каждый запрос — см. PR #42 review);
-//   - все map'ы сериализуются через json.Marshal — encoding/json
-//     документированно пишет ключи map'ов в лексикографическом порядке.
+// A deterministic payload is needed for ETag stability and rests on two
+// invariants:
+//   - every slice in Data is sorted by Normalize() on input (once per
+//     load, not per request — see review);
+//   - every map is serialised through json.Marshal — encoding/json
+//     documentedly writes map keys in lexicographic order.
 
 package catalog
 
@@ -26,25 +26,25 @@ import (
 	"sync/atomic"
 )
 
-// Snapshot — то, что отдаём в HTTP-ответ. Body уже сериализован; etag
-// посчитан по нему же — детерминированно для одинаковой Data+site.
+// Snapshot — what we serve in the HTTP response. The body is already serialised, and the etag
+// is computed over it — deterministically for the same Data+site.
 type Snapshot struct {
 	Body    []byte
 	ETag    string
 	Version string
 }
 
-// Store — read-mostly хранилище. Создаётся с пустыми каталогами и
-// Version=defaultVersion ("0.0.0"); сервер по этому версиону отвечает 503,
-// пока Replace не положил реальный snapshot — иначе эдж залип бы на пустых
-// данных, видя "успешный" 200 (см. server.handle).
+// Store — read-mostly storage. It is created with empty catalogs and
+// Version=defaultVersion ("0.0.0"); with that version the server answers 503
+// until Replace puts a real snapshot in — otherwise the edge would be stuck on empty
+// data while seeing a "successful" 200 (see server.handle).
 type Store struct {
 	data atomic.Pointer[Data]
-	// loaded — отдельный сигнал "данные положены хотя бы раз" вместо сравнения
-	// Version с defaultVersion. Иначе оператор, который легитимно ставит
-	// `version: "0.0.0"` в YAML (bootstrap / pre-release), получал бы 503
-	// до бесконечности — handler не различал бы "ещё не загружали" от "загрузили
-	// данные с этим версионом" (PR #42 follow-up).
+	// loaded — a separate "data was put in at least once" signal rather than comparing
+	// Version with defaultVersion. Otherwise an operator who legitimately sets
+	// `version: "0.0.0"` in the YAML (a bootstrap or pre-release) would get a 503
+	// forever — the handler could not tell "not loaded yet" from "we loaded
+	// data carrying that version" (a follow-up from review).
 	loaded atomic.Bool
 }
 
@@ -54,10 +54,10 @@ func NewStore() *Store {
 	return s
 }
 
-// Replace меняет данные целиком. Безопасно из любого числа горутин (но в
-// реальной топологии писатель один — YAML-reloader / B4 db-poller).
-// Нормализует d перед публикацией: сортирует все срезы и дедуплицирует ASN,
-// чтобы build*-функции на hot-path просто читали уже подготовленный массив.
+// Replace swaps the data wholesale. It is safe from any number of goroutines (though in the
+// real topology there is one writer — the YAML reloader / the B4 DB poller).
+// It normalises d before publishing: it sorts every slice and deduplicates ASNs,
+// so that the build* functions on the hot path simply read an already-prepared array.
 func (s *Store) Replace(d *Data) {
 	if d == nil {
 		d = emptyData()
@@ -67,14 +67,14 @@ func (s *Store) Replace(d *Data) {
 	s.loaded.Store(true)
 }
 
-// HasVerifiedBotIP — есть ли запись (verified ИЛИ rejected) для IP в
-// каталоге verified_bot_ips. rDNS-воркер (B7) использует это, чтобы
-// не дёргать DNS повторно — отсутствие записи = ещё не проверяли
-// (provisional на edge); наличие любого статуса = уже знаем verdict
-// в пределах TTL, перепроверять нет смысла.
+// HasVerifiedBotIP — whether there is a record (verified OR rejected) for an IP in the
+// verified_bot_ips catalog. The rDNS worker (B7) uses it so as
+// not to touch DNS again — no record means we have not checked yet
+// (provisional on the edge); any status means we already know the verdict
+// within the TTL and there is no point rechecking.
 //
-// Lock-free: data.Load() атомарный, map[string]string Replace'ом
-// меняется целиком, читать без локов безопасно.
+// Lock-free: data.Load() is atomic, a map[string]string is replaced
+// wholesale by Replace, and reading without locks is safe.
 func (s *Store) HasVerifiedBotIP(ip string) bool {
 	d := s.data.Load()
 	if d == nil {
@@ -84,21 +84,21 @@ func (s *Store) HasVerifiedBotIP(ip string) bool {
 	return ok
 }
 
-// IsLoaded возвращает true, когда Replace вызывался хотя бы один раз.
-// Handler по нему решает 200 vs 503 — не по сравнению Version с защитной
-// сентинелью, чтобы не падать на легитимном version: "0.0.0".
+// IsLoaded returns true once Replace has been called at least once.
+// The handler decides 200 versus 503 by it — not by comparing Version with a defensive
+// sentinel, so as not to fail on a legitimate version: "0.0.0".
 func (s *Store) IsLoaded() bool { return s.loaded.Load() }
 
-// Snapshot собирает payload для (catalog, site). err != nil для неизвестного
-// имени каталога или ошибки сериализации; handler разделяет 404 / 500.
+// Snapshot assembles the payload for (catalog, site). err != nil for an unknown
+// catalog name or a serialisation error; the handler separates 404 from 500.
 //
-// site="" — глобальный payload (для каталогов, где per-tenant не применим,
-// payload идентичен запросу с любым site).
+// site="" means the global payload (for catalogs where per-tenant does not apply, the
+// payload is identical to a request with any site).
 func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 	d := s.data.Load()
 	if d == nil {
-		// Не должно случаться — emptyData ставится в NewStore. Защита от
-		// чужой попытки сунуть nil в atomic.Pointer.
+		// Should never happen — emptyData is set in NewStore. A guard against
+		// somebody trying to push a nil into the atomic.Pointer.
 		d = emptyData()
 	}
 
@@ -116,7 +116,7 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 	case "ip_whitelist":
 		body, err = buildIPWhitelist(d, site)
 	case "asn_datacenters":
-		body = buildASNDatacenters(d) // ручная сборка ради числовой сортировки, ошибок нет
+		body = buildASNDatacenters(d) // assembled by hand for numeric sorting; no errors
 	case "tls_fp_catalog":
 		body, err = buildTLSFPCatalog(d)
 	case "tls_fp_browser_profiles":
@@ -135,43 +135,43 @@ func (s *Store) Snapshot(catalog, site string) (Snapshot, error) {
 	}
 
 	sum := sha256.Sum256(body)
-	// Strong ETag (без слабого W/) — payload собран детерминированно, побайтовое
-	// равенство = семантическое равенство, никаких whitespace-различий.
+	// A strong ETag (no weak W/) — the payload is assembled deterministically, so byte
+	// equality means semantic equality and there are no whitespace differences.
 	etag := `"` + hex.EncodeToString(sum[:]) + `"`
 	return Snapshot{Body: body, ETag: etag, Version: d.Version}, nil
 }
 
-// errUnknownCatalog различает 404 (имя не из списка) от 500 (сериализация
-// упала): handler смотрит errors.As, чтобы не лить 500 при опечатке в URL.
+// errUnknownCatalog separates 404 (a name outside the list) from 500 (serialisation
+// failed): the handler checks errors.As, so as not to emit a 500 on a typo in the URL.
 type errUnknownCatalog struct{ name string }
 
 func (e errUnknownCatalog) Error() string { return "unknown catalog: " + e.name }
 
 // ----- builders -------------------------------------------------------------
 //
-// Каждый builder обязан быть детерминированным по содержимому Data+site —
-// иначе ETag будет «дёргаться» на каждом запросе и If-None-Match сломается.
+// Every builder must be deterministic in the content of Data+site —
+// otherwise the ETag would "jitter" on every request and If-None-Match would break.
 
-// buildUABlacklist отдаёт JSON-объект `{"active": "<combined-regex>",
-// "staging": ["<pattern>", …]}` (A11). Раньше форма была одной combined-regex
-// строкой (config-distribution.md §"The 'catalog' concept"); чтобы доставлять
-// staging, payload стал объектом. Изменение wire-схемы — минорное
-// (X-Catalog-Version 1.2.0), edge-парсер обновляется в том же изменении.
+// buildUABlacklist returns the JSON object `{"active": "<combined-regex>",
+// "staging": ["<pattern>", …]}` (A11). The shape used to be a single combined-regex
+// string (config-distribution.md §"The 'catalog' concept"); to deliver
+// staging, the payload became an object. The wire-schema change is minor
+// (X-Catalog-Version 1.2.0), and the edge parser is updated in the same change.
 //
-//   - active  — combined regex (глобальные UABlacklist + при site —
-//     per-resource policy[site].UABlacklist). Эдж компилирует один раз на swap
-//     и при матче эмитит verdict=block.
-//   - staging — СПИСОК отдельных системных staging-паттернов (не combined):
-//     эдж матчит каждый отдельно, чтобы записать staging_match с конкретным
-//     pattern_id (`ua_blacklist:<pattern>`); combined-строка потеряла бы, какой
-//     именно паттерн сработал. Per-resource policy — runtime state, staged
-//     rollout к нему не применяется, поэтому в staging только системные.
+//   - active  — the combined regex (the global UABlacklist plus, when a site is given,
+//     the per-resource policy[site].UABlacklist). The edge compiles it once per swap
+//     and emits verdict=block on a match.
+//   - staging — the LIST of individual system staging patterns (not combined):
+//     the edge matches each one separately in order to record a staging_match with the specific
+//     pattern_id (`ua_blacklist:<pattern>`); a combined string would lose which
+//     pattern actually fired. A per-resource policy is runtime state, and staged
+//     rollout does not apply to it, so staging holds system patterns only.
 //
-// Каждый паттерн валидируется в Validate через regexp.Compile, так что в
-// payload попадает только синтаксически корректный RE2.
+// Every pattern is validated in Validate through regexp.Compile, so only
+// syntactically correct RE2 reaches the payload.
 func buildUABlacklist(d *Data, site string) ([]byte, error) {
-	// Срезы уже отсортированы normalize(). Просто конкатенируем — порядок
-	// "system, потом per-resource" фиксирован: если поменяем, не забыть про
+	// The slices are already sorted by normalize(). We simply concatenate — the order
+	// "system, then per-resource" is fixed: if we change it, remember
 	// X-Catalog-Version major.
 	active := make([]string, 0, len(d.UABlacklist)+4)
 	active = append(active, d.UABlacklist...)
@@ -194,10 +194,10 @@ func buildUABlacklist(d *Data, site string) ([]byte, error) {
 	return jsonBytes(out)
 }
 
-// combineRegex склеивает паттерны в одну альтернацию `(?:p1)|(?:p2)|…`.
-// Non-capturing group: нам не нужны $1/$2 на edge, но альтернация должна
-// биндиться к одному паттерну, не к произвольному `|` внутри. Пустой вход
-// → "" (эдж трактует пустую строку как «нет паттернов»).
+// combineRegex joins the patterns into one alternation `(?:p1)|(?:p2)|…`.
+// A non-capturing group: we need no $1/$2 on the edge, but the alternation must
+// bind to one pattern rather than to an arbitrary `|` inside it. An empty input
+// → "" (the edge treats an empty string as "no patterns").
 func combineRegex(patterns []string) string {
 	var combined string
 	for _, p := range patterns {
@@ -212,11 +212,11 @@ func combineRegex(patterns []string) string {
 	return combined
 }
 
-// buildTLSFPBlocklist кодирует каждую запись как "<status>:block" (A11),
-// симметрично tls_fp_catalog / verified_bot_ips: shared_dict на эдже хранит
-// готовую строку без per-entry JSON-разбора. Вердикт для этого каталога
-// всегда block; статус разводит active (эдж эмитит verdict=block) vs staging
-// (эдж пишет staging_match, не блокирует). Edge парсит split-по-первой-`:`.
+// buildTLSFPBlocklist encodes every record as "<status>:block" (A11),
+// symmetrically with tls_fp_catalog / verified_bot_ips: the edge's shared_dict stores a
+// ready string with no per-entry JSON parsing. The verdict for this catalog is
+// always block; the status separates active (the edge emits verdict=block) from staging
+// (the edge writes staging_match and does not block). The edge parses by splitting on the first `:`.
 func buildTLSFPBlocklist(d *Data) ([]byte, error) {
 	out := make(map[string]string, len(d.TLSFPBlocklist))
 	for fp, status := range d.TLSFPBlocklist {
@@ -226,12 +226,12 @@ func buildTLSFPBlocklist(d *Data) ([]byte, error) {
 }
 
 func buildIPBlocklist(d *Data, site string) ([]byte, error) {
-	// Системный ip_blocklist + per-resource policy[site].IPBlocklist. Эдж
-	// различит источник по rule_source через отдельный лог-маппинг — здесь
-	// просто объединяем; контракт payload — `{cidr: "<status>:block"}` (A11):
-	// статус разводит active (verdict=block) vs staging (staging_match без
-	// блокировки). Системные записи несут свой status; per-resource всегда
-	// active (policy — runtime state, staged rollout к нему не применяется).
+	// The system ip_blocklist plus the per-resource policy[site].IPBlocklist. The edge
+	// tells the source apart through rule_source in a separate log mapping — here we
+	// simply merge them; the payload contract is `{cidr: "<status>:block"}` (A11):
+	// the status separates active (verdict=block) from staging (staging_match with no
+	// block). System records carry their own status; per-resource ones are always
+	// active (a policy is runtime state and staged rollout does not apply to it).
 	out := make(map[string]string, len(d.IPBlocklist)+4)
 	for cidr, status := range d.IPBlocklist {
 		out[cidr] = status + ":block"
@@ -247,8 +247,8 @@ func buildIPBlocklist(d *Data, site string) ([]byte, error) {
 }
 
 func buildIPWhitelist(d *Data, site string) ([]byte, error) {
-	// Системный + per-resource. Дедуп через set: оба источника могут
-	// независимо иметь один и тот же CIDR (например, корпоративная подсеть).
+	// System plus per-resource. Deduplicated through a set: both sources may
+	// independently hold the same CIDR (a corporate subnet, say).
 	if site == "" {
 		return jsonBytes(d.IPWhitelist)
 	}
@@ -270,16 +270,16 @@ func buildIPWhitelist(d *Data, site string) ([]byte, error) {
 			merged = append(merged, c)
 		}
 	}
-	sort.Strings(merged) // обе ветки уже sorted из normalize, но merge порядок ломает
+	sort.Strings(merged) // both branches are already sorted by normalize, but the merge breaks the order
 	return jsonBytes(merged)
 }
 
-// buildASNDatacenters пишет JSON-объект руками: ключи — числа,
-// json.Marshal(map[uint32]int) выдал бы их в лексикографическом порядке
-// ("10" < "2"), а контракт §C1 — числовой порядок (читаемее в diff'ах
-// между версиями каталога).
+// buildASNDatacenters writes the JSON object by hand: the keys are numbers, and
+// json.Marshal(map[uint32]int) would emit them in lexicographic order
+// ("10" < "2"), whereas the §C1 contract is numeric order (which reads better in diffs
+// between catalog versions).
 func buildASNDatacenters(d *Data) []byte {
-	asns := d.ASNDatacenters // уже sorted+deduped в normalize()
+	asns := d.ASNDatacenters // already sorted and deduped in normalize()
 	buf := make([]byte, 0, len(asns)*16+2)
 	buf = append(buf, '{')
 	for i, asn := range asns {
@@ -296,26 +296,26 @@ func buildASNDatacenters(d *Data) []byte {
 
 func buildPolicy(d *Data, site string) ([]byte, error) {
 	if site != "" {
-		// Per-tenant: один host. Отсутствие записи = дефолт пула из B4
-		// (mode=shadow, observe-only), не 404 и не пустой Policy{} —
-		// edge должен сразу видеть валидный mode и не падать на "" в
-		// switch'е по режиму. См. PoolDefault и config-distribution.md
+		// Per tenant: one host. A missing record means the B4 pool default
+		// (mode=shadow, observe-only), not a 404 and not an empty Policy{} —
+		// the edge must immediately see a valid mode and must not break on "" in the
+		// mode switch. See PoolDefault and config-distribution.md
 		// §"Per-resource lookup — keyed by Host".
 		if p, ok := d.Policy[site]; ok {
 			return jsonBytes(p)
 		}
 		return jsonBytes(PoolDefault())
 	}
-	// Без site — полный map. На практике эдж всегда зовёт с site (он знает
-	// $host), но контракт оставляет lookup-режим для дашборда [B10] / аудита.
+	// Without a site — the full map. In practice the edge always calls with a site (it knows
+	// $host), but the contract keeps the lookup mode for the dashboard [B10] and for audits.
 	return jsonBytes(d.Policy)
 }
 
-// buildTLSFPCatalog кладёт каждую запись в payload как composite string
-// `<status>:<family>` — симметрично verified_bot_ips ("<status>:<family>"),
-// чтобы shared_dict на эдже хранил готовое значение без per-entry JSON-
-// разбора. Edge парсит split-по-первой-`:` и решает active vs staging
-// своей логикой (build_catalog в tls_fp.lua возвращает (active, staging) tuple).
+// buildTLSFPCatalog puts each record into the payload as the composite string
+// `<status>:<family>` — symmetrically with verified_bot_ips ("<status>:<family>"),
+// so that the edge's shared_dict stores a ready value with no per-entry JSON
+// parsing. The edge splits on the first `:` and decides active versus staging
+// with its own logic (build_catalog in tls_fp.lua returns an (active, staging) tuple).
 func buildTLSFPCatalog(d *Data) ([]byte, error) {
 	out := make(map[string]string, len(d.TLSFPCatalog))
 	for hb, entry := range d.TLSFPCatalog {
@@ -324,9 +324,9 @@ func buildTLSFPCatalog(d *Data) ([]byte, error) {
 	return jsonBytes(out)
 }
 
-// buildTLSFPBrowserProfiles — то же composite-кодирование, но во второй
-// позиции число (десятичная строка). Edge на cipher_count числовое
-// сравнение, поэтому tonumber на стороне Lua.
+// buildTLSFPBrowserProfiles — the same composite encoding, but the second
+// position is a number (a decimal string). The edge compares cipher_count numerically,
+// hence the tonumber on the Lua side.
 func buildTLSFPBrowserProfiles(d *Data) ([]byte, error) {
 	out := make(map[string]string, len(d.TLSFPBrowserProfiles))
 	for family, prof := range d.TLSFPBrowserProfiles {
@@ -336,11 +336,11 @@ func buildTLSFPBrowserProfiles(d *Data) ([]byte, error) {
 }
 
 func buildAttackMode(d *Data, site string) ([]byte, error) {
-	// Single source-of-truth: policy[host].AttackMode. Дублирующего top-level
-	// map'а больше нет — два источника создавали split-brain (OR-merge не
-	// давал выключить флаг через один источник, если в другом он остался).
-	// Emergency-override от B10 должен идти ТЕМ ЖЕ путём (записывая Policy),
-	// тогда поведение наблюдаемо одним catalog'ом.
+	// A single source of truth: policy[host].AttackMode. The duplicating top-level
+	// map is gone — two sources created a split brain (an OR merge made it impossible
+	// to switch the flag off through one source while it remained set in the other).
+	// An emergency override from B10 must go the SAME way (by writing Policy),
+	// so that the behaviour is observable through one catalog.
 	if site != "" {
 		on := false
 		if p, ok := d.Policy[site]; ok {
@@ -348,8 +348,8 @@ func buildAttackMode(d *Data, site string) ([]byte, error) {
 		}
 		return jsonBytes(map[string]bool{"on": on})
 	}
-	// Без site — полная карта host→on. Включаем явный false тоже: дашборд
-	// должен видеть "управляется, но выключен" отдельно от "не настроен".
+	// Without a site — the full host→on map. We include an explicit false too: the dashboard
+	// must see "managed but off" separately from "not configured".
 	out := make(map[string]bool, len(d.Policy))
 	for h, p := range d.Policy {
 		out[h] = p.AttackMode
@@ -357,10 +357,10 @@ func buildAttackMode(d *Data, site string) ([]byte, error) {
 	return jsonBytes(out)
 }
 
-// jsonBytes — обёртка над json.Marshal, чтобы вызывающий код был
-// единообразен. Не паникует на ошибку: builders возвращают её наверх,
-// handler отвечает 500 — это лучше, чем уронить процесс из-за нашей
-// неожиданной структуры (PR #42 review: error path, not panic).
+// jsonBytes — a wrapper over json.Marshal, so that calling code stays
+// uniform. It does not panic on an error: the builders return it upwards and the
+// handler answers 500 — which is better than killing the process because of our own
+// unexpected structure (from review: an error path, not a panic).
 func jsonBytes(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
