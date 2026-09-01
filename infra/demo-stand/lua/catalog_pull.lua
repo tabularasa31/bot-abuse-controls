@@ -1,27 +1,22 @@
--- The Channel C client: pulls the catalogs from the backend.
+-- The Channel C client: one timer per catalog does a conditional GET, writes
+-- the payload under a new generation, flips it and sweeps the old one.
 --
--- One background timer per catalog does a conditional GET, writes the payload
--- under a new generation, flips the generation and sweeps the old one.
--- Fail-stale throughout: any transport, status, decode or version error is
--- logged and skipped, leaving the previous generation in place.
+-- Fail-stale throughout: any error is logged and skipped, leaving the previous
+-- generation in place.
 --
--- Each catalog is a descriptor holding its endpoint, dict and apply/sweep
--- functions. `name` is kept separate from `dict_name` because the metrics are
--- keyed by catalog name, and the two differ for some catalogs.
+-- `name` is kept separate from `dict_name` because the metrics are keyed by
+-- catalog name, and for some catalogs the two differ.
 
 local cjson        = require "cjson.safe"
 local fp_state     = require "tls_fp_blocklist_state"
 
 local _M = {}
 
--- Major version of the X-Catalog-Version header we accept. Bump in lockstep
--- with backend B3 payload-shape changes; an incompatible major keeps the
--- previous generation and bumps edge_sidecar_version_mismatch_total.
+-- An incompatible major keeps the previous generation and counts a mismatch.
 _M.SUPPORTED_VERSION_MAJOR = "1"
 
--- Cleanup is explicit rather than a per-entry TTL: the 304 short-circuit means
--- entries are never rewritten, so a TTL would silently age out a catalog that
--- simply had not changed.
+-- Cleanup is explicit rather than a TTL: the 304 short-circuit means entries
+-- are never rewritten, so a TTL would age out an unchanged catalog.
 _M.catalogs = {
     tls_fp_blocklist = {
         name        = "tls_fp_blocklist",
@@ -30,9 +25,8 @@ _M.catalogs = {
         gen_key     = fp_state.META_GEN_KEY,   -- "tls_fp_blocklist_gen"
         etag_key    = fp_state.META_ETAG_KEY,
         version_key = "tls_fp_blocklist_version",
-        -- A single failed write fails the whole apply, so the caller can roll
-        -- back before the flip rather than sweep the old generation and leave a
-        -- half-written catalog behind.
+        -- One failed write fails the apply, so the caller can roll back before
+        -- the flip rather than leave a half-written catalog.
         apply = function(dict, entries, new_gen)
             local n = 0
             for fp, verdict in pairs(entries) do
@@ -46,17 +40,13 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- The scan locks the dict; at these catalog sizes that is microseconds,
-        -- but past tens of thousands of keys it would need an index per
-        -- generation instead.
-        --
-        -- Matched through the typed inverse of key() rather than a raw suffix,
-        -- so that a future second writer's keys cannot be deleted by an
-        -- accidental tail match.
+        -- The scan locks the dict; past tens of thousands of keys this would
+        -- need an index per generation. Matched through the typed inverse of
+        -- key(), so a future second writer's keys cannot be caught by a tail
+        -- match.
         sweep = function(dict, old_gen)
-            -- old_gen == 0 is the static seed from init.lua; sweeping it on
-            -- the first pull is intentional — once the live catalog lands,
-            -- the seed becomes redundant.
+            -- Generation 0 is the static seed; sweeping it once the live
+            -- catalog lands is intentional.
             if old_gen < 0 then return 0 end
             local n = 0
             for _, k in ipairs(dict:get_keys(0)) do
@@ -69,8 +59,7 @@ _M.catalogs = {
         end,
     },
 
-    -- map(ip → "<status>:<family>"). An empty dict means every searchbot UA
-    -- gets the provisional fastpath, which is the SEO-safe default.
+    -- An empty dict means every searchbot UA gets the provisional fastpath.
     verified_bot_ips = {
         name        = "verified_bot_ips",
         endpoint    = "/catalog/verified_bot_ips",
@@ -91,14 +80,9 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- A suffix match is safe here because this catalog is the dict's only
-        -- writer. This is the dict sized for tens of thousands of entries, so
-        -- it is the first that would need a per-generation index instead of a
-        -- full scan.
+        -- A suffix match is safe: this catalog is the dict's only writer.
         sweep = function(dict, old_gen)
-            -- The suffix match only holds for numeric generations. Asserted so
-            -- that switching to, say, a content hash fails here rather than
-            -- silently shadowing IP-shaped keys.
+            -- The suffix match only holds for numeric generations.
             assert(type(old_gen) == "number",
                 "verified_bot_ips.sweep: old_gen must be a number, got " ..
                 type(old_gen) .. " — sweep relies on numeric `:<gen>` suffix")
@@ -115,8 +99,6 @@ _M.catalogs = {
         end,
     },
 
-    -- map(hash_b → "<status>:<family>"), the automation signatures behind
-    -- tls_fp_impersonator.
     tls_fp_catalog = {
         name        = "tls_fp_catalog",
         endpoint    = "/catalog/tls_fp_catalog",
@@ -137,9 +119,7 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- The same suffix-match approach as verified_bot_ips: the gen is numeric and
-        -- hash_b is hex without a `:`. We keep the contract explicit with an assert, in case
-        -- somebody later decides to make the gen a string (a content hash).
+        -- Same suffix match: the generation is numeric and hash_b has no `:`.
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "tls_fp_catalog.sweep: old_gen must be a number, got " ..
@@ -157,8 +137,6 @@ _M.catalogs = {
         end,
     },
 
-    -- map(family → "<status>:<expected_cipher_cnt>"). A handful of entries, but
-    -- it follows the same swap model as the rest.
     tls_fp_browser_profiles = {
         name        = "tls_fp_browser_profiles",
         endpoint    = "/catalog/tls_fp_browser_profiles",
@@ -196,9 +174,8 @@ _M.catalogs = {
         end,
     },
 
-    -- An object rather than a per-key map: the active side is one combined
-    -- regex, and the staging side a list matched per pattern for attribution.
-    -- So this stores two keys per generation.
+    -- An object, not a per-key map: one combined regex plus a staged list
+    -- matched per pattern, so two keys per generation.
     ua_blacklist = {
         name        = "ua_blacklist",
         endpoint    = "/catalog/ua_blacklist",
@@ -207,10 +184,8 @@ _M.catalogs = {
         etag_key    = "ua_blacklist_etag",
         version_key = "ua_blacklist_version",
         apply = function(dict, entries, new_gen)
-            -- entries = { active = "<combined>", staging = { ... } }. A missing
-            -- field is tolerated (treated as empty) so a partial payload can't
-            -- crash the pull — handle_response already type-checked `entries`
-            -- is a table.
+            -- A missing field is treated as empty, so a partial payload cannot
+            -- crash the pull.
             local active = entries.active
             if type(active) ~= "string" then active = "" end
             local ok1, err1 = dict:set("active:" .. new_gen, active)
@@ -235,8 +210,7 @@ _M.catalogs = {
             end
             return true, 2
         end,
-        -- Fixed two-key layout per gen, so sweep just deletes the old gen's
-        -- `active:` and `staging:` keys (no get_keys scan needed).
+        -- Fixed two-key layout, so the sweep needs no scan.
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "ua_blacklist.sweep: old_gen must be a number, got " ..
@@ -253,9 +227,8 @@ _M.catalogs = {
         end,
     },
 
-    -- map(cidr → "<status>:block"). An IPv6 CIDR contains colons, but the
-    -- generation is always the last segment, so the suffix sweep still holds.
-    -- The per-host list is a separate catalog and is not merged here.
+    -- An IPv6 CIDR contains colons, but the generation is always the last
+    -- segment. The per-host list is a separate catalog.
     ip_blocklist = {
         name        = "ip_blocklist",
         endpoint    = "/catalog/ip_blocklist",
@@ -293,8 +266,7 @@ _M.catalogs = {
         end,
     },
 
-    -- A flat array: an allow list has no per-entry status, since staged rollout
-    -- makes no sense for it. Stored per key anyway, to match the others.
+    -- A flat array: an allow list has no status, since staging cannot apply.
     ip_whitelist = {
         name        = "ip_whitelist",
         endpoint    = "/catalog/ip_whitelist",
@@ -303,7 +275,6 @@ _M.catalogs = {
         etag_key    = "ip_whitelist_etag",
         version_key = "ip_whitelist_version",
         apply = function(dict, entries, new_gen)
-            -- entries is a JSON array → a Lua sequence; iterate with ipairs.
             -- A non-string element (malformed payload) is skipped rather than
             -- crashing the pull — handle_response already type-checked the
             -- top-level value is a table.

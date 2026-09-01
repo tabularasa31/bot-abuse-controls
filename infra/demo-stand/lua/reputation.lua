@@ -1,23 +1,18 @@
 -- L2 reputation: source IP, ASN and geo.
 --
--- Allow rules run before blocking ones — a whitelisted IP wins and the
--- blocklist is never consulted. The blocking side records the verdict and goes
--- through policy.enforce; the allow side deliberately does not short-circuit
--- the cascade on the stand, so a later fingerprint block still shows up in the
--- log.
+-- Allow rules run before blocking ones, so a whitelisted IP wins. The allow
+-- side deliberately does not short-circuit the cascade on the stand, so a later
+-- fingerprint block still shows up in the log.
 --
--- The system lists (ip_whitelist, ip_blocklist, asn_datacenters) are compiled
--- from local config at startup and then swapped to the Channel C snapshot on a
--- generation flip. Blocklist entries with status=staging compile into a
--- parallel matcher that only records staging_match and never blocks.
+-- The system lists are compiled from local config at startup and swapped to the
+-- Channel C snapshot on a generation flip; staged entries compile into a
+-- parallel matcher that only records and never blocks.
 --
--- Each request is also matched against the host's own policy lists. Rule names
--- are namespaced (`ip_blocklist` versus `policy.ip_blocklist`) so hits stay
--- attributable to the right source.
+-- Each request is also matched against the host's own lists, under namespaced
+-- rule names so hits stay attributable.
 --
--- reputation:asn_dc is a tag rather than a rule: it marks datacenter traffic
--- and emits no verdict. geo_blocklist is per-host only — there is no
--- system-wide country list, since geo gating is a customer choice.
+-- asn_dc is a tag, not a rule. geo_blocklist is per-host only: geo gating is a
+-- customer choice, so there is no system-wide country list.
 
 local policy          = require "policy"
 local policy_matchers = require "policy_matchers"
@@ -46,9 +41,7 @@ function _M.active_values(list)
     return out
 end
 
--- pure: array of `value` strings with status=staging (A11). The staging
--- counterpart of active_values — used to build the observe-only staging
--- matcher. No ngx / ipmatcher dependency (unit-tested in reputation_test.lua).
+-- The staged counterpart of active_values.
 function _M.staging_values(list)
     local out = {}
     for _, e in ipairs(list or {}) do
@@ -61,9 +54,6 @@ function _M.staging_values(list)
     return out
 end
 
--- pure: array of strings -> lookup set { [v] = true }. Used for the
--- asn_datacenters set (membership test for the reputation:asn_dc tag). No
--- ngx dependency — unit-tested in tests/reputation_test.lua.
 function _M.to_set(values)
     local set = {}
     for _, v in ipairs(values or {}) do
@@ -72,17 +62,15 @@ function _M.to_set(values)
     return set
 end
 
--- Blocks only when a whitelist is configured and the country is known and
--- outside it. An absent whitelist or an unknown country never blocks.
+-- Blocks only when a whitelist is configured and the country is outside it.
 function _M.country_blocked(allow, cc)
     if not allow or not next(allow) then return false end
     if not cc or cc == "" then return false end
     return not allow[cc]
 end
 
--- For the geo lookup only. A header override is available for testing behind a
--- toggle that is off by default; the IP matchers always use the real
--- remote_addr, so a caller-supplied header can never move a verdict.
+-- For the geo lookup only. The IP matchers always use the real remote_addr, so
+-- the testing header override can never move a verdict.
 local function geo_lookup_ip(remote_addr)
     if _M.demo_geo_header then
         local override = ngx.var.http_x_demo_ip
@@ -91,16 +79,12 @@ local function geo_lookup_ip(remote_addr)
     return remote_addr
 end
 
--- Compiles the on-disk lists into the matchers the request path reads.
---
 -- A malformed CIDR aborts the start rather than nilling the list: one bad line
--- silently disabling the whole whitelist or blocklist is a protection gap
--- nobody would notice.
+-- silently disabling a whole list is a gap nobody would notice.
 function _M.build(config)
     local ipmatcher = require "resty.ipmatcher"
     local defaults  = config.defaults or {}
 
-    -- enabled unless the rule's defaults.conf section sets enabled=false.
     local function rule_enabled(section, name)
         local rule = (defaults[section] or {})[name] or {}
         return rule.enabled ~= false
@@ -117,14 +101,12 @@ function _M.build(config)
         return m, #values
     end
 
-    -- Kept separate from the matchers, which cannot distinguish "disabled"
-    -- from "no entries". The per-host lists honour the same switch: disabling
-    -- the rule during an incident must stop all IP blocking.
+    -- Kept separate from the matchers, which cannot distinguish "disabled" from
+    -- "no entries". The per-host lists honour the same switch.
     _M.ip_whitelist_enabled = rule_enabled("allow", "ip_whitelist")
     _M.ip_blocklist_enabled = rule_enabled("blocking", "ip_blocklist")
 
-    -- A value map, so a match returns the CIDR that matched — that is the
-    -- identifier recorded in staging_match.
+    -- A value map, so a match returns the CIDR recorded in staging_match.
     local function staging_matcher(list, label, enabled)
         if not enabled then return nil, {} end
         local values = _M.staging_values(list)
@@ -147,25 +129,17 @@ function _M.build(config)
         staging_matcher(config.blocklist_ip, "blocklist_ip.conf (staging)",
                         _M.ip_blocklist_enabled)
 
-    -- asn_datacenters.conf -> membership set for the reputation:asn_dc tag.
-    -- Reuses active_values (drops blanks/staging). The tag has no enable flag
-    -- of its own (config-templates tags carry no toggle); the per-stage
-    -- kill-switch below disables it along with the rest of the stage.
+    -- The tag has no toggle of its own; the per-stage kill switch covers it.
     _M.asn_dc_set = _M.to_set(_M.active_values(config.asn_datacenters))
 
-    -- geo_blocklist runtime toggle (rollback/incident), mirroring the IP rules.
-    -- Dormant regardless in Phase 1 — there is no country whitelist source yet.
+    -- Dormant in Phase 1: there is no country whitelist source yet.
     _M.geo_enabled = rule_enabled("blocking", "geo_blocklist")
 
-    -- Stand-only X-Demo-IP override, off unless explicitly enabled.
     _M.demo_geo_header = (os.getenv("BAC_DEMO_GEO_HEADER") == "on")
 
-    -- Stage off via the shared kill-switch helper (config-templates.md
-    -- kill_switch; defaults.conf [kill_switch.*]).
     _M.enabled = require("config").stage_enabled(defaults, "reputation")
 
-    -- nil means the first refresh rebuilds. The matchers above are the
-    -- cold-start state until the catalog lands.
+    -- nil means the first refresh rebuilds from the cold-start state.
     _M._cached_gen_ip  = nil
     _M._cached_gen_wl  = nil
     _M._cached_gen_asn = nil
@@ -173,9 +147,8 @@ function _M.build(config)
     return _M, wl_n, bl_n
 end
 
--- Rebuilds the active and staging matchers on a generation flip; in steady
--- state this is one dict read and an integer compare. Fail-soft: a rebuild that
--- fails keeps the previous matcher.
+-- Rebuilds both matchers on a generation flip. Fail-soft: a failed rebuild
+-- keeps the previous matcher.
 function _M.refresh()
     if not ngx or not ngx.shared then return end
     local meta = ngx.shared.meta
@@ -212,7 +185,6 @@ function _M.refresh()
         end
     end
 
-    -- Active matcher: empty → nil (rule is a no-op); build error → keep previous.
     if #active == 0 then
         _M.blocklist = nil
     else
@@ -225,7 +197,6 @@ function _M.refresh()
         end
     end
 
-    -- Staging matcher (value-map so match() returns the CIDR for pattern_id).
     local prev = _M.blocklist_staging_values
     if next(staging_vmap) == nil then
         _M.blocklist_staging        = nil

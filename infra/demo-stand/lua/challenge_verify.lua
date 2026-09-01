@@ -1,18 +1,14 @@
--- The POST /__challenge/verify endpoint.
+-- The POST /__challenge/verify endpoint: takes the solver's payload and on
+-- success issues a clearance cookie.
 --
--- Takes the JS solver's payload, and on success issues a clearance cookie and
--- answers 200; the page then reloads the original URL and fastpaths.
+-- It sits outside the cascade deliberately — the answer arrives at a new URL,
+-- and running the cascade here would bounce it back to a challenge before the
+-- cookie could be issued.
 --
--- It sits outside the cascade deliberately. The answer arrives at a new URL, and
--- if the cascade ran here the grey verdict would bounce it back to a challenge
--- before the cookie could be issued.
+-- cascade_version pins the payload to the template, so a browser holding a page
+-- cached from before a rollout cannot POST the old nonce format.
 --
--- The payload contract is pinned to the template by cascade_version, which is
--- compared against the server's: a browser holding a cached page from before a
--- rollout would otherwise POST the old nonce format.
---
--- Replay protection is the 60 s TTL plus single use — the first successful
--- verify records the nonce, and a second one inside the window is refused.
+-- Replay protection is the short TTL plus single use.
 
 local cjson  = require "cjson.safe"
 local hmac   = require "resty.openssl.hmac"
@@ -28,25 +24,18 @@ if not ok_config then config = nil end
 
 local _M = {}
 
--- Must match the constant in the page. It is a pepper, not a secret: the
--- cryptographic strength is in the nonce HMAC, and this only proves JS ran.
--- Changing it requires a CASCADE_VERSION bump, or cached pages start failing.
+-- Must match the constant in the page. A pepper, not a secret: it only proves
+-- JS ran. Changing it requires a CASCADE_VERSION bump.
 local JS_SECRET = "tf_challenge_v1_proof_of_execution"
 
--- Chosen per request from the attack state of exactly this host, so one
--- customer's attack mode cannot shorten another's cookies. The short TTL is
--- itself the during-attack marker the L2.1 verify reads.
+-- Per host, so one customer's attack mode cannot shorten another's cookies.
+-- The short TTL is itself the during-attack marker L2.1 reads.
 local DEFAULT_COOKIE_TTL = 86400
 
--- The max request body — the JSON payload (~500 B typically, with a fingerprint). 4 KiB leaves room for
--- the fingerprint field to grow (canvas/audio fingerprints in future) and cuts
--- spam payloads before the JSON is parsed.
+-- Room for the fingerprint to grow, and it cuts spam before the JSON is parsed.
 local MAX_BODY_BYTES = 4096
 
--- The result codes — written into the `antibot_challenge_invalid_total{reason}`
--- metric. The names match the phase2-spec/rules-reference terms
--- (bad_nonce / expired / replay / bad_token / wrong_version), plus the
--- bookkeeping outcomes (body / json / shape).
+-- These become the reason label on the rejection metric.
 _M.REASON_BAD_NONCE     = "bad_nonce"
 _M.REASON_EXPIRED       = "expired"
 _M.REASON_REPLAY        = "replay"
@@ -56,10 +45,7 @@ _M.REASON_BAD_BODY      = "bad_body"
 _M.REASON_BAD_METHOD    = "bad_method"
 _M.REASON_NO_SECRET     = "no_secret"
 
--- b64url decode mirroring challenge.lua / clearance.lua (RFC 4648 §5,
--- no padding). Kept as a local function rather than a shared util — three
--- different modules keep their own copy to minimise coupling
--- (see clearance.lua and challenge.lua).
+-- Each module keeps its own copy rather than sharing one, to stay decoupled.
 local function b64url_decode(s)
     if type(s) ~= "string" then return nil end
     s = s:gsub("-", "+"):gsub("_", "/")
@@ -68,8 +54,7 @@ local function b64url_decode(s)
     return ngx.decode_base64(s)
 end
 
--- Also used for the token, even though the pepper is not a secret today — it
--- would matter the moment the pepper became per-host.
+-- Also used for the token: it would matter if the pepper became per-host.
 local function ct_eq(a, b)
     if type(a) ~= "string" or type(b) ~= "string" then return false end
     if #a ~= #b then return false end
@@ -80,9 +65,8 @@ local function ct_eq(a, b)
     return diff == 0
 end
 
--- Parses and authenticates the nonce. Single use is deliberately not applied
--- here: consuming before the token check would let a wrong-token POST burn a
--- valid nonce and break a legitimate retry.
+-- Single use is deliberately not applied here: consuming before the token check
+-- would let a wrong-token POST burn a valid nonce.
 function _M.verify_nonce(nonce, host)
     if type(nonce) ~= "string" or nonce == "" then
         return nil, _M.REASON_BAD_NONCE
@@ -97,10 +81,8 @@ function _M.verify_nonce(nonce, host)
         return nil, _M.REASON_NO_SECRET
     end
 
-    -- The HMAC recompute. It mirrors challenge.issue_nonce: payload_b64 is what
-    -- was signed (NOT the raw payload JSON). A divergence between "what we signed"
-    -- and "what we verify" is the main class of bug in HMAC schemes, so the
-    -- reader should keep both places in view at once.
+    -- What was signed is the encoded payload, not the raw JSON. A divergence
+    -- between signing and verifying is the classic bug here.
     local h, herr = hmac.new(key, "sha256")
     if not h then
         ngx.log(ngx.ERR, "challenge_verify: hmac.new: ", herr)
@@ -125,7 +107,6 @@ function _M.verify_nonce(nonce, host)
         return nil, _M.REASON_BAD_NONCE
     end
 
-    -- The payload is trustworthy — the HMAC passed. Decode plus the exp/host check.
     local payload_json = b64url_decode(payload_b64)
     if not payload_json then
         return nil, _M.REASON_BAD_NONCE
@@ -140,9 +121,8 @@ function _M.verify_nonce(nonce, host)
         return nil, _M.REASON_EXPIRED
     end
 
-    -- Host binding: the nonce was signed for a specific host. A cross-tenant
-    -- replay (obtain a nonce on site A, send the verify to site B) is rejected even with
-    -- the pool's shared HMAC secret.
+    -- Host binding: a nonce obtained on one site cannot be verified on another,
+    -- even though the secret is shared across the pool.
     if type(payload.h) ~= "string" or payload.h == "" or payload.h ~= host then
         return nil, _M.REASON_BAD_NONCE
     end
@@ -150,8 +130,6 @@ function _M.verify_nonce(nonce, host)
     return payload, sig_b64
 end
 
--- verify_token(nonce, token) → bool. token = hex(SHA-256(nonce || JS_SECRET)).
--- We compare them as byte strings through ct_eq.
 function _M.verify_token(nonce, token)
     if type(nonce) ~= "string" or type(token) ~= "string" then return false end
     if #token ~= 64 then return false end  -- hex sha256 = 64 chars
@@ -165,15 +143,11 @@ function _M.verify_token(nonce, token)
     return ct_eq(hex:lower(), token:lower())
 end
 
--- The HMAC segment is the key: unique by construction, shorter than the whole
--- nonce, and it keeps the host out of the dict. The TTL expires with the nonce,
--- so entries never accumulate.
+-- The HMAC segment is the key: unique by construction and it keeps the host out
+-- of the dict. The TTL expires with the nonce, so entries never accumulate.
 --
--- The two failure modes must not be confused: "exists" is a real replay, while
--- "no memory" means the dict is undersized. Without separating them, an
--- exhausted dict would show up as a replay spike and hide the real problem.
--- Either way the answer is a refusal — better than issuing a cookie on a
--- possible replay.
+-- "exists" is a real replay; "no memory" means the dict is undersized. Confusing
+-- them would show an exhausted dict as a replay spike.
 function _M.consume_nonce(sig_b64, exp)
     local dict = ngx.shared.used_nonces
     if not dict then
@@ -191,9 +165,6 @@ function _M.consume_nonce(sig_b64, exp)
     return false
 end
 
--- bump_counter — every challenge metric lives in ngx.shared.metrics.
--- No dedicated shortcut (unlike verdict.lua) — the module is called by a
--- single content_by_lua and has no hot path.
 local function bump(key)
     local m = ngx.shared.metrics
     if m then m:incr(key, 1, 0) end

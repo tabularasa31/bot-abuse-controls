@@ -1,20 +1,15 @@
--- L4 rate limits.
+-- L4 rate limits: five profiles, first match wins, each with a 10 s and a 60 s
+-- window that fires if either is exceeded.
 --
--- Five system profiles, first match wins: per IP, per IP+UA, per IP on API
--- paths, per TLS fingerprint, and unique-URL scanning per IP. Each has a 10 s
--- and a 60 s window and fires if either is exceeded; the thresholds live in the
--- config so they can be retuned without code changes.
+-- rate_tls_fp keys on the fingerprint rather than the IP, which closes the
+-- IP-rotation case, and skips when no fingerprint was computed so those
+-- requests do not all share one empty key.
 --
--- rate_tls_fp keys on the fingerprint instead of the IP, which closes the
--- IP-rotation case. It skips gracefully when no fingerprint was computed, so
--- only the per-IP profiles apply rather than everything sharing one empty key.
+-- GCRA: one float cell per (profile, window, key), so it scales to many keys
+-- without storing timestamps. The read-modify-write is unlocked, so under
+-- contention a few requests can slip past a boundary.
 --
--- The algorithm is GCRA: one float cell per (profile, window, key), updated
--- with a single arithmetic operation, so it scales to many keys without storing
--- timestamp lists. The read-modify-write is unlocked, so under contention a few
--- requests can slip past a window boundary.
---
--- A tripped profile is a fast 429 with Retry-After, never a delay or a hold.
+-- A tripped profile is a fast 429, never a delay.
 
 local policy = require "policy"
 
@@ -24,10 +19,8 @@ local _M = {
     api      = {},   -- api_path_patterns globs for rate_api / uri_bucket
 }
 
--- GCRA conformance for one window. `interval` is the spacing between conforming
--- requests and `burst` the tolerance; sized as below, a fresh key passes exactly
--- `limit` requests and rejects the next one. Returns (allowed, new_tat,
--- retry_after).
+-- Sized as below, a fresh key passes exactly `limit` requests and rejects the
+-- next. Returns (allowed, new_tat, retry_after).
 function _M.gcra(now, tat, interval, burst)
     tat = tat or 0
     local allow_at = tat - burst
@@ -38,17 +31,15 @@ function _M.gcra(now, tat, interval, burst)
     return true, base + interval, 0
 end
 
--- A fingerprint is usable only if it carries a real handshake: with none, the
--- cipher count degenerates to zero and every such request would share one key.
+-- Without a real handshake the cipher count is zero and every such request
+-- would share one key.
 function _M.fp_usable(fp)
     if type(fp) ~= "string" or fp == "" then return false end
     local cc = fp:match("^L%d%d[di](%d%d)")
     return cc ~= nil and tonumber(cc) > 0
 end
 
--- pure: glob match for an api_path pattern. "/api/*" matches any URI under the
--- "/api/" prefix; a pattern without a trailing "*" matches the URI exactly.
--- Mirrors how config-templates.md describes api_path_patterns. No ngx dep.
+-- "/api/*" matches anything under the prefix; without the star, exactly.
 function _M.glob_match(uri, pattern)
     if not uri or not pattern or pattern == "" then return false end
     if pattern:sub(-1) == "*" then
@@ -58,8 +49,6 @@ function _M.glob_match(uri, pattern)
     return uri == pattern
 end
 
--- pure: is this URI an API endpoint per the configured patterns? Used to gate
--- rate_api (it only counts requests on API paths). No ngx dep.
 function _M.is_api_path(uri, patterns)
     for _, p in ipairs(patterns or {}) do
         if _M.glob_match(uri, p) then return true end
@@ -67,19 +56,15 @@ function _M.is_api_path(uri, patterns)
     return false
 end
 
--- pure: coarse URI bucket label for metrics / debugging. Normalises a URI to a
--- small fixed set so the label cardinality stays bounded (the composite-key
--- shape RFC §A3 sketches). api patterns win; "/static/" is recognised as a
--- common second class; everything else collapses to "/". No ngx dep.
+-- Normalises the URI to a small fixed set, so the label cardinality stays
+-- bounded.
 function _M.uri_bucket(uri, api_patterns)
     if _M.is_api_path(uri, api_patterns) then return "api" end
     if uri and uri:sub(1, 8) == "/static/" then return "static" end
     return "root"
 end
 
--- Derives both windows from a threshold pair, carrying the raw limit for the
--- unique-URL counter and the GCRA parameters for the rate cells. nil when
--- neither threshold is set, which leaves the profile inert. No ngx dep.
+-- nil when neither threshold is set, which leaves the profile inert.
 function _M.windows(window_10s, window_60s)
     local function win(seconds, limit)
         if type(limit) ~= "number" or limit <= 0 then return nil end
@@ -92,20 +77,18 @@ function _M.windows(window_10s, window_60s)
     return { w10 = w10, w60 = w60 }
 end
 
--- Compiles the thresholds into the ordered profile list, in the master so
--- workers inherit it. The shared dict holds only per-key state.
+-- Compiled in the master so workers inherit it; the dict holds only per-key
+-- state.
 function _M.build(config)
     local defaults = config.defaults or {}
     local blocking = defaults.blocking or {}
     local hygiene  = defaults.hygiene  or {}
 
-    -- api_path_patterns may be a single string or a comma-split list (coerce()).
     local api = hygiene.api_path_patterns
     if type(api) == "string" then api = { api } end
     _M.api = api or {}
 
-    -- Order matters: first match wins. rate_scan_urls counts unique URLs
-    -- rather than request rate, which is why it has its own kind.
+    -- Order matters: first match wins.
     local specs = {
         { rule = "rate_ip",        kind = "rate", key = "ip" },
         { rule = "rate_ip_ua",     kind = "rate", key = "ip_ua" },
@@ -132,20 +115,15 @@ function _M.build(config)
         end
     end
 
-    -- Stage off via the shared kill-switch helper (config-templates.md
-    -- kill_switch; defaults.conf [kill_switch.*]). Required explicitly rather
-    -- than read off the `config` arg so build() works with any config-shaped
-    -- table, not only the config module instance.
+    -- Passed explicitly, so build() works with any config-shaped table.
     _M.enabled = require("config").stage_enabled(defaults, "rate_limits")
 
     return _M, #_M.profiles
 end
 
--- One GCRA window against the shared dict; a nil window never blocks.
---
--- The cell is persisted only on an allowed request, and the burst caps how far
--- it can run ahead — never more than one window into the future. So the 2×
--- window TTL always outlives the cell while still letting idle keys evict.
+-- One GCRA window; a nil window never blocks. The cell is persisted only on an
+-- allowed request and can never run more than one window ahead, so the 2× TTL
+-- always outlives it while idle keys still evict.
 local function window_exceeded(dict, dict_key, win)
     if not win then return false end
     local now = ngx.now()
@@ -158,25 +136,21 @@ local function window_exceeded(dict, dict_key, win)
     return true
 end
 
--- Bound a key fragment to a safe length for lua_shared_dict keys (a long URI or
--- User-Agent must not blow the dict's key-size limit or silently fail set/add).
--- Anything over 64 bytes is replaced by its md5 hex — collisions are negligible
--- for rate accounting and the length becomes fixed.
+-- A long URI or User-Agent would blow the dict's key-size limit, so anything
+-- over 64 bytes becomes its md5 — collisions are harmless for rate accounting.
 local function bound(s)
     if #s > 64 then return ngx.md5(s) end
     return s
 end
 
 -- Unique URLs per IP per window. GCRA models a rate, not set cardinality, so
--- this is a fixed-window unique counter instead.
+-- this is a fixed-window unique counter.
 --
--- Both the per-URL marker and the per-IP counter carry the same bucket number,
--- giving each window its own key namespace: a marker left over from an earlier
--- bucket cannot suppress counting in the next one.
+-- Marker and counter share a bucket number, so each window has its own key
+-- namespace and a stale marker cannot suppress counting in the next one.
 --
--- Marker writes stop once the counter is over the limit. Without that cap a
--- scraper hitting tens of thousands of URLs would fill the shared dict and
--- evict the other profiles' cells through LRU, corrupting their accounting.
+-- Marker writes stop at the limit: otherwise a scraper hitting tens of
+-- thousands of URLs would fill the dict and evict the other profiles' cells.
 local function scan_window_exceeded(dict, ip, uri, win)
     if not win then return false end
     local bucket  = math.floor(ngx.now() / win.seconds)
@@ -193,8 +167,7 @@ local function scan_window_exceeded(dict, ip, uri, win)
     return (n or 0) > win.limit
 end
 
--- Records the first profile that trips and returns. Never sleeps. The boolean
--- return is informational.
+-- Records the first profile that trips. The boolean return is informational.
 function _M.run(fp)
     if not _M.enabled then return false end
     if #_M.profiles == 0 then return false end
@@ -214,16 +187,13 @@ function _M.run(fp)
     for _, p in ipairs(_M.profiles) do
         local fire = false
 
-        -- Both windows are evaluated every request (no `or` short-circuit): each
-        -- window keeps its own cell/counter and must advance independently, else
-        -- tripping the 10s window would stop the 60s window from tracking.
+        -- Both windows every request: each keeps its own cell and must advance
+        -- independently, or tripping the short one would freeze the long one.
         if p.kind == "scan" then
             local f10 = scan_window_exceeded(dict, ip, uri, p.w10)
             local f60 = scan_window_exceeded(dict, ip, uri, p.w60)
             fire = f10 or f60
         else
-            -- rate_api applies only on API paths, rate_tls_fp only when the
-            -- fingerprint exists; the rest always apply.
             local applies, material
             if p.key == "tls_fp" then
                 applies, material = fp_ok, fp
@@ -243,16 +213,11 @@ function _M.run(fp)
 
         if fire then
             bac_log.set_verdict("rate_limits", "block", p.rule)
-            -- The larger window is a safe upper bound on the recovery time:
-            -- never under-advise, or the client retries straight into another
-            -- 429.
+            -- The larger window never under-advises, so the client does not
+            -- retry straight into another 429.
             local retry = (p.w60 and p.w60.seconds)
                        or (p.w10 and p.w10.seconds)
                        or 60
-            -- mode-gate: active → ngx.exit(429) + Retry-After;
-            -- shadow → no-op, cascade ends naturally (rate_limit is
-            -- the last stage), request reaches origin with would-be
-            -- block in the log.
             policy.enforce(429, { ["Retry-After"] = retry })
             return true
         end

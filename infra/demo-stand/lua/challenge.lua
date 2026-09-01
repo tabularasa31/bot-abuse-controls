@@ -1,43 +1,31 @@
--- Renders the HTML+JS challenge page and issues its nonce.
+-- Renders the challenge page and issues its nonce. The page computes
+-- SHA-256(nonce + JS_SECRET) and POSTs the token back.
 --
--- The page asks the browser to compute SHA-256(nonce + JS_SECRET) and POST the
--- token back; the verify side lives in challenge_verify and shares the secret.
+-- The template is loaded once at init and inherited through fork, so changing
+-- it means bumping CASCADE_VERSION and reloading.
 --
--- The template is loaded once in init_by_lua and inherited through fork, so
--- changing it means bumping CASCADE_VERSION and reloading.
---
--- The nonce is `<payload-b64url>.<hmac-b64url>`, where the payload carries the
--- host and an expiry about 60 s out. That expiry is what makes it single-use:
--- the window is bounded and a later replay is rejected.
+-- The nonce carries the host and a short expiry, which is what makes it
+-- single-use.
 
 local cjson  = require "cjson.safe"
 local hmac   = require "resty.openssl.hmac"
 local secret = require "challenge_secret"
--- Lazy `config` resolution: challenge.lua loads in init_by_lua *after*
--- config.load() runs, but unit tests bypass init.lua entirely. Require
--- here (cheap), but defensively re-check `config.defaults` in issue_nonce
--- since a test harness may inject a partial stub.
+-- Lazy: the unit tests bypass init.lua, so the require must not be fatal.
 local ok_config, config = pcall(require, "config")
 if not ok_config then config = nil end
 
 local _M = {}
 
--- Fallback for a missing config section. Never silently zero, which would
--- invalidate every nonce the moment it was issued.
+-- Never silently zero, which would invalidate every nonce as it was issued.
 local DEFAULT_NONCE_TTL = 60
 
--- TEMPLATE_PATH / VERSION_PATH are resolved through env, so that the integration
--- harness and the unit tests can override the paths without editing defaults.conf.
--- Production keeps the default paths from the docker-compose mounts.
+-- Overridable so the tests and the harness need not edit the config.
 local TEMPLATE_PATH = os.getenv("CHALLENGE_TEMPLATE_FILE")
     or "/etc/nginx/challenge/page.html"
 local VERSION_PATH  = os.getenv("CASCADE_VERSION_FILE")
     or "/etc/nginx/CASCADE_VERSION"
 
--- read_file — a bounded read, so that an accidental mis-mount onto a large file
--- (`/dev/urandom`, a bulky log) does not hang the master in init_by_lua. 64 KiB
--- gives ~16× headroom over the current template (~3 KiB) and cuts off any
--- reasonable "somebody mixed up the mount".
+-- Bounded, so a mis-mount onto a large file cannot hang the master.
 local MAX_TEMPLATE_BYTES = 65536
 
 local function read_file(path, limit)
@@ -56,23 +44,18 @@ local function rstrip(s)
     return (s:gsub("[%s%c]+$", ""))
 end
 
--- A module-level cache: filled by preload() from init_by_lua. Without preload,
--- render() still works (a lazy load), but the fallback is undesirable on the hot path —
--- the preload check catches a CASCADE_VERSION ↔ meta tag divergence at
--- startup, before the first request.
+-- Filled by preload at init. render() would lazily load too, but preload is
+-- what catches a version divergence before the first request.
 local cached_template
 local cached_version
 
--- The meta tag is the machine-checked marker; the HTML comment carrying the
--- same version is for reading curl output and is not parsed.
+-- The meta tag is the machine-checked marker; the HTML comment is for humans.
 local function parse_version_from_template(html)
     return html:match('<meta%s+name="cascade%-version"%s+content="([^"]+)"')
 end
 
--- preload() — called from init.lua. It reads CASCADE_VERSION and the template and
--- compares the versions. A mismatch → error(), which fails init_by_lua and the container does
--- not start. That is the C2 version-pin invariant: the cascade and the template can
--- only diverge deliberately (a bump in both places at once).
+-- A mismatch fails init_by_lua and the container does not start. That is the
+-- pin: template and cascade can only diverge through a deliberate bump of both.
 function _M.preload()
     local version, ver_err = read_file(VERSION_PATH, 64)
     if not version then
@@ -110,19 +93,13 @@ function _M.template_version()
     return cached_version
 end
 
--- base64url — without padding, RFC 4648 §5. ngx.encode_base64 gives standard
--- base64; we convert character by character. Compact is enough for one nonce per
--- request, and the hot path is not upstream of this.
+-- Unpadded base64url, RFC 4648 §5.
 local function b64url(raw)
     local s = ngx.encode_base64(raw)
     s = s:gsub("+", "-"):gsub("/", "_"):gsub("=+$", "")
     return s
 end
 
--- issue_nonce(host) → (nonce_string, expiry_ts) | nil, err.
---   nonce_string = b64url(payload_json) .. "." .. b64url(hmac_sha256)
--- The TTL comes from defaults.conf [challenge].nonce_ttl_seconds (see
--- config.lua); 60 is the default per vision §5.2.
 function _M.issue_nonce(host, ttl_seconds)
     if type(host) ~= "string" or host == "" then
         return nil, "host required"
@@ -131,8 +108,7 @@ function _M.issue_nonce(host, ttl_seconds)
     if not key then
         return nil, "challenge_secret not loaded (see C1: challenge_secret.lua)"
     end
-    -- Argument, then config, then the baked-in default. tonumber guards the
-    -- stringly-typed INI value.
+    -- Argument, then config, then default; tonumber guards the INI string.
     local ttl = tonumber(ttl_seconds)
     if not ttl and config and type(config.defaults) == "table" then
         local ch = config.defaults.challenge
@@ -151,7 +127,7 @@ function _M.issue_nonce(host, ttl_seconds)
     local payload_b64 = b64url(payload)
 
     -- Explicit update() then final(): the one-call form would let a version
-    -- drift silently sign the empty string instead of failing.
+    -- drift silently sign the empty string.
     local h, hmac_err = hmac.new(key, "sha256")
     if not h then return nil, "hmac.new: " .. tostring(hmac_err) end
     local upd_ok, upd_err = h:update(payload_b64)

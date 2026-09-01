@@ -1,27 +1,21 @@
--- Per-host policy reader and the mode gate for the whole cascade.
+-- Per-host policy reader and the mode gate for the cascade.
 --
--- Policy arrives over Channel C into a shared_dict keyed `<host>:<gen>`, with
--- the generation flipped atomically by the pull. get(host) always returns a
--- table: an unknown host, a missing dict or a decode failure all fall back to
--- POOL_DEFAULT, which must stay in step with the backend's PoolDefault().
+-- get(host) always returns a table: an unknown host or a decode failure falls
+-- back to POOL_DEFAULT, which must stay in step with the backend's.
 --
--- enforce(status) is the single point where a verdict becomes a response. Any
--- stage that wants to affect the response goes through it, or shadow-mode
--- customers would start receiving 4xx from new enforcement points. The verdict
--- is recorded before the call, so it lands in the log in either mode.
+-- enforce(status) is the single point where a verdict becomes a response, or
+-- shadow-mode customers would start receiving 4xx from new enforcement points.
 local _M = {}
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt sentinel
 
--- A `{}` that cjson encodes as `[]`. The list fields are arrays on the wire, so
--- the defaults have to encode as arrays too.
+-- A `{}` that cjson encodes as `[]`, since the list fields are arrays.
 local function empty_array()
     return setmetatable({}, cjson_base.empty_array_mt)
 end
 
--- Must match catalog.PoolDefault() in the backend. Built per call, so a caller
--- cannot mutate a shared instance and leak it into the next request.
+-- Built per call, so a caller cannot mutate a shared instance.
 local function new_pool_default()
     return {
         mode          = "shadow",
@@ -36,9 +30,8 @@ local function new_pool_default()
     }
 end
 
--- Host names are case-insensitive, so a mixed-case policy row still has to
--- resolve. Length is capped as well: shared_dict keys stop at 255 bytes and the
--- Host header is client-controlled.
+-- Host names are case-insensitive, and the header is client-controlled, so the
+-- key is also capped to fit the dict's limit.
 local function canonical_host(host)
     if not host or host == "" then return nil end
     host = string.lower(host)
@@ -48,15 +41,13 @@ local function canonical_host(host)
     return host
 end
 
--- Mirror the backend validators. If the backend gains a value the edge does not
--- know, the edge fails stale and says so, rather than silently demoting.
+-- Mirror the backend validators, so an unknown value fails loudly.
 local VALID_MODES         = { shadow = true, active = true }
 local VALID_STRICTNESSES  = { standard = true, permissive = true }
 
--- A policy with a missing or unknown `mode` would silently demote an active
--- customer to shadow, so it falls back loudly instead. origin_ip survives the
--- fallback: routing must not depend on enum validity, or a schema change would
--- drop a tenant's traffic entirely rather than just failing enforcement stale.
+-- A missing or unknown mode would silently demote an active customer to shadow.
+-- origin_ip survives the fallback: routing must not depend on enum validity, or
+-- a schema change would drop a tenant's traffic entirely.
 local function decode_entry(raw, host)
     local p, err = cjson.decode(raw)
     if not p or type(p) ~= "table" then
@@ -83,9 +74,8 @@ local function decode_entry(raw, host)
     return p
 end
 
--- Uncached read with a parent-domain walk: a customer onboards a domain, so one
--- row has to cover its subdomains, while an explicit subdomain row still wins.
--- Most specific match first.
+-- A customer onboards a domain, so one row covers its subdomains; an explicit
+-- subdomain row still wins.
 local function lookup(host)
     if not host or host == "" then return new_pool_default() end
     local dict = ngx.shared.antibot_policy
@@ -104,24 +94,19 @@ local function lookup(host)
         local dot = candidate:find(".", 1, true)
         if not dot then break end
         local parent = candidate:sub(dot + 1)
-        -- Never walk up to a bare TLD. The backend rejects public-suffix rows on
-        -- write, so one can only exist through manual SQL, and inheriting it
-        -- would hand its policy to every domain under it. An exact single-label
-        -- lookup still matches on the first iteration.
+        -- Never inherit from a bare TLD: such a row can only exist through
+        -- manual SQL, and it would hand its policy to every domain under it.
         if not parent:find(".", 1, true) then break end
         candidate = parent
     end
     return new_pool_default()
 end
 
--- Memoized per request: the cascade and the logger both read the same host, and
--- each miss costs a dict read plus a full decode. A generation flip mid-request
--- is deliberately invisible — consistency within one request matters more than
--- shaving the staleness window.
+-- Memoized per request: the cascade and the logger read the same host, and each
+-- miss costs a dict read and a decode. A flip mid-request is deliberately
+-- invisible.
 --
--- The returned table is read-only. Every caller in the request gets the same
--- instance, so mutating it corrupts the view for the rest of them; per-request
--- state belongs on ngx.ctx.
+-- The returned table is read-only — every caller gets the same instance.
 function _M.get(host)
     local ctx = ngx.ctx
     if not ctx then return lookup(host) end
@@ -141,17 +126,14 @@ end
 -- Exposed so the pull writes keys with the same normalisation this reads.
 _M.canonical_host = canonical_host
 
--- ctx-free, for the ssl_certificate_by_lua phase where ngx.ctx is not reliably
--- per-request and the memoized get() would leak across handshakes.
+-- ctx-free, for the ssl phase where ngx.ctx is not reliably per-request.
 function _M.origin_ip(host)
     return lookup(host).origin_ip
 end
 
--- Exits with `status` only under mode=active; under shadow it returns and the
--- caller carries on to the origin. Record the verdict before calling.
---
--- `headers` is skipped in shadow mode: that response belongs to the origin and
--- must not carry our headers.
+-- Exits only under mode=active; under shadow it returns and the caller carries
+-- on. Record the verdict before calling. Headers are skipped in shadow: that
+-- response belongs to the origin.
 function _M.enforce(status, headers)
     if _M.get(ngx.var.host).mode == "active" then
         if headers then

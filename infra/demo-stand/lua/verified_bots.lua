@@ -1,21 +1,14 @@
--- L2.2 verified-bot fastpath.
+-- L2.2 verified-bot fastpath: a read-only lookup against the catalog the rDNS
+-- worker publishes. Three states.
 --
--- A read-only lookup against the catalog the backend rDNS worker publishes.
--- Three states per searchbot-looking request:
---
---   verified  → allow, rule=bot_verified.
+--   verified  → allow.
 --   rejected  → no verdict; the cascade continues. A UA claiming Googlebot
---               whose rDNS was rejected is exactly what the cascade is for.
---   absent    → provisional allow, rule=bot_verified_pending, on every request
---               from that IP. The edge keeps no per-IP state; the backend sees
---               the pending event and queues the rDNS check. Never block a
---               searchbot merely because we have not confirmed it yet.
+--               whose rDNS was rejected is what the cascade exists for.
+--   absent    → provisional allow, on every request from that IP. The edge
+--               keeps no state; the backend sees the event and queues the
+--               check. Never block a searchbot we have not confirmed yet.
 --
--- No DNS on the hot path — only the set-membership lookup.
---
--- The searchbot UA test is a plain-substring alternation, so it needs no PCRE
--- and stays testable under bare luajit. A pattern needing real regex syntax
--- would have to move to ngx.re.match.
+-- No DNS on the hot path, only the membership lookup.
 local _M = {
     enabled     = true,
     ua_alts     = {},   -- array of plain substrings split from ua_pattern
@@ -24,13 +17,10 @@ local _M = {
 
 _M.GEN_KEY = "verified_bots_gen"
 
--- Outcomes that short-circuit the reputation stage. "rejected" must stay out:
--- the point of the three-state catalog is that those IPs keep going through the
--- rest of the cascade.
+-- "rejected" must stay out: those IPs keep going through the cascade.
 _M.SHORT_CIRCUIT = { verified = true, pending = true }
 
--- plain=true, so an alternative containing regex metacharacters still matches
--- literally.
+-- plain=true, so an alternative with regex metacharacters matches literally.
 function _M.looks_like_bot(ua, alts)
     if not ua or ua == "" or not alts then return false end
     for _, a in ipairs(alts) do
@@ -39,8 +29,7 @@ function _M.looks_like_bot(ua, alts)
     return false
 end
 
--- Empty input yields an empty list, leaving the rule dormant rather than
--- crashing.
+-- Empty input leaves the rule dormant rather than crashing.
 function _M.split_ua_pattern(pattern)
     local out = {}
     if not pattern or pattern == "" then return out end
@@ -51,8 +40,7 @@ function _M.split_ua_pattern(pattern)
     return out
 end
 
--- An unknown status yields nil, so a malformed entry can never upgrade a
--- request to verified.
+-- An unknown status yields nil, so a malformed entry cannot upgrade a request.
 function _M.parse_entry(val)
     if type(val) ~= "string" or val == "" then return nil, nil end
     local status, family = val:match("^([^:]+):(.+)$")
@@ -62,8 +50,7 @@ function _M.parse_entry(val)
     return status, family
 end
 
--- The per-stage kill switch is checked at the reputation stage boundary, so one
--- toggle covers every L2 rule.
+-- The kill switch is checked at the stage boundary, covering every L2 rule.
 function _M.build(config)
     local defaults = config.defaults or {}
     local rule     = (defaults.allow or {}).bot_verified or {}
@@ -75,16 +62,14 @@ function _M.build(config)
     return _M, #_M.ua_alts
 end
 
--- Returns "verified" / "rejected" / "absent" plus the family. Catalog trouble
--- reads as absent: a searchbot must never be blocked by our own plumbing.
+-- Catalog trouble reads as absent: never block a searchbot over our plumbing.
 function _M.classify(ip)
     if not ip or ip == "" then return "absent", nil end
     local dict = ngx.shared.verified_bots
     local meta = ngx.shared.meta
     if not dict or not meta then return "absent", nil end
-    -- A missing generation and a legitimate 0 must not collapse: reading gen 0
-    -- against live entries at gen N degrades quietly to "everything pending"
-    -- with no operator signal. Logged once per worker.
+    -- A missing generation must not collapse into a legitimate 0, which would
+    -- quietly make everything pending with no signal. Logged once per worker.
     local gen, gen_err = meta:get(_M.GEN_KEY)
     if gen == nil and gen_err == nil then
         if meta:add("verified_bots_gen_missing_logged", 1) then
@@ -94,7 +79,6 @@ function _M.classify(ip)
         end
         gen = 0
     elseif gen == nil then
-        -- Same fail-open shape, separate log so the two are distinguishable.
         if meta:add("verified_bots_gen_error_logged", 1) then
             ngx.log(ngx.ERR, "verified_bots: meta:get(", _M.GEN_KEY,
                 ") failed: ", tostring(gen_err))

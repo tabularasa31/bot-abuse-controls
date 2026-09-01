@@ -1,18 +1,12 @@
--- L1 hygiene: the cheapest checks, run first.
+-- L1 hygiene: the cheapest checks, run first — the method whitelist and the UA
+-- blacklist, system list before the per-host one.
 --
--- Blocking rules are the method whitelist and the UA blacklist (system list
--- first, then the per-host one). Both record the verdict and then go through
--- policy.enforce, so shadow mode keeps accumulating verdicts and tags from the
--- later stages instead of stopping here. That deliberately lets a more specific
--- later match, such as a blocklisted fingerprint, take the label in the log.
+-- Both go through policy.enforce, so shadow mode keeps accumulating verdicts
+-- from the later stages instead of stopping here, and a more specific later
+-- match takes the label in the log.
 --
--- hygiene:header_anomaly is a tag, not a rule: header heuristics false-positive
--- on unusual but legitimate clients, so it is weighed at L5 and never blocks.
---
--- Staged UA patterns are matched separately and only record staging_match.
---
--- resource_id is not derived here: the edge works from the Host, and the
--- backend enriches it on ingest.
+-- header_anomaly is a tag, not a rule: the heuristic false-positives on unusual
+-- but legitimate clients, so it is weighed at L5 and never blocks.
 local policy          = require "policy"
 local policy_matchers = require "policy_matchers"
 local staging_metrics = require "staging_metrics"
@@ -23,7 +17,6 @@ local _M = {
     active_re  = nil,
 }
 
--- Combined regex over the active patterns, or nil when there are none.
 function _M.build_combined(ua_list)
     local active = {}
     for _, e in ipairs(ua_list or {}) do
@@ -37,8 +30,7 @@ function _M.build_combined(ua_list)
     return "(" .. table.concat(active, ")|(") .. ")"
 end
 
--- Returns (combined_re, patterns). The regex is the cheap gate; the list is
--- needed because a combined match cannot say which alternative fired.
+-- The regex is the cheap gate; the list says which alternative fired.
 function _M.build_staging(ua_list)
     local staging = {}
     for _, e in ipairs(ua_list or {}) do
@@ -52,7 +44,6 @@ function _M.build_staging(ua_list)
     return "(" .. table.concat(staging, ")|(") .. ")", staging
 end
 
--- Wraps a plain pattern array into an alternation, or nil when empty.
 function _M.combine_patterns(patterns)
     if not patterns or #patterns == 0 then return nil end
     return "(" .. table.concat(patterns, ")|(") .. ")"
@@ -63,7 +54,6 @@ function _M.header_anomaly(server_protocol, accept)
     return server_protocol == "HTTP/2.0" and not accept
 end
 
--- Lookup set from a method whitelist (array or single string).
 function _M.method_lookup(whitelist)
     local set = {}
     if type(whitelist) == "table" then
@@ -74,21 +64,18 @@ function _M.method_lookup(whitelist)
     return set
 end
 
--- Compiles the on-disk config into the state the request path reads.
 function _M.build(config)
     local defaults = config.defaults or {}
     local hygiene_cfg = defaults.hygiene or {}
 
     _M.method_set = _M.method_lookup(hygiene_cfg.method_whitelist)
 
-    -- Kept separate from active_re, which cannot distinguish "no patterns"
-    -- from "rule disabled". The per-host list has to honour the same switch:
-    -- disabling the rule during an incident must stop all UA blocking.
+    -- Kept separate from active_re, which cannot distinguish "no patterns" from
+    -- "rule disabled". The per-host list honours the same switch.
     local ua_rule = (defaults.blocking or {}).ua_blacklist or {}
     _M.ua_blacklist_enabled = ua_rule.enabled ~= false
     if not _M.ua_blacklist_enabled then
         _M.active_re = nil
-        -- Staging observation honours the same switch.
         _M.staging_re = nil
         _M.staging_patterns = {}
     else
@@ -98,15 +85,13 @@ function _M.build(config)
 
     _M.enabled = require("config").stage_enabled(defaults, "hygiene")
 
-    -- nil means the first refresh rebuilds. The matchers above are the
-    -- cold-start state until the catalog lands.
+    -- nil means the first refresh rebuilds from the cold-start state.
     _M._cached_gen_ua = nil
 
     return _M
 end
 
--- Rebuilds the matchers on a generation flip; in steady state this is one dict
--- read and an integer compare. A missing generation keeps the cold-start state.
+-- Rebuilds on a generation flip; a missing generation keeps the cold start.
 function _M.refresh()
     if not ngx or not ngx.shared then return end
     local meta = ngx.shared.meta
@@ -147,7 +132,6 @@ function _M.refresh()
     staging_metrics.reconcile("ua_blacklist", prev, pats)
 end
 
--- The boolean return is informational; the caller does not branch on it.
 function _M.run()
     if not _M.enabled then return false end
 
@@ -166,12 +150,11 @@ function _M.run()
         return true
     end
 
-    -- System list first, then the per-host one. The rule names differ so hits
-    -- stay attributable.
+    -- System list first; the rule names differ so hits stay attributable.
     local ua = ngx.var.http_user_agent or ""
     if _M.active_re then
-        -- "jo" caches the compiled regex per worker. A bad pattern returns an
-        -- error rather than throwing; fail open, never flag on our own fault.
+        -- "jo" caches the compiled regex. A bad pattern returns an error rather
+        -- than throwing: fail open, never flag on our own fault.
         local from, _, err = ngx.re.find(ua, _M.active_re, "jo")
         if err then
             ngx.log(ngx.ERR, "ua_blacklist regex error, fail-open: ", err)
@@ -182,7 +165,6 @@ function _M.run()
         end
     end
 
-    -- Compiled once per (host, gen); nil when the host has no custom patterns.
     if _M.ua_blacklist_enabled then
         local pm = policy_matchers.get(ngx.var.host)
         if pm.ua_blacklist_re then
@@ -197,8 +179,8 @@ function _M.run()
         end
     end
 
-    -- Observe-only, and only reached when nothing active matched — so it
-    -- records what promotion to active would have done.
+    -- Observe-only, reached only when nothing active matched — so it records
+    -- what promotion would have done.
     if _M.staging_re then
         local from, _, err = ngx.re.find(ua, _M.staging_re, "jo")
         if err then

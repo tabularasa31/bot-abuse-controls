@@ -1,9 +1,7 @@
--- access_by_lua entry point: runs the L1-L5 cascade for every request.
+-- access_by_lua entry point: runs the L1-L5 cascade.
 --
--- Every physical exit (403, 429, the challenge page) goes through
--- policy.enforce, which is what makes shadow mode observe-only: the verdict is
--- always recorded, but only mode=active turns it into a response. New
--- enforcement points must use the same helper.
+-- Every physical exit goes through policy.enforce, which is what makes shadow
+-- mode observe-only. New enforcement points must use the same helper.
 
 local ja4        = require "ja4_compute"
 local bac_log    = require "bac_log"
@@ -17,9 +15,8 @@ local policy     = require "policy"
 local clearance  = require "clearance"
 local verification = require "verification"
 
--- Returning before bac_log.init is deliberate: a killed cascade emits no
--- BAC_LOG record at all, so the request is indistinguishable from one that
--- never reached the edge.
+-- Returning before bac_log.init is deliberate: a killed cascade emits no record
+-- at all.
 if config.global_kill(config.defaults) then
     return
 end
@@ -46,9 +43,9 @@ if config.stage_enabled(config.defaults, "clearance") then
     ngx.shared.metrics:incr("clearance_verify_" .. result .. "_total", 1, 0)
     if result == clearance.RESULT_VALID then
         local ctx = ngx.ctx.bac
-        -- A block from L1/L2 outranks this allow, and skipping L3 for it would
-        -- lose the soft-rule signals for exactly the case they exist for: a
-        -- stolen cookie on a bad fingerprint.
+        -- A block from L1/L2 outranks this allow, and skipping L3 would lose
+        -- the soft signals for the case they exist for: a stolen cookie on a
+        -- bad fingerprint.
         if ctx and ctx.verdict ~= "block" then
             ngx.ctx.clearance_valid = true
             bac_log.set_verdict("reputation", "allow", "cookie_valid")
@@ -56,18 +53,16 @@ if config.stage_enabled(config.defaults, "clearance") then
     end
 end
 
--- L3 tls_fp. A valid cookie skips the L3 decision but not the fingerprint
--- itself: L4 rate_tls_fp keys on it, and a cookie must not buy a free pass
--- through the per-fingerprint limit.
+-- L3. A valid cookie skips the decision but not the fingerprint: L4 keys on it,
+-- and a cookie must not buy a free pass through the per-fingerprint limit.
 local fp
 if config.stage_enabled(config.defaults, "tls_fp") then
     fp = ja4.compute()
     bac_log.set_tls_fp(fp)
 
     if not ngx.ctx.clearance_valid then
-        -- Keying the cache by `fp:gen` makes a catalog swap atomic: on a gen
-        -- bump the old entries become unreachable instead of masking the new
-        -- list until their TTL runs out.
+        -- Keying by `fp:gen` makes a catalog swap atomic: old entries become
+        -- unreachable instead of masking the new list until their TTL.
         local gen = ngx.shared.meta:get(fp_state.META_GEN_KEY) or 0
         local key = fp_state.key(fp, gen)
 
@@ -79,8 +74,8 @@ if config.stage_enabled(config.defaults, "tls_fp") then
         if cached == "block" or cached == "allow" then
             verdict = cached
         else
-            -- Only an active entry blocks; a staged one resolves to "allow" so
-            -- the request reaches tls_fp.run and is recorded as staging_match.
+            -- Only an active entry blocks; a staged one falls through and is
+            -- recorded as staging_match.
             local status = fp_state.parse_value(ngx.shared.tls_fp_blocklist:get(key))
             verdict = (status == "active") and "block" or "allow"
             cache:set(key, verdict, 60)
@@ -90,10 +85,9 @@ if config.stage_enabled(config.defaults, "tls_fp") then
 
         if verdict == "block" then
             bac_log.set_verdict("tls_fp", "block", "tls_fp_blocklist")
-            -- Stamp before enforce: in shadow this returns and the request
-            -- still proxies to origin, so cascade_ms must not swallow the
-            -- upstream time. The return keeps a later stage from overwriting
-            -- the block through last-writer-wins.
+            -- Stamp before enforce: in shadow this returns and still proxies,
+            -- so cascade_ms must not swallow the upstream time. The return
+            -- keeps a later stage from overwriting the block.
             bac_log.mark_cascade_end()
             policy.enforce(403)
             return
@@ -105,9 +99,7 @@ end
 
 rate_limit.run(fp)
 
--- L5 verification: the only place a challenge is decided. L3 and L4 accumulate
--- flags; decide() turns them into a verdict, classify_branch() picks the branch,
--- and this block is the only physical issue/block point.
+-- L5: the only place a challenge is decided, and the only physical issue point.
 if config.stage_enabled(config.defaults, "verification") then
     verification.run()
 
@@ -132,10 +124,8 @@ if config.stage_enabled(config.defaults, "verification") then
             policy.enforce(403)
             return
         else
-            -- Branch A serves the page only in active mode; in shadow the
-            -- verdict stays in the log and the response is untouched.
-            -- ngx.exec keeps the client's URL, so the post-challenge reload
-            -- lands back on it with the new cookie.
+            -- Active mode only; in shadow the response is untouched. ngx.exec
+            -- keeps the client's URL, so the reload lands back on it.
             local p = policy.get(ngx.var.host or "")
             if p and p.mode == "active" then
                 return ngx.exec("@challenge_page")

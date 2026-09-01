@@ -1,28 +1,21 @@
--- Periodic aggregate stats pushed to stdout, one `EDGE_STATS {json}` line per
--- interval, which promtail already tails into Loki alongside the request log.
--- Aggregate rather than per-request, so it stays safe under a flood, and there
--- is no pull endpoint to scan.
+-- Aggregate stats pushed to stdout once per interval, which promtail already
+-- tails alongside the request log. Aggregate rather than per-request, so it
+-- stays safe under a flood and exposes no endpoint to scan.
 --
--- snapshot() enumerates the whole metrics dict rather than an allowlist: a
--- curated list had already dropped the clearance and challenge security
--- counters, and enumeration means a new counter ships without editing here.
+-- The whole metrics dict is enumerated rather than an allowlist: a curated list
+-- had already dropped the security counters, and this way a new counter ships
+-- without editing here.
 --
--- Scalars go top-level; the prefixed families are grouped into nested objects
--- (rules, flags, tags, staging, version_mismatch). Staged patterns with zero
--- traffic matter: they have no request-log record, so nothing else can
--- reconstruct them for the promotion decision.
+-- Staged patterns with zero traffic matter: nothing else can reconstruct them
+-- for the promotion decision.
 
 local _M = { interval = 30 }
 
--- pure: RFC3339 UTC second-precision timestamp for `epoch` seconds. promtail's
--- timestamp stage parses this with RFC3339Nano (variable fractional digits, so a
--- second-precision value is accepted). No ngx dep → unit-testable.
+-- Second precision is accepted by promtail's RFC3339Nano parsing.
 function _M.iso8601(epoch)
     return os.date("!%Y-%m-%dT%H:%M:%S", math.floor(epoch or 0)) .. "Z"
 end
 
--- Builds the snapshot from a flat map of every metrics-dict entry. No ngx
--- dependency, so the classification is testable directly.
 function _M.snapshot(map, now, start_time, edge_id)
     local s = {
         type     = "edge_stats",
@@ -39,8 +32,7 @@ function _M.snapshot(map, now, start_time, edge_id)
         local tag  = k:match("^tag:(.+)$")
         local stg  = k:match("^staging:(.+)$")
         local vmis = k:match("^edge_sidecar_version_mismatch_total:(.+)$")
-        -- start_time / catalog_last_pull_ts:* are internal (drive uptime /
-        -- catalog_staleness below) — fall through to no bucket, not dumped raw.
+        -- Internal keys: they drive the gauges below and are not dumped raw.
         local internal = (k == "start_time") or (k:find("^catalog_last_pull_ts:") ~= nil)
         if rule then s.rules[rule] = v
         elseif flag then s.flags[flag] = v
@@ -58,10 +50,8 @@ function _M.snapshot(map, now, start_time, edge_id)
     return s
 end
 
--- Writes straight to stdout rather than through ngx.log, which would wrap the
--- line in the error-log format and break the promtail regex.
--- The file wins over the env var: it survives a hot reload that froze the env
--- at container start. Static for a worker's life, so it is read once.
+-- Straight to stdout: ngx.log would wrap the line and break the promtail regex.
+-- The file wins over the env var, since it survives a hot reload.
 local cached_revision
 local function revision()
     if cached_revision then return cached_revision end
@@ -75,14 +65,11 @@ local function revision()
     return cached_revision
 end
 
--- Shared by the stdout push and the private /__stats handler, so both report
--- exactly the same numbers.
+-- Shared by the stdout push and the /__stats handler, so both agree.
 function _M.collect()
     local m = ngx.shared.metrics
     if not m then return nil end
-    -- Enumerate the whole dict (like the deleted metrics.lua) so no counter is
-    -- silently dropped. get_keys(0) = all keys; one lock-pass, cheap for the
-    -- counter dict, same cost metrics.lua paid per scrape (now once per tick).
+    -- One lock-pass over the whole dict, once per tick.
     local map = {}
     for _, k in ipairs(m:get_keys(0)) do
         map[k] = m:get(k)
@@ -93,9 +80,8 @@ function _M.collect()
         m:get("start_time"),
         os.getenv("EDGE_ID") or "stand-bac")
 
-    -- Lets an operator confirm what is deployed, and whether a secret rotation
-    -- took, from the log alone. All three are static for a worker's life, so
-    -- they resolve once; the `false` sentinel separates "resolved to nil" from
+    -- Lets an operator confirm what is deployed from the log alone. Static for
+    -- a worker's life; the `false` sentinel separates "resolved to nil" from
     -- "not yet resolved".
     snap.commit = revision()
     if _M._cached_cascade_version == nil then
@@ -109,20 +95,16 @@ function _M.collect()
     end
     snap.challenge_secret_fp = _M._cached_secret_fp or nil
 
-    -- Seconds since the last successful pull per catalog, -1 if never. The
-    -- alert signal for a dead channel: the staleness warnings go to the error
-    -- log, which promtail drops, so they would never reach Loki otherwise.
+    -- Seconds since the last successful pull, -1 if never. The alert signal for
+    -- a dead channel: the warnings go to the error log, which promtail drops.
     local ok_st, stale = pcall(function()
         local cp = require "catalog_pull"
         local now = ngx.time()
         local out = {}
-        -- cp.catalogs is a dict keyed by name ({tls_fp_blocklist = {...}}), but
-        -- resolve from key OR value so an array form would also work.
+        -- Resolve from key or value, so an array form would work too.
         for k, v in pairs(cp.catalogs or {}) do
             local name = (type(k) == "string") and k or v
             if type(name) == "string" then
-                -- catalog_pull stamps `catalog_last_pull_ts:<name>` (ngx.time
-                -- epoch seconds) into the metrics dict on every 200/304.
                 local ts = m:get("catalog_last_pull_ts:" .. name)
                 out[name] = ts and (now - ts) or -1
             end
@@ -143,10 +125,8 @@ function _M.emit()
     io.stdout:flush()
 end
 
--- start(opts) — register the worker-0 emit timer. opts.interval overrides the
--- 30s default. Guarded to worker 0 so an N-worker pool emits a single line per
--- interval (the metrics dict is shared, so any worker sees the global totals).
--- Call from init_worker_by_lua_block.
+-- Worker 0 only, so an N-worker pool emits one line per interval; the metrics
+-- dict is shared, so any worker sees the global totals.
 function _M.start(opts)
     opts = opts or {}
     local interval = tonumber(opts.interval) or _M.interval
