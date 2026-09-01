@@ -1,75 +1,91 @@
-# Blocklist promotion — регламент оператора
+# Blocklist promotion — the operator's process
 
-Как провести TLS-fingerprint из утреннего письма в enforcement и как снять. Логика решений
-(score, gates, purity, intent, жизненный цикл) — в [blocklist-scoring.md](blocklist-scoring.md).
-Процедура на VM с командами — в [runbooks/blocklist-promotion.md](runbooks/blocklist-promotion.md).
+How to take a TLS fingerprint from the morning email into enforcement, and how to
+retire one. The decision logic (score, gates, purity, intent, lifecycle) is in
+[blocklist-scoring.md](blocklist-scoring.md). The on-VM procedure with the actual
+commands is in [runbooks/blocklist-promotion.md](runbooks/blocklist-promotion.md).
 
-## Зачем это
+## Why this exists
 
-Раньше единственный способ внести fp в `catalogs/tls_fp_blocklist.yaml` — править файл руками, а
-снять устаревшую запись не делал никто. Тулинг закрывает оба конца: промоут одной командой с
-аудит-следом (evidence-«паспорт» в PR и в комментарии записи) и автоматическое снятие по
-неактивности. Все авто-действия — **draft-PR, человек аппрувит** (никакого auto-merge).
+Previously the only way to add a fingerprint to `catalogs/tls_fp_blocklist.yaml`
+was to edit the file by hand, and nobody ever retired a stale entry. The tooling
+closes both ends: promotion in one command with an audit trail (an evidence
+"passport" in the PR and in the entry's comment), and automatic retirement on
+inactivity. Every automated action is a **draft PR that a human approves** — there
+is no auto-merge.
 
 ## SLA
 
-**От утреннего письма до прод-блокировки — ≤ 4 часа.** Это бюджет на: увидеть HIGH-кандидата →
-запустить `promote-fp.sh` → ревью staging-PR → мерж → наблюдение → activate-PR → мерж. После мержа
-каталог доезжает на эдж за ≤15 мин (Channel C, см. [catalogs/README](../catalogs/README.md)).
+**From the morning email to a production block: ≤4 hours.** That budget covers
+spotting a HIGH candidate → running `promote-fp.sh` → reviewing the staging PR →
+merging → observing → the activate PR → merging. After the merge, the catalog
+reaches the edge within ≤15 min (Channel C, see
+[catalogs/README](../catalogs/README.md)).
 
-## Когда промоутить
+## When to promote
 
-- **impersonator** (UA = браузер, fp = инструмент) — самый надежный сигнал, промоутить.
-- **recon на неизвестном/специфичном fp** (не общий curl/python) — промоутить.
-- **HIGH без intent** (честный curl из ДЦ, даже с recon) — **НЕ** в `tls_fp_blocklist`: его
-  отпечаток общий для всех пользователей инструмента. Это кейс для `ua_blacklist` / `ip_blocklist`.
-- **purity-вето** (`human_share > 0.05`) — не промоутить: под fp есть живые браузеры.
+- **impersonator** (UA says browser, fingerprint says tool) — the most reliable
+  signal, promote it.
+- **recon on an unknown or specific fingerprint** (not a generic curl/python one)
+  — promote it.
+- **HIGH with no intent** (an honest curl from a datacenter, even doing recon) —
+  do **not** put it in `tls_fp_blocklist`: that fingerprint is shared by every
+  user of the tool. This is a case for `ua_blacklist` / `ip_blocklist`.
+- **purity veto** (`human_share > 0.05`) — do not promote: there are real browsers
+  behind that fingerprint.
 
-Автомат сам открывает draft-PR для кандидатов, прошедших все gates + intent — оператору остается
-ревью. Письмо помечает, почему HIGH-кандидат НЕ был авто-промоутирован.
+The autopilot opens draft PRs by itself for candidates that pass every gate plus
+intent, leaving the operator the review. The email states why a HIGH candidate was
+not auto-promoted.
 
-## Что писать в `--reason`
+## What to write in `--reason`
 
-Одна строка, по делу: что это и почему блокируем. Хорошо: `"impersonator-кампания, маскировка
-под Chrome + recon /.env"`, `"go-сканер Atlassian-эндпоинтов, 8 IP из ДЦ"`. Плохо: `"бот"`,
-`"плохой fp"`. Reason попадает в PR и в комментарий-паспорт записи — это и есть ответ на будущий
-вопрос «почему этот fp в блоклисте».
+One line, to the point: what this is and why we block it. Good: `"impersonator
+campaign, poses as Chrome + recon /.env"`, `"go scanner hitting Atlassian
+endpoints, 8 datacenter IPs"`. Bad: `"bot"`, `"bad fp"`. The reason goes into the
+PR and into the entry's passport comment — it is the answer to the future question
+"why is this fingerprint on the blocklist".
 
-## Жизненный цикл и команды
+## Lifecycle and commands
 
 ```sh
-# 1. Промоут в staging (матчит, пишет staging_match, НЕ блокирует) — открывает PR
-scripts/promote-fp.sh <fp> --reason "одна строка"
+# 1. Promote to staging (matches, writes staging_match, does NOT block) — opens a PR
+scripts/promote-fp.sh <fp> --reason "one line"
 
-# 2. Наблюдение ≥48ч. Проверить, что паттерн ловит только ботов (см. runbook).
+# 2. Observe for ≥48 h. Confirm the pattern only catches bots (see the runbook).
 
-# 3. Активация (staging → active) — сверяется с наблюдением, открывает PR-2
+# 3. Activation (staging → active) — checks against the observation, opens PR 2
 scripts/promote-fp.sh <fp> --activate
 
-# Снятие (обратимо):
-scripts/demote-fp.sh <fp> --reason "почему сняли"            # active → staging
-scripts/demote-fp.sh <fp> --reason "campaign over" --remove  # удалить совсем
+# Retirement (reversible):
+scripts/demote-fp.sh <fp> --reason "why we retired it"      # active → staging
+scripts/demote-fp.sh <fp> --reason "campaign over" --remove # remove entirely
 
-# Посмотреть, что предложит автомат, ничего не делая:
+# See what the autopilot would propose, changing nothing:
 scripts/blocklist-autopilot.sh --dry-run
 ```
 
-Полезные флаги promote: `--status active` (пропустить staging — против A11, только осознанно),
-`--ttl-days N` (advisory review-by в паспорте), `--force-low-volume` (перебить volume-гейт),
-`--dry-run` (показать diff + тело PR, ничего не делать), `--auto` (draft-PR — режим автомата).
+Useful promote flags: `--status active` (skip staging — against A11, do it
+deliberately), `--ttl-days N` (an advisory review-by date in the passport),
+`--force-low-volume` (override the volume gate), `--dry-run` (show the diff and
+the PR body, change nothing), `--auto` (draft PR — the autopilot's mode).
 
-## Обратимость
+## Reversibility
 
-- **`demote-fp.sh`** — штатный обратный путь, адресуется по ключу fp (хирургически, без конфликтов
-  с другими записями). По умолчанию мягко `active → staging`, `--remove` — снять.
-- **`git revert`** — аварийный откат всего PR целиком, в рамках того же SLA. Применять, когда нужно
-  быстро отменить именно последний PR (см. [runbooks/catalog-rollback.md](runbooks/catalog-rollback.md)).
-- **auto-demote** — автомат сам открывает draft-PR на снятие fp, который молчит > 14 дней. Человек
-  не обязан отслеживать неактивные записи вручную.
+- **`demote-fp.sh`** — the standard way back, addressed by fingerprint key
+  (surgical, no conflicts with other entries). By default it softly moves
+  `active → staging`; `--remove` takes it out.
+- **`git revert`** — the emergency rollback of a whole PR, within the same SLA.
+  Use it when you need to undo the last PR quickly (see
+  [runbooks/catalog-rollback.md](runbooks/catalog-rollback.md)).
+- **auto-demote** — the autopilot opens a draft PR to retire a fingerprint that
+  has been silent for more than 14 days. Nobody has to track inactive entries by
+  hand.
 
-## Где это работает
+## Where this runs
 
-Аналитика и артефакты (`candidates.json` / `staging-observation.json` / `stale.json`) — на
-**backend+obs VM** (`antibot-analytics`, источник Loki). Скрипты promote/demote/autopilot
-запускаются **там же host-side** (нужен git-чекаут + gh). Прод-эдж на Puppet — не наш
-контур; наш путь доставки — git → backend → эдж.
+The analytics and its artifacts (`candidates.json` / `staging-observation.json` /
+`stale.json`) live on the **backend+obs VM** (`antibot-analytics`, sourced from
+Loki). The promote/demote/autopilot scripts run **there too, host-side** (they
+need a git checkout and gh). A Puppet-managed production edge is not our
+territory; our delivery path is git → backend → edge.
