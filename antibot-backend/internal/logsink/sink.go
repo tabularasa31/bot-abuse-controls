@@ -1,29 +1,29 @@
-// Package logsink — приёмник BAC_LOG в PostgreSQL для аналитики ([B9]).
+// Package logsink — the BAC_LOG receiver into PostgreSQL for analytics ([B9]).
 //
-// vision §"Приёмник логов" + phase1-spec §"Открытые вопросы (приёмник
-// телеметрии)" — куда лить структурированный поток логов. Стартовый sink —
-// та же PostgreSQL, что держит каталоги (B1/B4), таблица `logs` из
-// миграции 0003_logs.sql. Когда объём перерастёт Postgres — swap на
-// DuckDB/ClickHouse за границей «receiver→sink»: edge-сторона и schema
-// (за счёт raw JSONB) не меняются.
+// vision §"The log receiver" plus phase1-spec §"Open questions (the telemetry
+// sink)" — where to send the structured log stream. The initial sink is
+// the same PostgreSQL that holds the catalogs (B1/B4), the `logs` table from
+// migration 0003_logs.sql. When the volume outgrows Postgres, we swap to
+// DuckDB/ClickHouse behind the "receiver→sink" boundary: the edge side and the schema
+// (thanks to the raw JSONB) stay unchanged.
 //
-// Контракт пакета:
+// The package contract:
 //
-//   - Submit(line) — non-blocking; вызывает receiver на hot-path POST /v1/logs.
-//     Очередь bounded; переполнение → drop с метрикой `…_submit_dropped_total`,
-//     edge продолжит работать, NDJSON осядет в следующий батч.
+//   - Submit(line) — non-blocking; the receiver calls it on the POST /v1/logs hot path.
+//     The queue is bounded; an overflow → a drop with the `…_submit_dropped_total` metric,
+//     the edge keeps working, and the NDJSON settles into the next batch.
 //
-//   - Run(ctx) — крутит две горутины:
-//     (a) consumer: батчит из канала, флашит по size/timer через CopyFrom.
-//     На ошибку записи → spill всего батча на диск (одна спул-файла
-//     NDJSON = один батч), консумер продолжает принимать новые строки.
-//     (b) drainer: периодически выгребает старейший спул-файл и пробует
-//     вставить заново; на ошибку — backoff (ничего не удаляет).
+//   - Run(ctx) — runs two goroutines:
+//     (a) the consumer: it batches from the channel and flushes by size or timer through CopyFrom.
+//     On a write error it spills the whole batch to disk (one NDJSON spool file
+//     = one batch) and the consumer keeps accepting new lines.
+//     (b) the drainer: it periodically picks up the oldest spool file and tries
+//     the insert again; on an error it backs off (deleting nothing).
 //
-//   - Disk-queue: гарантия «sink-простой не теряет логи» (acceptance B9).
-//     Bound: SpoolMaxBytes; при превышении — удаляем старейшие спул-файлы
-//     с метрикой `…_spool_dropped_files_total` (защита от unbounded роста
-//     при длительном outage'е sink).
+//   - The disk queue: the guarantee "a sink outage loses no logs" (acceptance B9).
+//     The bound is SpoolMaxBytes; above it we delete the oldest spool files
+//     with the `…_spool_dropped_files_total` metric (protection from unbounded growth
+//     during a long sink outage).
 package logsink
 
 import (
@@ -48,33 +48,33 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Config — настройки sink. Дефолты в DefaultConfig().
+// Config — the sink settings. The defaults live in DefaultConfig().
 type Config struct {
-	// BatchSize — порог флаша по числу строк.
+	// BatchSize — the flush threshold by line count.
 	BatchSize int
-	// FlushInterval — порог флаша по времени (если BatchSize не набран).
+	// FlushInterval — the flush threshold by time (when BatchSize is not reached).
 	FlushInterval time.Duration
-	// QueueSize — bound на in-memory очередь Submit→consumer. Подбирается
-	// под пиковую частоту POST'ов c эджей; при переполнении дропаем
-	// (acceptance — «не теряем при простое sink», а не «при перегрузке»;
-	// перегрузка in-memory очереди = receiver падает в backpressure,
-	// что сильно хуже).
+	// QueueSize — the bound on the in-memory Submit→consumer queue. It is sized
+	// for the peak POST rate from the edges; on an overflow we drop
+	// (the acceptance criterion is "no loss during a sink outage", not "during overload";
+	// overloading the in-memory queue means the receiver falls into backpressure,
+	// which is far worse).
 	QueueSize int
-	// SpoolDir — где складывать NDJSON-батчи при простое sink. Пустая
-	// строка = spill отключён (для тестов и dev-режима без диска).
+	// SpoolDir — where to put NDJSON batches during a sink outage. An empty
+	// string disables the spill (for tests and a dev mode without disk).
 	SpoolDir string
-	// SpoolMaxBytes — потолок суммарного размера спул-каталога. При
-	// превышении удаляем самые старые файлы; sink-outage не должен
-	// заливать диск целиком.
+	// SpoolMaxBytes — the ceiling on the spool directory's total size. Above
+	// it we delete the oldest files; a sink outage must not
+	// fill the whole disk.
 	SpoolMaxBytes int64
-	// DrainInterval — как часто пробуем выгрести спул-каталог.
+	// DrainInterval — how often we try to drain the spool directory.
 	DrainInterval time.Duration
 }
 
-// DefaultConfig — разумные значения для демо-стенда.
-// BatchSize/FlushInterval: 500 строк ИЛИ 2 с — pgx CopyFrom за один RTT
-// на батч; при умеренном QPS эджа (десятки RPS на инстанс) это секундная
-// задержка ingest-видимости, под аналитикой нормально.
+// DefaultConfig — sensible values for the demo stand.
+// BatchSize/FlushInterval: 500 lines OR 2 s — pgx CopyFrom takes one RTT
+// per batch; at the edge's moderate QPS (tens of RPS per instance) that is a second of
+// ingest visibility delay, which is fine for analytics.
 func DefaultConfig() Config {
 	return Config{
 		BatchSize:     500,
@@ -85,15 +85,15 @@ func DefaultConfig() Config {
 	}
 }
 
-// Writer — то, что Sink дёргает для одного батча. Production-реализация
-// — pgxWriter (CopyFrom в logs); тесты подменяют на фейк с управляемой
-// ошибкой, чтобы проверять spill/drain без живой БД.
+// Writer — what Sink calls for one batch. The production implementation
+// is pgxWriter (CopyFrom into logs); tests substitute a fake with a controllable
+// error, to exercise spill/drain without a live database.
 type Writer interface {
 	Insert(ctx context.Context, rows [][]any) error
 }
 
-// pgxWriter — production-реализация Writer над pgxpool. CopyFrom за один
-// раунд — самый дешёвый bulk-insert.
+// pgxWriter — the production implementation of Writer over pgxpool. CopyFrom in one
+// round is the cheapest bulk insert.
 type pgxWriter struct{ pool *pgxpool.Pool }
 
 func (w *pgxWriter) Insert(ctx context.Context, rows [][]any) error {
@@ -101,8 +101,8 @@ func (w *pgxWriter) Insert(ctx context.Context, rows [][]any) error {
 	return err
 }
 
-// Sink — батч-инсертер с disk-queue. Создаётся через New, запускается Run,
-// получает работу через Submit.
+// Sink — a batch inserter with a disk queue. Created through New, started with Run,
+// and fed through Submit.
 type Sink struct {
 	cfg     Config
 	logger  *slog.Logger
@@ -110,7 +110,7 @@ type Sink struct {
 	ch      chan []byte
 	stopped atomic.Bool
 
-	// метрики
+	// the metrics
 	submitted    prometheus.Counter
 	dropped      prometheus.Counter
 	parseErr     prometheus.Counter
@@ -124,10 +124,10 @@ type Sink struct {
 	queueDepth   prometheus.GaugeFunc
 }
 
-// New создаёт sink. Если cfg.SpoolDir задан и существует — создаст подкаталог
-// при необходимости. Возврат ошибки = неустранимая проблема среды (нет прав
-// на спул-каталог) — receiver/app должны решить, валить процесс или работать
-// без sink.
+// New creates the sink. If cfg.SpoolDir is set and exists it creates the subdirectory
+// when needed. Returning an error means an unrecoverable environment problem (no permission
+// on the spool directory) — the receiver/app decides whether to fail the process or work
+// without a sink.
 func New(cfg Config, pool *pgxpool.Pool, logger *slog.Logger, reg prometheus.Registerer) (*Sink, error) {
 	if pool == nil {
 		return nil, errors.New("logsink: pool is nil")
@@ -135,8 +135,8 @@ func New(cfg Config, pool *pgxpool.Pool, logger *slog.Logger, reg prometheus.Reg
 	return NewWithWriter(cfg, &pgxWriter{pool: pool}, logger, reg)
 }
 
-// NewWithWriter — для тестов и для будущего DuckDB/ClickHouse swap'a
-// (другой Writer, тот же Sink).
+// NewWithWriter — for tests and for a future DuckDB/ClickHouse swap
+// (a different Writer, the same Sink).
 func NewWithWriter(cfg Config, w Writer, logger *slog.Logger, reg prometheus.Registerer) (*Sink, error) {
 	if w == nil {
 		return nil, errors.New("logsink: writer is nil")
@@ -219,17 +219,17 @@ func NewWithWriter(cfg Config, w Writer, logger *slog.Logger, reg prometheus.Reg
 	return s, nil
 }
 
-// Submit — non-blocking, дёргается с hot-path receiver. Копия line — её
-// уже сделал bufio.Scanner владельцу, нам безопасно держать ссылку, но
-// scanner переиспользует свой буфер на следующей итерации → нужно скопировать.
+// Submit — non-blocking, called from the receiver hot path. A copy of line — the
+// owner already made one through bufio.Scanner and it is safe for us to hold a reference, but
+// the scanner reuses its buffer on the next iteration → so we must copy.
 //
-// stopped-проверка best-effort: формально между Load и select-write есть
-// окно, в которое consume может уже выйти из drain-цикла и оставить
-// записанный line осиротевшим в буфере. В app.shutdown HTTP-сервер
-// дренируется ДО cancelWorkers (см. app/app.go shutdown), так что
-// receiver-горутины завершаются до того, как consume увидит ctx.Done —
-// окна в проде не наступает. Mutex здесь добавлял бы contention на
-// каждый log-line ради сценария, отсутствующего по порядку shutdown'a.
+// The stopped check is best effort: formally there is a window between the Load and the select write
+// in which consume may already have left the drain loop, leaving the
+// written line orphaned in the buffer. In app.shutdown the HTTP server is
+// drained BEFORE cancelWorkers (see app/app.go shutdown), so the
+// receiver goroutines finish before consume sees ctx.Done —
+// the window never occurs in production. A mutex here would add contention on
+// every log line for a scenario the shutdown order rules out.
 func (s *Sink) Submit(line []byte) {
 	if s.stopped.Load() {
 		return
@@ -244,11 +244,11 @@ func (s *Sink) Submit(line []byte) {
 	}
 }
 
-// Run крутит consumer + drainer. Возвращает после ctx.Done() и финального
-// флаша оставшегося батча (на диск, если DB недоступна).
+// Run runs the consumer plus the drainer. It returns after ctx.Done() and the final
+// flush of the remaining batch (to disk if the DB is unavailable).
 func (s *Sink) Run(ctx context.Context) {
-	// Стартовая инвентаризация спула — чтобы gauge сразу показывал реальный
-	// размер (не «0 → bump» после первого spill).
+	// An initial inventory of the spool — so that the gauge shows the real
+	// size straight away (rather than "0 → bump" after the first spill).
 	s.updateSpoolGauge()
 
 	var wg sync.WaitGroup
@@ -271,15 +271,15 @@ func (s *Sink) consume(ctx context.Context) {
 		batch = batch[:0]
 	}
 
-	// detachedFlush — общий хелпер для всех флашей в shutdown-фазе:
-	// ctx уже отменён, но writer.Insert должен иметь шанс отдать батч в
-	// DB (иначе батч уйдёт в spill, хотя DB здорова). WithoutCancel рвёт
-	// cancellation; WithTimeout даёт жёсткую границу — иначе зависший
-	// CopyFrom на мёртвой DB пережил бы ShutdownTimeout, wg.Wait
-	// abandon'нул бы воркера, pool.Close race'нулся бы с in-flight
-	// CopyFrom, и финальный батч пропал бы и из DB, и из спула
-	// (code-review #56). FlushInterval — приемлемый бюджет: он уже задаёт
-	// порядок «как быстро мы ждём ответа sink'а» в нормальной работе.
+	// detachedFlush — the shared helper for every flush in the shutdown phase:
+	// ctx is already cancelled, but writer.Insert must have a chance to hand the batch to the
+	// DB (otherwise the batch goes to the spill even though the DB is healthy). WithoutCancel breaks
+	// the cancellation; WithTimeout gives a hard bound — otherwise a hung
+	// CopyFrom against a dead DB would outlive ShutdownTimeout, wg.Wait
+	// would abandon the worker, pool.Close would race with the in-flight
+	// CopyFrom, and the final batch would be lost from both the DB and the spool
+	// (from code review). FlushInterval is an acceptable budget: it already sets
+	// the order of "how long we wait for the sink to answer" in normal operation.
 	detachedFlush := func(b [][]byte) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.FlushInterval)
 		defer cancel()
@@ -289,20 +289,20 @@ func (s *Sink) consume(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// stopped=true ДО drain'a: окно между ctx.Done и Store
-			// должно быть нулевым, иначе Submit, прошедший Load до
-			// Store, мог бы записать в канал после drain'а и осиротить
-			// строку. См. также комментарий в Submit.
+			// stopped=true BEFORE the drain: the window between ctx.Done and the Store
+			// must be zero, otherwise a Submit that passed the Load before the
+			// Store could write into the channel after the drain and orphan the
+			// line. See also the comment in Submit.
 			s.stopped.Store(true)
 			for {
 				select {
 				case line := <-s.ch:
 					batch = append(batch, line)
 					if len(batch) >= s.cfg.BatchSize {
-						// Все флаши на shutdown-фазе — через detachedFlush
-						// (не только финальный): mid-drain батч с
-						// canceled ctx сразу спилл'ился бы без попытки
-						// в DB (code-review #56).
+						// Every flush in the shutdown phase goes through detachedFlush
+						// (not just the final one): a mid-drain batch with a
+						// cancelled ctx would spill immediately without trying
+						// the DB (from code review).
 						detachedFlush(batch)
 						batch = batch[:0]
 					}
@@ -324,9 +324,9 @@ func (s *Sink) consume(ctx context.Context) {
 	}
 }
 
-// flush — попытка положить батч в DB. На ошибку → spill в spool.
+// flush — an attempt to put the batch into the DB. On an error → a spill into the spool.
 func (s *Sink) flush(ctx context.Context, lines [][]byte) {
-	// Локальная копия слайса — caller переиспользует свой буфер.
+	// A local copy of the slice — the caller reuses its buffer.
 	cp := make([][]byte, len(lines))
 	copy(cp, lines)
 
@@ -338,9 +338,9 @@ func (s *Sink) flush(ctx context.Context, lines [][]byte) {
 	}
 }
 
-// insert парсит строки и копирует их в logs одним CopyFrom. Неудача парса
-// одной строки не валит весь батч — строку пропускаем (parseErr++), остальные
-// идут в DB. Так один кривой JSON не запирает sink навсегда.
+// insert parses the lines and copies them into logs with a single CopyFrom. A parse failure
+// on one line does not fail the whole batch — we skip the line (parseErr++) and the rest
+// go into the DB. That way one malformed JSON does not lock the sink forever.
 func (s *Sink) insert(ctx context.Context, lines [][]byte) error {
 	rows := make([][]any, 0, len(lines))
 	for _, line := range lines {
@@ -354,10 +354,10 @@ func (s *Sink) insert(ctx context.Context, lines [][]byte) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	// Ошибка на любой строке — вся транзакция rollback; мы тогда отдаём
-	// весь батч в spill, а не пытаемся локализовать виноватую строку (для
-	// аналитики приемлемо при редких outage'ах; парсинг отдельных строк
-	// уже отфильтрован выше).
+	// An error on any line rolls the whole transaction back; we then hand the
+	// whole batch to the spill rather than trying to localise the guilty line (which is
+	// acceptable for analytics during rare outages; individual line parsing
+	// is already filtered above).
 	if err := s.writer.Insert(ctx, rows); err != nil {
 		return fmt.Errorf("writer insert: %w", err)
 	}
@@ -365,10 +365,10 @@ func (s *Sink) insert(ctx context.Context, lines [][]byte) error {
 	return nil
 }
 
-// spill пишет батч одной NDJSON-файлой в SpoolDir. Если SpoolDir не задан —
-// просто роняем строки (метрика dropped уже не подходит, sink_insert_errors
-// уже инкрементирован, осиротевшие строки видны как разность). В реальной
-// конфигурации demo-VM SpoolDir всегда задан.
+// spill writes the batch as a single NDJSON file into SpoolDir. If SpoolDir is unset we
+// simply drop the lines (the dropped metric no longer fits, sink_insert_errors
+// has already been incremented, and the orphaned lines show up as the difference). In a real
+// demo-VM configuration SpoolDir is always set.
 func (s *Sink) spill(lines [][]byte) {
 	if s.cfg.SpoolDir == "" {
 		return
@@ -378,8 +378,8 @@ func (s *Sink) spill(lines [][]byte) {
 	}
 	name := fmt.Sprintf("batch-%d-%d.ndjson", time.Now().UnixNano(), spoolCounter.Add(1))
 	path := filepath.Join(s.cfg.SpoolDir, name)
-	// Пишем в tmp + rename, чтобы drainer не подхватил частично записанный
-	// файл (concurrent drain vs spill в одном каталоге).
+	// We write to tmp plus rename, so that the drainer does not pick up a partially written
+	// file (a concurrent drain versus a spill in the same directory).
 	tmp := path + ".partial"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 	if err != nil {
@@ -409,20 +409,20 @@ func (s *Sink) spill(lines [][]byte) {
 	}
 	s.spooledFiles.Inc()
 	s.spooledLines.Add(float64(len(lines)))
-	// Post-write повторно прогоняем budget: pre-write enforce оставлял
-	// только «место под следующий батч», но сам batch мог быть крупнее
-	// освобождённого окна и оставить каталог над cap'ом до следующего
-	// spill'a (codex review #56). Гарантия hard-bound'a достигается
-	// именно этим вторым прогоном.
+	// Post-write we run the budget again: the pre-write enforcement left
+	// only "room for the next batch", but the batch itself could be larger than the
+	// freed window and leave the directory over the cap until the next
+	// spill (from review). The hard bound is guaranteed
+	// precisely by this second pass.
 	if err := s.enforceSpoolBudget(); err != nil {
 		s.logger.Warn("logsink: post-write budget check failed", "err", err)
 	}
 	s.updateSpoolGauge()
 }
 
-// drain периодически берёт самый старый файл из спула и пытается вставить.
-// На успех — удаляет файл; на ошибку — стопаемся до следующего тика
-// (DB ещё не восстановилась).
+// drain periodically takes the oldest file from the spool and tries to insert it.
+// On success it deletes the file; on an error we stop until the next tick
+// (the DB has not recovered yet).
 func (s *Sink) drain(ctx context.Context) {
 	if s.cfg.SpoolDir == "" {
 		return
@@ -449,9 +449,9 @@ func (s *Sink) drainOnce(ctx context.Context) {
 		path := filepath.Join(s.cfg.SpoolDir, f.Name())
 		lines, err := readNDJSON(path)
 		if err != nil {
-			// Битый файл — НЕ удаляем автоматически, оператор разберётся
-			// (могла случиться частичная запись при crash'е, либо мусор);
-			// просто пропускаем, drain попробует другие.
+			// A broken file is NOT deleted automatically — the operator will sort it out
+			// (it may be a partial write from a crash, or junk);
+			// we simply skip it and drain will try the others.
 			s.logger.Warn("logsink: drain read failed", "err", err, "path", path)
 			continue
 		}
@@ -461,13 +461,13 @@ func (s *Sink) drainOnce(ctx context.Context) {
 			return
 		}
 		if err := os.Remove(path); err != nil {
-			// Файл уже в DB — без квaрантина следующий drain-тик
-			// перечитает и вставит дубликаты (logs не имеет natural-key
-			// на request_id, только BIGSERIAL id; code-review #56).
-			// Переименовываем в .quarantine — listSpoolFiles фильтрует
-			// по префиксу `batch-` и суффиксу `.ndjson`, так что
-			// quarantine-файлы больше не попадают в drain. Если и
-			// rename упал — отдаём операцию оператору.
+			// The file is already in the DB — without quarantine the next drain tick
+			// would reread it and insert duplicates (logs has no natural key
+			// on request_id, only a BIGSERIAL id; from code review).
+			// We rename it to .quarantine — listSpoolFiles filters by the
+			// `batch-` prefix and the `.ndjson` suffix, so
+			// quarantine files no longer reach the drain. If the
+			// rename fails too, we hand the operation to the operator.
 			quar := path + ".quarantine"
 			if rerr := os.Rename(path, quar); rerr != nil {
 				s.logger.Error("logsink: drain remove AND quarantine-rename failed — RISK OF DUPLICATES on next tick",
@@ -485,9 +485,9 @@ func (s *Sink) drainOnce(ctx context.Context) {
 	}
 }
 
-// enforceSpoolBudget удаляет старейшие файлы пока суммарный размер не
-// уйдёт под SpoolMaxBytes. Защита от ситуации «sink лежит сутки, диск
-// забит».
+// enforceSpoolBudget deletes the oldest files until the total size drops
+// below SpoolMaxBytes. Protection against "the sink is down for a day and the disk
+// is full".
 func (s *Sink) enforceSpoolBudget() error {
 	if s.cfg.SpoolMaxBytes <= 0 {
 		return nil
@@ -504,12 +504,12 @@ func (s *Sink) enforceSpoolBudget() error {
 		}
 		total += info.Size()
 	}
-	// Никогда не evict'им последний оставшийся файл: если total>cap
-	// при len(files)==1, значит один батч сам по себе больше cap'a
-	// (misconfig: SpoolMaxBytes < ожидаемого размера батча). Удаление
-	// этого файла превратило бы «жёсткий bound» в «гарантированную
-	// потерю любого spill'a», даже когда диск пуст. Логируем как ошибку
-	// и оставляем как есть — оператор должен поднять SpoolMaxBytes.
+	// We never evict the last remaining file: if total>cap
+	// with len(files)==1, then one batch by itself is larger than the cap
+	// (a misconfiguration: SpoolMaxBytes < the expected batch size). Deleting
+	// that file would turn a "hard bound" into "guaranteed loss of every
+	// spill", even with an empty disk. We log it as an error
+	// and leave it — the operator should raise SpoolMaxBytes.
 	for total > s.cfg.SpoolMaxBytes && len(files) > 1 {
 		victim := files[0]
 		path := filepath.Join(s.cfg.SpoolDir, victim.Name())
@@ -551,13 +551,13 @@ func (s *Sink) updateSpoolGauge() {
 	s.spoolBytes.Set(float64(total))
 }
 
-// spoolCounter — монотонный суффикс к имени спул-файла, чтобы две
-// одновременные spill-операции в пределах одной нс не столкнулись на
-// одинаковом имени.
+// spoolCounter — a monotonic suffix for the spool file name, so that two
+// simultaneous spill operations within the same nanosecond do not collide on the
+// same name.
 var spoolCounter atomic.Uint64
 
-// copyColumns — порядок колонок для CopyFrom. Должен совпадать с порядком
-// значений в parseRow.
+// copyColumns — the column order for CopyFrom. It must match the order of the
+// values in parseRow.
 var copyColumns = []string{
 	"request_id", "ts", "edge_id", "resource_id",
 	"host", "path", "method", "status",
@@ -569,13 +569,13 @@ var copyColumns = []string{
 	"raw",
 }
 
-// rawRecord — гибкое представление JSON-строки лога. Все поля
-// nullable-указатели: edge выставляет null'ом то, что не применимо
-// (entities-reference: resource_id, tls_*, asn, gео и т.д.).
+// rawRecord — a flexible representation of a JSON log line. Every field is a
+// nullable pointer: the edge sets null for whatever does not apply
+// (entities-reference: resource_id, tls_*, asn, geo and so on).
 //
-// json.Number для status — поле приходит как int, но через float64 в
-// generic decoder'е оно теряет точность; пишем как Number и парсим
-// руками. Аналогично tls_cipher_count и latency_ms.
+// json.Number for status — the field arrives as an int, but through a float64 in a
+// generic decoder it loses precision; we store it as a Number and parse it
+// by hand. The same goes for tls_cipher_count and latency_ms.
 type rawRecord struct {
 	RequestID      string      `json:"request_id"`
 	Timestamp      string      `json:"timestamp"`
@@ -607,13 +607,13 @@ type rawRecord struct {
 }
 
 func parseRow(line []byte) ([]any, error) {
-	// json.Decoder.Decode принимает один JSON-объект и молча игнорирует
-	// trailing-байты — строка вида `{...}garbage` прошла бы парс, но та же
-	// строка как jsonb в PostgreSQL отвергается, и весь батч CopyFrom
-	// падает; sink уносит его в spool, drainer его же возвращает в DB,
-	// CopyFrom снова падает — sink-throughput умирает на одной кривой
-	// строке (codex review #56, P1). Поэтому после Decode проверяем,
-	// что в буфере осталась только whitespace до EOF.
+	// json.Decoder.Decode accepts one JSON object and silently ignores
+	// trailing bytes — a line like `{...}garbage` would pass the parse, but the same
+	// line as jsonb in PostgreSQL is rejected and the whole CopyFrom batch
+	// fails; the sink carries it into the spool, the drainer returns it to the DB,
+	// CopyFrom fails again — and sink throughput dies on one malformed
+	// line (from review, P1). So after the Decode we check that
+	// only whitespace remains in the buffer up to EOF.
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.UseNumber()
 	var r rawRecord
@@ -658,8 +658,8 @@ func parseRow(line []byte) ([]any, error) {
 		emptyArr(r.StagingMatch),
 		nullStr(r.RuleSource),
 		nullStr(r.ClientRuleName),
-		// raw — целая строка как jsonb. pgx сам конвертит []byte в jsonb,
-		// валидность JSON pgx не проверяет — мы выше успешно его распарсили.
+		// raw — the whole line as jsonb. pgx converts []byte to jsonb itself, and
+		// does not check the JSON's validity — we parsed it successfully above.
 		line,
 	}
 	return row, nil
@@ -685,8 +685,8 @@ func nullIntNum(n json.Number) any {
 	}
 	v, err := n.Int64()
 	if err != nil {
-		// status/tls_cipher_count иногда могут прийти как float (например,
-		// сериализатор выдал 200.0); пробуем float→int64.
+		// status/tls_cipher_count can sometimes arrive as a float (if the
+		// serialiser emitted 200.0, say); we try float→int64.
 		f, ferr := n.Float64()
 		if ferr != nil {
 			return nil
@@ -709,14 +709,14 @@ func nullFloatNum(n json.Number) any {
 
 func emptyArr(a []string) any {
 	if a == nil {
-		// pgx text[] не любит nil — отдаём пустой slice. В Postgres ляжет '{}'.
+		// pgx dislikes a nil text[] — we hand it an empty slice. In Postgres it lands as '{}'.
 		return []string{}
 	}
 	return a
 }
 
-// readNDJSON разворачивает один спул-файл в []line. Каждая строка — отдельная
-// запись BAC_LOG. Пустые строки пропускаем (хвостовой '\n').
+// readNDJSON unwraps one spool file into []line. Each line is a separate
+// BAC_LOG record. Empty lines are skipped (the trailing '\n').
 func readNDJSON(path string) ([][]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -725,7 +725,7 @@ func readNDJSON(path string) ([][]byte, error) {
 	defer f.Close()
 	var out [][]byte
 	sc := bufio.NewScanner(f)
-	// 1 MiB на строку — с запасом от 32 KiB receiver-cap'a.
+	// 1 MiB per line — comfortably above the receiver's 32 KiB cap.
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -742,12 +742,12 @@ func readNDJSON(path string) ([][]byte, error) {
 	return out, nil
 }
 
-// listSpoolFiles возвращает спул-файлы, отсортированные по имени (имя
-// начинается с UnixNano → лексикографический порядок = хронологический).
-// Принимаем только `batch-*.ndjson` — БЕЗ суффикс-проверки `.quarantine`
-// (созданные drainOnce при недоступном Remove) и `.partial` (незаконченные
-// spill'ы) тоже имеют prefix `batch-` и без точной проверки суффикса .ndjson
-// drainer перечитал бы их и вставил повторно (PR-56 review, P1 blocker).
+// listSpoolFiles returns the spool files sorted by name (the name
+// starts with UnixNano, so lexicographic order is chronological).
+// We accept only `batch-*.ndjson` — WITHOUT the exact suffix check, `.quarantine`
+// files (created by drainOnce when Remove is unavailable) and `.partial` (unfinished
+// spills) also carry the `batch-` prefix, and without checking the .ndjson suffix the
+// drainer would reread them and insert duplicates (from review, a P1 blocker).
 func listSpoolFiles(dir string) ([]os.DirEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
