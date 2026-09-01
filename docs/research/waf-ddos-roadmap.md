@@ -17,7 +17,7 @@
 > **Where this sits on the product timeline:** WAF/DDoS is **post-post-MVP** (new
 > axes alongside the detector), not a continuation of the D series. The broad frame
 > of what we are aiming at is in
-> [../product/product-scope.md](../product/product-scope.md).
+> [../product/product-scope.md](../design/product-scope.md).
 
 ## 1. The baseline — what we already have (and what we do not)
 
