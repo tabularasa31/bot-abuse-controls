@@ -44,7 +44,7 @@ The JS POSTs this body to `/__challenge/verify`:
 ```
 
 The server (C5) must:
-1. Decode the nonce and check the HMAC through `challenge_secret.get`.
+1. Decode the nonce and check the HMAC through `challenge_secret.get()`.
 2. Check that `expiry > now` (single use through the TTL — replay protection per vision §5.2).
 3. Recompute `sha256(nonce + JS_SECRET)` and compare it with `token`. `JS_SECRET`
    is a constant in [`page.html`](page.html); changing it requires a `CASCADE_VERSION` bump.

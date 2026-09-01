@@ -114,7 +114,7 @@ For us it is the monetisation hook: we show the customer what we see in their tr
 
 Full protection: blocking rules really block (403 / 429 with Retry-After), soft signals trigger verification through L5 (a JS challenge), and verified crawlers fastpath. Everything that "would have been blocked" in shadow is now really blocked.
 
-Inside active there is the emergency Under Attack toggle (`attack_mode=true`) — per host, enabled by the customer for their domain. With it on, L5 forces `should_challenge=true` for every request that reaches it: browsers go to the JS challenge, non-browser clients are blocked as `non_browser_blocked` (branch B), and protocol-incompatible requests as `unchallengeable_request` (branch C). Verified search bots and IP whitelist holders keep fastpathing at L2 (SEO and trusted integrations are unaffected). Clearance cookies issued BEFORE the attack started do not fastpath while `attack_mode=on` (an attacker could have stockpiled them in advance) — such a request goes through the cascade to L5 for a challenge. Cookies issued during the attack (after re-solving the challenge) fastpath as usual, so a real user solves one challenge per attack rather than one per request. Use it during an ongoing attack, or pre-emptively ahead of expected load.
+Inside active there is the emergency Under Attack toggle (`attack_mode=true`) — per host, enabled by the customer for their domain. With it on, L5 forces `should_challenge()=true` for every request that reaches it: browsers go to the JS challenge, non-browser clients are blocked as `non_browser_blocked` (branch B), and protocol-incompatible requests as `unchallengeable_request` (branch C). Verified search bots and IP whitelist holders keep fastpathing at L2 (SEO and trusted integrations are unaffected). Clearance cookies issued BEFORE the attack started do not fastpath while `attack_mode=on` (an attacker could have stockpiled them in advance) — such a request goes through the cascade to L5 for a challenge. Cookies issued during the attack (after re-solving the challenge) fastpath as usual, so a real user solves one challenge per attack rather than one per request. Use it during an ongoing attack, or pre-emptively ahead of expected load.
 
 ---
 
@@ -379,7 +379,7 @@ The passive allow rules (the clearance cookie, verified bots, the IP whitelist) 
 
 ##### 5.1. The verification decision
 
-Whether active verification is needed right now is decided by `should_challenge`. It is a function computed at L5 on every request, from three inputs:
+Whether active verification is needed right now is decided by `should_challenge()`. It is a function computed at L5 on every request, from three inputs:
 
 1. **The `attack_mode` toggle** for this host (per host). When it is on, every request that reaches L5 requires verification regardless of every other signal. See Under Attack mode below.
 2. **The accumulated challenge flags** from the earlier layers (tls_fp_impersonator / tls_fp_suspicious_ciphers / tls_fp_dc_browser from L3, rate rules with action=challenge from L4). The request reached L5, so at least one flag has already fired.
@@ -418,9 +418,9 @@ Targeted cases — known API partners, specific webhook sources, individual path
 
 ##### 5.2. Choosing and issuing the verification
 
-When `should_challenge=true` we do NOT always issue a JS challenge. Not all legitimate traffic comes from a browser — API clients, mobile apps, server-to-server integrations and IoT do not execute JS. Issuing them a JS challenge would block the customer's legitimate non-browser requests.
+When `should_challenge()=true` we do NOT always issue a JS challenge. Not all legitimate traffic comes from a browser — API clients, mobile apps, server-to-server integrations and IoT do not execute JS. Issuing them a JS challenge would block the customer's legitimate non-browser requests.
 
-So when `should_challenge=true` the cascade chooses the verification mechanism by client type:
+So when `should_challenge()=true` the cascade chooses the verification mechanism by client type:
 
 **Branch A: the client looks like a browser** (the UA contains Mozilla/Chrome/Safari/Firefox/Edge and it passes the basic header checks) → a JS challenge:
 
@@ -443,7 +443,7 @@ So when `should_challenge=true` the cascade chooses the verification mechanism b
 
 So → the blocking category → `verdict=block, rule=non_browser_blocked`. We block it as suspicious.
 
-**When branch B fires.** Only when `should_challenge=true` at stage 5.1 — that is, either `attack_mode` is on, or the client is on Standard Strictness and has accumulated system challenge flags. Under Permissive, branch B does not fire: there `should_challenge` returns false for system flags, the request never reaches branch B and physically continues through the cascade. The log then records `verdict=permissive, rule=<name of the last soft flag>` — which is the whole point of Permissive (not getting in the way of non-browser clients without clear need), while the separate verdict lets analytics see "Standard would have blocked here".
+**When branch B fires.** Only when `should_challenge()=true` at stage 5.1 — that is, either `attack_mode` is on, or the client is on Standard Strictness and has accumulated system challenge flags. Under Permissive, branch B does not fire: there `should_challenge()` returns false for system flags, the request never reaches branch B and physically continues through the cascade. The log then records `verdict=permissive, rule=<name of the last soft flag>` — which is the whole point of Permissive (not getting in the way of non-browser clients without clear need), while the separate verdict lets analytics see "Standard would have blocked here".
 
 **The false-positive recovery loop.** A blocked request lands in the log with all the details (the IP, the UA, which challenge flags fired, exactly which rules carried it to L5, the fingerprint). In the dashboard the customer sees that block in the "Blocked requests" widget and can:
 
@@ -462,7 +462,7 @@ Once it applies, the next request from that client fastpaths at L2.3 and never r
 | `Upgrade: websocket` (a WebSocket handshake) | The client is waiting for `101 Switching Protocols`. An HTML response breaks the upgrade and the connection is never established. |
 | `Accept` explicitly excludes `text/html` (for example `application/json`, `application/grpc`, `image/*`) | The client is not a browser, will not render an HTML page and will not execute the JS. It receives HTML instead of the expected JSON or binary and breaks while parsing. The default when there is no `Accept` header is to treat it as `*/*` (not html) → unchallengeable. (The product team may adjust this during implementation if they find a practical counter-example.) |
 
-Branch C's decision when `should_challenge=true`: `verdict=block, rule=unchallengeable_request`. The recovery loop is the same as branch B's — the customer sees the block in the dashboard and can add the IP to the per-resource IP whitelist.
+Branch C's decision when `should_challenge()=true`: `verdict=block, rule=unchallengeable_request`. The recovery loop is the same as branch B's — the customer sees the block in the dashboard and can add the IP to the per-resource IP whitelist.
 
 **Why a separate `unchallengeable_request` rule rather than the general `non_browser_blocked`.** It is useful for the customer in the dashboard to distinguish two different reasons for a block:
 
@@ -479,7 +479,7 @@ A forced mode, toggled by `attack_mode` per host (its own toggle for each protec
 
 With `attack_mode=on` for a domain:
 
-- **Every request that reaches L5 is forced into verification** regardless of Strictness and the accumulated flags. The branch routing at L5 is preserved: a browser → a JS challenge (branch A); a non-browser → `verdict=block, rule=non_browser_blocked` (branch B); a protocol-incompatible request → `verdict=block, rule=unchallengeable_request` (branch C). So attack_mode does not cancel L5's protective blocks; it forces `should_challenge=true` for everyone.
+- **Every request that reaches L5 is forced into verification** regardless of Strictness and the accumulated flags. The branch routing at L5 is preserved: a browser → a JS challenge (branch A); a non-browser → `verdict=block, rule=non_browser_blocked` (branch B); a protocol-incompatible request → `verdict=block, rule=unchallengeable_request` (branch C). So attack_mode does not cancel L5's protective blocks; it forces `should_challenge()=true` for everyone.
 - **Cookie verify at L2.1: cookies issued before the attack started do not fastpath** — the attacker could have stockpiled them in advance on freshly issued IPs, so we do not trust them. Real users re-solve the challenge once and receive a fresh cookie with TTL=1 h, which fastpaths for the rest of the attack (see below).
 - **Verified search bots (stage 2.2) and the IP whitelist (stage 2.3) keep fastpathing** — SEO and the server integrations the customer has explicitly trusted are unaffected.
 - The L4 rate limits apply as usual to everything that reaches L4 — including clearance cookie holders (the cookie skips L3 and L5 but not L4, see L2.1). A full bypass of L4 belongs to verified bots and the IP whitelist only.

@@ -17,7 +17,7 @@
 > **Where this sits on the product timeline:** WAF/DDoS is **post-post-MVP** (new
 > axes alongside the detector), not a continuation of the D series. The broad frame
 > of what we are aiming at is in
-> [../product/product-scope.md](../design/product-scope.md).
+> [../product/product-scope.md](../product/product-scope.md).
 
 ## 1. The baseline — what we already have (and what we do not)
 
@@ -31,23 +31,23 @@ TODAY"):
 | **L2 reputation** (`reputation.lua`, `verified_bots.lua`, `clearance.lua`) | IP allow/block, geo/ASN, verified bots, clearance cookie | the reputation layer — a shared foundation for both directions |
 | **L3 tls_fp** (`tls_fp.lua`) | JA4 fingerprint (blocklist plus soft flags) | anti-bot, orthogonal to WAF |
 | **L4 rate_limits** (`rate_limit.lua`) | GCRA: `rate_ip`/`rate_ip_ua`/`rate_api`/`rate_tls_fp`/`rate_scan_urls`, 10 s/60 s windows | **the core of L7 anti-DDoS**, already here |
-| **L5 verification** (`verification.lua`, `challenge*.lua`) | JS challenge, Strictness, `attack_mode` | **L7 anti-DDoS**: the challenge as a filter under load |
+| **L5 verification** (`verification.lua`, `challenge*.lua`) | JS challenge, Strictness, `attack_mode`  | **L7 anti-DDoS**: the challenge as a filter under load |
 
 Three conclusions that set the direction:
 
 1. **L7 anti-DDoS already partly exists.** L4 rate limits plus `attack_mode` plus the
- challenge are working protection against an application-layer flood. Development
- here means **deepening what exists**, not a new discipline.
+   challenge are working protection against an application-layer flood. Development
+   here means **deepening what exists**, not a new discipline.
 2. **The WAF is not implemented anywhere.** There is no inspection of request bodies,
- query/POST parameters or headers against signatures (SQLi/XSS/path
- traversal/RCE/SSRF), and no virtual patching. In [vision.md](../product/vision.md)
- DDoS is an explicit goal (§"cutting off DDoS bots") while WAF is mentioned only
- indirectly (XSS, as the reason for `HttpOnly` on the cookie). This is **greenfield**.
+   query/POST parameters or headers against signatures (SQLi/XSS/path
+   traversal/RCE/SSRF), and no virtual patching. In [vision.md](../product/vision.md)
+   DDoS is an explicit goal (§"cutting off DDoS bots") while WAF is mentioned only
+   indirectly (XSS, as the reason for `HttpOnly` on the cookie). This is **greenfield**.
 3. **The delivery and observability infrastructure is reusable.** Channel C
- (`catalog_pull.lua`, the ADR-006 git catalogs), shadow/active mode
- (`policy.enforce`), staged rollout (staging→active), the structured log
- (`bac_log.lua`), the metrics and the kill switch all get reused for both WAF
- signatures and DDoS rules, with nothing to reinvent.
+   (`catalog_pull.lua`, the ADR-006 git catalogs), shadow/active mode
+   (`policy.enforce`), staged rollout (staging→active), the structured log
+   (`bac_log.lua`), the metrics and the kill switch  all get reused for both WAF
+   signatures and DDoS rules, with nothing to reinvent.
 
 ## 2. The principle: WAF and DDoS are two new **axes**, not new stages "instead of"
 
@@ -55,16 +55,16 @@ The cascade remains a single decision point (L5 `verification` folds the flags i
 verdict). WAF and DDoS add **sources of flags**, not parallel pipelines:
 
 - **WAF** → a new content-inspection stage that accumulates flags (`waf:sqli`,
- `waf:xss`, …) and in active mode may block on its own for critical rules — by
- analogy with the way a `tls_fp_blocklist` hit calls `policy.enforce(403)` directly.
+  `waf:xss`, …) and in active mode may block on its own for critical rules — by
+  analogy with the way a `tls_fp_blocklist` hit calls `policy.enforce(403)` directly.
 - **L7 DDoS (rate-based)** → not a new stage and **not a new axis**: it is adaptivity
- in the existing L4/L5 (rate-limit thresholds plus automatic `attack_mode`), already
- scoped in the G series (G1–G4, §4.1).
+  in the existing L4/L5 (rate-limit thresholds plus automatic `attack_mode`), already
+  scoped in the G series (G1–G4, §4.1).
 - **Connection/protocol-level DDoS (slow attacks, HTTP/2 DoS)** → this **is genuinely
- new scope**, and it does **not fit the cascade** at all: slowloris, slow POST, slow
- read and Rapid Reset live BELOW `access_by_lua` (at the connection and frame level,
- before HTTP semantics). They are handled by nginx directives and the build version,
- with Lua only observing and feeding reputation. Scoped as E1–E3 / E4–E5 (§4.2).
+  new scope**, and it does **not fit the cascade** at all: slowloris, slow POST, slow
+  read and Rapid Reset live BELOW `access_by_lua` (at the connection and frame level,
+  before HTTP semantics). They are handled by nginx directives and the build version,
+  with Lua only observing and feeding reputation. Scoped as E1–E3 / E4–E5 (§4.2).
 
 This preserves the rules-reference invariant: "the only decision point is L5", and
 flags do not issue verdicts themselves (apart from the explicit hard-block exit points
@@ -75,15 +75,15 @@ under `policy.enforce`).
 ### 3.1 What is in the MVP scope
 A minimal useful WAF at the edge:
 - inspection of the **query string and the POST body** (form-urlencoded plus JSON;
- multipart is phase 2);
+  multipart is phase 2);
 - inspection of **headers and the path** (path traversal, null bytes, protocol
- anomalies);
+  anomalies);
 - a signature set for the **OWASP Top 10 core**: SQLi, XSS, path traversal, command
- injection, obvious SSRF/LFI;
+  injection, obvious SSRF/LFI;
 - **virtual patching** — a targeted rule for a specific CVE or customer endpoint (a
- fast PR-driven catalog, like `tls_fp_blocklist`);
+  fast PR-driven catalog, like `tls_fp_blocklist`);
 - shadow mode by default (like the whole cascade) plus per-host on/off through the
- policy.
+  policy.
 
 Out of MVP scope: ML anomaly detection on bodies, full CRS paranoia level 3+, and
 anti-evasion normalisation of every conceivable encoding (a long tail, added
@@ -97,20 +97,20 @@ Coraza is a Go implementation of ModSecurity seclang, with
 Set is a set proven over years.
 - **+** Instant Top 10 coverage, maintained rules, seclang familiar to operators.
 - **−** Someone else's rule model, outside our Channel C / shadow mode / `bac_log`;
- we either pull it in as a Go service (another `auth_request` hop — which we already
- rejected in ADR-001 in favour of edge Lua) or look for a Lua binding of questionable
- maturity. Body-inspection latency on every request needs measuring. CRS is famous for
- false positives and would need tuning that does not fit our staging→active workflow
- out of the box.
+  we either pull it in as a Go service (another `auth_request` hop — which we already
+  rejected in ADR-001 in favour of edge Lua) or look for a Lua binding of questionable
+  maturity. Body-inspection latency on every request needs measuring. CRS is famous for
+  false positives and would need tuning that does not fit our staging→active workflow
+  out of the box.
 
 **Option B — our own ruleset in the style of the cascade.**
 A `waf.lua` stage with our own signatures; catalogs (`waf_rules.yaml`) over Channel C
 exactly like `tls_fp_blocklist`; shadow/active through `policy.enforce`; flags in
 `bac_log`; staged rollout and `git revert` for free (ADR-006).
 - **+** One architecture: the same log, metrics, kill switch, mode gate, PR workflow
- and CI validation of rules. Controlled latency (we inspect exactly what we chose to).
+  and CI validation of rules. Controlled latency (we inspect exactly what we chose to).
 - **−** We own completeness and anti-evasion ourselves. Coverage grows slowly. The risk
- of "inventing our own CRS, worse than CRS".
+  of "inventing our own CRS, worse than CRS".
 
 **Option C (a compromise) — our own execution engine plus an import of a subset of CRS
 signatures** as data in our catalog format. We take proven patterns but run them
@@ -125,12 +125,12 @@ No code lands before that ADR.
 
 ### 3.3 Open questions for the WAF
 - Body inspection requires **buffering** it (`lua_need_request_body` / reading
- `request_body`), which conflicts with proxying large uploads; we need a size limit and
- a bypass for media/upload endpoints.
+  `request_body`), which conflicts with proxying large uploads; we need a size limit and
+  a bypass for media/upload endpoints.
 - Where normalisation happens (URL decode, unicode, comment stripping) — a shared
- preprocessor ahead of the signatures, otherwise evasion is trivial.
+  preprocessor ahead of the signatures, otherwise evasion is trivial.
 - A per-host WAF profile (paranoia level, disabled rules) — an extension of `policy`
- (the B10 Policy API already handles PATCH of scalars and JSONB arrays).
+  (the B10 Policy API already handles PATCH of scalars and JSONB arrays).
 
 ## 4. DDoS — three layers at different maturity
 
@@ -138,10 +138,10 @@ No code lands before that ADR.
 > layers for us, not one:
 > - **§4.1 L7 rate-based** — already scoped in the G series (G1–G4), not duplicated here.
 > - **§4.2 connection/protocol level (slow attacks, HTTP/2 DoS)** — genuinely new scope,
-> filed as E1–E3 / E4–E5; it lives in nginx directives and the build version, NOT in
-> the cascade.
+>   filed as E1–E3 / E4–E5; it lives in nginx directives and the build version, NOT in
+>   the cascade.
 > - **§4.3 volumetric L3/L4** — outside the OpenResty stand (reality level 3), only the
-> edge-ACL feed contract.
+>   edge-ACL feed contract.
 
 ### 4.1 L7 application layer — already scoped in the G series (not duplicated)
 Everything I originally sketched as "DDoS phase 1/2" turned out, on checking the
@@ -150,9 +150,9 @@ backlog, to be already-filed tickets (the G series plus one signal from layer D)
 | Idea | Where it already lives (backlog / research) |
 |---|---|
 | Automatically raising `attack_mode` on "bad" traffic (not raw volume), hysteresis, manual precedence over automatic, the per-host `auto_attack_mode` flag | (backlog, design ready) — detection by bot rate / solve rate / origin latency relative to the host baseline |
-| Subnet/ASN reputation for datacenter pools (soft, analytics) | plus [subnet-unit-design.md](subnet-unit-design.md) |
+| Subnet/ASN reputation for datacenter pools (soft, analytics) | (backlog) plus [subnet-unit-design.md](subnet-unit-design.md) |
 | Transient subnet challenge→drop during an attack | (backlog) |
-| A fast hot list of attackers (pre-arming edges when a botnet pivots) | plus [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
+| A fast hot list of attackers (pre-arming edges when a botnet pivots) | (backlog) plus [cross-tenant-threat-intel-design.md](cross-tenant-threat-intel-design.md) |
 | Solve rate as a bot signal under a flood (the ticket itself is **layer D**, the detector; the G series reuses it) | (review) plus [challenge-solve-rate-design.md](challenge-solve-rate-design.md) |
 
 **Conclusion:** the L4 (`rate_limit`) and L5 (`attack_mode`/challenge) mechanisms exist,
@@ -194,14 +194,14 @@ to.
 What we **can** do within our scope, without reaching into someone else's
 infrastructure:
 - **design the contract** between our L7 detector and the network layer: when L7 sees a
- hopeless source (a crude flood, zero solve rate, the edge budget exhausted), emit a
- "drop this at L3/L4" signal (format, transport) for the network layer to execute. This
- is an **edge-ACL feed**, an analogue of `ip_blocklist` but for a firewall rather than
- for Lua;
+  hopeless source (a crude flood, zero solve rate, the edge budget exhausted), emit a
+  "drop this at L3/L4" signal (format, transport) for the network layer to execute. This
+  is an **edge-ACL feed**, an analogue of `ip_blocklist` but for a firewall rather than
+  for Lua;
 - write a **research ADR/design** for eBPF/XDP dropping as a future phase, without
- implementing it in production.
+  implementing it in production.
 - do NOT assume an integration with a production edge's configuration management.
- If a production network layer becomes necessary, that is a separate phase.
+  If a production network layer becomes necessary, that is a separate phase.
 
 ## 5. API security / account protection — an adjacent axis (0 tickets in the backlog)
 
@@ -219,7 +219,7 @@ from a header or query) → a key for rate limiting and reputation, exactly as
 
 A second cross-cutting point: the strongest auth-abuse signal is the **share of failed
 logins**, which the edge sees only from the origin's response (`$status` 401/403 in the
-log or header phase). That is the same feedback pattern as **D12 (challenge solve
+log or header phase). That is the same feedback pattern as **the solve-rate work (challenge solve
 rate)**.
 
 ### 5.2 Scope — two clusters
@@ -235,7 +235,7 @@ rate)**.
 **API security:**
 | Threat | What the edge can do | Fit |
 |---|---|---|
-| API scraping / abuse | partly covered by `rate_api` and `rate_scan_urls`; new: per-API-key quotas | ★★★ |
+| API scraping / abuse | partly covered by `rate_api`  and `rate_scan_urls`; new: per-API-key quotas | ★★★ |
 | API key brute force / leaked key | rate limits plus reputation per key | ★★★ |
 | Enumeration / BOLA probing | overlaps with `rate_scan_urls` (recon URIs) | ★★ |
 | Schema/contract enforcement | partly hygiene, partly **WAF** (§3) — the boundary goes in an ADR | ★★ |
@@ -243,32 +243,32 @@ rate)**.
 
 ### 5.3 What gets reused
 `rate_limit.lua` (the GCRA engine plus keying — we add account/api_key/endpoint-class
-keys), `is_api_path`/glob matching, `policy` plus the B10 Policy API (per-host auth
+keys), `is_api_path()`/glob matching, `policy` plus the B10 Policy API (per-host auth
 paths and quotas), `reputation` (per key / per account), `challenge`/`attack_mode` (a
-step-up on auth), `bac_log` plus tags, and the D12 pattern (response-phase feedback for
+step-up on auth), `bac_log` plus tags, and the the solve-rate work pattern (response-phase feedback for
 the failed-login ratio).
 
 ### 5.4 The `P` series — the first wave (auth abuse plus quotas), filed
 P covers the auth-credential-abuse and rate/quota domains. Tickets are in §7.
 1. **The identity-extraction stage** — username/token/API key → keys. ⚠️
- **PII/security**: hash the username, **never log or store passwords**, and do not
- inspect the password body.
+   **PII/security**: hash the username, **never log or store passwords**, and do not
+   inspect the password body.
 2. **Per-credential / per-key GCRA profiles** (`rate_login_per_account`, `rate_api_key`).
 3. **A failed-auth feedback loop** — origin 401/403 → a counter → reputation/challenge
- (modelled on D12).
+   (modelled on the solve-rate work).
 4. **Auth-endpoint policy config** — declaring login/register/API paths plus per-host
- quotas.
+   quotas.
 5. *(optional, possibly backend)* **a breached-credential / disposable-email signal** — a
- catalog like `ip_blocklist`; the edge does not validate passwords.
+   catalog like `ip_blocklist`; the edge does not validate passwords.
 
 ### 5.5 The honest boundaries
 - **ATO** (an anomalous successful login) — the edge does not know the account history;
- the decision belongs to the backend.
+  the decision belongs to the backend.
 - **Business-logic abuse** — needs application context, outside the edge.
 - **Credential stuffing** at the edge means volume plus failed ratio plus bot score,
- **not** checking a password against a breach list (the edge never touches passwords).
+  **not** checking a password against a breach list (the edge never touches passwords).
 - **Schema enforcement** partly bleeds into WAF (§3) — pin the boundary in an ADR so it
- does not duplicate the W series.
+  does not duplicate the W series.
 
 ### 5.6 The `Q` series — the second wave (API contract / governance / transport), filed
 P covers only the abuse-control slice (auth plus quotas). Full API protection is broader;
@@ -304,50 +304,50 @@ in flight, which **on its own closes L7 DDoS** (G1–G4). Post-post-MVP adds **n
 that are absent from the backlog entirely:
 
 1. **Slow-attacks baseline** (§4.2, [E1]) — the cheapest and most urgent: the stand is
- currently vulnerable to slowloris out of the box (no `limit_conn`, no timeouts). Pure
- nginx config.
+   currently vulnerable to slowloris out of the box (no `limit_conn`, no timeouts). Pure
+   nginx config.
 2. **The WAF spike plus ADR-007** (§3.2) — research, does not block the D series, can
- start early.
+   start early.
 3. **API security / account protection** (§5) — cheaper than WAF because it is closer to
- the core (rate/reputation/challenge/fingerprint). The foundation is
- identity-extraction (§5.4).
+   the core (rate/reputation/challenge/fingerprint). The foundation is
+   identity-extraction (§5.4).
 4. **WAF MVP** (§3.1) — after the ADR, along whichever path it chooses.
 5. **HTTP/2 DoS audit** (§4.2, [E4]) — targeted, depends on the build version.
 6. **The DDoS L3/L4 contract** (§4.3) — design the edge-ACL feed; implementing the
- network-level drop is a future phase with production access.
+   network-level drop is a future phase with production access.
 7. **Rate-based L7 DDoS** — deliberately NOT tracked as a separate item here: that is
- G1–G4 in the G series.
+   G1–G4 in the G series.
 
 ## 7. Relation to the existing backlog and research
 - **Rate-based L7 DDoS — already in the backlog (layer G):** (subnet
- reputation), (transient drop), (automatic attack
- mode), (cross-tenant). It uses the solve-rate signal from layer D
- and rests on `attack_mode` plus `rate_limit`, which
- are already in the code.
+  reputation), (transient drop), (automatic attack
+  mode), (cross-tenant). It uses the solve-rate signal from layer D
+  () and rests on `attack_mode`  plus `rate_limit` , which
+  are already in the code.
 - **Connection/protocol-level DDoS — filed (§4.2):** [E1] (slow-attacks
- baseline), [E2] (observability), [E3] (a policy knob,
- optional); [E4] (HTTP/2 DoS mitigation audit), [E5] (h2 abuse
- as a signal, depends on R2 ). Reuses `bac_log`, the metrics, G1 reputation
- and the edge ACL.
+  baseline), [E2] (observability), [E3] (a policy knob,
+  optional); [E4] (HTTP/2 DoS mitigation audit), [E5] (h2 abuse
+  as a signal, depends on R2 ). Reuses `bac_log`, the metrics, G1 reputation
+  and the edge ACL.
 - **WAF — there is NO such axis in the backlog** (checked: 0 tasks on WAF/SQLi/XSS).
- Proposed as a `W` series: W1 spike/ADR-007, W2 the engine, W3 the signature catalog
- over Channel C, W4 a per-host WAF profile in the policy, W5 virtual patching. Reuses
- ADR-006 (git catalogs), B10 (the Policy API) and `policy.enforce` (the mode gate),
- plus `bac_log` and the metrics.
+  Proposed as a `W` series: W1 spike/ADR-007, W2 the engine, W3 the signature catalog
+  over Channel C, W4 a per-host WAF profile in the policy, W5 virtual patching. Reuses
+  ADR-006 (git catalogs), B10 (the Policy API) and `policy.enforce` (the mode gate),
+  plus `bac_log` and the metrics.
 - **API security / account protection — filed (§5.4, the `P` series):** [P1] (identity extraction), [P2] (per-key/per-account profiles), [P3]
- (failed-auth feedback), [P4] (auth-endpoint policy config),
- [P5] (optional breached credentials). Closer to the existing core than WAF.
+  (failed-auth feedback), [P4] (auth-endpoint policy config),
+  [P5] (optional breached credentials). Closer to the existing core than WAF.
 - **API contract / governance — filed (§5.6, the `Q` series):** [Q1] (per-endpoint contract), [Q2] (schema validation), [Q3] (resource limits), [Q4] (edge JWT), [Q5] (mTLS, optional), [Q6]
- (transport hygiene), [Q7] (API inventory). A positive model,
- complementary to WAF (`W`).
+  (transport hygiene), [Q7] (API inventory). A positive model,
+  complementary to WAF (`W`).
 - **Volumetric L3/L4** — outside the stand repo's scope; present as a contract plus
- research, not as an implementation (reality level 3).
+  research, not as an implementation (reality level 3).
 
 ## 8. What we are NOT doing at this step
 - No WAF code lands before ADR-007 (build versus buy is settled by the spike).
 - No more **rate-based** L7 DDoS tickets — that is the G series (G1–G4), already in the
- backlog.
+  backlog.
 - Slow attacks and HTTP/2 DoS are not added as cascade stages — they sit below
- `access_by_lua` (nginx directives plus the build plus a log shim; E1–E3 / E4–E5).
+  `access_by_lua` (nginx directives plus the build plus a log shim; E1–E3 / E4–E5).
 - We do not reach into the network layer (eBPF or routing on live edges) — a
- separate phase.
+  separate phase.

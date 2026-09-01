@@ -70,7 +70,7 @@ Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, the design decision, [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
-The cascade stages record their outcome via `bac_log.set_verdict`/`add_tag`; the final triggering rule wins. The fp-block path is recorded as the `tls_fp` stage through the same contract. TLS-fp data columns and the centralized telemetry sink are out of scope here (separate tasks).
+The cascade stages record their outcome via `bac_log.set_verdict()`/`add_tag()`; the final triggering rule wins. The fp-block path is recorded as the `tls_fp` stage through the same contract. TLS-fp data columns and the centralized telemetry sink are out of scope here (separate tasks).
 
 ## Quickstart on a fresh VM
 
@@ -292,7 +292,7 @@ with the issuing side only (the template + the nonce + the version pin); binding
   that changes the nonce format, `JS_SECRET`, the fingerprint fields, the verify path or
   the expected response contract. The version↔template contract is described in
   [challenge/README.md](challenge/README.md).
-- `infra/demo-stand/lua/challenge.lua` — `preload` compares the template's
+- `infra/demo-stand/lua/challenge.lua` — `preload()` compares the template's
   `<meta name="cascade-version">` against the contents of `CASCADE_VERSION` at
   init_by_lua (a mismatch fails the nginx start); `render(host)` / `issue_nonce(host)`
   are for C5.
@@ -451,7 +451,7 @@ infra/demo-stand/
 │   ├── edge_stats.lua              EDGE_STATS stdout dump (counters + deploy metadata → Loki; replaces /metrics + /__version)
 │   ├── recent.lua                  last-N request ring buffer (shared_dict; written by log_event)
 │   ├── probe.lua                   TLS-fp dump — not routed
-│   ├── bac_log.lua                 structured-log contract (init/set_verdict/add_tag/emit)
+│   ├── bac_log.lua                 structured-log contract (init/set_verdict/add_tag()/emit)
 │   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
 │   ├── challenge_secret.lua HMAC secret loader (file mount → shared_dict)
 │   └── challenge.lua challenge page renderer + nonce issuer (version-pinned)

@@ -99,7 +99,7 @@ implementation is GCRA.
 
 Consolidates the accumulated challenge flags and decides what to serve the client.
 
-### `should_challenge` — a computed function, not a config flag
+### `should_challenge()` — a computed function, not a config flag
 
 It is not a value stored somewhere and not a separate toggle. It is a function L5
 evaluates on every request from three inputs: `attack_mode[host]`, the set of
@@ -108,7 +108,7 @@ system versus a customer rule). The flags at L3/L4 never issue a challenge thems
 they only mark the request. The single point where "issue verification or not" is
 decided is this call at L5.
 
-`should_challenge` returns `true` if any of the following holds:
+`should_challenge()` returns `true` if any of the following holds:
 
 | Input | Condition → `true` |
 | --- | --- |
@@ -116,7 +116,7 @@ decided is this call at L5.
 | System challenge flags plus Strictness | At least one system flag accumulated (`tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, system L4 rate rules with action=challenge) AND `Strictness[host]=Standard` |
 | A customer rate rule | A customer rate rule with `action=challenge` fired — always `true`, even under `Strictness=Permissive` (an explicit customer setting is respected) |
 
-`should_challenge` returns `false` if:
+`should_challenge()` returns `false` if:
 
 | Input | Condition → `false` |
 | --- | --- |
@@ -125,11 +125,11 @@ decided is this call at L5.
 
 ### What happens next (stage 5.1 → 5.2)
 
-- `should_challenge=false` → `verdict=pass` or `verdict=permissive` (see above), and
+- `should_challenge()=false` → `verdict=pass` or `verdict=permissive` (see above), and
   the request continues into the CDN flow.
-- `should_challenge=true` → routed into branches A/B/C by client type (below).
+- `should_challenge()=true` → routed into branches A/B/C by client type (below).
 
-### Issuing branches (stage 5.2) when `should_challenge=true`
+### Issuing branches (stage 5.2) when `should_challenge()=true`
 
 | # | If… | Then… | Category |
 | --- | --- | --- | --- |
