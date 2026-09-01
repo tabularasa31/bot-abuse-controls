@@ -1,58 +1,20 @@
--- L4 rate_limits stage (rules-reference L4, phase1-spec "rate_limits",
--- phase2-spec "Effect on the rate_limits stage"; RFC §A3).
+-- L4 rate limits.
 --
--- System profiles, in rules-reference order (first match wins within the stage):
---   1. rate_ip       — per source IP            (10s>100  || 60s>600)
---   2. rate_ip_ua    — per source IP + UA pair  (10s>100  || 60s>600)
---   3. rate_api      — per IP, API paths only   (10s>50   || 60s>300)
---   4. rate_tls_fp   — per TLS fingerprint      (10s>50   || 60s>300)  [Phase 2]
---   5. rate_scan_urls— per IP, UNIQUE URLs      (10s>50   || 60s>200)
--- Each profile has two windows (10s and 60s); the profile fires if EITHER is
--- exceeded. Thresholds come from defaults.conf [blocking.rate_*] via the config
--- module (window_10s / window_60s), so admins retune without code changes.
+-- Five system profiles, first match wins: per IP, per IP+UA, per IP on API
+-- paths, per TLS fingerprint, and unique-URL scanning per IP. Each has a 10 s
+-- and a 60 s window and fires if either is exceeded; the thresholds live in the
+-- config so they can be retuned without code changes.
 --
--- rate_tls_fp (Phase 2, phase2-spec §"Effect on the rate_limits stage") keys the
--- GCRA cell on the TLS fingerprint instead of the IP, closing the IP-rotation /
--- single-TLS-stack class. It is GRACEFUL-SKIP on an fp-cache miss: if the fp was
--- not computed for this request (no TLS handshake captured ⇒ cipher_count 0, or
--- an absent/malformed fp), the profile is skipped entirely (no key, no cell, no
--- verdict) and only the per-IP / per-IP+UA limits apply — exactly as the spec
--- requires ("if tls_fp_cache missed ... the rate_tls_fp rule does not
--- fire"). The fp is computed once in verdict.lua and passed into run().
+-- rate_tls_fp keys on the fingerprint instead of the IP, which closes the
+-- IP-rotation case. It skips gracefully when no fingerprint was computed, so
+-- only the per-IP profiles apply rather than everything sharing one empty key.
 --
--- Algorithm — GCRA (phase1-spec §"Sliding window semantics"): one float TAT
--- cell per (profile, window, key) in the `rate_limit` shared_dict, updated with
--- one arithmetic op. No timestamp lists, so it scales to many keys. We roll our
--- own over shared_dict (the spec explicitly allows this in lieu of
--- lua-resty-limit-req, which the stand does not vendor). The read-modify-write
--- is not locked; under contention a few extra requests can slip a window
--- boundary — acceptable for an observe-only stand, and lua-resty-limit-req's
--- locking is the productionize step, not Phase 1.
+-- The algorithm is GCRA: one float cell per (profile, window, key), updated
+-- with a single arithmetic operation, so it scales to many keys without storing
+-- timestamp lists. The read-modify-write is unlocked, so under contention a few
+-- requests can slip past a window boundary.
 --
--- Mode-gated enforcement (86exr0627). When a profile fires, run() records
--- the would-be verdict via bac_log and then calls policy.enforce(429,
--- {Retry-After=...}). For a host with policy.mode=active that means
--- ngx.exit(429) right inside run with a Retry-After header (the larger
--- of the profile's windows, typically 60s — phase1-spec §"429 with
--- Retry-After"). For mode=shadow (pool default) enforce is a no-op:
--- run returns true, the cascade ends (rate_limit is already last), and
--- the request continues to origin. The GCRA cell's exact retry-after
--- gap is still not surfaced — using the window size is a safe upper
--- bound and avoids leaking the cell's internal state; refining to the
--- precise gap is a future optimization, not a correctness gap.
---
--- Fair-queueing / ngx.sleep delaying is explicitly NOT done: a block
--- is a fast 429, not a hold. Spec mentions delay/fair-queue as
--- possible future behaviour; current scope is plain 429.
---
--- Cascade order is hygiene → reputation → tls_fp → rate_limits → verification,
--- so run() is called LAST in verdict.lua (after the tls_fp allow fall-through).
--- bac_log is last-writer-wins, so a rate_limits block overwrites an earlier
--- observe-only hygiene/reputation verdict — matching the "final rule that
--- fired" logging contract (phase1-spec). Metrics: a fired profile is counted
--- automatically by log_event.lua as antibot_rule_total{stage="rate_limits",
--- rule="rate_ip"|...} — the stand's per-rule counter model. (The dedicated
--- lua-resty-prometheus histograms are cascade task C3.)
+-- A tripped profile is a fast 429 with Retry-After, never a delay or a hold.
 
 local policy = require "policy"
 
@@ -62,16 +24,10 @@ local _M = {
     api      = {},   -- api_path_patterns globs for rate_api / uri_bucket
 }
 
--- pure: GCRA conformance test for one window. `interval` = seconds between two
--- conforming requests (= window/limit); `burst` = burst tolerance in seconds.
--- With burst = (limit-1)*interval = window-interval (see windows()), a fresh key
--- emits exactly `limit` requests instantaneously and the (limit+1)th is the
--- first rejected — matching the rules-reference ">N" threshold (block the
--- request that pushes the count past N). Returns (allowed, new_tat, retry_after):
---   * allowed false  → request is over the limit; new_tat unchanged; retry_after
---                      = seconds until it would conform again.
---   * allowed true   → new_tat is the updated cell to persist; retry_after 0.
--- No ngx dependency — unit-tested in tests/rate_limit_test.lua.
+-- GCRA conformance for one window. `interval` is the spacing between conforming
+-- requests and `burst` the tolerance; sized as below, a fresh key passes exactly
+-- `limit` requests and rejects the next one. Returns (allowed, new_tat,
+-- retry_after).
 function _M.gcra(now, tat, interval, burst)
     tat = tat or 0
     local allow_at = tat - burst
@@ -82,12 +38,8 @@ function _M.gcra(now, tat, interval, burst)
     return true, base + interval, 0
 end
 
--- pure: is the fp usable as a rate_tls_fp key? True only when fp is a non-empty
--- string carrying a real handshake — cipher_count > 0. The fp prefix is always
--- "L<ver:2d><sni:d|i><cipher_cnt:2d>…" (ja4_compute.lua), and a request with no
--- TLS handshake degenerates to cipher_count 0 ("L00i00…"). A 0 count (or a
--- prefix that does not parse) means "fp not computed" → graceful skip. Same
--- parse as tls_fp.cipher_count; inlined to keep this module free of a tls_fp dep.
+-- A fingerprint is usable only if it carries a real handshake: with none, the
+-- cipher count degenerates to zero and every such request would share one key.
 function _M.fp_usable(fp)
     if type(fp) ~= "string" or fp == "" then return false end
     local cc = fp:match("^L%d%d[di](%d%d)")
@@ -125,12 +77,9 @@ function _M.uri_bucket(uri, api_patterns)
     return "root"
 end
 
--- pure: derive the two windows of a profile from its threshold pair. Each
--- window carries both the raw `limit` (used by the scan-urls unique counter)
--- and the GCRA params interval=window/limit, burst=(limit-1)*interval (used by
--- the rate cells; burst sized so exactly `limit` requests pass before the
--- (limit+1)th trips). Returns { w10, w60 } or nil when neither threshold is a
--- positive number (profile inert). No ngx dep.
+-- Derives both windows from a threshold pair, carrying the raw limit for the
+-- unique-URL counter and the GCRA parameters for the rate cells. nil when
+-- neither threshold is set, which leaves the profile inert. No ngx dep.
 function _M.windows(window_10s, window_60s)
     local function win(seconds, limit)
         if type(limit) ~= "number" or limit <= 0 then return nil end
@@ -143,11 +92,8 @@ function _M.windows(window_10s, window_60s)
     return { w10 = w10, w60 = w60 }
 end
 
--- Called once in init_by_lua, after config.load(). Compiles the defaults.conf
--- thresholds into the ordered profile list the request path reads. Done in the
--- master so workers inherit it on fork (no shared dict for config; the shared
--- dict holds only per-key TAT state). Returns _M and the count of active
--- profiles for the startup log.
+-- Compiles the thresholds into the ordered profile list, in the master so
+-- workers inherit it. The shared dict holds only per-key state.
 function _M.build(config)
     local defaults = config.defaults or {}
     local blocking = defaults.blocking or {}
@@ -158,12 +104,8 @@ function _M.build(config)
     if type(api) == "string" then api = { api } end
     _M.api = api or {}
 
-    -- Profile order is the rules-reference order: rate_ip → rate_ip_ua →
-    -- rate_api → rate_tls_fp → rate_scan_urls. rate_scan_urls counts UNIQUE URLs,
-    -- not request rate (kind="scan"); the others are plain GCRA request-rate
-    -- cells (kind="rate"). rate_api is a rate cell that only applies on API paths
-    -- (api_only=true). rate_tls_fp (Phase 2) keys on the TLS fp and is skipped
-    -- when the fp is not usable (graceful skip — see run()).
+    -- Order matters: first match wins. rate_scan_urls counts unique URLs
+    -- rather than request rate, which is why it has its own kind.
     local specs = {
         { rule = "rate_ip",        kind = "rate", key = "ip" },
         { rule = "rate_ip_ua",     kind = "rate", key = "ip_ua" },
@@ -199,16 +141,11 @@ function _M.build(config)
     return _M, #_M.profiles
 end
 
--- One GCRA window against the shared dict. `dict_key` identifies the cell;
--- `win` is a {interval,burst,seconds} window (or nil → not configured, never
--- blocks). Returns true when this window is exceeded.
+-- One GCRA window against the shared dict; a nil window never blocks.
 --
--- We only persist the cell on an ALLOWED request, and burst = window - interval
--- caps how far the TAT can run ahead: a request only conforms while
--- now >= tat - burst, so the stored new_tat = max(now,tat) + interval is at most
--- now + burst + interval = now + window. The 2× window TTL therefore always
--- outlives the cell's own TAT (the cell never points more than one window into
--- the future) while still letting idle keys evict so the dict stays bounded.
+-- The cell is persisted only on an allowed request, and the burst caps how far
+-- it can run ahead — never more than one window into the future. So the 2×
+-- window TTL always outlives the cell while still letting idle keys evict.
 local function window_exceeded(dict, dict_key, win)
     if not win then return false end
     local now = ngx.now()
@@ -230,28 +167,16 @@ local function bound(s)
     return s
 end
 
--- rate_scan_urls: count UNIQUE URLs per IP per window. GCRA models request rate,
--- not set cardinality, so this is a fixed-window unique counter instead.
+-- Unique URLs per IP per window. GCRA models a rate, not set cardinality, so
+-- this is a fixed-window unique counter instead.
 --
--- Keys are bucketed by floor(now/window): both the per-URL marker and the
--- per-IP counter carry the same bucket number, so each window generation has a
--- distinct key namespace. That is what keeps the marker and counter lifetimes
--- consistent — a marker lingering from an earlier bucket cannot suppress
--- counting in the next one (its key no longer matches), and within a bucket the
--- counter is created on the first unique URL and lives 2× the window, well
--- beyond every marker added in that same bucket. The marker fires :add() only
--- the first time a URL is seen in the bucket; each first-sight bumps the
--- counter. Exceeded when the counter passes the threshold. Fixed-window (not
--- sliding) with the usual boundary doubling is acceptable for the observe-only
--- stand.
+-- Both the per-URL marker and the per-IP counter carry the same bucket number,
+-- giving each window its own key namespace: a marker left over from an earlier
+-- bucket cannot suppress counting in the next one.
 --
--- Marker writes are CAPPED at the threshold: once the counter is over the limit
--- the verdict is already decided, so we stop recording new URL markers. Without
--- this a scraper hitting tens of thousands of distinct URLs would flood the
--- shared `rate_limit` dict and, via LRU, evict the GCRA TAT cells of the OTHER
--- profiles — corrupting their accounting too. The cap bounds markers to ~limit
--- per (ip, bucket) (a few hundred), so scan traffic can no longer starve the
--- rest of the stage.
+-- Marker writes stop once the counter is over the limit. Without that cap a
+-- scraper hitting tens of thousands of URLs would fill the shared dict and
+-- evict the other profiles' cells through LRU, corrupting their accounting.
 local function scan_window_exceeded(dict, ip, uri, win)
     if not win then return false end
     local bucket  = math.floor(ngx.now() / win.seconds)
@@ -268,12 +193,8 @@ local function scan_window_exceeded(dict, ip, uri, win)
     return (n or 0) > win.limit
 end
 
--- Called per request from verdict.lua, LAST in the cascade. Observe-only:
--- records the would-be verdict via bac_log on the first profile that trips,
--- then returns (first-match-wins). Never blocks, never sleeps, never stops the
--- cascade; the boolean return is informational only. `fp` is the TLS
--- fingerprint computed once in verdict.lua, used to key rate_tls_fp; when it is
--- not usable that profile is skipped (graceful skip).
+-- Records the first profile that trips and returns. Never sleeps. The boolean
+-- return is informational.
 function _M.run(fp)
     if not _M.enabled then return false end
     if #_M.profiles == 0 then return false end
@@ -301,11 +222,8 @@ function _M.run(fp)
             local f60 = scan_window_exceeded(dict, ip, uri, p.w60)
             fire = f10 or f60
         else
-            -- Per-profile applicability:
-            --   * rate_api  — only on API paths (api_only).
-            --   * rate_tls_fp — only when the fp was computed (graceful skip on
-            --     an fp-cache miss; phase2-spec). Its key material is the fp.
-            --   * everything else always applies, keyed on ip / ip+ua.
+            -- rate_api applies only on API paths, rate_tls_fp only when the
+            -- fingerprint exists; the rest always apply.
             local applies, material
             if p.key == "tls_fp" then
                 applies, material = fp_ok, fp
@@ -325,13 +243,9 @@ function _M.run(fp)
 
         if fire then
             bac_log.set_verdict("rate_limits", "block", p.rule)
-            -- Retry-After in seconds. Use the larger of the profile's
-            -- two windows (typically 60s) as a safe upper bound on the
-            -- recovery time — the GCRA cell's exact gap isn't surfaced
-            -- here, but the window size is always ≥ the gap, so we
-            -- never under-advise the client (which would cause an
-            -- immediate retry that 429s again). Fall back to 60 if
-            -- neither window has a `.seconds` field, defensive only.
+            -- The larger window is a safe upper bound on the recovery time:
+            -- never under-advise, or the client retries straight into another
+            -- 429.
             local retry = (p.w60 and p.w60.seconds)
                        or (p.w10 and p.w10.seconds)
                        or 60

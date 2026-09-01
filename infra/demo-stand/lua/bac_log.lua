@@ -1,19 +1,13 @@
--- Phase 1 structured-log contract for the BAC stand.
+-- The structured request log: exactly one JSON record per request, emitted in
+-- log_by_lua.
 --
--- Emits exactly one JSON record per request in log_by_lua. The cascade
--- stages (hygiene / reputation / rate_limits — each a separate task)
--- record their outcome through set_verdict()/add_tag(); the final
--- triggering rule wins (last writer), which is the "final rule that
--- fired" the schema asks for.
+-- Cascade stages record their outcome through set_verdict() and add_tag(); the
+-- last rule to fire wins, which is the "final rule that fired" the schema asks
+-- for.
 --
--- Forward-compatibility: the field set and enums are stable. `tls_fp` and
--- its three sub-columns (tls_cipher_count, tls_alpn, tls_sni_present,
--- parsed from the fp prefix in set_tls_fp) are emitted; the stand's daily
--- analyzer keys on them. The `flags` array (soft-rule challenge flags,
--- vision.md v0.5 Step 7) is populated by the tls_fp soft rules (A9) and
--- stays a stable [] when none fire.
--- The Phase 2/3 optional fields (rule_source, client_rule_name) still land
--- with their own tasks, without renaming or reordering these keys.
+-- The field set and the enums are stable. Consumers key on them, so fields are
+-- added rather than renamed or reordered, and arrays stay present and empty
+-- when nothing fills them.
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt + null sentinels
@@ -38,11 +32,8 @@ local VERDICT_TO_ACTION = {
     allow = "allow", permissive = "pass",
 }
 
--- Stage / verdict enums. Forward-compatible per phase1-spec: the enum
--- carries the documented future values (tls_fp Phase 2, cold_start
--- Phase 3, verification Phase 4; verdict permissive Phase 4) so a later
--- cascade stage calling set_verdict() isn't rejected. Existing codes are
--- never renamed or reordered.
+-- Carries the documented future values too, so a stage landing later is not
+-- rejected by its own log call.
 local VALID_STAGES = {
     hygiene = true, reputation = true, tls_fp = true,
     rate_limits = true, verification = true,
@@ -86,13 +77,9 @@ function _M.init()
     return ctx
 end
 
--- mark_cascade_end — stamp the end of the access-phase cascade. Called at the
--- tail of verdict.lua (the pass path), i.e. the moment we've finished checking
--- and hand the request to proxy_pass. Lets emit() split cascade_ms (our own
--- intake+check overhead) from the upstream/origin time and the client-delivery
--- tail. For block/challenge requests verdict.lua exits before this, so
--- t_cascade_end stays nil and cascade_ms falls back to the full window (which
--- is fine — those never reach an upstream).
+-- Stamped when the cascade hands the request to proxy_pass, so cascade_ms can
+-- be separated from the origin and delivery time. Blocked requests exit before
+-- this and fall back to the full window, which is the same thing for them.
 function _M.mark_cascade_end()
     local ctx = ngx.ctx.bac
     -- Only the first stamp wins (the real cascade end); later calls are no-ops.
@@ -106,11 +93,9 @@ function _M.mark_cascade_end()
     end
 end
 
--- sum_upstream_time — parse nginx $upstream_response_time into seconds.
--- The var is nil/""/"-" when no upstream was contacted (blocked, challenge), or
--- one-or-more numbers separated by ", " (multiple upstream tries) / " : "
--- (internal redirects); failed tries appear as "-". We sum every numeric
--- component and ignore the rest. Returns nil when there's no numeric value.
+-- $upstream_response_time is empty with no upstream, and otherwise carries one
+-- component per try or internal redirect, with failures as "-". Sum the numbers
+-- and ignore the rest.
 local function sum_upstream_time(v)
     if not v or v == "" then return nil end
     local total, found = 0, false
@@ -149,23 +134,16 @@ function _M.add_tag(tag)
     ctx.tags[#ctx.tags + 1] = tag
 end
 
--- Append a soft-rule challenge flag (e.g. tls_fp_impersonator). Flags
--- accumulate across stages independently of the terminal verdict/rule:
--- the cascade short-circuits only on a blocking/allow rule, while soft
--- flags seen along the way are all kept for analytics (vision.md Step 7).
--- Producers: the tls_fp soft rules (A9, tls_fp.lua). The field stays a
--- stable [] when no soft rule fires, so the sink schema is unchanged.
+-- Flags accumulate independently of the terminal verdict: only a blocking or
+-- allow rule short-circuits, and every soft signal seen on the way is kept.
 function _M.add_flag(flag)
     local ctx = ngx.ctx.bac
     if not ctx then return end
     ctx.flags[#ctx.flags + 1] = flag
 end
 
--- Record a staged-catalog pattern that matched but did not affect the
--- verdict (for promotion analytics). Format "<catalog>:<pattern_id>".
--- Producers: the tls_fp stage (A11, tls_fp.run) for tls_fp_blocklist /
--- tls_fp_catalog / tls_fp_browser_profiles. Stays a stable [] when nothing
--- staged matched.
+-- A staged pattern that matched without affecting the verdict, as
+-- "<catalog>:<pattern_id>". This is what the promotion decision reads.
 function _M.add_staging_match(entry)
     local ctx = ngx.ctx.bac
     if not ctx then return end
@@ -180,25 +158,12 @@ function _M.set_source(asn, geo_country)
     ctx.geo_country = geo_country
 end
 
--- Record the computed TLS fingerprint (tls_fp stage) and the three TLS
--- sub-columns derived from it. We parse them straight out of the fp
--- prefix rather than re-reading $ssl_* or calling compute() again: the
--- prefix layout "L<ver><sni><cipher_cnt><alpn>" (ja4_compute.lua) already
--- encodes them, so the log values are guaranteed consistent with tls_fp
--- (same source of truth the daily analyzer keys on, scripts/analyze.py).
---   <ver>        2 digits  (e.g. 13)
---   <sni>        d = SNI present, i = absent
---   <cipher_cnt> 2 digits  (%02d, GREASE-stripped, capped at 99)
---   <alpn>       2 chars   (h2 / h1 / 00 = none)
--- A malformed/absent fp leaves the sub-columns nil → null in the record.
--- set_challenge_fp(table). [C5] The browser fingerprint collected by the JS solver
--- on the challenge page (canvas/audio/screen/UA/etc.), which arrived in the payload of
--- POST /__challenge/verify. It is written into BAC_LOG as a separate
--- `challenge_fp` field for the challenge-pass event (vision §5.2). It takes NO part
--- in verifying the request (a bearer cookie with no fingerprint binding); it is a dataset for
--- analytics and future L6 ML models. We store it as-is, so that the backend
--- can normalise the fields for its own use (fields like `ua/languages/
--- screen/timezone/hwc/platform` — see `fingerprint()` in challenge/page.html).
+-- The sub-columns are parsed back out of the fingerprint prefix rather than
+-- re-read from $ssl_*, so they cannot disagree with the fingerprint itself.
+-- Layout: 2-digit version, SNI flag, 2-digit cipher count, 2-char ALPN.
+-- The browser fingerprint the JS solver collected. It plays no part in
+-- verification — the cookie is a bearer token — and is stored as-is, as a
+-- dataset for analytics.
 function _M.set_challenge_fp(fp)
     local ctx = ngx.ctx.bac
     if ctx and type(fp) == "table" then
@@ -248,21 +213,11 @@ function _M.emit()
         sni_present = ctx.tls_sni_present
     end
 
-    -- Timing decomposition. latency_ms (below) is the WHOLE request lifetime
-    -- ($request_time-like): cascade + origin + delivery to the end user — so
-    -- for a slow client it's dominated by the download tail, not our work.
-    -- The fields here isolate the parts we care about:
-    --   cascade_ms  — our access-phase overhead (intake + cascade check),
-    --                 stamped by verdict.lua mark_cascade_end(). Exact for
-    --                 pass; for block/challenge (no upstream) ≈ latency_ms.
-    --   upstream_response_ms — $upstream_response_time: upstream connect → last
-    --                 byte of the origin response (origin round-trip incl. the
-    --                 origin's own think-time), EXCLUDING delivery to the user.
-    --                 null when no upstream was contacted (blocked / challenge).
-    --   proxy_ms    — cascade_ms + upstream_response_ms: request arrival → we
-    --                 hold the full origin response ready to hand to the user.
-    --                 This is the proxy path that adds overhead, WITHOUT the
-    --                 slow-client delivery tail (what latency_ms − proxy_ms is).
+    -- latency_ms covers the whole request, so for a slow client it is dominated
+    -- by the download tail rather than by our work. The split isolates the
+    -- parts that are ours: cascade_ms is the access-phase overhead,
+    -- upstream_response_ms the origin round trip, and proxy_ms their sum —
+    -- everything up to holding the full response, with no delivery tail.
     local cascade_ms = ctx.t_start and ((ctx.t_cascade_end or now) - ctx.t_start) * 1000 or nil
     local up_total = sum_upstream_time(ngx.var.upstream_response_time)
     local upstream_response_ms = up_total and up_total * 1000 or nil
@@ -292,15 +247,9 @@ function _M.emit()
         edge_id       = EDGE_ID,
         resource_id   = cjson_base.null,   -- backend-enriched on ingest; null on edge
         host          = ngx.var.host or cjson_base.null,
-        -- $request_uri preserves the ORIGINAL request path through internal
-        -- redirects — e.g. the @challenge_page ngx.exec on the L5 challenge
-        -- path; without this $uri-vs-$request_uri swap those records would log
-        -- the internal target instead of what the client asked for. (Non-tenant
-        -- Hosts no longer reach here at all — they're dropped with 444 before the
-        -- cascade since the /__landing page was removed.) Query string is stripped so
-        -- the field stays comparable to its pre-change shape — the
-        -- sink already has separate observability for query patterns
-        -- if needed.
+        -- $request_uri survives internal redirects, so a challenged request
+        -- logs what the client asked for rather than the internal target. The
+        -- query string is stripped to keep the field comparable.
         path          = (ngx.var.request_uri and ngx.var.request_uri:match("^([^?]*)"))
                           or ngx.var.uri or cjson_base.null,
         method        = ngx.var.request_method or cjson_base.null,
@@ -318,14 +267,10 @@ function _M.emit()
         rule          = ctx.rule or cjson_base.null,
         action        = VERDICT_TO_ACTION[ctx.verdict] or "pass",
         mode          = p.mode,
-        -- [D12] solve-rate signal needs to exclude attack-mode challenges: under
-        -- attack L5 forces challenge on almost everyone (C4), so a low solve_rate
-        -- there is the host's posture, not a judgement about the fp. analyze.py
-        -- counts issued/solved only on `mode==active AND attack_mode==false`.
-        -- Boolean-safe null sentinel: a bare `p.attack_mode or null` would log
-        -- null for the common `false` case (Lua: `false or x == x`); guard on
-        -- nil so `false` stays false and only a missing field becomes an
-        -- explicit null, keeping the schema's full key set stable.
+        -- The solve-rate signal has to exclude attack-mode challenges: under
+        -- attack almost everyone is challenged, so a low solve rate reflects the
+        -- host's posture rather than the fingerprint. Guarded on nil, since
+        -- `false or null` would log the common case as null.
         attack_mode   = p.attack_mode == nil and cjson_base.null or p.attack_mode,
         strictness    = p.strictness,
         latency_ms    = ctx.t_start and (now - ctx.t_start) * 1000 or cjson_base.null,
@@ -348,36 +293,24 @@ function _M.emit()
         return
     end
 
-    -- Write straight to stdout rather than via ngx.log: a message logged
-    -- through the error_log during the log phase gets nginx's request
-    -- context ("while logging request, client: ...") appended, which
-    -- would corrupt the JSON line. A direct write keeps every line a
-    -- clean, jq-parseable object for the telemetry sink (separate task).
-    -- The "BAC_LOG " prefix lets the sink grep the structured stream out
-    -- of the access/error lines that share docker stdout.
+    -- Straight to stdout, not through ngx.log: during the log phase nginx
+    -- appends its request context to the message, which would corrupt the JSON.
+    -- The prefix lets the sink separate this stream from the access lines
+    -- sharing the same pipe.
     --
-    -- The flush is required, not optional: stdout to a docker pipe is
-    -- fully buffered (not line-buffered), so without it lines accumulate
-    -- and get split at arbitrary BUFSIZ boundaries, interleaving across
-    -- workers. Writing the whole line then flushing emits it as one
-    -- write() at the line boundary; with the line kept under PIPE_BUF
-    -- (see UA cap) that write is atomic. The per-request syscall is fine
-    -- for the stand; the telemetry-sink task swaps this for a batched
-    -- async shipper.
+    -- The flush is required. Stdout to a pipe is fully buffered, so without it
+    -- lines are split at arbitrary buffer boundaries and interleave across
+    -- workers. Writing the whole line and flushing makes it one write, atomic
+    -- as long as the line stays under PIPE_BUF — hence the UA cap.
     io.stdout:write("BAC_LOG ", line, "\n")
     io.stdout:flush()
 
-    -- Ship to antibot-backend /v1/logs via per-worker async queue. enqueue
-    -- never blocks and allocates nothing heavy (see log_shipper.lua);
-    -- if the shipper is not configured (ANTIBOT_BACKEND_URL unset) this is a
-    -- no-op. On the stand the stdout emit remains the ground truth for analyze.py's
-    -- daily report; the shipper is a separate channel for the backend receiver.
+    -- enqueue never blocks, and is a no-op when the shipper is unconfigured.
+    -- stdout stays the ground truth; this is a second channel to the backend.
     --
-    -- Direct access through package.loaded rather than pcall(require, ...): require
-    -- caches, but a pcall plus a table lookup on every request is noticeable noise
-    -- on the log_by_lua hot path. The module is definitely loaded in init_worker (see
-    -- nginx.demo.conf); if it failed to register there, that is a deploy bug,
-    -- not a runtime fallback. From review.
+    -- Read from package.loaded rather than pcall(require): the module is loaded
+    -- in init_worker, so a miss here is a deploy bug rather than something to
+    -- fall back from, and the pcall would cost on every request.
     local shipper = package.loaded["log_shipper"]
     if shipper and shipper.enqueue then
         shipper.enqueue(line)

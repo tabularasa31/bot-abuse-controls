@@ -1,30 +1,16 @@
--- BAC_LOG shipper (edge → antibot-backend /v1/logs).
+-- Ships the request log from the edge to the backend receiver.
 --
--- The Phase 1 receiver on the backend (antibot-backend [B6/B7]) already accepts
--- POST /v1/logs, validates the JSON lines and (B7) triggers the rDNS worker
--- for IPs with a search engine UA. This module closes the edge side of the chain:
--- bac_log.emit() in log_by_lua appends a JSON line to a per-worker
--- queue, and a background ngx.timer.every pulls it as a batch and POSTs it to the
--- backend over mTLS (the same certificate catalog_pull uses for
--- Channel C — we reuse the pre-parsed _M.parsed_{cert,key}).
+-- bac_log.emit appends a JSON line to a per-worker queue, and a background timer
+-- drains it as a batch over mTLS, reusing the certificate the catalog pull
+-- already parsed.
 --
--- Topology: every nginx worker keeps ITS OWN queue and its own timer.
--- Several parallel POSTs to the backend are fine for an HA load balancer;
--- a cross-worker shared_dict queue would add serialisation on the
--- hot path of bac_log.emit() plus a single point of failure in a single-worker shipper.
+-- Every worker keeps its own queue and its own timer: several parallel POSTs
+-- are fine for the load balancer, whereas a shared queue would put contention
+-- on the hot path of every request and make a single worker a bottleneck.
 --
--- Fail-stale: with the backend offline / a handshake error / a 5xx, the batch is lost, the
--- `bac_log_ship_failed_total` metric increments, and the edge keeps
--- handling requests. A persistent disk queue to guarantee "logs are never
--- lost" is a separate backend task [B9]; on the edge, v1 keeps the buffer
--- in memory and it disappears on an nginx reload. That is a deliberate trade-off from
--- vision §"Log delivery" (the hot path takes priority over logs).
---
--- API:
---   _M.enqueue(line)    — add a JSON line to the queue (the hot path!)
---   _M.start(opts)      — wire timer.every from init_worker_by_lua_block
---   _M.flush_now()      — a synchronous flush for tests / a drain on shutdown
---   _M.queue_size()     — the current queue length (for the metric)
+-- Fail-stale. If the backend is unreachable the batch is dropped, a counter
+-- increments, and the edge keeps serving. The buffer is in memory and does not
+-- survive a reload — the hot path takes priority over the logs.
 
 local _M = {}
 
@@ -39,28 +25,18 @@ local DEFAULTS = {
     path           = "/v1/logs",
 }
 
--- Per-worker state. A simple array plus a write index for the tail: an append is
--- O(1), and the drain is `for i=1,#q` plus a table.clear() equivalent. We do not use a
--- shared_dict — this is per worker, because:
---   1. bac_log.emit() is on the hot path, and regular shared_dict lpush/rpush
---      would add spinlock contention as traffic grows;
---   2. one queue per worker means N parallel POSTs into the load balancer, which for the
---      demo stand (4 workers × ~100 RPS) is a non-issue.
+-- An array plus a write index: appending is O(1) and draining is a single pass.
+-- Deliberately not a shared_dict, whose locking would land on the hot path of
+-- every request.
 local queue = {}
 local in_flight = false  -- a guard so that ticks do not overlap
 
--- Metrics. The names follow the shared antibot_edge_* style, so that a /metrics scrape
--- sees them as ordinary prometheus counters. The metrics shared_dict is already
--- declared in nginx.demo.conf (1m) and loaded by init.lua (see below —
--- primed through safe_add(0)).
--- Metrics. dropped is split into TWO counters so that the dashboard can distinguish:
---   _overflow — the queue is full and the backend cannot keep up (real load)
---   _disabled — the shipper is off (ANTIBOT_BACKEND_URL is empty);
---               for an operator that signals "traffic is flowing but we are not
---               delivering it", which is conceptually a different error.
--- shipper_loaded — a 0/1 gauge; init.lua primes it with zero and start() sets 1.
--- Without it, "the module did not load because of a syntax bug in log_shipper.lua"
--- is indistinguishable from "the module works, the counters are simply at zero".
+-- Drops are split in two: overflow means the backend cannot keep up, disabled
+-- means the shipper was never configured. They look identical in a total and
+-- mean completely different things to an operator.
+--
+-- shipper_loaded exists so that "the module failed to load" is distinguishable
+-- from "the module works and the counters are simply zero".
 local M_ENQUEUED          = "bac_log_enqueued_total"
 local M_DROPPED_OVERFLOW  = "bac_log_dropped_overflow_total"
 local M_DROPPED_DISABLED  = "bac_log_dropped_disabled_total"
@@ -93,11 +69,8 @@ end
 function _M.enqueue(line)
     if not line then return false end
     if line == "" then
-        -- An empty string from bac_log.emit is possible only on a
-        -- cjson.encode regression (which is checked above — emit returns
-        -- early on an encode failure). Here == "" means a bug
-        -- in the producer; we WARN but do not fail — better to skip
-        -- one line than to take the worker down. From review.
+        -- Only reachable through a producer bug. Skip the line rather than
+        -- taking the worker down.
         ngx.log(ngx.WARN, "log_shipper: enqueue('') — empty line, upstream bug?")
         return false
     end
@@ -136,11 +109,8 @@ local function drain_batch(n)
     return batch
 end
 
--- requeue_front — on a shutdown drain it would be nice to return the unprocessed
--- tail, but on a POST error that would create an endless retry loop
--- (the same reason the backend has no sink retry — that is B9). So
--- on a send error the batch is lost. A v1 trade-off; the backend disk queue
--- will close it when it appears.
+-- Deliberately absent: requeueing on a send error would spin into an endless
+-- retry loop, so a failed batch is dropped.
 
 -- ship — one POST with a batch. It returns (ok, err) for logging.
 local function ship(batch)
@@ -214,12 +184,8 @@ local function tick(premature)
     end
 end
 
--- A synchronous flush for draining from tests. We never call it in production —
--- timer.every gives an asynchronous pipeline.
--- It uses a pcall around ship() symmetrically with the tick — if ship raises
--- (resty.http throwing on a broken URL, table.concat on a non-string and so on),
--- in_flight is still reset, otherwise the next flush_now would return
--- "in_flight" forever. From review.
+-- For tests. The pcall matters: without it a raise would leave in_flight set
+-- and every later flush would refuse to run.
 function _M.flush_now()
     if #queue == 0 then return true, nil end
     if in_flight then return false, "in_flight" end
@@ -240,19 +206,11 @@ function _M.flush_now()
     return ok, err
 end
 
--- start — wire the background timer.every from init_worker_by_lua_block.
--- It is not pinned to worker 0 (unlike catalog_pull): a per-worker
--- shipper is by design — every worker has its own queue. It is invoked
--- through the same path from nginx.demo.conf, see init_worker_by_lua_block.
--- mark_loaded — we set the gauge ONLY on paths where start() really
--- completed its setup successfully: either "backend_url is empty and we deliberately
--- started nothing" (intentionally disabled — the module works and
--- enqueue correctly counts dropped_disabled), or "the timer plus the http
--- module plus the mTLS snapshot are ready" (the full happy path). The error paths
--- (a resty.http require failure, an ngx.timer.every failure) do NOT set the
--- gauge — the operator sees loaded=0 and is alerted to the silent failure.
--- From self-review (setting the gauge before the setup was a bug — the contract in
--- metrics.lua says "the module plus its dependencies are OK").
+-- Runs in every worker, unlike the catalog pull: each has its own queue.
+--
+-- The loaded gauge is set only where setup actually completed — either
+-- deliberately disabled, or fully wired. An error path leaves it at zero, which
+-- is what tells the operator the failure was silent.
 local function mark_loaded()
     if ngx.shared.metrics then ngx.shared.metrics:set(M_SHIPPER_LOADED, 1) end
 end
@@ -279,12 +237,9 @@ function _M.start(opts)
         _M.ssl_verify = truthy_env(os.getenv("ANTIBOT_BACKEND_SSL_VERIFY"), true)
     end
 
-    -- mTLS: we reuse the pre-parsed cert/key from catalog_pull —
-    -- init.lua already called preload_mtls() in the master phase, and both routines
-    -- see the same cdata objects after the fork. If there are no certificates
-    -- (the cert paths are unset or parsing failed) we ship plain HTTPS
-    -- and get a handshake error from the backend, which ship() catches
-    -- as a transport error → a metric, with no crash.
+    -- Reuses the certificate parsed in the master, so both routines share the
+    -- same objects after the fork. With none, the backend refuses the handshake
+    -- and that surfaces as an ordinary transport error.
     local cp = require "catalog_pull"
     _M.parsed_cert = cp.parsed_cert
     _M.parsed_key  = cp.parsed_key
