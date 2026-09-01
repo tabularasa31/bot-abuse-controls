@@ -1,141 +1,152 @@
-# Runbook — что делать при атаке
+# Runbook — what to do under attack
 
-**Цель.** Что включено всегда, что включать руками под конкретный тип атаки, и
-где смотреть, что происходит. Главное правило: **базовая защита работает без
-тебя**; рычаги ниже — это усиление под инцидент, а не «включатель защиты».
+**Goal.** What is always on, what you enable by hand for a given attack type, and
+where to look while it happens. The main rule: **the baseline protection works
+without you**; the levers below strengthen it during an incident, they are not a
+"turn protection on" switch.
 
-## Что защищает ВСЕГДА (включать не надо)
+## What protects you AT ALL TIMES (nothing to enable)
 
-- **Не-тенантский трафик режется.** Запрос на не-клиентский Host (голый IP эджа,
-  мусорный Host, HTTP/1.0 без Host) → `444` (соединение закрыто) еще до каскада.
-  Эдж tenant-only: обслуживаются только зарегистрированные клиентские домены.
-- **Боты на клиентских сайтах режутся каскадом.** Для каждого тенант-запроса
-  идет каскад: hygiene → reputation (IP/ASN/geo) → tls_fp (блоклист отпечатков) →
-  rate_limits → verification (challenge). В `mode=active` вердикты исполняются
-  (403/429/challenge). Это и есть постоянная защита.
+- **Non-tenant traffic is cut.** A request for a non-customer Host (the edge's
+  bare IP, a junk Host, HTTP/1.0 with no Host) gets `444` (connection closed)
+  before the cascade even runs. The edge is tenant-only: it serves registered
+  customer domains and nothing else.
+- **Bots on customer sites are cut by the cascade.** Every tenant request runs
+  the cascade: hygiene → reputation (IP/ASN/geo) → tls_fp (fingerprint blocklist)
+  → rate_limits → verification (challenge). In `mode=active` the verdicts are
+  enforced (403/429/challenge). This is the standing protection.
 
-Проверка, что оно живо: `curl` по IP/чужому Host → 444; в Loki видно `verdict=block`.
+To check it is alive: `curl` the IP or a foreign Host → 444; Loki shows
+`verdict=block`.
 
-## Где смотреть атаку (наблюдаемость)
+## Where to watch an attack (observability)
 
-Все в Loki/Grafana (на эдже HTTP-эндпоинтов наблюдаемости нет — Phase 1).
+Everything is in Loki/Grafana (the edge exposes no observability HTTP endpoints —
+Phase 1).
 
-- **Поток запросов и вердикты** — `{kind="bac_log"}`: поля `host`, `ip`, `asn`,
-  `geo_country`, `verdict`, `rule`, `tls_fp`, `ua`, `status`. Так видно, кто бьет,
-  по какому хосту, и режется ли (`verdict=block, rule=...`).
-- **Агрегатные счетчики эджа** — `{kind="edge_stats"}` (раз в 30с): `requests_total`,
-  `verdict_*_total`, `edge_nontenant_dropped_total` (444-дропы по не-тенантам),
-  `edge_sni_rejected_total` (TLS-reject, если включен рычаг ниже),
-  `rules{}` (срабатывания правил), `catalog_staleness_seconds.*`.
-- На самой VM (быстро, без Grafana):
+- **Request stream and verdicts** — `{kind="bac_log"}`: fields `host`, `ip`,
+  `asn`, `geo_country`, `verdict`, `rule`, `tls_fp`, `ua`, `status`. This shows
+  who is hitting you, on which host, and whether they are being cut
+  (`verdict=block, rule=...`).
+- **Aggregate edge counters** — `{kind="edge_stats"}` (every 30 s):
+  `requests_total`, `verdict_*_total`, `edge_nontenant_dropped_total` (444 drops
+  for non-tenants), `edge_sni_rejected_total` (TLS rejects, if the lever below is
+  on), `rules{}` (rule hits), `catalog_staleness_seconds.*`.
+- On the VM itself (fast, no Grafana):
   `ssh ubuntu@<edge>` → `docker logs --since 5m nginx-demo 2>&1 | grep BAC_LOG | tail`
-  и `... | grep EDGE_STATS | tail -1`.
+  and `... | grep EDGE_STATS | tail -1`.
 
-## Что включать — по типу атаки
+## What to enable, by attack type
 
-| Симптом | Уже покрыто? | Действие |
+| Symptom | Already covered? | Action |
 |---|---|---|
-| Боты/скрейперы по клиентскому сайту (высокий RPS, странные UA/fp) | да — rate_limits + tls_fp + challenge | обычно ничего; для одного клиента под прицелом → **attack_mode** на этот host |
-| L7-флуд по **IP эджа** / не-тенантскому Host / no-SNI (как у turbo) | HTTP-444 уже режет | под жестким флудом → **deny_nontenant** (рубит еще на TLS, экономит крипту) |
-| Сам антибот сбоит / массовые ложные блоки | — | **kill-switch** (per-stage конкретной стадии или global) |
-| Объемный **L3/L4** (SYN-флуд, забивание полосы) | НЕТ — вне зоны антибота | сетевой уровень: SYN-cookies/conn-limit на VM, scrubbing/anycast у провайдера |
+| Bots/scrapers against a customer site (high RPS, odd UA/fp) | yes — rate_limits + tls_fp + challenge | usually nothing; if one customer is singled out → **attack_mode** on that host |
+| L7 flood against the **edge IP** / a non-tenant Host / no SNI | HTTP 444 already cuts it | under a heavy flood → **deny_nontenant** (rejects at TLS, saves the crypto work) |
+| The antibot itself misbehaves / mass false blocks | — | **kill switch** (per-stage for one stage, or global) |
+| Volumetric **L3/L4** (SYN flood, saturated link) | NO — outside the antibot's scope | network layer: SYN cookies / connection limits on the VM, scrubbing/anycast at the provider |
 
-## Рычаг 1 — attack_mode (точечно на клиента под прицелом)
+## Lever 1 — attack_mode (targeted, for the customer under fire)
 
-Per-host. Под `attack_mode` стадия verification форсит challenge для серых
-запросов и укорачивает TTL clearance-cookie (vision §5.3, C7). Не глобально —
-не задевает других клиентов. Доставка на эдж ≤30с (Channel C).
+Per host. Under `attack_mode` the verification stage forces a challenge for grey
+requests and shortens the clearance cookie TTL (vision §5.3, C7). It is not
+global — other customers are untouched. Delivery to the edge takes ≤30 s
+(Channel C).
 
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<BACKEND_VM_IP>
 cd ~/abuse-controls
 TOKEN=$(grep -E '^DASHBOARD_API_TOKEN=' infra/demo-backend/.env | cut -d= -f2- | tr -d '"'\''')
 API='https://127.0.0.1:443'; H='Host: antibot.internal'
-HOSTQ=<клиентский-домен-под-атакой>
-# Включить:
+HOSTQ=<customer-domain-under-attack>
+# Turn it on:
 curl -ks -X PATCH "$API/antibot/v1/policy/$HOSTQ" -H "$H" -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/merge-patch+json' -d '{"attack_mode":true}'
-# Выключить после атаки:
+# Turn it off once the attack is over:
 curl -ks -X PATCH "$API/antibot/v1/policy/$HOSTQ" -H "$H" -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/merge-patch+json' -d '{"attack_mode":false}'
 ```
 
-## Рычаг 2 — deny_nontenant (TLS-reject под флудом по IP эджа)
+## Lever 2 — deny_nontenant (TLS reject under a flood against the edge IP)
 
-Усиливает защиту собственного IP: не-тенантскую/no-SNI/чужую-SNI сессию рубит
-**на TLS-рукопожатии** (до каскада И до серверной крипты). HTTP-слой не-тенанта и
-так режет 444 — этот рычаг добавляет более ранний и дешевый отказ под большим
-L7-флудом по IP.
+This hardens the edge's own IP: a non-tenant / no-SNI / foreign-SNI session is
+cut **during the TLS handshake**, before the cascade and before the server-side
+crypto. The HTTP layer already answers non-tenants with 444 — this lever adds an
+earlier and cheaper refusal under a large L7 flood.
 
-Файловый рычаг (Channel A на стенде): правится локальный `kill_switch.local.conf`
-на edge-VM (gitignored, переживает авто-деплой) + reload, без передеплоя.
+It is a file lever (Channel A on the stand): edit the local
+`kill_switch.local.conf` on the edge VM (gitignored, survives auto-deploy) and
+reload, with no redeploy.
 
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP>
 cd ~/abuse-controls/infra/demo-stand/config
-# Локальный оверрайд (если файла нет — копия из .example, где уже есть секция
-# [edge_protection] с deny_nontenant = false).
+# Local override (if the file does not exist, copy it from .example, which
+# already carries an [edge_protection] section with deny_nontenant = false).
 [ -f kill_switch.local.conf ] || cp kill_switch.local.conf.example kill_switch.local.conf
-# Правим строку НА МЕСТЕ (идемпотентно), не дописываем в конец — иначе выйдут
-# дубли секций/ключей (парсер last-wins, но файл станет противоречивым). Если
-# строки/секции нет — открой файл руками (nano) и выставь deny_nontenant = true.
+# Edit the line IN PLACE (idempotent) rather than appending — appending produces
+# duplicate sections/keys (the parser is last-wins, but the file becomes
+# self-contradictory). If the line or section is missing, open the file by hand
+# (nano) and set deny_nontenant = true.
 sed -i 's/^deny_nontenant = .*/deny_nontenant = true/' kill_switch.local.conf
 docker exec nginx-demo openresty -s reload
-# Проверить, что включилось: no-SNI рукопожатие теперь должно отвергаться.
-# Выключить после атаки: тем же sed вернуть `= false` + reload.
+# Confirm it took effect: a no-SNI handshake should now be rejected.
+# Turn it off after the attack: the same sed back to `= false` plus a reload.
 ```
 
-> ⚠️ **Побочка — ломает liveness-пробы.** При включенном рычаге health-проверки
-> по no-SNI (`curl https://<IP>/__health`) и по SNI=`localhost` будут отвергаться
-> на рукопожатии. Поэтому это INCIDENT-рычаг, а не дефолт: включай на время
-> флуда, мониторь через Loki (не через `/__health`), и **верни в false** после.
-> Если нужен health-чек при включенном рычаге — бей по тенантской SNI
-> (`curl --resolve <tenant>:443:<IP> https://<tenant>/__health`).
+> ⚠️ **Side effect — it breaks liveness probes.** With the lever on, health checks
+> over no-SNI (`curl https://<IP>/__health`) and with SNI=`localhost` are rejected
+> at the handshake. So this is an INCIDENT lever, not a default: turn it on for
+> the duration of the flood, monitor through Loki (not `/__health`), and **set it
+> back to false** afterwards. If you need a health check while it is on, use a
+> tenant SNI (`curl --resolve <tenant>:443:<IP> https://<tenant>/__health`).
 
-## Рычаг 3 — kill-switch (аварийный, когда сбоит сам антибот)
+## Lever 3 — kill switch (emergency, when the antibot itself misbehaves)
 
-Когда проблема не в атакующем, а в каскаде (баг/перф/массовые ложняки). Тот же
-`kill_switch.local.conf` + reload (A12, vision §«Аварийные рычаги»).
+For when the problem is the cascade rather than the attacker (a bug, a
+performance regression, mass false positives). Same
+`kill_switch.local.conf` plus a reload (A12, vision §"Emergency levers").
 
-- **Per-stage** — выключить одну стадию, остальные работают:
-  `[kill_switch.per_stage]` → `tls_fp = true` (или `reputation`/`rate_limits`/
-  `verification`/`hygiene`/`clearance`).
-- **Global** — весь каскад no-op, трафик идет на origin как есть, BAC_LOG не
-  пишется: `[kill_switch.global]` → `enabled = true`. Крайняя мера: «защита не
-  должна положить сайт».
+- **Per-stage** — disable one stage, the rest keep working:
+  `[kill_switch.per_stage]` → `tls_fp = true` (or `reputation` / `rate_limits` /
+  `verification` / `hygiene` / `clearance`).
+- **Global** — the whole cascade becomes a no-op, traffic goes to the origin as
+  is, and BAC_LOG is not written: `[kill_switch.global]` → `enabled = true`. A
+  last resort: protection must not take the site down.
 
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP>
 cd ~/abuse-controls/infra/demo-stand/config
-# .example уже содержит [kill_switch.per_stage] со всеми стадиями = false —
-# правим нужную строку НА МЕСТЕ (не дописываем, чтобы не плодить дубли).
+# The .example already carries [kill_switch.per_stage] with every stage = false,
+# so edit the relevant line IN PLACE (do not append, to avoid duplicates).
 [ -f kill_switch.local.conf ] || cp kill_switch.local.conf.example kill_switch.local.conf
-# напр. потушить только tls_fp:
+# e.g. disable tls_fp only:
 sed -i 's/^tls_fp = .*/tls_fp = true/' kill_switch.local.conf
-# global (крайняя мера): sed -i 's/^enabled = .*/enabled = true/' kill_switch.local.conf
+# global (last resort): sed -i 's/^enabled = .*/enabled = true/' kill_switch.local.conf
 docker exec nginx-demo openresty -s reload
-# вернуть в false + reload после починки.
+# set it back to false plus a reload once the fix is in.
 ```
 
-## После атаки
+## After the attack
 
-Верни все включенные рычаги обратно (`attack_mode:false` через Policy API;
-`deny_nontenant = false` / `*_stage = false` / `global.enabled = false` в
-`kill_switch.local.conf` + reload). Базовая защита (444 + каскад) остается
-включенной всегда.
+Put every lever you enabled back (`attack_mode:false` through the Policy API;
+`deny_nontenant = false` / `*_stage = false` / `global.enabled = false` in
+`kill_switch.local.conf` plus a reload). The baseline protection (444 plus the
+cascade) stays on permanently.
 
-## Граница (важно, без иллюзий)
+## The boundary (important, no illusions)
 
-Антибот закрывает **прикладной L7** (запросы, боты, флуд по IP на уровне HTTP/TLS).
-Он НЕ закрывает **объемный L3/L4** (SYN-флуд, исчерпание полосы/коннектов до
-рукопожатия) — там даже 444/TLS-reject уже оплачены accept+handshake. Это
-сетевой уровень: лимиты соединений на VM, SYN-cookies, scrubbing/anycast у
-провайдера.
+The antibot covers the **application layer, L7** (requests, bots, HTTP/TLS-level
+floods against the IP). It does NOT cover **volumetric L3/L4** (SYN floods,
+bandwidth or connection exhaustion before the handshake) — there, even a 444 or a
+TLS reject has already cost you an accept plus a handshake. That is the network
+layer: connection limits on the VM, SYN cookies, scrubbing/anycast at the
+provider.
 
 ## Verified on stand
 
-2026-06-05. На живом стенде наблюдалось в Loki: recon-сканер с `2.57.122.192`
-(RO, ASN 47890) по под-домену клиента (`/ollama/api/tags`, `/harbor/api/...`,
-`/openai/v1/models`) → эдж режет `verdict=block, rule=tls_fp_blocklist, status=403,
-mode=active`. Не-тенант по IP → 444. Рычаг `deny_nontenant` — выключен (дефолт),
-подтверждено: no-SNI `/__health` → 200 (рукопожатие проходит).
+2026-06-05. Observed live in Loki: a recon scanner from `2.57.122.192` (RO, ASN
+47890) hitting a customer subdomain (`/ollama/api/tags`, `/harbor/api/...`,
+`/openai/v1/models`) → the edge cuts it with
+`verdict=block, rule=tls_fp_blocklist, status=403, mode=active`. A non-tenant on
+the IP → 444. The `deny_nontenant` lever was off (the default), confirmed: a
+no-SNI `/__health` → 200 (the handshake goes through).

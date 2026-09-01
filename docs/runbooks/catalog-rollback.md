@@ -1,114 +1,124 @@
 # Runbook — catalog rollback
 
-**Цель.** Откатить плохой PR в медленный каталог (например, в
-`tls_fp_blocklist` попал fp, общий для всех Chrome → массовый false-positive).
-Откат обратим в обе стороны без ручных операций на эдже или в БД — атомарная
-замена `shared_dict` работает в любую сторону (vision §«Rollback каталога»).
+**Goal.** Roll back a bad PR to a slow catalog — say, a fingerprint shared by
+every Chrome build lands in `tls_fp_blocklist` and causes mass false positives.
+The rollback is reversible in both directions with no manual work on the edge or
+in the database: the atomic `shared_dict` swap works either way (vision
+§"Catalog rollback").
 
-**SLA.** Применение изменения на пуле эджей ≤15 мин от merge'а PR (vision
-§Channel C). На стенде фактически ~1 мин: backend reloader (5с) + edge
-`catalog_pull` (≤30с).
+**SLA.** A change applies across the edge pool within ≤15 min of the PR merge
+(vision §Channel C). On the stand it is roughly a minute in practice: backend
+reloader (5 s) plus edge `catalog_pull` (≤30 s).
 
-**Механизм.** Медленные каталоги — git-репо
-[`catalogs/`](../../catalogs/) (ADR-006, единственный источник истины). Backend
-читает файлы из чекаута (`~/abuse-controls/catalogs` → монтируется `/catalogs:ro`,
-`CATALOGS_DIR=/catalogs`) через `internal/filesource` с mtime-кешем и отдает на
-эдж по `/catalog/<name>` с ETag. Эдж
-[`catalog_pull.lua`](../../infra/demo-stand/lua/catalog_pull.lua) опрашивает
-backend (`ngx.timer.every(30s)` + If-None-Match), на изменении делает atomic swap
-в `antibot_*` shared_dict, fail-stale при недоступности backend.
+**Mechanism.** The slow catalogs are a git directory,
+[`catalogs/`](../../catalogs/) (ADR-006, the single source of truth). The backend
+reads the files from the checkout (`~/abuse-controls/catalogs`, mounted
+`/catalogs:ro`, `CATALOGS_DIR=/catalogs`) through `internal/filesource` with an
+mtime cache, and serves them to the edge at `/catalog/<name>` with an ETag. The
+edge [`catalog_pull.lua`](../../infra/demo-stand/lua/catalog_pull.lua) polls the
+backend (`ngx.timer.every(30s)` plus If-None-Match), atomically swaps the
+`antibot_*` shared_dict on a change, and fails stale when the backend is
+unreachable.
 
-## Боевой путь (как в проде)
+## The production path
 
-1. Продакт делает `git revert` плохого PR в репозитории каталогов.
-2. Merge → backend (source of truth) пересобирает каталог из файлов.
-3. Эджи подтягивают откаченную версию ≤15 мин и атомарно подменяют shared_dict.
-4. Новые запросы матчатся против старой (рабочей) версии — инцидент закончился.
+1. Product runs `git revert` on the bad PR in the catalogs repository.
+2. On merge, the backend (source of truth) rebuilds the catalog from the files.
+3. Edges pull the reverted version within ≤15 min and atomically swap the shared_dict.
+4. New requests match against the old, working version — the incident is over.
 
-Откат всегда делать через `status: staging` для новых паттернов (A11 staged
-rollout, см. [`catalogs/README.md`](../../catalogs/README.md)).
+Always roll new patterns out through `status: staging` first (A11 staged
+rollout, see [`catalogs/README.md`](../../catalogs/README.md)).
 
-## Какие каталоги реально тянутся на эдж (важно для выбора объекта демо)
+## Which catalogs actually reach the edge (matters for picking a demo subject)
 
-На стенде эдж по Channel C тянет **5** каталогов (EDGE_STATS
-`catalog_staleness_seconds.<catalog>`): `tls_fp_blocklist`,
-`tls_fp_catalog`, `tls_fp_browser_profiles`, `verified_bot_ips`, `policy`.
-`ua_blacklist`/`ip_*`/`asn_datacenters` грузятся из локального конфига эджа, по
-Channel C **не** доставляются. Отдельная тонкость `tls_fp_blocklist`: по Channel C
-тянется только **active**-набор (в `tls_fp_blocklist` shared_dict); **staging**-набор
-строится из локального файла ([`tls_fp.lua`](../../infra/demo-stand/lua/tls_fp.lua)
-≈312), поэтому staging-запись через backend на эдж не доедет.
+On the stand the edge pulls **five** catalogs over Channel C (EDGE_STATS
+`catalog_staleness_seconds.<catalog>`): `tls_fp_blocklist`, `tls_fp_catalog`,
+`tls_fp_browser_profiles`, `verified_bot_ips`, `policy`. `ua_blacklist`, `ip_*`
+and `asn_datacenters` are loaded from the edge's local config and are **not**
+delivered over Channel C. One extra subtlety for `tls_fp_blocklist`: only the
+**active** set travels over Channel C (into the `tls_fp_blocklist` shared_dict);
+the **staging** set is built from a local file
+([`tls_fp.lua`](../../infra/demo-stand/lua/tls_fp.lua) around line 312), so a
+staging entry written through the backend never reaches the edge.
 
-Вывод: демо rollback'а гоняем на **active**-записи `tls_fp_blocklist` — это и есть
-PR-каталог из vision-примера.
+So: run the rollback demo against an **active** entry of `tls_fp_blocklist` —
+that is exactly the PR-driven catalog from the vision example.
 
-## Демонстрация на стенде
+## Demonstration on the stand
 
-Backend читает **файлы** (mtime), не git-историю, поэтому на стенде ту же
-атомарную замену показывает прямая правка файла + восстановление (эквивалент
-merge → revert на слое доставки каталога). В качестве записи берем реальный
-HIGH-кандидат из дневного анализа (D1, email label `abuse-controls`) —
-подтвержденный бот, не легитимный клиент:
+The backend reads **files** (by mtime), not git history, so on the stand the same
+atomic swap is shown by editing the file directly and then restoring it (the
+equivalent of merge → revert at the delivery layer). Use a real HIGH candidate
+from the daily analysis (D1, email label `abuse-controls`) — a confirmed bot, not
+a legitimate client:
 
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<BACKEND_VM_IP>
 cd ~/abuse-controls
 
-# 0. Блоклист до правки (на эдже): N записей. blocklist_entries — поле в
-#    EDGE_STATS.
+# 0. Blocklist size before the edit (on the edge): N entries. blocklist_entries
+#    is a field of EDGE_STATS.
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
   "docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1 | grep -o '\"blocklist_entries\":[0-9]*'"
 
-# 1. Добавить HIGH-fp как active (формат <fp>: <status>).
-#    FP=… — подставить РЕАЛЬНЫЙ fp из дневного анализа (валидный L-префикс
-#    JA4-токен); литерал <HIGH-fp> backend отвергнет на валидации.
-FP='L13d3000_bcf826a2cd28_430ec2476535'    # пример из отчёта 2026-05-28
+# 1. Add the HIGH fingerprint as active (the format is <fp>: <status>).
+#    FP=… — substitute a REAL fingerprint from the daily analysis (a valid
+#    L-prefixed JA4 token); the literal <HIGH-fp> is rejected by backend validation.
+FP='L13d3000_bcf826a2cd28_430ec2476535'    # example from the 2026-05-28 report
 printf '\n"%s": active\n' "$FP" >> catalogs/tls_fp_blocklist.yaml
 
-# 2. Backend подхватит ≤5с; эдж — ≤30с. Проверить, что fp доехал. Снимок по
-#    требованию — приватный :9090/__stats (loopback, на эдж-VM).
+# 2. The backend picks it up within ≤5 s, the edge within ≤30 s. Check that the
+#    fingerprint arrived. For an on-demand snapshot use the private
+#    :9090/__stats (loopback, on the edge VM).
 sleep 38
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
   "curl -s http://127.0.0.1:9090/__stats | grep -o '\"blocklist_entries\":[0-9]*'"
-#    → N+1 entries. Запрос с этим fp → verdict=block,rule=tls_fp_blocklist
-#      (403 на active-хосте, would-be block + 200 на shadow); сам fp виден в
+#    → N+1 entries. A request with that fingerprint gives
+#      verdict=block,rule=tls_fp_blocklist (403 on an active host, would-be block
+#      plus 200 on a shadow host); the fingerprint itself shows up in
 #      Loki {kind="bac_log"}.
 
-# 3. Откат — git checkout (эквивалент revert PR на слое доставки).
+# 3. Roll back with git checkout (the delivery-layer equivalent of reverting the PR).
 git checkout -- catalogs/tls_fp_blocklist.yaml
 
-# 4. ≤30с спустя fp исчезает на эдже (atomic swap обратно) → снова N entries.
+# 4. Within ≤30 s the fingerprint disappears from the edge (atomic swap back) →
+#    N entries again.
 sleep 38
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP> \
   "curl -s http://127.0.0.1:9090/__stats | grep -o '\"blocklist_entries\":[0-9]*'"
 ```
 
-## Что наблюдать
+## What to watch
 
-- После шага 2: `blocklist_entries` N→N+1 (EDGE_STATS / :9090 `__stats`), fp
-  виден в Loki `{kind="bac_log"}`; `verdict=block,rule=tls_fp_blocklist`
-  для запросов с этим fp; `catalog_staleness_seconds.tls_fp_blocklist`
-  остается низкой (контакт с backend жив).
-- После шага 4: блоклист N+1→N, fp ушел — эдж атомарно вернулся к прежней версии.
-- Битый каталог от backend (не проходит валидацию) → эдж **не применяет**,
-  работает на последней валидной копии (fail-stale) и тикает счетчик отвергнутых
-  обновлений.
+- After step 2: `blocklist_entries` goes N→N+1 (EDGE_STATS / `:9090/__stats`),
+  the fingerprint shows up in Loki `{kind="bac_log"}`,
+  `verdict=block,rule=tls_fp_blocklist` for requests carrying it, and
+  `catalog_staleness_seconds.tls_fp_blocklist` stays low (contact with the
+  backend is alive).
+- After step 4: the blocklist goes N+1→N and the fingerprint is gone — the edge
+  atomically returned to the previous version.
+- A broken catalog from the backend (one that fails validation) is **not applied**
+  by the edge: it keeps serving from the last valid copy (fail-stale) and ticks
+  the rejected-update counter.
 
-## Откат демонстрации
+## Undoing the demonstration
 
-`git checkout -- catalogs/tls_fp_blocklist.yaml` (шаг 3) уже возвращает стенд в
-исходное состояние. Убедиться `git status` чист.
+`git checkout -- catalogs/tls_fp_blocklist.yaml` (step 3) already returns the
+stand to its original state. Confirm with a clean `git status`.
 
 ## Verified on stand
 
-2026-05-28, commit e3a72f7. Два HIGH-кандидата из дневного отчета
-(`L13d3000_bcf826a2cd28_430ec2476535`, `L13d1300_69e852b66fc7_10d89aa70559`)
-добавлены как `active` в `catalogs/tls_fp_blocklist.yaml` на backend:
+2026-05-28, commit e3a72f7. Two HIGH candidates from the daily report
+(`L13d3000_bcf826a2cd28_430ec2476535`, `L13d1300_69e852b66fc7_10d89aa70559`) were
+added as `active` to `catalogs/tls_fp_blocklist.yaml` on the backend:
 
-- Доставка: `blocklist_entries` **7 → 9** (:9090 `__stats`), оба fp в Loki
-  `{kind="bac_log"}` на эдже через ~38с (PR-каталог, SLA ≤15м — на стенде
-  ~1мин; `staleness=21с`, контакт жив).
-- Откат: `git checkout -- catalogs/tls_fp_blocklist.yaml` → блоклист **9 → 7**,
-  оба fp исчезли через ~38с (atomic swap обратно). `git status` чист.
+- Delivery: `blocklist_entries` **7 → 9** (`:9090/__stats`), both fingerprints in
+  Loki `{kind="bac_log"}` on the edge after ~38 s (a PR-driven catalog, SLA
+  ≤15 min — about a minute on the stand; `staleness=21s`, contact alive).
+- Rollback: `git checkout -- catalogs/tls_fp_blocklist.yaml` → the blocklist went
+  **9 → 7** and both fingerprints disappeared after ~38 s (atomic swap back).
+  `git status` clean.
 
-Подтверждает обратимость в обе стороны без ручных операций на эдже/в БД.
+This confirms reversibility in both directions with no manual work on the edge or
+in the database.

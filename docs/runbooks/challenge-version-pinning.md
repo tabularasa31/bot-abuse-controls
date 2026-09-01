@@ -1,64 +1,66 @@
 # Runbook — challenge-page version pinning
 
-**Цель.** Гарантировать, что HTML+JS challenge-страница и Lua-каскад согласованы
-по версии: страница не может «уехать» от каскада незаметно. Версия страницы
-(`<meta name="cascade-version">`) обязана совпадать с файлом
-[`CASCADE_VERSION`](../../infra/demo-stand/CASCADE_VERSION).
+**Goal.** Guarantee that the HTML+JS challenge page and the Lua cascade agree on
+a version: the page cannot drift away from the cascade unnoticed. The page
+version (`<meta name="cascade-version">`) must match the
+[`CASCADE_VERSION`](../../infra/demo-stand/CASCADE_VERSION) file.
 
-**Механизм.** [`challenge.lua`](../../infra/demo-stand/lua/challenge.lua) `preload()`
-вызывается из `init_by_lua`. Он читает `CASCADE_VERSION` и meta-тег шаблона; при
-несовпадении (или отсутствии meta-тега) делает `error()`, что **валит
-`init_by_lua` и не дает nginx стартовать/перезагрузиться**. Это и есть pin: версии
-можно развести только осознанно — bump в обоих местах одновременно.
+**Mechanism.** [`challenge.lua`](../../infra/demo-stand/lua/challenge.lua)
+`preload()` is called from `init_by_lua`. It reads `CASCADE_VERSION` and the
+template's meta tag; on a mismatch (or a missing meta tag) it calls `error()`,
+which **fails `init_by_lua` and stops nginx from starting or reloading**. That is
+the pin: the versions can only diverge deliberately, by bumping both places at
+once.
 
-## Нормальный bump версии шаблона
+## Normal template version bump
 
 ```sh
 ssh -i ~/.ssh/gpu-key ubuntu@<EDGE_VM_IP>
 cd ~/abuse-controls/infra/demo-stand
 
-# 1. Поправить шаблон и обе версии (page.html meta + CASCADE_VERSION).
-$EDITOR challenge/page.html        # текст/JS challenge + <meta name="cascade-version" content="X.Y.Z">
-$EDITOR CASCADE_VERSION            # тот же X.Y.Z
-#    (есть и человекочитаемый комментарий <!-- cascade-version: … --> в начале
-#     page.html — обновить для глаза; машинно проверяется только meta-тег.)
+# 1. Edit the template and both versions (page.html meta + CASCADE_VERSION).
+$EDITOR challenge/page.html        # challenge copy/JS + <meta name="cascade-version" content="X.Y.Z">
+$EDITOR CASCADE_VERSION            # the same X.Y.Z
+#    (page.html also carries a human-readable <!-- cascade-version: … --> comment
+#     at the top — update it for the reader; only the meta tag is checked by code.)
 
-# 2. Reload — preload сверит версии.
+# 2. Reload — preload compares the versions.
 docker compose -f docker-compose.demo.yml exec nginx-demo openresty -s reload
 
-# 3. Проверить. cascade_version — поле в EDGE_STATS-строке логов (reload роняет
-#    свежую).
+# 3. Verify. cascade_version is a field of the EDGE_STATS log line (a reload
+#    emits a fresh one).
 docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1 | grep -o '"cascade_version":"[^"]*"'
 ```
 
-## Что наблюдает pin (negative-тест)
+## What the pin catches (negative test)
 
-Если развести версии (bump только `CASCADE_VERSION`, забыв meta-тег), reload
-**падает** на `init_by_lua` со строкой вида:
+If you let the versions diverge (bump only `CASCADE_VERSION` and forget the meta
+tag), the reload **fails** in `init_by_lua` with a line like:
 
 ```
 challenge: cascade/template version mismatch — /etc/nginx/CASCADE_VERSION=0.2.0 vs template meta=0.1.0 (bump both sides together; …)
 ```
 
-Важно: при провале reload **старые worker'ы продолжают обслуживать трафик** —
-nginx не применяет битую конфигурацию (reload отвергается на стадии загрузки).
-`/__health` остается `ok`, `cascade_version` в EDGE_STATS остается прежним. То
-есть pin ловит рассинхрон, не уронив стенд.
+Note: when the reload fails, **the old workers keep serving traffic** — nginx
+does not apply a broken configuration (the reload is rejected at load time).
+`/__health` stays `ok` and `cascade_version` in EDGE_STATS stays where it was.
+So the pin catches the drift without taking the stand down.
 
-> `openresty -t` на этой сборке **не** исполняет `init_by_lua_file`, поэтому
-> config-test mismatch не ловит — проверка идет именно через `openresty -s reload`
-> (failed reload безопасен: отвергается, старые worker'ы живут).
+> `openresty -t` on this build does **not** execute `init_by_lua_file`, so a
+> config test will not catch the mismatch — the check happens on
+> `openresty -s reload` (a failed reload is safe: it is rejected and the old
+> workers live on).
 
-## Откат
+## Rollback
 
-Восстановить согласованность (вернуть meta-тег или `CASCADE_VERSION` к прежнему
-значению) и сделать `openresty -t` → чистый reload. Поскольку битый reload не
-применяется, отдельного «отката» рабочей конфигурации не требуется.
+Restore consistency (put the meta tag or `CASCADE_VERSION` back to its previous
+value) and run `openresty -t` → a clean reload. Since a broken reload is never
+applied, there is no working configuration to roll back.
 
 ## Verified on stand
 
-2026-05-28, commit e3a72f7. Развел версии (host `CASCADE_VERSION` 0.1.0 → 0.2.0),
-`openresty -s reload`:
+2026-05-28, commit e3a72f7. Diverged the versions (host `CASCADE_VERSION`
+0.1.0 → 0.2.0) and ran `openresty -s reload`:
 
 ```
 [error] 1#1: init_by_lua_file error: /etc/nginx/lua/challenge.lua:114:
@@ -66,6 +68,6 @@ challenge: cascade/template version mismatch — /etc/nginx/CASCADE_VERSION=0.2.
 vs template meta=0.1.0 (bump both sides together; see …/challenge/README.md)
 ```
 
-`/__health` = `ok`, `cascade_version` в EDGE_STATS остался `0.1.0` (старые
-worker'ы обслуживали) — стенд не упал. Восстановил `0.1.0` → чистый reload,
-`cascade_version: 0.1.0`, `git status` чист.
+`/__health` = `ok` and `cascade_version` in EDGE_STATS stayed at `0.1.0` (the old
+workers kept serving) — the stand did not go down. Restoring `0.1.0` gave a clean
+reload, `cascade_version: 0.1.0`, and a clean `git status`.

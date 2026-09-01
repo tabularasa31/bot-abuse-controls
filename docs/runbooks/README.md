@@ -1,72 +1,77 @@
-# Runbooks — demo-stand (Phase 4 readiness)
+# Runbooks — demo stand (Phase 4 readiness)
 
-Операционные процедуры для **демо-стенда** (`infra/demo-stand/`, long-running
-reverse proxy на VM). Это не прод-эдж: Channel A на стенде = file/mount +
-`openresty -s reload`, а не Puppet. Каждая процедура ниже проверена на живом
-стенде — см. раздел «Verified on stand» в конце каждого файла.
+Operational procedures for the **demo stand** (`infra/demo-stand/`, a
+long-running reverse proxy on a VM). This is not the production edge: Channel A
+on the stand is a file/mount plus `openresty -s reload`, not Puppet. Every
+procedure below has been exercised against the live stand — see the "Verified on
+stand" section at the end of each file.
 
-Все четыре механизма уже реализованы в каскаде (C1–C7). Эти runbook'и —
-аварийные рычаги и регламент перед включением реальной верификации
-(`mode=active`) на пилотном клиенте.
+All four mechanisms are already implemented in the cascade (C1–C7). These
+runbooks are the emergency levers and the drill to run before turning on real
+verification (`mode=active`) for a pilot customer.
 
-## Phase 4 readiness — чеклист перед `mode=active` на пилоте
+## Phase 4 readiness — checklist before `mode=active` on the pilot
 
-- [ ] **HMAC secret** сгенерирован, fingerprint виден в EDGE_STATS
-  (`challenge_secret_fp`), ротация проверена → [secret-rotation.md](secret-rotation.md)
-- [ ] **Challenge-страница** version-pinned к каскаду; рассинхрон валит старт →
+- [ ] **HMAC secret** generated, fingerprint visible in EDGE_STATS
+  (`challenge_secret_fp`), rotation exercised → [secret-rotation.md](secret-rotation.md)
+- [ ] **Challenge page** version-pinned to the cascade; a mismatch fails startup →
   [challenge-version-pinning.md](challenge-version-pinning.md)
-- [ ] **Mode toggle** ресурса shadow↔active доезжает на эдж ≤30с →
+- [ ] **Mode toggle** shadow↔active for a resource reaches the edge in ≤30 s →
   [mode-toggle.md](mode-toggle.md)
-- [ ] **Rollback каталога** обратим в обе стороны ≤15м →
+- [ ] **Catalog rollback** reversible in both directions in ≤15 min →
   [catalog-rollback.md](catalog-rollback.md)
 
-## Операционные workflow
+## Operational workflows
 
-- **Blocklist promotion (D1)** — провести fp из утреннего отчета в enforcement
-  (staging → наблюдение → active) и снять устаревший, через PR с аудит-следом →
-  [blocklist-promotion.md](blocklist-promotion.md). Логика решений —
+- **Blocklist promotion (D1)** — take a fingerprint from the morning report
+  through to enforcement (staging → observation → active) and retire a stale
+  one, via a PR with an audit trail →
+  [blocklist-promotion.md](blocklist-promotion.md). The decision logic lives in
   [`docs/blocklist-scoring.md`](../blocklist-scoring.md).
 
-## Атаки / аварийные рычаги
+## Attacks / emergency levers
 
-- **Что делать при атаке** — что защищает всегда (444 не-тенанта + каскад), что
-  включать руками под тип атаки (`attack_mode` на клиента, `deny_nontenant`
-  TLS-reject под флудом по IP, kill-switch при сбое каскада), где смотреть
-  (Loki `{kind="bac_log"}` / `{kind="edge_stats"}`), и граница L7 vs L3/L4 →
+- **What to do under attack** — what protects you at all times (444 for
+  non-tenants plus the cascade), what you turn on by hand per attack type
+  (`attack_mode` for a customer, `deny_nontenant` TLS reject under an IP flood,
+  the kill switch if the cascade misbehaves), where to look (Loki
+  `{kind="bac_log"}` / `{kind="edge_stats"}`), and the L7 vs L3/L4 boundary →
   [attack-response.md](attack-response.md).
 
-[`docs/product/vision.md`](../product/vision.md): §«Аварийные рычаги»,
-§«Rollback каталога», §«HMAC secret»/«Ротация», §«Channel C» (продуктовый
-контракт доставки), §Roadmap Phase 4/5.
+[`docs/product/vision.md`](../product/vision.md): §"Emergency levers",
+§"Catalog rollback", §"HMAC secret"/"Rotation", §"Channel C" (the product
+delivery contract), §Roadmap Phase 4/5.
 
-## Топология стенда (одно место, чтобы не повторять в каждом файле)
+## Stand topology (one place, so it is not repeated in every file)
 
-| Узел | SSH | Что крутится |
+| Node | SSH | What runs there |
 |---|---|---|
-| edge | `ubuntu@<EDGE_VM_IP>` | контейнер `nginx-demo` (весь каскад), `promtail` |
-| backend+obs | `ubuntu@<BACKEND_VM_IP>` | `antibot-backend-1/2` + `antibot-lb` + postgres + loki + grafana + `antibot-analytics` (daily report + blocklist-candidate producer, читает Loki) |
+| edge | `ubuntu@<EDGE_VM_IP>` | the `nginx-demo` container (the whole cascade), `promtail` |
+| backend+obs | `ubuntu@<BACKEND_VM_IP>` | `antibot-backend-1/2` + `antibot-lb` + postgres + loki + grafana + `antibot-analytics` (daily report and blocklist-candidate producer, reads Loki) |
 
-Адреса VM — плейсхолдеры `<EDGE_VM_IP>` / `<BACKEND_VM_IP>`: подставь свои
-(это единственное место, где они описаны). Ключ — `~/.ssh/gpu-key`. Контейнер
-`nginx-demo` слушает на LAN-IP
-(`192.168.10.208:443`), поэтому curl к публичным эндпоинтам идет через контейнер:
+The VM addresses are placeholders, `<EDGE_VM_IP>` / `<BACKEND_VM_IP>`: substitute
+your own (this is the only place they are described). The key is
+`~/.ssh/gpu-key`. The `nginx-demo` container listens on the LAN IP
+(`192.168.10.208:443`), so curl against the public endpoints goes through the
+container:
 
 ```sh
 docker exec nginx-demo curl -ks https://127.0.0.1/__health -H 'Host: bac.example.com'
 ```
 
-Счетчики и deploy-метаданные эджа (commit, cascade_version, challenge_secret_fp,
-blocklist_entries, catalog_staleness_seconds.*) больше не на публичном :443 —
-они идут строкой `EDGE_STATS {json}` в stdout → promtail → Loki
-(`{kind="edge_stats"}`), на VM: `docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1`.
-Снимок по требованию — приватный read-only mgmt-план на :9090 (loopback):
-`ssh -L 9090:127.0.0.1:9090 ubuntu@<EDGE_VM_IP>`, затем
-`curl -s http://localhost:9090/__stats` или `/__policy?host=<host>`.
+The edge counters and deploy metadata (commit, cascade_version,
+challenge_secret_fp, blocklist_entries, catalog_staleness_seconds.*) are no
+longer on the public :443 — they go out as an `EDGE_STATS {json}` line on stdout
+→ promtail → Loki (`{kind="edge_stats"}`); on the VM:
+`docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1`. For an on-demand
+snapshot there is a private read-only mgmt plane on :9090 (loopback):
+`ssh -L 9090:127.0.0.1:9090 ubuntu@<EDGE_VM_IP>`, then
+`curl -s http://localhost:9090/__stats` or `/__policy?host=<host>`.
 
-Backend читает медленные каталоги из git-чекаута `~/abuse-controls/catalogs`
-(монтируется `:/catalogs:ro`); Policy API живет за `antibot-lb:443`
-(Host `antibot.internal`), bearer `DASHBOARD_API_TOKEN` из
-`infra/demo-backend/.env`.
+The backend reads the slow catalogs from the git checkout at
+`~/abuse-controls/catalogs` (mounted `:/catalogs:ro`); the Policy API lives
+behind `antibot-lb:443` (Host `antibot.internal`), bearer `DASHBOARD_API_TOKEN`
+from `infra/demo-backend/.env`.
 
-> Прод-материал эджа (Puppet/hiera/canary) в этом репо не ведется — здесь
-> только стендовые инструкции.
+> Production edge material (Puppet/hiera/canary) is not maintained in this repo —
+> these are stand instructions only.
