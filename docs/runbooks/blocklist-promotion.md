@@ -144,8 +144,8 @@ whole PR ([catalog-rollback.md](catalog-rollback.md)). Both land within the
   opened a clean staging PR off main with an evidence passport (score 6 HIGH:
   impersonator go-http-client plus leakix recon, 13 IPs, datacenter,
   `human_share 0.0`, gates ✓); CI green.
-- **Channel C staging delivery.** After that merge the edge (then `/__admin` →
-  Blocklist; the same is now visible in `:9090/__stats` / EDGE_STATS) showed
+- **Channel C staging delivery.** After that merge the edge (visible in
+  `:9090/__stats` and the EDGE_STATS stream) showed
   `L13d1300_69e852b66fc7_10d89aa70559 → staging:block` — the entry arrived and
   loaded as match-but-observe (no 403, unlike the `active:block` entries the edge
   was blocking a live jitsi scanner with at that moment). This confirms staging

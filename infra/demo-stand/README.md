@@ -461,17 +461,6 @@ infra/demo-stand/
     └── README.md                   the contract with C5 (the verify endpoint) + the version bump rules
 ```
 
-## Talking points for a sceptical reviewer
-
-| Concern | Where to look |
-|---|---|
-| "Is this AI-generated slop?" | `make ci` passes the full unit suite + 0 lint warnings. ADRs in the design docs document every non-obvious decision with alternatives explicitly considered. Engineering narrative in the design notes traces the work commit-by-commit. |
-| "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
-| "How much overhead per request?" | PoC #2 previously measured ~32 K RPS on the allow path vs ~40 K baseline on a 4-core MacBook (the benchmark stand was removed from the repo; the `/baseline/` passthrough was dropped in Phase 1 too). |
-| "How do I roll it back?" | Single config-line change (per the design decision consequences). Per-Host rollback to observe-only is one PATCH against `/antibot/v1/policy/<host>` flipping `mode` back to `shadow` — Channel C delivers the change to the edge in ≤30s without redeploy. |
-| "Why not just use cloudflare/qrator/foxio/etc?" | RFC the design notes §A explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
-| "What do I monitor?" | The `EDGE_STATS` stdout dump → Loki (`{kind="edge_stats"}`): edge-deny drops, TLS rejects, cache ratio, fp_unique, catalog staleness, `commit` / `cascade_version`. Per-request detail via `{kind="bac_log"}`. Operational procedures (secret rotation, mode toggle, catalog rollback, challenge version pinning) are in [`docs/runbooks/`](../../docs/runbooks/). |
-
 ## Divergence WARN triage
 
 On an edge reload (`nginx -s reload` or a container recreate) error.log may show one of:

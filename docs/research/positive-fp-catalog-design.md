@@ -31,11 +31,12 @@ coarse `cipher_cnt`, plus a sharpened purity gate from #1 (D12).
 
 ### How the harvester works — no new edge code
 
-The edge already exposes **`/__fp`**
-([probe.lua](../../infra/demo-stand/lua/probe.lua)): it returns the `fp` plus the raw
-components, **bypasses the verdict and always answers 200**. The farm simply drives a
-browser at `https://<stand>/__fp` and reads our `fp` (the one `ja4_compute` produces).
-There is no need to replicate the ja4 logic inside the farm.
+The fingerprint dump lives in
+[probe.lua](../../infra/demo-stand/lua/probe.lua): it returns the `fp` plus the raw
+components and bypasses the verdict. The module is **not routed** — the public
+surface carries no such endpoint — so the farm needs it exposed on a controlled
+listener first. Given that, a browser driven at the endpoint reads back the same
+`fp` the cascade computes, and the farm does not have to reimplement the logic.
 
 ### Components
 

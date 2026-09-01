@@ -316,7 +316,7 @@ Any transition can be rolled back specifically (retire one signature or return i
 **What it does.**
 
 1. It runs a known set of real clients — Playwright with stable Chrome/Firefox/Edge (the browsers) and automation tools (curl, python-requests, Go, okhttp, plus the headless ones — Playwright/Puppeteer/UCD).
-2. With each of them it opens the edge's service endpoint `/__fp` (which returns a ready fingerprint, bypassing the cascade) and captures the full fingerprint.
+2. With each of them it opens the edge's fingerprint-dump endpoint (which returns a ready fingerprint, bypassing the cascade; it is not exposed publicly and has to be served on a controlled listener) and captures the full fingerprint.
 3. It opens a draft PR. A human merges it.
 
 **What comes out.** Two catalogs:

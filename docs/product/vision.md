@@ -130,7 +130,7 @@ The L numbers in this table are a visual hierarchy of layers by complexity and c
 | **L2** | `reputation` | Clearance cookie verify (HMAC), the verified-bot allowlist (rDNS), IP whitelist/blocklist, customer/datacenter ASN, geo | μs | stateless HMAC + static lists + MaxMind + rDNS verdicts from the backend | proxy |
 | **L3** | `tls_fp` | Fingerprint computation, the fingerprint blocklist, impersonator, suspicious ciphers | ~μs | catalog + a per-fingerprint cache | proxy (computation) + backend (the catalog) |
 | **L4** | `rate_limits` | per IP, per IP+UA, per API, per fingerprint, rate_scan_urls — sliding 10 s/60 s | μs | per-proxy counters | proxy |
-| **L5** | `verification` *(roadmap)* | Issuing the JS challenge, issuing the clearance cookie, Under Attack mode | seconds to issue | a stateless HMAC secret | proxy (issuing) |
+| **L5** | `verification` | Issuing the JS challenge, issuing the clearance cookie, Under Attack mode | seconds to issue | a stateless HMAC secret | proxy (issuing) |
 | **L6** | *(out of scope in v1)* | Mouse, timings, URL sequences — behavioural ML over sessions | needs a JS beacon | full sessions | future |
 
 **v1 = L1–L5.** L6 is a different product already.
