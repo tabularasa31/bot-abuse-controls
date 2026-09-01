@@ -1,14 +1,14 @@
-// Package antibotapi — HTTP-эндпоинты policy API ([B10]).
+// Package antibotapi — the HTTP endpoints of the policy API ([B10]).
 //
-// Контракт server-to-server: единственный потребитель — dashboard-backend.
-// Аутентификация конечного клиента — забота дашборда; здесь только bearer-auth
-// между двумя сервисами и валидация payload'ов до открытия транзакции.
+// A server-to-server contract: the only consumer is the dashboard backend.
+// Authenticating the end client is the dashboard's concern; here there is only bearer auth
+// between the two services plus payload validation before a transaction is opened.
 //
-// Маршруты — под `/antibot/v1/policy/{site}` (`{site}` — host клиента,
-// валидируется ≤253 байта). Каждый mutation handler пишет slog с полями
-// actor=dashboard, action, site, was_noop — единая точка для агрегатора
-// логов когда он появится. Audit-таблицу в БД не вводим (обоснование — в
-// плане B10).
+// The routes live under `/antibot/v1/policy/{site}` (`{site}` is the customer host,
+// validated at ≤253 bytes). Every mutation handler writes an slog record with the fields
+// actor=dashboard, action, site, was_noop — a single point for a log
+// aggregator once one exists. We do not introduce an audit table in the database (the rationale is in
+// the B10 plan).
 package antibotapi
 
 import (
@@ -25,12 +25,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// maxBodyBytes — bound на одно тело запроса. PATCH-payload маленький; защита
-// от случайного гигантского write от багнутого dashboard-клиента.
+// maxBodyBytes — the bound on one request body. A PATCH payload is small; this protects
+// against an accidental gigantic write from a buggy dashboard client.
 const maxBodyBytes = 64 * 1024
 
-// Server держит зависимости и метрики API. New возвращает nil, если auth
-// не сконфигурирован — main делает warn и не регистрирует роуты.
+// Server holds the API's dependencies and metrics. New returns nil when auth
+// is not configured — main warns and does not register the routes.
 type Server struct {
 	store *Store
 	auth  *Authenticator
@@ -62,8 +62,8 @@ func New(pool *pgxpool.Pool, auth *Authenticator, log *slog.Logger, reg promethe
 	return s
 }
 
-// Register монтирует роуты под общим bearer-auth-middleware. Go 1.22+
-// method+path-маршрутизация: чужие методы → 405 без захода в handler.
+// Register mounts the routes under a shared bearer-auth middleware. Go 1.22+
+// method+path routing: other methods → 405 without entering the handler.
 func (s *Server) Register(mux *http.ServeMux) {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /antibot/v1/policy/{site}", s.timed("get_policy", s.handleGetPolicy))
@@ -89,8 +89,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("/antibot/v1/", s.auth.Middleware(api))
 }
 
-// timed — обёртка: измеряет latency, валидирует site из path. handler работает
-// в уже-аутентифицированном контексте; site вытащен и проверен.
+// timed — a wrapper: it measures latency and validates the site from the path. The handler works
+// in an already-authenticated context, with the site extracted and checked.
 func (s *Server) timed(action string, h func(action, site string, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -106,13 +106,13 @@ func (s *Server) timed(action string, h func(action, site string, w http.Respons
 	}
 }
 
-// requestAttrs собирает forensic-поля для slog'а на каждую mutation
-// (PR-58 security audit #3): при leak'е токена audit-log без source IP /
-// request_id не позволял отличить легитимные мутации от атакующих.
-// Источник IP — X-Forwarded-For (наш LB — nginx — его выставляет; см.
-// infra/demo-backend/nginx/lb.conf), fallback на r.RemoteAddr. Request-id —
-// заголовок X-Request-Id (если dashboard-backend его проставляет), пустая
-// строка иначе.
+// requestAttrs collects forensic fields for the slog record of every mutation
+// (from the security audit): if the token leaked, an audit log without a source IP or a
+// request_id would not let us tell legitimate mutations from an attacker's.
+// The IP source is X-Forwarded-For (our LB, nginx, sets it; see
+// infra/demo-backend/nginx/lb.conf), falling back to r.RemoteAddr. The request id is the
+// X-Request-Id header (when the dashboard backend sets it), and an empty
+// string otherwise.
 func requestAttrs(r *http.Request) []any {
 	src := r.Header.Get("X-Forwarded-For")
 	if src == "" {
@@ -138,9 +138,9 @@ func (s *Server) handleGetPolicy(action, site string, w http.ResponseWriter, r *
 	s.mutations.WithLabelValues(action, "ok").Inc()
 }
 
-// patchBody принимает только скалярные поля; unknown ключи валятся
-// strict-декодером (DisallowUnknownFields), чтобы опечатки от dashboard'а не
-// тихо игнорировались.
+// patchBody accepts only scalar fields; unknown keys are rejected by the
+// strict decoder (DisallowUnknownFields), so that a typo from the dashboard is not
+// silently ignored.
 type patchBody struct {
 	Mode       *string `json:"mode,omitempty"`
 	Strictness *string `json:"strictness,omitempty"`
@@ -193,9 +193,9 @@ func (s *Server) handlePatchPolicy(action, site string, w http.ResponseWriter, r
 	s.writeJSON(w, map[string]any{"changed": changed, "diff": orEmpty(fields)})
 }
 
-// handleDeletePolicy удаляет policy-запись host'а целиком. Тела нет (DELETE
-// идентифицирует ресурс через path). Отсутствие записи → 404, идемпотентно
-// как у array DELETE. После удаления эдж через Channel C ≤30с возвращается к
+// handleDeletePolicy removes a host's policy record entirely. There is no body (DELETE
+// identifies the resource through the path). A missing record → 404, idempotently
+// like the array DELETE. After the deletion, within ≤30 s the edge returns through Channel C to
 // pool default (mode=shadow, observe-only).
 func (s *Server) handleDeletePolicy(action, site string, w http.ResponseWriter, r *http.Request) {
 	existed, err := s.store.DeletePolicy(r.Context(), site)
@@ -235,8 +235,8 @@ type stringArrayBody struct {
 	Geo     string `json:"geo,omitempty"`
 }
 
-// valueForField извлекает значение из body согласно семантике поля и
-// валидирует его. Возвращает (value, errCode, errMsg).
+// valueForField extracts the value from the body per the field's semantics and
+// validates it. It returns (value, errCode, errMsg).
 func valueForField(field string, b stringArrayBody) (string, string, string) {
 	switch field {
 	case "ua_blacklist":
@@ -330,15 +330,15 @@ func (s *Server) handleGetASN(action, site string, w http.ResponseWriter, r *htt
 	s.mutations.WithLabelValues(action, "ok").Inc()
 }
 
-// asnBody — ASN как *int64 чтобы отличить «не задано» от «0». ValidateASN(0)
-// принимает (RFC 6793 — 0 reserved, но не блокируем как явный выбор оператора),
-// поэтому без *-указателя пустой body `{}` молча мутировал бы ASN 0
+// asnBody — the ASN as an *int64, to tell "unset" from "0". ValidateASN(0)
+// accepts it (RFC 6793 — 0 is reserved, but we do not block it as an explicit operator choice),
+// so without the pointer an empty body `{}` would silently mutate ASN 0
 // (PR-58 review #4).
 type asnBody struct {
 	ASN *int64 `json:"asn"`
 }
 
-// requireASN — общая проверка required + range для POST/DELETE asn_block.
+// requireASN — the shared required plus range check for POST/DELETE asn_block.
 func (s *Server) requireASN(w http.ResponseWriter, action string, b asnBody) (uint32, bool) {
 	if b.ASN == nil {
 		s.bad(w, action, "missing_asn", "field 'asn' is required")
@@ -406,18 +406,18 @@ func (s *Server) handleDeleteASN(action, site string, w http.ResponseWriter, r *
 
 // --- helpers ---------------------------------------------------------------
 
-// Sentinel-ошибки decodeJSON — handler.bad() мапит их на санитарные коды
-// без leak'a внутренних деталей (имена unknown полей, JSON-decoder сообщения,
-// размер MaxBytes — PR-58 security audit #5/#7).
+// The sentinel errors of decodeJSON — handler.bad() maps them onto sanitised codes
+// without leaking internal details (the names of unknown fields, JSON decoder messages,
+// the MaxBytes size — from the security audit).
 var (
 	errBodyEmpty    = errors.New("empty body")
 	errBodyTooLarge = errors.New("body too large")
 	errBodyBadJSON  = errors.New("invalid json")
 )
 
-// decodeJSON читает bounded body и парсит strict-декодером. Возвращает
-// одну из sentinel-ошибок выше (или nil). Сами json.Decoder-сообщения и
-// `read body: http: request body too large` НЕ выходят за пределы пакета.
+// decodeJSON reads a bounded body and parses it with a strict decoder. It returns
+// one of the sentinel errors above (or nil). The json.Decoder messages themselves and
+// `read body: http: request body too large` never leave the package.
 func decodeJSON(r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
 	buf, err := io.ReadAll(r.Body)
@@ -442,9 +442,9 @@ func decodeJSON(r *http.Request, dst any) error {
 	return nil
 }
 
-// handleDecodeErr мапит sentinel-ошибки decodeJSON на корректный HTTP-статус
-// + статичный JSON-код без раскрытия деталей. 413 для oversize — стандарт
-// (RFC 7231 §6.5.11), не лепим всё в 400.
+// handleDecodeErr maps decodeJSON's sentinel errors onto the correct HTTP status
+// plus a static JSON code without revealing details. 413 for an oversize is the standard
+// (RFC 7231 §6.5.11); we do not lump everything into a 400.
 func (s *Server) handleDecodeErr(w http.ResponseWriter, action string, err error) {
 	switch {
 	case errors.Is(err, errBodyTooLarge):
@@ -457,9 +457,9 @@ func (s *Server) handleDecodeErr(w http.ResponseWriter, action string, err error
 	}
 }
 
-// itemsKey возвращает имя ключа в JSON-ответе для GET array-endpoint'а.
-// Соответствует таблице в плане B10: ua → "patterns", ip_* → "cidrs",
-// geo → "geos". Делает выдачу самодокументируемой («patterns»: [...]).
+// itemsKey returns the key name in the JSON response of a GET array endpoint.
+// It matches the table in the B10 plan: ua → "patterns", ip_* → "cidrs",
+// geo → "geos". It makes the output self-documenting ("patterns": [...]).
 func itemsKey(field string) string {
 	switch field {
 	case "ua_blacklist":
@@ -472,7 +472,7 @@ func itemsKey(field string) string {
 	return "items"
 }
 
-// orEmpty гарантирует не-nil slice в JSON-ответе («diff»: [] вместо null).
+// orEmpty guarantees a non-nil slice in the JSON response ("diff": [] instead of null).
 func orEmpty(xs []string) []string {
 	if xs == nil {
 		return []string{}
@@ -485,12 +485,12 @@ type errBody struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// writeJSON всегда отвечает 200 OK — успешный ответ handler'а. Для ошибок
-// используется writeErr с явным status.
+// writeJSON always answers 200 OK — a handler's successful response. For errors
+// we use writeErr with an explicit status.
 func (s *Server) writeJSON(w http.ResponseWriter, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
-		// Невозможно для наших типов; но errchkjson требует обработки.
+		// Impossible for our types, but errchkjson requires handling it.
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}

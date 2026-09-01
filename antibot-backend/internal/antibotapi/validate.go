@@ -1,7 +1,7 @@
-// Валидация payload'ов admin API ДО открытия транзакции. Любая запись,
-// прошедшая эти проверки, обязана пройти catalog.Validate на следующем тике
-// dbloader.Reloader — иначе reloader станет fail-stale и edge зависнет на
-// старом каталоге.
+// Validation of the admin API payloads BEFORE a transaction is opened. Any record
+// that passes these checks must also pass catalog.Validate on the next tick of
+// dbloader.Reloader — otherwise the reloader goes fail-stale and the edge is stuck on the
+// old catalog.
 package antibotapi
 
 import (
@@ -13,24 +13,24 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 )
 
-// maxSiteLen — RFC 1035 §2.3.4 (максимум 253 октета для domain name).
+// maxSiteLen — RFC 1035 §2.3.4 (a maximum of 253 octets for a domain name).
 const maxSiteLen = 253
 
-// siteRE — допустимое hostname по RFC 1123 §2.1: LDH-label'ы (буквы, цифры,
-// дефис), разделённые точкой, label ≤63 байт, не начинается/заканчивается
-// дефисом. Регистр сохраняем как есть (Postgres host PK is case-sensitive),
-// но фактически hostname'ы lowercase у дашборда.
+// siteRE — a permissible hostname per RFC 1123 §2.1: LDH labels (letters, digits,
+// hyphens) separated by dots, each label ≤63 bytes, not starting or ending with a
+// hyphen. We preserve the case as given (the Postgres host PK is case-sensitive),
+// though in practice the dashboard sends lowercase hostnames.
 //
-// PR-58 security audit #2: до этого проверка была только len ≤253, что
-// пропускало `..`, NUL, control-chars, percent-encoded slash (после
-// ServeMux URL-decode становится '/'), unicode. Не SQLi (parameterized),
-// но мусор в `host` PK + сломанная корреляция по `site` в SIEM-логах.
+// From the security audit: previously the check was only len ≤253, which
+// let through `..`, NUL, control characters, a percent-encoded slash (which after
+// the ServeMux URL decode becomes '/') and unicode. Not SQLi (the queries are parameterized),
+// but junk in the `host` PK plus broken correlation by `site` in SIEM logs.
 var siteRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
-// ValidateSite — синтаксическая проверка hostname'a из URL-path.
-// LDH + dots + length ≤253. Single-label hosts разрешены (например, internal
-// `staging`). IDN не поддерживаем — дашборд обязан подавать ASCII (Punycode
-// при необходимости).
+// ValidateSite — a syntactic check of the hostname from the URL path.
+// LDH plus dots plus a length ≤253. Single-label hosts are allowed (an internal
+// `staging`, say). IDN is not supported — the dashboard must send ASCII (Punycode
+// where needed).
 func ValidateSite(s string) error {
 	if s == "" {
 		return fmt.Errorf("site: empty")
@@ -72,8 +72,8 @@ func ValidateStrictness(s string) error {
 	return nil
 }
 
-// ValidateUARegex — RE2-валидация. Та же грамматика, что и catalog.Validate
-// на стороне reloader'a: если здесь пропустили, там тоже пропустит.
+// ValidateUARegex — RE2 validation. The same grammar as catalog.Validate
+// on the reloader side: if it passes here, it passes there too.
 func ValidateUARegex(pattern string) error {
 	if pattern == "" {
 		return fmt.Errorf("pattern: empty")
@@ -84,8 +84,8 @@ func ValidateUARegex(pattern string) error {
 	return nil
 }
 
-// ValidateCIDR делегирует catalog.ValidateCIDR — симметрично reloader'у и
-// lua-resty-ipmatcher на edge (принимает IP без /N как host-route).
+// ValidateCIDR delegates to catalog.ValidateCIDR — symmetrically with the reloader and
+// lua-resty-ipmatcher on the edge (an IP with no /N is accepted as a host route).
 func ValidateCIDR(s string) error {
 	if s == "" {
 		return fmt.Errorf("cidr: empty")
@@ -93,17 +93,17 @@ func ValidateCIDR(s string) error {
 	return catalog.ValidateCIDR(s)
 }
 
-// ValidateOriginIP делегирует catalog.ValidateOriginIP — тот же предикат,
-// что reloader применяет в catalog.Validate. Пустая строка допустима
-// (снять origin_ip / тенант не проксируется); иначе одиночный bare-адрес
-// IPv4/IPv6, без префикса.
+// ValidateOriginIP delegates to catalog.ValidateOriginIP — the same predicate
+// the reloader applies in catalog.Validate. An empty string is permitted
+// (clearing origin_ip / a non-proxied tenant); otherwise a single bare
+// IPv4/IPv6 address with no prefix.
 func ValidateOriginIP(s string) error {
 	return catalog.ValidateOriginIP(s)
 }
 
-// ValidateASN — RFC 6793 32-bit ASN. Допускаем диапазон uint32 (≤4_294_967_295).
-// 0 — зарезервирован, но не блокируем (operator-discretion); ловим в БД при
-// необходимости.
+// ValidateASN — an RFC 6793 32-bit ASN. We allow the uint32 range (≤4_294_967_295).
+// 0 is reserved, but we do not block it (operator discretion); catch it in the database if
+// needed.
 func ValidateASN(n int64) error {
 	if n < 0 || n > 0xFFFFFFFF {
 		return fmt.Errorf("asn: out of uint32 range, got %d", n)
@@ -111,9 +111,9 @@ func ValidateASN(n int64) error {
 	return nil
 }
 
-// geoCodeRE — две заглавные ASCII-буквы. ISO 3166-1 alpha-2 без проверки
-// against реального списка стран (это не наша забота, geoip-база может быть
-// обновлённее нашего hard-coded списка).
+// geoCodeRE — two uppercase ASCII letters. ISO 3166-1 alpha-2 without checking
+// against a real country list (that is not our concern; the geoip database may be
+// more up to date than any list we hardcode).
 var geoCodeRE = regexp.MustCompile(`^[A-Z]{2}$`)
 
 func ValidateGeoCode(s string) error {

@@ -1,10 +1,10 @@
-// Bearer-token middleware для policy API. Один shared M2M secret между
-// dashboard-backend и antibot-backend; единственный потребитель этих
-// endpoint'ов — dashboard-backend, per-tenant авторизация делается ВНУТРИ
-// дашборда.
+// Bearer-token middleware for the policy API. One shared M2M secret between the
+// dashboard backend and antibot-backend; the only consumer of these
+// endpoints is the dashboard backend, and per-tenant authorisation happens INSIDE
+// the dashboard.
 //
-// Constant-time compare (crypto/subtle) — стандартная защита от timing
-// side-channel'ов при поиске валидного токена.
+// A constant-time compare (crypto/subtle) — the standard protection from timing
+// side channels while searching for a valid token.
 package antibotapi
 
 import (
@@ -16,23 +16,23 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Authenticator проверяет bearer-token. Сконфигурирован одним allowed-токеном;
-// больше нужно — заводим slice (per-tenant — v2).
+// Authenticator verifies the bearer token. It is configured with one allowed token;
+// if more are ever needed we add a slice (per tenant — v2).
 //
-// Compare-стратегия: sha256(token) → 32 байта → ConstantTimeCompare фиксированной
-// длины. Прямой ConstantTimeCompare([]byte(got), token) short-circuit'ит когда
-// len(got) != len(token), что технически leak'ает длину сконфигурированного
-// токена через timing (PR-58 security audit #8). Хеширование выравнивает
-// длину compare-операндов независимо от длины входа.
+// The compare strategy: sha256(token) → 32 bytes → a fixed-length ConstantTimeCompare.
+// A direct ConstantTimeCompare([]byte(got), token) short-circuits when
+// len(got) != len(token), which technically leaks the length of the configured
+// token through timing (from the security audit). Hashing equalises the
+// length of the compare operands regardless of the input length.
 type Authenticator struct {
 	tokenHash     [32]byte               // sha256 of configured token
 	authFailures  *prometheus.CounterVec // {reason}: missing | malformed | bad_token
 	authSucceeded prometheus.Counter
 }
 
-// NewAuthenticator валидирует токен на старте: пустая строка = nil, вызывающий
-// должен решить «не регистрировать handler'ы». Зарегистрирует метрики на
-// переданном registerer (обычно общий *prometheus.Registry).
+// NewAuthenticator validates the token at startup: an empty string means nil, and the caller
+// must decide "do not register the handlers". It registers metrics on the
+// passed registerer (usually the shared *prometheus.Registry).
 func NewAuthenticator(token string, reg prometheus.Registerer) *Authenticator {
 	if token == "" {
 		return nil
@@ -52,8 +52,8 @@ func NewAuthenticator(token string, reg prometheus.Registerer) *Authenticator {
 	return a
 }
 
-// Middleware обёртывает handler bearer-auth'ом. На fail — 401 + JSON-тело,
-// next не вызывается.
+// Middleware wraps a handler in bearer auth. On failure it returns 401 plus a JSON body and
+// next is not called.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
@@ -61,7 +61,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			a.fail(w, "missing")
 			return
 		}
-		// Принимаем только "Bearer <tok>" (case-insensitive scheme).
+		// We accept only "Bearer <tok>" (with a case-insensitive scheme).
 		const prefix = "bearer "
 		if len(h) <= len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
 			a.fail(w, "malformed")

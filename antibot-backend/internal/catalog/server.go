@@ -1,20 +1,20 @@
-// Package catalog — HTTP-сервер Channel C ([B3]).
+// Package catalog — the Channel C HTTP server ([B3]).
 //
-// Контракт по docs/architecture/config-distribution.md §"The 'catalog' concept"
+// The contract per docs/architecture/config-distribution.md §"The 'catalog' concept"
 // + §"Channel C — antibot-backend HTTP pull (runtime data)":
 //
-//   - GET /catalog/{name}            — снимок каталога.
-//   - ?site=<host>                   — per-tenant фильтрация (combined UA regex,
+//   - GET /catalog/{name}            — a snapshot of the catalog.
+//   - ?site=<host>                   — per-tenant filtering (the combined UA regex,
 //     per-resource ip_*, policy/attack_mode).
-//   - If-None-Match: "<etag>"        — 304 без тела, если payload не менялся.
-//   - X-Catalog-Version: <semver>    — версия схемы payload (RFC §C1).
+//   - If-None-Match: "<etag>"        — a 304 with no body when the payload has not changed.
+//   - X-Catalog-Version: <semver>    — the payload schema version (RFC §C1).
 //   - ETag: "<sha256-hex>"           — strong, content-hash.
-//   - 503 Service Unavailable        — Store пуст (никто не вызвал Replace);
-//     fail-closed, чтобы эдж не "успешно" принимал пустые катаолги.
+//   - 503 Service Unavailable        — the Store is empty (nobody called Replace);
+//     fail-closed, so that the edge does not "successfully" accept empty catalogs.
 //
-// Хранилище — *Store (in-memory, atomic-swap). Реальный YAML/Postgres
-// загрузчик подаётся снаружи: B3 ставит in-memory + YAML, B4 заменит на pgx
-// без изменения интерфейса.
+// The storage is a *Store (in-memory, atomic swap). The real YAML/Postgres
+// loader is supplied from outside: B3 provides in-memory plus YAML, and B4 replaces it with pgx
+// without changing the interface.
 package catalog
 
 import (
@@ -24,9 +24,9 @@ import (
 	"strings"
 )
 
-// knownCatalogs — восемь каталогов из config-distribution.md §"The 'catalog'
-// concept". Держим в одном месте, чтобы регистрация роутов и handle.handle
-// смотрели на тот же список.
+// knownCatalogs — the eight catalogs from config-distribution.md §"The 'catalog'
+// concept". Kept in one place, so that route registration and handle.handle
+// look at the same list.
 var knownCatalogs = map[string]struct{}{
 	"tls_fp_blocklist":        {},
 	"ua_blacklist":            {},
@@ -40,16 +40,16 @@ var knownCatalogs = map[string]struct{}{
 	"attack_mode":             {},
 }
 
-// Server — HTTP-обёртка над Store. Один Store на процесс; Server-объектов
-// может быть несколько (например, тестовый и продовый mux'ы), они шарят данные.
+// Server — the HTTP wrapper over Store. One Store per process; there can be
+// several Server objects (a test mux and a production one, say) sharing the data.
 type Server struct {
 	store *Store
 }
 
 func New() *Server { return &Server{store: NewStore()} }
 
-// NewWithStore — для тестов и для main(), который грузит данные сам и хочет
-// передать готовый Store.
+// NewWithStore — for tests and for main(), which loads the data itself and wants to
+// pass a ready Store.
 func NewWithStore(s *Store) *Server {
 	if s == nil {
 		s = NewStore()
@@ -57,12 +57,12 @@ func NewWithStore(s *Store) *Server {
 	return &Server{store: s}
 }
 
-// Store — доступ к данным, чтобы main мог вызывать Replace из YAML-reloader'a
-// без знания внутренностей пакета.
+// Store — access to the data, so that main can call Replace from the YAML reloader
+// without knowing the package internals.
 func (s *Server) Store() *Store { return s.store }
 
-// Register монтирует GET /catalog/{name}. Метод фиксируется на ServeMux
-// (Go 1.22+); чужие методы получают 405 без захода в handler.
+// Register mounts GET /catalog/{name}. The method is pinned at the ServeMux
+// (Go 1.22+); other methods get a 405 without entering the handler.
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /catalog/{name}", s.handle)
 }
@@ -74,13 +74,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// site — опционален. Пустой = глобальный payload. Валидация: только
-	// длина (защита от случайного гигантского ?site=) — формат host'a
-	// проверять смысла нет, неизвестный host для policy/attack_mode
-	// штатно отдаёт дефолт.
+	// site is optional. Empty means the global payload. Validation: length
+	// only (protection from an accidental gigantic ?site=) — there is no point
+	// checking the host format, since an unknown host for policy/attack_mode
+	// legitimately returns the default.
 	site := r.URL.Query().Get("site")
 	if len(site) > 253 {
-		// RFC 1035 §2.3.4: максимальная длина domain name — 253 октета.
+		// RFC 1035 §2.3.4: the maximum length of a domain name is 253 octets.
 		writeErr(w, http.StatusBadRequest, "site_too_long", "")
 		return
 	}
@@ -89,25 +89,25 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var unk errUnknownCatalog
 		if errors.As(err, &unk) {
-			// Не должно случиться (имя уже в knownCatalogs), но defense-in-depth:
-			// если кто-то добавит каталог в knownCatalogs и забудет в Store —
-			// 500 заметнее в логах эджа, чем 200 с пустым телом.
+			// Should not happen (the name is already in knownCatalogs), but defence in depth:
+			// if somebody adds a catalog to knownCatalogs and forgets the Store,
+			// a 500 is more visible in the edge logs than a 200 with an empty body.
 			writeErr(w, http.StatusInternalServerError, "catalog_not_built", name)
 			return
 		}
-		// json.Marshal на нашей форме не должен падать; если упал — лучше
-		// явный 500, чем процессовая паника (PR #42 review).
+		// json.Marshal must not fail on our shape; if it does, an explicit
+		// 500 is better than a process panic (from review).
 		writeErr(w, http.StatusInternalServerError, "serialize_failed", name)
 		return
 	}
 
-	// Fail-closed: Store ни разу не звался Replace'ом → 503 Service Unavailable.
-	// Эдж по логике fail-stale (docs/architecture/config-distribution.md
-	// §"Channel C / Failure mode") держит последний хороший каталог, а не
-	// перезаписывает его нашим "успешным" пустым ответом (codex review).
-	// Проверка через флаг Store.IsLoaded, а не по сравнению Version с
-	// defaultVersion — иначе оператор, поставивший в YAML `version: "0.0.0"`,
-	// видел бы 503 на легитимном payload'е.
+	// Fail-closed: Replace was never called on the Store → 503 Service Unavailable.
+	// By the fail-stale logic (docs/architecture/config-distribution.md
+	// §"Channel C / Failure mode") the edge keeps the last good catalog rather than
+	// overwriting it with our "successful" empty response (from review).
+	// The check goes through the Store.IsLoaded flag rather than comparing Version with
+	// defaultVersion — otherwise an operator who set `version: "0.0.0"` in the YAML
+	// would see a 503 on a legitimate payload.
 	if !s.store.IsLoaded() {
 		w.Header().Set("X-Catalog-Version", snap.Version)
 		w.Header().Set("Retry-After", "5")
@@ -115,13 +115,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Контракт §C1: X-Catalog-Version всегда, ETag всегда, тело — только
-	// если If-None-Match не совпал.
+	// The §C1 contract: X-Catalog-Version always, an ETag always, and a body only
+	// when If-None-Match did not match.
 	h := w.Header()
 	h.Set("X-Catalog-Version", snap.Version)
 	h.Set("ETag", snap.ETag)
-	// Cache-Control: эдж сам решает (timer.every(30s)), но запрещаем
-	// промежуточным прокси кэшировать — иначе at-most-once-per-edge сломается.
+	// Cache-Control: the edge decides for itself (timer.every(30s)), but we forbid
+	// intermediate proxies to cache — otherwise at-most-once-per-edge breaks.
 	h.Set("Cache-Control", "no-store")
 
 	if anyETagMatches(r.Header.Values("If-None-Match"), snap.ETag) {
@@ -134,10 +134,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(snap.Body)
 }
 
-// anyETagMatches проверяет совпадение по RFC 7232 §3.2 поверх ВСЕХ значений
-// If-None-Match. Клиент имеет право прислать заголовок несколько раз
-// (http.Header.Values вернёт их раздельно) или один раз со списком через
-// запятую — поддерживаем оба случая.
+// anyETagMatches checks a match per RFC 7232 §3.2 across ALL the values of
+// If-None-Match. A client may send the header several times
+// (http.Header.Values returns them separately) or once with a comma-separated
+// list — we support both.
 func anyETagMatches(headers []string, etag string) bool {
 	for _, h := range headers {
 		if etagMatches(h, etag) {
@@ -147,10 +147,10 @@ func anyETagMatches(headers []string, etag string) bool {
 	return false
 }
 
-// etagMatches парсит один If-None-Match по RFC 7232 §3.2: список через
-// запятую, "*", опциональный prefix `W/`. Принципиально: запятая ВНУТРИ
-// quoted-string не разделяет токены — ETag `"foo,bar"` валидный. Поэтому
-// токенайзер ведёт state-машину по DQUOTE, а не slice'ит по indexByte
+// etagMatches parses one If-None-Match per RFC 7232 §3.2: a comma-separated
+// list, "*", an optional `W/` prefix. Crucially: a comma INSIDE a
+// quoted-string does not separate tokens — the ETag `"foo,bar"` is valid. So the
+// tokeniser runs a state machine over DQUOTE rather than slicing by indexByte
 // (PR #42 review).
 func etagMatches(header, etag string) bool {
 	header = strings.TrimSpace(header)
@@ -158,7 +158,7 @@ func etagMatches(header, etag string) bool {
 		return true
 	}
 	for _, token := range splitETagList(header) {
-		// strip W/ prefix — weak/strong сравнение для not-modified эквивалентно.
+		// strip the W/ prefix — weak and strong comparison are equivalent for not-modified.
 		token = strings.TrimPrefix(token, "W/")
 		if token == "" {
 			continue
@@ -170,9 +170,9 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
-// splitETagList разбивает значение If-None-Match на токены, уважая
-// quoted-string по RFC 7230 §3.2.6 (quoted-pair `\X` внутри тоже
-// поглощается). Пустые токены отбрасываются.
+// splitETagList splits an If-None-Match value into tokens, respecting
+// quoted-string per RFC 7230 §3.2.6 (a quoted-pair `\X` inside is also
+// consumed). Empty tokens are discarded.
 func splitETagList(s string) []string {
 	var out []string
 	inQuotes := false
@@ -183,8 +183,8 @@ func splitETagList(s string) []string {
 		case c == '"':
 			inQuotes = !inQuotes
 		case c == '\\' && inQuotes && i+1 < len(s):
-			// quoted-pair: пропускаем следующий байт целиком, чтобы `\"`
-			// не закрывал quoted-string.
+			// A quoted-pair: we skip the next byte entirely, so that `\"`
+			// does not close the quoted-string.
 			i++
 		case c == ',' && !inQuotes:
 			if tok := strings.TrimSpace(s[start:i]); tok != "" {
@@ -199,8 +199,8 @@ func splitETagList(s string) []string {
 	return out
 }
 
-// errorBody — типизированное тело, чтобы json.Marshal не получал `any`
-// (errchkjson: any может скрыть unencodable-тип).
+// errorBody — a typed body, so that json.Marshal never receives an `any`
+// (errchkjson: an any can hide an unencodable type).
 type errorBody struct {
 	Error   string `json:"error"`
 	Catalog string `json:"catalog,omitempty"`
@@ -209,7 +209,7 @@ type errorBody struct {
 func writeErr(w http.ResponseWriter, status int, code, catalog string) {
 	data, err := json.Marshal(errorBody{Error: code, Catalog: catalog})
 	if err != nil {
-		// Невозможно для errorBody (только строки), но errchkjson требует.
+		// Impossible for errorBody (strings only), but errchkjson requires it.
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}
