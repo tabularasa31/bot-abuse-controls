@@ -2,7 +2,7 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (edge admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (B11). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The cascade лежит целиком в `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
+The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (B11). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The whole cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
 
 ## Scenarios a reviewer can probe
 
@@ -179,7 +179,7 @@ first — see below.
 
 Protection must never take the site down. If the cascade misbehaves — a bug, a
 perf regression, a flood of false positives — switch it off. Two levers
-(vision.md §"Аварийные рычаги", A12):
+(vision.md §"Emergency levers", A12):
 
 - **Global** — the whole cascade goes no-op: traffic proxies straight to the
   origin and **no `BAC_LOG` record is written**. The catastrophe lever (Lua
@@ -229,80 +229,80 @@ no `BAC_LOG` lines (`docker logs --since 1m nginx-demo | grep BAC_LOG`); with th
 
 ## Challenge HMAC secret (Phase 4)
 
-Phase 4 (L5 active verification) подписывает clearance cookie и self-signed
-nonce challenge-страницы локальным HMAC-секретом — без обращения к backend
-(vision §«HMAC secret для clearance cookie», §Channel A). Один секрет на весь
-эдж-пул; в проде доставляется через Puppet (Channel A), на демо-стенде Channel
-A = file mount, как и для `./certs/*.pem` и `kill_switch.local.conf`.
+Phase 4 (L5 active verification) signs the clearance cookie and the self-signed
+nonce of the challenge page with a local HMAC secret — without calling the backend
+(vision §"The HMAC secret for the clearance cookie", §Channel A). One secret for the whole
+edge pool; in production it is delivered through Puppet (Channel A); on the demo stand Channel
+A = a file mount, as it is for `./certs/*.pem` and `kill_switch.local.conf`.
 
-**Файл.** `infra/demo-stand/certs/challenge_secret.key` — одна строка
-base64 (32+ байта энтропии). Bind-mount в контейнер на
-`/etc/nginx/certs/challenge_secret.key` (override через env
-`CHALLENGE_HMAC_SECRET_FILE`). `*.key` уже в `.gitignore` — секрет в репо не
-попадёт.
+**The file.** `infra/demo-stand/certs/challenge_secret.key` — a single line of
+base64 (32+ bytes of entropy). Bind-mounted into the container at
+`/etc/nginx/certs/challenge_secret.key` (overridable through the
+`CHALLENGE_HMAC_SECRET_FILE` env var). `*.key` is already in `.gitignore`, so the secret never
+lands in the repo.
 
-**Генерация.**
+**Generation.**
 
 ```sh
 ./infra/demo-stand/scripts/generate-challenge-secret.sh
 ```
 
-Скрипт пишет файл с правами `600` и печатает 8-hex fingerprint — тот же, что
-стенд выводит в EDGE_STATS-дампе (`challenge_secret_fp` field, kind="edge_stats"
-в Loki). Сам секрет наружу не выводится никогда.
+The script writes the file with mode `600` and prints an 8-hex fingerprint — the same one the
+stand reports in the EDGE_STATS dump (the `challenge_secret_fp` field, kind="edge_stats"
+in Loki). The secret itself is never printed.
 
-**Ротация = `openresty -s reload`.** `init_by_lua` перезапускается на каждом
-reload и перечитывает файл; cookie, подписанные старым секретом, перестают
-проходить HMAC verify на L2.1 — клиент идёт через каскад до L5 и получает
-новую cookie. Это by-design (vision §«Ротация»: «новая версия через PR +
-reload nginx; ротация инвалидирует все ранее выданные cookie разом»).
+**Rotation = `openresty -s reload`.** `init_by_lua` runs again on every
+reload and re-reads the file; cookies signed with the old secret stop
+passing HMAC verify at L2.1 — the client goes through the cascade to L5 and gets
+a new cookie. This is by design (vision §"The HMAC secret for the clearance cookie": "a new version
+through a PR + an nginx reload; rotation invalidates every previously issued cookie at once").
 
 ```sh
 rm  infra/demo-stand/certs/challenge_secret.key
 ./infra/demo-stand/scripts/generate-challenge-secret.sh
 docker compose -f infra/demo-stand/docker-compose.demo.yml \
     exec nginx-demo openresty -s reload
-docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # новый challenge_secret_fp
+docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # the new challenge_secret_fp
 ```
 
-**Failure-режим.** Если файла нет — стенд стартует, печатает WARN в
-error.log, L2.1 cookie verify и L5 cookie issue откажутся работать (Phase 4
-по факту off). Phase 1-3 запросы продолжают идти. При пустом или коротком
-(<32 байт) файле — ERR + тот же fail-closed путь. Сам секрет в логах не
-светим, только fingerprint.
+**Failure mode.** If the file is missing, the stand starts, prints a WARN into
+error.log, and L2.1 cookie verify plus L5 cookie issue refuse to work (Phase 4
+is effectively off). Phase 1–3 requests keep flowing. On an empty or too short
+(<32 bytes) file — an ERR plus the same fail-closed path. The secret is never
+printed to the logs, only its fingerprint.
 
 ## Challenge page asset + cascade version pin (Phase 4, C2)
 
-Phase 4 «Ветка A» (vision §5.2) выдает браузеру HTML+JS-страницу, JS считает
-`SHA-256(nonce + JS_SECRET)` и POST-ит токен на verify-эндпоинт; edge
-подставляет в шаблон одноразовый nonce (TTL 60с, подписан тем же HMAC
-secret'ом, что и clearance cookie, см. предыдущую секцию). В C2 на стенд
-заехала **только сама эмиссия** (шаблон + nonce + version-pin); привязка к
-`verdict=challenge` и серверный verify — за C5.
+Phase 4 "Branch A" (vision §5.2) serves the browser an HTML+JS page; the JS computes
+`SHA-256(nonce + JS_SECRET)` and POSTs the token to the verify endpoint; the edge
+substitutes a single-use nonce into the template (TTL 60 s, signed with the same HMAC
+secret as the clearance cookie, see the previous section). C2 landed on the stand
+with the issuing side only (the template + the nonce + the version pin); binding it to
+`verdict=challenge` and the server-side verify belong to C5.
 
-**Файлы.**
+**The files.**
 
-- `infra/demo-stand/challenge/page.html` — единственный шаблон. На render
-  подставляются только плейсхолдеры `{{NONCE}}` и `{{EXPIRY}}`. Версия
-  каскада зашита в шаблон литералом (в `<meta name="cascade-version">`, в
-  HTML-комментарии и в `data-cascade-version`) — НЕ плейсхолдер: это
-  source of truth, который сверяется с `CASCADE_VERSION` на init и
-  бампается одновременно. Bind-mount в `/etc/nginx/challenge:ro`
-  (Channel A на демо = file mount).
-- `infra/demo-stand/CASCADE_VERSION` — semver-строка (текущая `0.1.0`).
-  Bind-mount в `/etc/nginx/CASCADE_VERSION:ro`. **Bump обязателен** в любом PR,
-  который меняет nonce-формат, `JS_SECRET`, поля fingerprint, путь verify или
-  ожидаемый контракт ответа. Контракт версия↔шаблон описан в
+- `infra/demo-stand/challenge/page.html` — the only template. At render time
+  only the `{{NONCE}}` and `{{EXPIRY}}` placeholders are substituted. The cascade
+  version is baked into the template as a literal (in `<meta name="cascade-version">`, in an
+  HTML comment and in `data-cascade-version`) — NOT a placeholder: it is the
+  source of truth, compared against `CASCADE_VERSION` at init and
+  bumped alongside it. Bind-mounted into `/etc/nginx/challenge:ro`
+  (Channel A on the demo = a file mount).
+- `infra/demo-stand/CASCADE_VERSION` — a semver string (currently `0.1.0`).
+  Bind-mounted into `/etc/nginx/CASCADE_VERSION:ro`. **A bump is mandatory** in any PR
+  that changes the nonce format, `JS_SECRET`, the fingerprint fields, the verify path or
+  the expected response contract. The version↔template contract is described in
   [challenge/README.md](challenge/README.md).
-- `infra/demo-stand/lua/challenge.lua` — `preload()` сверяет
-  `<meta name="cascade-version">` шаблона с содержимым `CASCADE_VERSION` на
-  init_by_lua (mismatch валит nginx старт), `render(host)` / `issue_nonce(host)`
-  для C5.
+- `infra/demo-stand/lua/challenge.lua` — `preload()` compares the template's
+  `<meta name="cascade-version">` against the contents of `CASCADE_VERSION` at
+  init_by_lua (a mismatch fails the nginx start); `render(host)` / `issue_nonce(host)`
+  are for C5.
 
-**Verify it took.** После старта EDGE_STATS-дамп показывает поле
-`cascade_version: "0.1.0"`. Подмена `CASCADE_VERSION` (`echo 0.0.0 > …`) +
-`docker compose restart nginx-demo` → контейнер падает с понятной ошибкой
-в `docker logs` (`challenge: cascade/template version mismatch …`).
+**Verify it took.** After startup the EDGE_STATS dump shows the field
+`cascade_version: "0.1.0"`. Swapping `CASCADE_VERSION` (`echo 0.0.0 > …`) +
+`docker compose restart nginx-demo` → the container dies with a clear error
+in `docker logs` (`challenge: cascade/template version mismatch …`).
 
 ## Migrating a snapshot deploy to a git checkout
 
@@ -457,10 +457,10 @@ infra/demo-stand/
 │   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
 │   ├── challenge_secret.lua        [C1] Phase 4 HMAC secret loader (file mount → shared_dict)
 │   └── challenge.lua               [C2] Phase 4 challenge page renderer + nonce issuer (version-pinned)
-├── CASCADE_VERSION                 [C2] semver, сверяется с meta-тегом шаблона на init
-└── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A на демо)
-    ├── page.html                   шаблон с плейсхолдерами {{NONCE}} / {{EXPIRY}}; cascade-version зашит литералом
-    └── README.md                   контракт с C5 (verify-эндпоинт) + правила bump'a версии
+├── CASCADE_VERSION                 [C2] semver, compared against the template meta tag at init
+└── challenge/                      [C2] HTML+JS challenge page asset (file mount = Channel A on the demo)
+    ├── page.html                   the template with the {{NONCE}} / {{EXPIRY}} placeholders; cascade-version baked in as a literal
+    └── README.md                   the contract with C5 (the verify endpoint) + the version bump rules
 ```
 
 ## Talking points for a sceptical reviewer
@@ -469,14 +469,14 @@ infra/demo-stand/
 |---|---|
 | "Is this AI-generated slop?" | `make ci` passes the full unit suite + 0 lint warnings. ADRs in [`docs/architecture-decisions/`](../../docs/architecture-decisions/) document every non-obvious decision with alternatives explicitly considered. Engineering narrative in [`docs/engineering-narrative.md`](../../docs/engineering-narrative.md) traces the work commit-by-commit. |
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
-| "How much overhead per request?" | PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен; `/baseline/` passthrough тоже убран в Phase 1). |
+| "How much overhead per request?" | PoC #2 previously measured ~32 K RPS on the allow path vs ~40 K baseline on a 4-core MacBook (the benchmark stand was removed from the repo; the `/baseline/` passthrough was dropped in Phase 1 too). |
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). Per-Host rollback to observe-only is one PATCH against `/antibot/v1/policy/<host>` flipping `mode` back to `shadow` — Channel C delivers the change to the edge in ≤30s without redeploy. |
 | "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §A explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | The `EDGE_STATS` stdout dump → Loki (`{kind="edge_stats"}`): edge-deny drops, TLS rejects, cache ratio, fp_unique, catalog staleness, `commit` / `cascade_version`. Per-request detail via `{kind="bac_log"}`. Operational procedures (secret rotation, mode toggle, catalog rollback, challenge version pinning) are in [`docs/runbooks/`](../../docs/runbooks/). |
 
 ## Divergence WARN triage
 
-При reload edge'a (`nginx -s reload` или recreate-контейнера) можно увидеть в error.log одно из:
+On an edge reload (`nginx -s reload` or a container recreate) error.log may show one of:
 
 ```
 [demo] tls_fp_blocklist: meta says gen=N but data dict has no matching entries — possibly zone wipe or intentionally-empty Channel C payload. Dropping etag to force next pull to verify…
@@ -485,14 +485,14 @@ infra/demo-stand/
 [demo] tls_fp_browser_profiles: meta says gen=N …
 ```
 
-Это значит: `meta` shared_dict пережил reload с gen=N (Channel C исторически доставлял payload), но соответствующий data dict пуст (нет ни одного `:N` ключа). Два возможных сценария:
+This means: the `meta` shared_dict survived the reload with gen=N (Channel C had delivered a payload at some point), but the corresponding data dict is empty (not a single `:N` key). Two possible scenarios:
 
-1. **Operator resized data dict zone в nginx.conf** (e.g. `lua_shared_dict tls_fp_catalog 1m → 4m`) — nginx пересоздаёт zone, ключи теряются. `meta` (unchanged) сохраняет stale gen+etag.
-2. **Backend опубликовал intentional empty payload** — продакт удалил все entries из `catalogs/<name>.yaml`, Channel C доставил пустой ответ. Edge state корректно отражает product intent.
+1. **The operator resized the data dict zone in nginx.conf** (e.g. `lua_shared_dict tls_fp_catalog 1m → 4m`) — nginx recreates the zone and the keys are lost. `meta` (unchanged) keeps the stale gen+etag.
+2. **The backend published an intentional empty payload** — product removed every entry from `catalogs/<name>.yaml` and Channel C delivered an empty response. The edge state correctly reflects product intent.
 
-Edge не может различить эти два случая из init.lua, поэтому **не делает re-seed** (это override'нуло бы product intent во втором случае). Действия:
+The edge cannot tell these two apart from init.lua, so it **does not re-seed** (that would override product intent in the second case). What to do:
 
-- **Триаж**: `curl <antibot-backend>/catalog/<name>` чтобы увидеть текущий backend payload. Если пусто — сценарий (2), всё корректно. Если есть entries — сценарий (1), wait ≤30s.
-- **Auto-recovery**: edge сбрасывает etag → catalog_pull следующего тика (≤30s) делает полный 200 GET → backend re-доставит entries (если они есть) → стенд recovery'нется automatically.
-- **Manual override** (если backend ALSO unreachable и intentional-empty НЕ ваш случай): рестарт edge (`docker compose restart` или `nginx -s stop` + `start`) — на полном рестарте `meta` zone re-create'ится, gen-key отсутствует → init.lua идёт cold-start path → локальный seed из `config/tls_fp_blocklist.conf` (для tls_fp_blocklist) или пустое состояние (для других — у них нет file-fallback'а).
-- **Между WARN и recovery**: соответствующий rule молча наблюдает (no blocks/challenges). Для tls_fp_browser_profiles cold-start fallback (chrome=15, firefox=16, safari=20, edge=15) применяется только пока `_M._cached_gen_profiles > 0` НЕ выставлен — после первого refresh fallback OFF, observe-only без profiles.
+- **Triage**: `curl <antibot-backend>/catalog/<name>` to see the current backend payload. Empty means scenario (2) and everything is correct. Entries present means scenario (1) — wait ≤30 s.
+- **Auto-recovery**: the edge resets the etag → the next catalog_pull tick (≤30 s) does a full 200 GET → the backend re-delivers the entries (if there are any) → the stand recovers automatically.
+- **Manual override** (if the backend is ALSO unreachable and intentional-empty is NOT your case): restart the edge (`docker compose restart`, or `nginx -s stop` + `start`) — on a full restart the `meta` zone is recreated, the gen key is absent → init.lua takes the cold-start path → a local seed from `config/tls_fp_blocklist.conf` (for tls_fp_blocklist) or an empty state (for the others — they have no file fallback).
+- **Between the WARN and recovery**: the corresponding rule observes silently (no blocks/challenges). For tls_fp_browser_profiles the cold-start fallback (chrome=15, firefox=16, safari=20, edge=15) applies only while `_M._cached_gen_profiles > 0` is NOT set — after the first refresh the fallback is OFF and it is observe-only with no profiles.
