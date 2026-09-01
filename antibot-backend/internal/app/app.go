@@ -1,10 +1,10 @@
-// Package app — сборка процесса antibot-backend.
+// Package app — the assembly of the antibot-backend process.
 //
-// main() здесь занимается только signal-context'ом и логгером; всё, что
-// связано с конфигом, БД, каталогом, HTTP-сервером и фоновыми воркерами,
-// собирается в App.New и крутится из App.Run. Если завтра потребуется
-// поднимать backend из тестов или из обёртки (например, для integration-теста
-// с реальным Postgres), вызов остаётся идентичным main.
+// main() here deals only with the signal context and the logger; everything to do with
+// the config, the database, the catalog, the HTTP server and the background workers is
+// assembled in App.New and driven from App.Run. If tomorrow we need to
+// bring the backend up from tests or from a wrapper (for an integration test
+// against a real Postgres, say), the call stays identical to main.
 package app
 
 import (
@@ -33,34 +33,34 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/rdns"
 )
 
-// App — собранный, но ещё не запущенный процесс. Все зависимости проинициализированы
-// (config прочитан, БД подключена, каталог забутстраплен, HTTP-сервер собран);
-// Run() запускает воркеры и блокирует до сигнала / ошибки HTTP, после чего
-// сам делает graceful shutdown.
+// App — an assembled but not yet started process. Every dependency is initialised
+// (the config is read, the database is connected, the catalog is bootstrapped, the HTTP server is built);
+// Run() starts the workers and blocks until a signal or an HTTP error, after which
+// it performs a graceful shutdown itself.
 type App struct {
 	cfg      config.Config
 	logger   *slog.Logger
-	pool     *pgxpool.Pool // nil в skeleton-режиме без БД
+	pool     *pgxpool.Pool // nil in skeleton mode without a database
 	srv      *http.Server
 	reg      *prometheus.Registry
-	store    *catalog.Store     // ссылка нужна rDNS-воркеру (HasVerifiedBotIP)
-	reloader *dbloader.Reloader // nil в skeleton-режиме без БД
-	rdns     *rdns.Worker       // nil в skeleton-режиме без БД
-	logSink  *logsink.Sink      // nil без БД (skeleton) или при ошибке инициализации спула
+	store    *catalog.Store     // the rDNS worker needs this reference (HasVerifiedBotIP)
+	reloader *dbloader.Reloader // nil in skeleton mode without a database
+	rdns     *rdns.Worker       // nil in skeleton mode without a database
+	logSink  *logsink.Sink      // nil without a database (skeleton) or on a spool initialisation error
 }
 
-// New собирает граф зависимостей. Возвращает ошибку, если конфиг не читается,
-// БД не открывается, миграции не накатываются или каталог не бутстрапится —
-// все эти случаи мы предпочитаем поймать ДО открытия listening-сокета,
-// чтобы процесс не висел "успешно" с битой подсистемой.
+// New assembles the dependency graph. It returns an error if the config cannot be read,
+// the database cannot be opened, the migrations do not apply or the catalog does not bootstrap —
+// we prefer to catch all of those BEFORE opening the listening socket,
+// so that the process does not hang "successfully" with a broken subsystem.
 //
-// Ctx используется только под bootstrap (миграции, первый Load); фоновые
-// воркеры получат свой ctx в Run.
+// Ctx is used only during the bootstrap (migrations, the first Load); the background
+// workers get their own ctx in Run.
 //
-// Named return — чтобы defer'ом подчищать pgxpool на любом error-пути ПОСЛЕ
-// db.Open. В main() это в основном маскируется os.Exit(1), но App.New
-// позиционируется как callable из тестов и обёрток — там утечка горутин/
-// коннектов pool'a была бы реальной.
+// A named return — so that a defer can clean up the pgxpool on any error path AFTER
+// db.Open. In main() that is mostly masked by os.Exit(1), but App.New
+// is positioned as callable from tests and wrappers, where leaking goroutines or
+// pool connections would be real.
 func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -76,22 +76,22 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 
 	a = &App{cfg: cfg, logger: logger}
 
-	// БД — опциональна на скелете. Если DSN задан и недоступна — это явная
-	// ошибка деплоя, валимся: B1-substrate гарантирует, что postgres рядом
-	// и healthy до старта backend (depends_on/condition: service_healthy).
+	// The database is optional in the skeleton. If a DSN is set and it is unreachable, that is a clear
+	// deployment error and we fail: the B1 substrate guarantees that postgres is nearby
+	// and healthy before the backend starts (depends_on/condition: service_healthy).
 	if cfg.PostgresDSN != "" {
 		pool, err := db.Open(ctx, cfg.PostgresDSN)
 		if err != nil {
 			return nil, fmt.Errorf("postgres open: %w", err)
 		}
 		a.pool = pool
-		// Cleanup-on-error: любой возврат с retErr != nil после этой точки
-		// (миграции, reloader-init, bootstrap каталога) должен закрыть pool —
-		// иначе in-process caller (тест / обёртка) утаскивает живые коннекты
-		// и фоновые pgx-горутины. Замыкаемся на локальный `pool`, а не на
-		// `a.pool`: тело функции делает `return nil, err`, что зануляет
-		// именованный возврат `a`, и обращение к `a.pool` в defer'е дало бы
-		// nil-deref панику ровно на error-пути, который мы пытаемся убрать.
+		// Cleanup on error: any return with retErr != nil after this point
+		// (migrations, reloader init, the catalog bootstrap) must close the pool —
+		// otherwise an in-process caller (a test or a wrapper) drags live connections
+		// and background pgx goroutines along. We close over the local `pool` rather than
+		// `a.pool`: the function body does `return nil, err`, which zeroes the
+		// named return `a`, and touching `a.pool` in the defer would give a
+		// nil-deref panic on exactly the error path we are trying to clean up.
 		defer func() {
 			if retErr != nil {
 				pool.Close()
@@ -109,8 +109,8 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	)
 
 	mux := http.NewServeMux()
-	// Метод фиксируем на уровне ServeMux (Go 1.22+): POST /health → 405,
-	// дёргать /metrics чем-то кроме GET — тоже не повод трогать registry.
+	// We pin the method at the ServeMux level (Go 1.22+): POST /health → 405, and
+	// hitting /metrics with anything but GET is likewise no reason to touch the registry.
 	mux.HandleFunc("GET /health", health.Handler(cfg.Instance, healthPinger(a.pool)))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(a.reg, promhttp.HandlerOpts{}))
 
@@ -118,10 +118,10 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		return nil, err
 	}
 
-	// rDNS-воркер ([B7]) живёт только когда есть БД и каталог — пишет
-	// verified_bot_ips, читает «уже есть в каталоге» из catalog.Store.
-	// Без pool'a (skeleton без БД) воркер остаётся nil; receiver тогда
-	// тоже без enqueue и работает как счётчик.
+	// The rDNS worker ([B7]) exists only when there is a database and a catalog — it writes
+	// verified_bot_ips and reads "already in the catalog" from catalog.Store.
+	// Without a pool (a skeleton with no database) the worker stays nil; the receiver is then
+	// left without enqueue and works as a counter.
 	if a.pool != nil && a.store != nil {
 		a.rdns = rdns.New(
 			a.reg, logger,
@@ -130,10 +130,10 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 				Workers:    cfg.RDNSWorkers,
 				DNSTimeout: cfg.RDNSDNSTimeout,
 				GCInterval: cfg.RDNSGCInterval,
-				// PostWriteHold перекрывает окно между «воркер записал»
-				// и «reloader положил свежий Data в Store». Без буфера
-				// hot IP внутри этого окна снова прошёл бы Enqueue и
-				// сделал повторный DNS. +2с с запасом на pgx latency.
+				// PostWriteHold covers the window between "the worker wrote it"
+				// and "the reloader put a fresh Data into the Store". Without the buffer a
+				// hot IP inside that window would pass Enqueue again and
+				// do a repeat DNS lookup. +2 s of headroom for pgx latency.
 				PostWriteHold: cfg.CatalogReloadInterval + 2*time.Second,
 			},
 			rdns.NetResolver{},
@@ -144,9 +144,9 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		logger.Warn("rdns worker disabled — no DB / catalog store (skeleton mode)")
 	}
 
-	// LogSink (B9) — батч-инсертер BAC_LOG в PostgreSQL с disk-queue.
-	// Поднимаем только при наличии пула: без БД sink'у некуда писать,
-	// receiver останется без него (логи будут просто 202-ить как в B2-скелете).
+	// LogSink (B9) — the BAC_LOG batch inserter into PostgreSQL with a disk queue.
+	// We bring it up only when a pool exists: with no database the sink has nowhere to write, and the
+	// receiver goes without it (the logs will simply return 202 as in the B2 skeleton).
 	if a.pool != nil {
 		sink, err := logsink.New(logsink.Config{
 			BatchSize:     cfg.LogsSinkBatchSize,
@@ -157,9 +157,9 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 			DrainInterval: cfg.LogsSinkDrainInterval,
 		}, a.pool, logger, a.reg)
 		if err != nil {
-			// Спул-каталог не создаётся → инструментальная ошибка деплоя
-			// (volume не примонтирован / нет прав). Лучше упасть, чем
-			// тихо терять логи в spillover.
+			// The spool directory cannot be created → a deployment tooling error
+			// (the volume is not mounted, or permissions are missing). Better to fail than to
+			// lose logs quietly in the spillover.
 			return nil, fmt.Errorf("logsink init: %w", err)
 		}
 		a.logSink = sink
@@ -177,9 +177,9 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		}
 	}
 
-	// Receiver регистрируется здесь, после rdns + sink: если воркер есть —
-	// даём receiver'у Enqueuer + classifier; sink подключаем независимо.
-	// Без пула обе ветки = nil, receiver работает как счётчик строк (B2).
+	// The receiver is registered here, after rdns plus the sink: if the worker exists we
+	// give the receiver an Enqueuer plus a classifier; the sink is wired independently.
+	// Without a pool both branches are nil and the receiver works as a line counter (B2).
 	var sinkArg logs.LogSink
 	if a.logSink != nil {
 		sinkArg = a.logSink
@@ -192,10 +192,10 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		logs.New(a.reg).Register(mux)
 	}
 
-	// Policy API ([B10]) — write-side для dashboard-backend. Поднимаем только
-	// если DB есть И токен задан: без токена /antibot/v1/* не регистрируется
-	// (fail-closed; dashboard получит 404, и сразу видно что secret не
-	// прокинут в env).
+	// The Policy API ([B10]) — the write side for the dashboard backend. We bring it up only
+	// if there is a DB AND a token is set: with no token /antibot/v1/* is not registered
+	// (fail-closed; the dashboard gets a 404, which immediately shows that the secret was not
+	// passed through env).
 	if a.pool != nil {
 		auth := antibotapi.NewAuthenticator(a.cfg.DashboardAPIToken, a.reg)
 		if auth != nil {
@@ -220,25 +220,25 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	return a, nil
 }
 
-// buildCatalog собирает источники Channel C и регистрирует HTTP-роуты.
-// Источников теперь два, оба обязательны при наличии БД (по ADR-006):
+// buildCatalog assembles the Channel C sources and registers the HTTP routes.
+// There are now two sources, both mandatory when a database is present (per ADR-006):
 //
-//   - filesource (catalogs/): медленные каталоги от продакта. Без файлов
-//     невозможно собрать осмысленный slow-слой — Store не поднимется.
-//   - dbloader.LoadRuntime: verified_bot_ips, policy. Без БД (skeleton-
-//     режим) — оба пустые, /catalog/* отвечает 503.
+//   - filesource (catalogs/): the slow catalogs from product. Without the files it is
+//     impossible to assemble a meaningful slow layer — the Store will not come up.
+//   - dbloader.LoadRuntime: verified_bot_ips, policy. Without a database (skeleton
+//     mode) both are empty and /catalog/* answers 503.
 //
-// Reloader тикает оба источника на одном interval'е, мерджит в *catalog.Data,
-// публикует в Store через атомарный Replace.
+// The reloader ticks both sources on one interval, merges them into a *catalog.Data and
+// publishes into the Store through an atomic Replace.
 func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	catalogSrv := catalog.New()
 	a.store = catalogSrv.Store()
 
 	if a.pool == nil {
-		// Skeleton-режим без БД: Channel C остаётся в not-loaded состоянии
-		// (503 на любой /catalog/*). Это явный знак оператору — без БД
-		// rDNS-воркер не пишет verified_bot_ips, antibotapi не принимает
-		// policy, отдавать пустую runtime-часть было бы хуже, чем 503.
+		// Skeleton mode without a database: Channel C stays in the not-loaded state
+		// (503 on any /catalog/*). That is an explicit sign to the operator — with no database the
+		// rDNS worker does not write verified_bot_ips, antibotapi does not accept a
+		// policy, and serving an empty runtime part would be worse than a 503.
 		a.logger.Warn("no POSTGRES_DSN — Channel C stays not-loaded (returns 503); set POSTGRES_DSN + CATALOGS_DIR to enable")
 		catalogSrv.Register(mux)
 		return nil
@@ -256,8 +256,8 @@ func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	if err != nil {
 		return fmt.Errorf("catalog reloader: %w", err)
 	}
-	// Первый Bootstrap синхронно — если файлы / БД биты, backend не должен
-	// подниматься "успешно" с 503 на каждый /catalog/* до первого тика.
+	// The first Bootstrap is synchronous — if the files or the database are broken, the backend must not
+	// come up "successfully" and answer 503 on every /catalog/* until the first tick.
 	if err := reloader.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("catalog bootstrap: %w", err)
 	}
@@ -268,29 +268,29 @@ func (a *App) buildCatalog(ctx context.Context, mux *http.ServeMux) error {
 	)
 
 	catalogSrv.Register(mux)
-	// logs.Receiver регистрируется ПОСЛЕ rdns.Worker (см. App.New), чтобы
-	// мог получить Enqueuer. Здесь только catalog + /metrics уже на mux.
+	// logs.Receiver is registered AFTER rdns.Worker (see App.New), so that it
+	// can get an Enqueuer. Here we only put the catalog plus /metrics on the mux.
 	return nil
 }
 
-// Run запускает фоновые воркеры и HTTP-сервер, блокирует до отмены ctx или
-// фатальной ошибки HTTP, затем сам делает graceful shutdown. Возвращает
-// ошибку HTTP-сервера (если он упал), иначе nil.
+// Run starts the background workers and the HTTP server, blocks until ctx is cancelled or a
+// fatal HTTP error occurs, and then performs a graceful shutdown itself. It returns
+// the HTTP server's error (if it fell over), otherwise nil.
 //
-// Ctx должен отменяться по сигналу (см. signal.NotifyContext в main) —
-// именно его отмена триггерит начало shutdown'а.
+// Ctx must be cancelled by a signal (see signal.NotifyContext in main) —
+// its cancellation is what triggers the start of the shutdown.
 func (a *App) Run(ctx context.Context) error {
-	// workerCtx живёт под Run и закрывается при выходе, чтобы воркеры
-	// получили сигнал к остановке даже если Run возвращается через
-	// HTTP-ошибку (а не через отмену внешнего ctx).
+	// workerCtx lives under Run and is closed on exit, so that the workers
+	// get the stop signal even when Run returns through an
+	// HTTP error (rather than through the outer ctx being cancelled).
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var wg sync.WaitGroup
 
-	// rDNS-воркер — фоновая горутина, единственный активный compute сейчас.
-	// В skeleton-режиме без БД воркер не сконструирован — тогда просто
-	// нечего запускать.
+	// The rDNS worker — a background goroutine, the only active compute for now.
+	// In skeleton mode without a database the worker was never constructed — so there is simply
+	// nothing to start.
 	if a.rdns != nil {
 		wg.Add(1)
 		go func() {
@@ -308,7 +308,7 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	}
 
-	// Catalog-reloader (B4): тикает Load → Store.Replace.
+	// The catalog reloader (B4): it ticks Load → Store.Replace.
 	if a.reloader != nil {
 		wg.Add(1)
 		go func() {
@@ -332,12 +332,12 @@ func (a *App) Run(ctx context.Context) error {
 		runErr = err
 	case <-ctx.Done():
 		a.logger.Info("shutdown signal received")
-		// Гонка: между тем, как сигнал закрыл ctx.Done и тем, как мы успели
-		// вызвать srv.Shutdown, listener мог вернуть НЕ-ErrServerClosed
-		// ошибку (accept loop EMFILE, network fault, recovered panic).
-		// HTTP-горутина запишет её в буферизованный serverErr (cap=1),
-		// но никто уже не читает — без drain'а ошибка тихо потеряется,
-		// Run вернёт nil, оператор после инцидента не найдёт причину.
+		// A race: between the signal closing ctx.Done and us calling
+		// srv.Shutdown, the listener could have returned a NON-ErrServerClosed
+		// error (an EMFILE in the accept loop, a network fault, a recovered panic).
+		// The HTTP goroutine writes it into the buffered serverErr (cap=1),
+		// but nobody reads it any more — without a drain the error is quietly lost,
+		// Run returns nil, and after the incident the operator cannot find the cause.
 		select {
 		case err := <-serverErr:
 			a.logger.Error("late http server error during shutdown", "err", err)
@@ -351,20 +351,20 @@ func (a *App) Run(ctx context.Context) error {
 	return runErr
 }
 
-// shutdown — упорядоченное завершение под общим бюджетом cfg.ShutdownTimeout.
-// Шаги идут последовательно и каждый знает про общий deadline:
-//  1. HTTP: srv.Shutdown дренирует in-flight; если не уложился — srv.Close()
-//     рвёт хвост, иначе systemd прибьёт SIGKILL'ом без grace.
-//  2. cancelWorkers: останавливает фоновые воркеры (rDNS сейчас, B6 disk-queue
-//     потом).
-//  3. wg.Wait под deadline: B7 принесёт реальные DNS-запросы, которые могут
-//     висеть на сети — не даём им задержать выход.
-//  4. pgxpool.Close под deadline: блокирует на активных коннектах, B3/B7
-//     принесут их — ограничиваем по тому же бюджету.
+// shutdown — an ordered termination under the shared cfg.ShutdownTimeout budget.
+// The steps run in sequence and each knows about the shared deadline:
+//  1. HTTP: srv.Shutdown drains what is in flight; if it does not fit, srv.Close()
+//     tears down the tail, otherwise systemd kills us with SIGKILL without grace.
+//  2. cancelWorkers: it stops the background workers (rDNS now, the B6 disk queue
+//     later).
+//  3. wg.Wait under the deadline: B7 brings real DNS lookups that can
+//     hang on the network — we do not let them delay the exit.
+//  4. pgxpool.Close under the deadline: it blocks on active connections, which B3/B7
+//     bring — we bound it by the same budget.
 func (a *App) shutdown(parent context.Context, cancelWorkers context.CancelFunc, wg *sync.WaitGroup) {
-	// parent уже отменён сигналом — нам нужен fresh ctx с deadline, но
-	// унаследовавший values (tracing/log). WithoutCancel + WithDeadline —
-	// тот же приём, что в advisory_unlock из B4 (contextcheck).
+	// The parent was already cancelled by the signal — we need a fresh ctx with a deadline that
+	// inherits the values (tracing/log). WithoutCancel + WithDeadline is
+	// the same trick as in the B4 advisory_unlock (contextcheck).
 	deadline := time.Now().Add(a.cfg.ShutdownTimeout)
 	shutdownCtx, cancel := context.WithDeadline(context.WithoutCancel(parent), deadline)
 	defer cancel()
@@ -380,9 +380,9 @@ func (a *App) shutdown(parent context.Context, cancelWorkers context.CancelFunc,
 	a.logger.Info("shutdown: stopping background workers")
 	cancelWorkers()
 	if !waitBounded(shutdownCtx, wg.Wait) {
-		// Горутина продолжит крутиться до os.Exit — это осознанный abandonment,
-		// а не leak: процесс уходит следом, рантайм её собирёт. Логируем явно,
-		// чтобы оператор не гадал, почему процесс выходит дольше ShutdownTimeout.
+		// The goroutine keeps running until os.Exit — that is deliberate abandonment,
+		// not a leak: the process follows and the runtime collects it. We log it explicitly,
+		// so that the operator does not wonder why the process took longer than ShutdownTimeout.
 		a.logger.Error("shutdown: workers did not exit within deadline — abandoning")
 	}
 
@@ -394,9 +394,9 @@ func (a *App) shutdown(parent context.Context, cancelWorkers context.CancelFunc,
 	}
 }
 
-// waitBounded зовёт блокирующую fn в горутине и ждёт её либо до завершения,
-// либо до ctx.Done(). true — fn успела, false — abandoned (горутина может
-// продолжить жить до os.Exit).
+// waitBounded calls a blocking fn in a goroutine and waits either for it to finish
+// or for ctx.Done(). true means fn made it, false means it was abandoned (the goroutine may
+// keep living until os.Exit).
 func waitBounded(ctx context.Context, fn func()) bool {
 	done := make(chan struct{})
 	go func() {
@@ -411,9 +411,9 @@ func waitBounded(ctx context.Context, fn func()) bool {
 	}
 }
 
-// healthPinger превращает nil-pool в nil-Pinger (skeleton без БД) и наоборот
-// пробрасывает *pgxpool.Pool как health.Pinger. Без этого пришлось бы тащить
-// pgx-зависимость в пакет health.
+// healthPinger turns a nil pool into a nil Pinger (a skeleton with no database) and otherwise
+// passes *pgxpool.Pool through as a health.Pinger. Without it we would have to drag the
+// pgx dependency into the health package.
 func healthPinger(pool *pgxpool.Pool) health.Pinger {
 	if pool == nil {
 		return nil
