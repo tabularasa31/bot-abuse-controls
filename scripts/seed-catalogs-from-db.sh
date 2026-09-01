@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# seed-catalogs-from-db.sh — одноразовая миграция содержимого slow-каталогов
-# из Postgres в файлы catalogs/*.yaml. Запускайте ДО `alembic upgrade head`
-# (миграция 0004 дропает таблицы). После выполнения проверьте `git diff
-# catalogs/`, закоммитьте seed и накатите миграцию.
+# seed-catalogs-from-db.sh — a one-off migration of the slow-catalog contents
+# from Postgres into the catalogs/*.yaml files. Run it BEFORE `alembic upgrade head`
+# (migration 0004 drops the tables). Afterwards review `git diff
+# catalogs/`, commit the seed and apply the migration.
 #
-# Использование:
+# Usage:
 #   POSTGRES_DSN="postgres://user:pass@host:5432/db" \
 #     ./scripts/seed-catalogs-from-db.sh [out_dir]
 #
-# out_dir по умолчанию ./catalogs (относительно текущего pwd).
+# out_dir defaults to ./catalogs (relative to the current pwd).
 #
-# Требует psql.
+# Requires psql.
 #
-# Скрипт пишет YAML вручную (без зависимости от Go/yaml-генератора), чтобы
-# не вводить новых артефактов сборки. Формат симметричен тому, что
-# ожидает internal/filesource (см. docs/architecture-decisions/006).
+# The script writes the YAML by hand (with no dependency on Go or a yaml generator), to
+# avoid introducing new build artifacts. The format is symmetric with what
+# internal/filesource expects (see docs/architecture-decisions/006).
 
 set -euo pipefail
 
@@ -31,7 +31,7 @@ if [[ ! -d "$OUT_DIR" ]]; then
 fi
 
 psql_q() {
-  # -At: tuples-only, unaligned. -F'<TAB>': field separator. -X: не читать .psqlrc.
+  # -At: tuples-only, unaligned. -F'<TAB>': field separator. -X: do not read .psqlrc.
   PGOPTIONS="--client-min-messages=warning" \
     psql "$POSTGRES_DSN" -X -At -F$'\t' -c "$1"
 }
@@ -43,31 +43,31 @@ if [[ -n "$VERSION" ]]; then
   echo "wrote $OUT_DIR/version: $VERSION"
 fi
 
-# Квотируем ключи и значения как YAML single-quoted scalars: внутри
-# одинарных кавычек YAML экранирует только саму ' через ''. Awk %q
-# непортабелен (только gawk 4.2+) и экранирует под shell, не под YAML —
-# поэтому делаем bash-ом. PR-59 review (gemini high / codex P1).
+# Keys and values are quoted as YAML single-quoted scalars: inside
+# single quotes YAML only escapes the ' itself, as ''. Awk's %q
+# is not portable (gawk 4.2+ only) and escapes for the shell, not for YAML —
+# so we do it in bash. PR-59 review (gemini high / codex P1).
 yaml_sq() {
-  # echo single-quoted YAML scalar для строки $1.
+  # echo a single-quoted YAML scalar for the string $1.
   local s=${1//\'/\'\'}
   printf "'%s'" "$s"
 }
 
-# tls_fp_blocklist: map fp → status. Legacy DB-таблица из 0001_init.sql
-# называется `fp_blocklist` (миграция 0004 её дропнет); выходной файл —
-# `tls_fp_blocklist.yaml` (имя из vision/entities-reference.md, PR-62 rename).
-# Скрипт идёт ДО 0004, поэтому SQL читает старое имя.
+# tls_fp_blocklist: map fp → status. The legacy DB table from 0001_init.sql
+# is called `fp_blocklist` (migration 0004 drops it); the output file is
+# `tls_fp_blocklist.yaml` (the name from vision/entities-reference.md, PR-62 rename).
+# The script runs BEFORE 0004, so the SQL reads the old name.
 {
   echo "# tls_fp_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
-  echo "# Формат: <fp>: <status>"
+  echo "# Format: <fp>: <status>"
   psql_q "SELECT fp, status FROM fp_blocklist ORDER BY fp" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
-        # Trim whitespace и CR (Windows-edited rows, manual UPDATEs):
-        # bash-builtin не trim'ит без extglob, поэтому через parameter
-        # expansion. Иначе ' ' / '\r' проходят guard как «non-empty»
-        # и попадают в YAML как невалидный status → catalog.Validate
-        # отвергает весь slow-слой на reloader тике (PR-62 round-6).
+        # Trim whitespace and CR (Windows-edited rows, manual UPDATEs):
+        # the bash builtin does not trim without extglob, so we use parameter
+        # expansion. Otherwise ' ' / '\r' pass the guard as "non-empty"
+        # and land in the YAML as an invalid status → catalog.Validate
+        # rejects the whole slow layer on the reloader tick (PR-62 round-6).
         status="${status#"${status%%[![:space:]]*}"}"
         status="${status%"${status##*[![:space:]]}"}"
         if [[ "$status" != "active" && "$status" != "staging" ]]; then
@@ -81,19 +81,19 @@ yaml_sq() {
 } > "$OUT_DIR/tls_fp_blocklist.yaml"
 echo "wrote $OUT_DIR/tls_fp_blocklist.yaml"
 
-# ua_blacklist: map pattern → status. Pattern содержит спецсимволы regex —
-# YAML single-quoted скаляр доставляет их без интерпретации.
+# ua_blacklist: map pattern → status. A pattern contains regex metacharacters —
+# a YAML single-quoted scalar delivers them uninterpreted.
 {
   echo "# ua_blacklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
-  echo "# Формат: <pattern>: <status>"
+  echo "# Format: <pattern>: <status>"
   psql_q "SELECT pattern, status FROM ua_blacklist ORDER BY pattern" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
-        # Trim whitespace и CR (Windows-edited rows, manual UPDATEs):
-        # bash-builtin не trim'ит без extglob, поэтому через parameter
-        # expansion. Иначе ' ' / '\r' проходят guard как «non-empty»
-        # и попадают в YAML как невалидный status → catalog.Validate
-        # отвергает весь slow-слой на reloader тике (PR-62 round-6).
+        # Trim whitespace and CR (Windows-edited rows, manual UPDATEs):
+        # the bash builtin does not trim without extglob, so we use parameter
+        # expansion. Otherwise ' ' / '\r' pass the guard as "non-empty"
+        # and land in the YAML as an invalid status → catalog.Validate
+        # rejects the whole slow layer on the reloader tick (PR-62 round-6).
         status="${status#"${status%%[![:space:]]*}"}"
         status="${status%"${status##*[![:space:]]}"}"
         if [[ "$status" != "active" && "$status" != "staging" ]]; then
@@ -110,15 +110,15 @@ echo "wrote $OUT_DIR/ua_blacklist.yaml"
 # ip_blocklist: map cidr → status.
 {
   echo "# ip_blocklist.yaml — seeded from DB at $(date -u +%FT%TZ)."
-  echo "# Формат: <cidr>: <status>"
+  echo "# Format: <cidr>: <status>"
   psql_q "SELECT cidr, status FROM ip_blocklist ORDER BY cidr" \
     | while IFS=$'\t' read -r key status; do
         [[ -z "$key" ]] && continue
-        # Trim whitespace и CR (Windows-edited rows, manual UPDATEs):
-        # bash-builtin не trim'ит без extglob, поэтому через parameter
-        # expansion. Иначе ' ' / '\r' проходят guard как «non-empty»
-        # и попадают в YAML как невалидный status → catalog.Validate
-        # отвергает весь slow-слой на reloader тике (PR-62 round-6).
+        # Trim whitespace and CR (Windows-edited rows, manual UPDATEs):
+        # the bash builtin does not trim without extglob, so we use parameter
+        # expansion. Otherwise ' ' / '\r' pass the guard as "non-empty"
+        # and land in the YAML as an invalid status → catalog.Validate
+        # rejects the whole slow layer on the reloader tick (PR-62 round-6).
         status="${status#"${status%%[![:space:]]*}"}"
         status="${status%"${status##*[![:space:]]}"}"
         if [[ "$status" != "active" && "$status" != "staging" ]]; then

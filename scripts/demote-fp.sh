@@ -48,7 +48,7 @@ if [ "$REMOVE" = 1 ]; then
   EDITOR_ARGS=(remove "$FP")
 else
   [ "$cur" = "active" ] || { [ "$FORCE" = 1 ] || bl_die "$FP is already '$cur'; use --remove to delete (or --force)"; }
-  ACTION="active → staging (перестает блокировать, продолжает наблюдаться)"
+  ACTION="active → staging (stops blocking, stays under observation)"
   SUBJECT="blocklist: demote $FP (active→staging)"; TITLE="Blocklist demote: $FP (active→staging)"
   EDITOR_ARGS=(set-status "$FP" staging --note "demoted $TODAY: $REASON")
 fi
@@ -62,7 +62,7 @@ cat > "$BODY" <<EOF
 
 ### Rollback
 - Re-promote: \`scripts/promote-fp.sh $FP --reason "...":\` (staging) → \`--activate\`.
-- Или git revert этого PR.
+- Or git revert this PR.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

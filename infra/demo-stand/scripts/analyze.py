@@ -602,7 +602,7 @@ def seed_ip_cache_from_log(events, cache):
 
     Why: the analytics container sits in-network for Loki and cannot reach a
     public geo-IP service, so the old external lookup failed wholesale and every
-    per-ASN row rendered "(нет данных)" — and the DC-ASN scoring signal silently
+    per-ASN row rendered "(no data)" — and the DC-ASN scoring signal silently
     went dark too. The edge already does the lookup; we just read it.
 
     `hosting` (the DC signal) = membership in the asn_datacenters catalog, the
@@ -1224,7 +1224,7 @@ def collect_window_stats(events, ip_cache):
     for e in events:
         info = ip_cache.get(e["remote"], {})
         if "error" in info or not info:
-            asns[("(нет данных)", False, "")] += 1
+            asns[("(no data)", False, "")] += 1
         else:
             asns[(info.get("asn") or "(unknown)",
                   info.get("hosting", False),
@@ -1283,7 +1283,7 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
 
     if has_impersonator:
         score += 3
-        reasons.append("impersonator-маскировка (UA браузер, fp автоматизатор) +3")
+        reasons.append("impersonator disguise (browser UA, automation fp) +3")
     if has_suspicious:
         score += 1
         reasons.append("suspicious cipher count vs UA +1")
@@ -1299,13 +1299,13 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
         reasons.append(f"DC ASN: {len(dc_ips)}/{len(ips)} IP +1")
     if len(ips) >= 2:
         score += 1
-        reasons.append(f"multi-IP: {len(ips)} разных IP +1")
+        reasons.append(f"multi-IP: {len(ips)} distinct IPs +1")
 
     # Persistence — from state file
     days_seen = (seen_entry or {}).get("days_seen", [])
     if len(set(days_seen)) >= 2:
         score += 1
-        reasons.append(f"persistent: {len(set(days_seen))} разных дней +1")
+        reasons.append(f"persistent: {len(set(days_seen))} distinct days +1")
 
     # Suspicious URIs
     suspicious_uris = {e["uri"] for e in events_for_fp if SUSPICIOUS_URI_RE.search(e["uri"])}
@@ -1320,7 +1320,7 @@ def score_fp_candidate(fp, events_for_fp, ip_cache, seen_entry):
                        (seen_entry or {}).get("challenge_solved", 0))
     if sig["enough"] and sig["solve_rate"] <= LOW_SOLVE_RATE:
         score += 2
-        reasons.append(f"challenge не решается (issued={sig['issued']}, "
+        reasons.append(f"challenge is not being solved (issued={sig['issued']}, "
                        f"solved={sig['solved']}) +2")
 
     return score, reasons, tags
@@ -1399,23 +1399,23 @@ def find_blocklist_candidates(events, ip_cache, seen):
         # Operator-facing one-liner that explains the gate outcome, not just the
         # tier — so the report says WHY a HIGH was/ wasn't auto-promoted.
         if auto_eligible:
-            suggested_action = "auto-promote eligible → PR (staging), наблюдение → active"
+            suggested_action = "auto-promote eligible → PR (staging), observe → active"
         elif tier == "HIGH" and not intent:
-            suggested_action = ("HIGH без impersonator/recon: общий tool-fp, hard-block "
-                                "заденет легит-автоматизацию → кейс для ua_blacklist/ip_blocklist, "
-                                "решение за человеком")
+            suggested_action = ("HIGH with no impersonator/recon: a shared tool fp, a hard block "
+                                "would hit legitimate automation → a case for ua_blacklist/ip_blocklist, "
+                                "human decision")
         elif tier == "HIGH" and not gates["purity"]:
-            suggested_action = (f"HIGH, но purity-вето: human_share {hs:.2f} > "
-                                f"{MAX_HUMAN_SHARE} (под fp есть живые браузеры) — не блокировать")
+            suggested_action = (f"HIGH, but purity veto: human_share {hs:.2f} > "
+                                f"{MAX_HUMAN_SHARE} (there are live browsers behind this fp) — do not block")
         elif tier == "HIGH" and not gates["volume"]:
-            suggested_action = (f"HIGH, но мало данных: lifetime {n_lifetime} < {MIN_EVENTS} "
-                                f"или дней {len(days)} < {MIN_DAYS_PROMOTE} — наблюдать")
+            suggested_action = (f"HIGH, but too little data: lifetime {n_lifetime} < {MIN_EVENTS} "
+                                f"or days {len(days)} < {MIN_DAYS_PROMOTE} — keep observing")
         elif tier == "HIGH" and (wl_hit or hard_id):
             if wl_hit:
                 wl_ips = [ip for ip in ips if _ip_in_whitelist(ip, whitelist_nets)]
                 ip_str = ", ".join(sorted(wl_ips)[:3]) + ("…" if len(wl_ips) > 3 else "")
                 suggested_action = (
-                    f"HIGH, жёсткое вето: IP в ip_whitelist ({ip_str}) — не блокировать"
+                    f"HIGH, hard veto: IP is in ip_whitelist ({ip_str}) — do not block"
                 )
             else:
                 rule_counts = Counter(rule for _, rule in hard_id)
@@ -1425,23 +1425,23 @@ def find_blocklist_candidates(events, ip_cache, seen):
                 )
                 ip_str = ", ".join(hit_ips[:2]) + ("…" if len(hit_ips) > 2 else "")
                 suggested_action = (
-                    f"HIGH, жёсткое вето: identity-allow в логе "
-                    f"(rule={rules_str}, IP={ip_str}, {len(hard_id)} событий) — "
-                    f"не блокировать, проверить вручную"
+                    f"HIGH, hard veto: identity-allow in the log "
+                    f"(rule={rules_str}, IP={ip_str}, {len(hard_id)} events) — "
+                    f"do not block, review by hand"
                 )
         elif tier == "HIGH" and cp_gate == "veto":
-            suggested_action = (f"HIGH, но challenge решается (issued={cl_issued}, "
-                                f"solved={cl_solved}) — под fp есть люди/легит, не блокировать")
+            suggested_action = (f"HIGH, but the challenge is being solved (issued={cl_issued}, "
+                                f"solved={cl_solved}) — there are people/legit clients behind this fp, do not block")
         elif tier == "HIGH" and cp_gate == "gray":
-            suggested_action = ("HIGH, но challenge solve-rate в серой зоне "
-                                f"({LOW_SOLVE_RATE}–{HUMAN_SOLVE_RATE}) — не авто-промоут, "
-                                "staging-наблюдение")
+            suggested_action = ("HIGH, but the challenge solve rate is in the grey zone "
+                                f"({LOW_SOLVE_RATE}–{HUMAN_SOLVE_RATE}) — no auto-promote, "
+                                "observe in staging")
         elif tier == "HIGH" and not gates["dedup"]:
-            suggested_action = "уже в blocklist-каталоге"
+            suggested_action = "already in the blocklist catalog"
         elif tier == "MEDIUM":
-            suggested_action = "watch-list, нужен 2-й день данных + intent"
+            suggested_action = "watch list, needs a second day of data + intent"
         else:
-            suggested_action = "слабые сигналы — не блокировать"
+            suggested_action = "weak signals — do not block"
 
         candidates.append({
             "fp": fp, "score": score, "tier": tier,
@@ -1558,7 +1558,7 @@ def find_stale_blocklist_entries(seen, now_utc, ttl_days):
             out.append({"fp": fp, "status": status, "last_seen": None,
                         "days_silent": None, "lifetime": entry.get("count", 0),
                         "unknown": True, "stale": False,
-                        "reason": "нет наблюдений в state — нужен человек, не авто-демоут"})
+                        "reason": "no observations in state — needs a human, not an auto-demote"})
             continue
         days_silent = (today - last_seen).days
         if days_silent > ttl_days:
@@ -1576,16 +1576,16 @@ def find_stale_blocklist_entries(seen, now_utc, ttl_days):
                             "family_hash_b": hb,
                             "family_last_seen": fam[0].isoformat(),
                             "family_active_fp": fam[1],
-                            "reason": (f"молчит {days_silent}д, но семейство "
-                                       f"hash_b={hb} активно ({fam[1]} видели "
-                                       f"{fam[0].isoformat()}) — ротация hash_c, "
-                                       f"нужен человек, не авто-демоут")})
+                            "reason": (f"silent for {days_silent}d, but the family "
+                                       f"hash_b={hb} is active ({fam[1]} last seen "
+                                       f"{fam[0].isoformat()}) — hash_c rotation, "
+                                       f"needs a human, not an auto-demote")})
                 continue
             out.append({"fp": fp, "status": status,
                         "last_seen": last_seen.isoformat(),
                         "days_silent": days_silent, "lifetime": entry.get("count", 0),
                         "unknown": False, "stale": True,
-                        "reason": f"молчит {days_silent}д > {ttl_days}д"})
+                        "reason": f"silent for {days_silent}d > {ttl_days}d"})
     return out
 
 
@@ -1689,32 +1689,32 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
     L = []
     L.append(f"# Demo-stand report — {now_msk.strftime('%Y-%m-%d %H:%M %Z')}")
     L.append("")
-    L.append("Стенд: https://bac.example.com (resty)")
-    L.append(f"Режим: {'SHADOW (без блокировок)' if blocklist_size == 0 else f'ACTIVE — в blocklist {blocklist_size} fps'}")
+    L.append("Stand: https://bac.example.com (resty)")
+    L.append(f"Mode: {'SHADOW (no blocking)' if blocklist_size == 0 else f'ACTIVE — {blocklist_size} fps in the blocklist'}")
     L.append("")
     L.append("")
-    L.append("## Сводка")
+    L.append("## Summary")
     L.append("")
-    L.append(f"**За 24 часа:** {s24['n_events']} запросов · **{s24['n_bot']} ({s24['bot_pct']}%) bot-like** · {s24['n_events'] - s24['n_bot']} ({100 - s24['bot_pct']}%) human-like · {s24['n_fps']} fp · {s24['n_ips']} IP · {s24['n_dc']} ({s24['dc_pct']}%) DC ASN")
+    L.append(f"**Last 24 h:** {s24['n_events']} requests · **{s24['n_bot']} ({s24['bot_pct']}%) bot-like** · {s24['n_events'] - s24['n_bot']} ({100 - s24['bot_pct']}%) human-like · {s24['n_fps']} fp · {s24['n_ips']} IP · {s24['n_dc']} ({s24['dc_pct']}%) DC ASN")
     L.append("")
-    L.append(f"**Lifetime:** {sLT['n_events']} запросов · {sLT['n_fps']} fp · {sLT['n_ips']} IP · {sLT['n_dc']} ({sLT['dc_pct']}%) DC ASN")
+    L.append(f"**Lifetime:** {sLT['n_events']} requests · {sLT['n_fps']} fp · {sLT['n_ips']} IP · {sLT['n_dc']} ({sLT['dc_pct']}%) DC ASN")
     L.append("")
-    L.append(f"**Кандидаты на blocklist:** {len(high)} HIGH · {len(medium)} MEDIUM · {len(low)} LOW · {len(asn_watch)} ASN-watch")
+    L.append(f"**Blocklist candidates:** {len(high)} HIGH · {len(medium)} MEDIUM · {len(low)} LOW · {len(asn_watch)} ASN-watch")
     L.append("")
     L.append("---")
     L.append("")
-    L.append("# Кандидаты на blocklist")
+    L.append("# Blocklist candidates")
     L.append("")
-    L.append("_Метод подсчёта: каждому fp начисляются очки по сигналам:_")
-    L.append("- impersonator-маскировка: +3")
+    L.append("_Scoring method: each fp accrues points per signal:_")
+    L.append("- impersonator disguise: +3")
     L.append("- suspicious cipher count: +1")
     L.append("- automation UA: +1")
     L.append("- multi-IP (≥2): +1")
     L.append("- DC ASN: +1")
-    L.append("- persistent (≥2 дня): +1")
+    L.append("- persistent (≥2 days): +1")
     L.append("- recon URI (/admin /.env /wp-login etc): +1")
     L.append("")
-    L.append("_Тиры: HIGH ≥5 баллов · MEDIUM 3-4 · LOW 1-2._")
+    L.append("_Tiers: HIGH ≥5 points · MEDIUM 3-4 · LOW 1-2._")
     L.append("")
     for tier_name, tier_list in [("HIGH", high), ("MEDIUM", medium), ("LOW", low)]:
         if not tier_list:
@@ -1724,22 +1724,22 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
         for c in tier_list:
             L.append(f"### `{c['fp']}` — score {c['score']}")
             L.append("")
-            L.append(f"- За сутки: **{c['n_events_24h']}** событий · lifetime: **{c['n_lifetime']}** · дней наблюдения: **{len(c['days_seen'])}**")
+            L.append(f"- Last 24 h: **{c['n_events_24h']}** events · lifetime: **{c['n_lifetime']}** · days observed: **{len(c['days_seen'])}**")
             L.append(f"- IP ({len(c['ips'])}): {', '.join(c['ips'][:5])}{'...' if len(c['ips']) > 5 else ''}")
-            L.append(f"- Tags: {', '.join(c['tags']) or '(нет)'}")
+            L.append(f"- Tags: {', '.join(c['tags']) or '(none)'}")
             if c['uris']:
                 L.append(f"- URI: {', '.join(f'`{u}`' for u in c['uris'][:5])}")
             L.append(f"- UA sample: `{c['sample_ua']}`")
-            L.append(f"- Доказательная цепочка: {' / '.join(c['reasons'])}")
-            L.append(f"- **Действие:** {c['suggested_action']}")
+            L.append(f"- Evidence chain: {' / '.join(c['reasons'])}")
+            L.append(f"- **Action:** {c['suggested_action']}")
             L.append("")
 
     if asn_watch:
         L.append("## ASN-watch candidates")
         L.append("")
-        L.append("_ASN, у которых **все** события bot-like + ≥2 события за сутки. Не hard-block — слишком много легитимного на типичных DC ASN (AWS, GCP). Кандидаты на ASN-level challenge или rate limit._")
+        L.append("_ASNs where **every** event is bot-like plus ≥2 events in 24 h. Not a hard block — there is too much legitimate traffic on typical DC ASNs (AWS, GCP). Candidates for an ASN-level challenge or rate limit._")
         L.append("")
-        L.append("| ASN | страна | DC? | events | IPs | fps |")
+        L.append("| ASN | country | DC? | events | IPs | fps |")
         L.append("|---|---|:---:|---:|---:|---:|")
         for c in asn_watch:
             L.append(f"| {c['asn']} | {c['country']} | {'DC' if c['hosting'] else ''} | {c['n_events']} | {c['n_ips']} | {c['n_fps']} |")
@@ -1747,16 +1747,16 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
 
     L.append("---")
     L.append("")
-    L.append("# За последние 24 часа")
+    L.append("# Last 24 hours")
     L.append("")
 
     new_fps = sorted(set(e["fp"] for e in events_24h if e["fp"] not in seen))
-    L.append(f"## Новые fingerprints ({len(new_fps)})")
+    L.append(f"## New fingerprints ({len(new_fps)})")
     L.append("")
     if not new_fps:
-        L.append("(нет)")
+        L.append("(none)")
     else:
-        L.append("| fp | первая UA | первый IP | ASN / гео | запросов |")
+        L.append("| fp | first UA | first IP | ASN / geo | requests |")
         L.append("|---|---|---|---|---:|")
         for fp in new_fps:
             sample = next(e for e in events_24h if e["fp"] == fp)
@@ -1766,18 +1766,18 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
             L.append(f"| `{fp}` | `{ua}` | {sample['remote']} | {geo} | {count} |")
 
     L.append("")
-    L.append("## Топ URIs (за сутки)")
+    L.append("## Top URIs (24 h)")
     L.append("")
-    L.append("| URI | запросов |")
+    L.append("| URI | requests |")
     L.append("|---|---:|")
     for uri, c in s24["uris"].most_common(15):
         suspicious = " 🚨" if SUSPICIOUS_URI_RE.search(uri) else ""
         L.append(f"| `{uri}`{suspicious} | {c} |")
 
     L.append("")
-    L.append("## Топ-10 fingerprints (за сутки)")
+    L.append("## Top 10 fingerprints (24 h)")
     L.append("")
-    L.append("| fp | запросов | ciphers | пример UA |")
+    L.append("| fp | requests | ciphers | sample UA |")
     L.append("|---|---:|---:|---|")
     for fp, c in s24["fps"].most_common(10):
         sample = next(e for e in events_24h if e["fp"] == fp)
@@ -1785,22 +1785,22 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
         L.append(f"| `{fp}` | {c} | {sample['cipher_count']} | `{ua}` |")
 
     L.append("")
-    L.append("## Per-ASN за сутки")
+    L.append("## Per-ASN, 24 h")
     L.append("")
-    L.append("| ASN | страна | тип | запросов |")
+    L.append("| ASN | country | type | requests |")
     L.append("|---|---|---|---:|")
     for (asn, hosting, country), c in s24["asns"].most_common():
         L.append(f"| {asn} | {country} | {'datacenter' if hosting else 'other'} | {c} |")
 
     L.append("")
-    L.append("## UA family + verdict (за сутки)")
+    L.append("## UA family + verdict (24 h)")
     L.append("")
-    L.append("| family | запросов |")
+    L.append("| family | requests |")
     L.append("|---|---:|")
     for fam, c in s24["fams"].most_common():
         L.append(f"| {fam} | {c} |")
     L.append("")
-    L.append("| verdict | запросов |")
+    L.append("| verdict | requests |")
     L.append("|---|---:|")
     for v, c in s24["verdicts"].most_common():
         L.append(f"| {v} | {c} |")
@@ -1808,11 +1808,11 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
     L.append("")
     L.append("---")
     L.append("")
-    L.append("# Lifetime контекст (persistent state)")
+    L.append("# Lifetime context (persistent state)")
     L.append("")
-    L.append("## Топ-15 fingerprints lifetime")
+    L.append("## Top 15 fingerprints, lifetime")
     L.append("")
-    L.append("| fp | total | дней | первый раз | первая UA |")
+    L.append("| fp | total | days | first seen | first UA |")
     L.append("|---|---:|---:|---|---|")
     for fp, c in sLT["fps"].most_common(15):
         info = seen.get(fp, {})
@@ -1824,14 +1824,14 @@ def render_markdown(events_24h, seen, blocklist_size, ip_cache, now_utc):
     L.append("")
     L.append("## Per-ASN lifetime")
     L.append("")
-    L.append("| ASN | страна | тип | запросов |")
+    L.append("| ASN | country | type | requests |")
     L.append("|---|---|---|---:|")
     for (asn, hosting, country), c in sLT["asns"].most_common():
         L.append(f"| {asn} | {country} | {'datacenter' if hosting else 'other'} | {c} |")
 
     L.append("")
     L.append("---")
-    L.append(f"State: {sLT['n_fps']} fp, {len(ip_cache)} IP в кеше enrichment.")
+    L.append(f"State: {sLT['n_fps']} fp, {len(ip_cache)} IPs in the enrichment cache.")
     return "\n".join(L) + "\n"
 
 
@@ -1932,7 +1932,7 @@ def html_candidate(c, tier_cls):
     parts = [f"<div class='candidate {tier_cls}'>"]
     parts.append(f"<div><span class='fp'>{h(c['fp'])}</span> <span class='score'>score {c['score']}</span></div>")
     parts.append("<ul>")
-    parts.append(f"<li>За сутки: <strong>{c['n_events_24h']}</strong> событий · lifetime: <strong>{c['n_lifetime']}</strong> · дней наблюдения: <strong>{len(c['days_seen'])}</strong></li>")
+    parts.append(f"<li>Last 24 h: <strong>{c['n_events_24h']}</strong> events · lifetime: <strong>{c['n_lifetime']}</strong> · days observed: <strong>{len(c['days_seen'])}</strong></li>")
     ips_short = ', '.join(c['ips'][:5]) + ('...' if len(c['ips']) > 5 else '')
     parts.append(f"<li>IP ({len(c['ips'])}): {h(ips_short)}</li>")
     if c['tags']:
@@ -1942,9 +1942,9 @@ def html_candidate(c, tier_cls):
         uri_html = ", ".join(f"<code>{h(u)}</code>" for u in c['uris'][:5])
         parts.append(f"<li>URI: {uri_html}</li>")
     parts.append(f"<li>UA sample: <code>{h(c['sample_ua'])}</code></li>")
-    parts.append(f"<li>Цепочка доказательств: {h(' / '.join(c['reasons']))}</li>")
+    parts.append(f"<li>Evidence chain: {h(' / '.join(c['reasons']))}</li>")
     parts.append("</ul>")
-    parts.append(f"<div class='action'><strong>Действие:</strong> {h(c['suggested_action'])}</div>")
+    parts.append(f"<div class='action'><strong>Action:</strong> {h(c['suggested_action'])}</div>")
     parts.append("</div>")
     return "".join(parts)
 
@@ -1967,27 +1967,27 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     mode_html = (
         "<span class='mode-shadow'>SHADOW</span>"
         if blocklist_size == 0
-        else f"<span class='mode-active'>ACTIVE</span> ({blocklist_size} fps в blocklist)"
+        else f"<span class='mode-active'>ACTIVE</span> ({blocklist_size} fps in the blocklist)"
     )
 
     n_human = s24['n_events'] - s24['n_bot']
     human_pct = 100 - s24['bot_pct']
     parts.append(
         f"<div class='summary'>"
-        f"<span class='label'>Режим:</span> {mode_html}<br>"
-        f"<span class='label'>За 24 часа:</span> "
-        f"<span class='val'>{s24['n_events']}</span> запросов · "
+        f"<span class='label'>Mode:</span> {mode_html}<br>"
+        f"<span class='label'>Last 24 h:</span> "
+        f"<span class='val'>{s24['n_events']}</span> requests · "
         f"<span class='bot'>{s24['n_bot']} ({s24['bot_pct']}%) bot-like</span> · "
         f"<span class='human'>{n_human} ({human_pct}%) human-like</span> · "
         f"<span class='val'>{s24['n_fps']}</span> fp · "
         f"<span class='val'>{s24['n_ips']}</span> IP · "
         f"<span class='val'>{s24['n_dc']}</span> ({s24['dc_pct']}%) DC ASN<br>"
         f"<span class='label'>Lifetime:</span> "
-        f"<span class='val'>{sLT['n_events']}</span> запросов · "
+        f"<span class='val'>{sLT['n_events']}</span> requests · "
         f"<span class='val'>{sLT['n_fps']}</span> fp · "
         f"<span class='val'>{sLT['n_ips']}</span> IP · "
         f"<span class='val'>{sLT['n_dc']}</span> ({sLT['dc_pct']}%) DC ASN<br>"
-        f"<span class='label'>Кандидаты на blocklist:</span> "
+        f"<span class='label'>Blocklist candidates:</span> "
         f"<span class='val' style='color:#c62828'>{len(high)}</span> HIGH · "
         f"<span class='val' style='color:#e65100'>{len(medium)}</span> MEDIUM · "
         f"<span class='val' style='color:#827717'>{len(low)}</span> LOW · "
@@ -1996,12 +1996,12 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     )
 
     # Blocklist candidates section — show FIRST, before raw data
-    parts.append("<div class='section-divider candidates'>Кандидаты на blocklist</div>")
+    parts.append("<div class='section-divider candidates'>Blocklist candidates</div>")
     parts.append(
         "<div class='legend'>"
-        "<strong>Скоринг:</strong> impersonator +3 · suspicious cipher +1 · automation UA +1 · "
-        "multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 дней +1 · recon URI +1.<br>"
-        "<strong>Тиры:</strong> <span style='color:#c62828; font-weight:700'>HIGH ≥5</span> · "
+        "<strong>Scoring:</strong> impersonator +3 · suspicious cipher +1 · automation UA +1 · "
+        "multi-IP ≥2 +1 · DC ASN +1 · persistent ≥2 days +1 · recon URI +1.<br>"
+        "<strong>Tiers:</strong> <span style='color:#c62828; font-weight:700'>HIGH ≥5</span> · "
         "<span style='color:#e65100; font-weight:700'>MEDIUM 3-4</span> · "
         "<span style='color:#827717; font-weight:700'>LOW 1-2</span>."
         "</div>"
@@ -2019,12 +2019,12 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
             parts.append(html_candidate(c, tier_cls))
 
     if not (high or medium or low):
-        parts.append("<p class='empty'>(нет кандидатов за сутки — нет fp с подозрительными сигналами)</p>")
+        parts.append("<p class='empty'>(no candidates in the last 24 h — no fp with suspicious signals)</p>")
 
     if asn_watch:
         parts.append("<h2>ASN-watch candidates</h2>")
-        parts.append("<div class='explain'>ASN где <strong>все</strong> события bot-like + ≥2 события за сутки. Не hard-block — кандидаты на ASN-level challenge / rate limit.</div>")
-        parts.append("<table><tr><th>ASN</th><th>страна</th><th>DC?</th><th>events</th><th>IPs</th><th>fps</th></tr>")
+        parts.append("<div class='explain'>ASNs where <strong>every</strong> event is bot-like plus ≥2 events in 24 h. Not a hard block — candidates for an ASN-level challenge / rate limit.</div>")
+        parts.append("<table><tr><th>ASN</th><th>country</th><th>DC?</th><th>events</th><th>IPs</th><th>fps</th></tr>")
         for c in asn_watch:
             dc_tag = " <span class='dc-flag'>DC</span>" if c['hosting'] else ""
             parts.append(
@@ -2037,14 +2037,14 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
             )
         parts.append("</table>")
 
-    parts.append("<div class='section-divider'>За последние 24 часа (сырые данные)</div>")
+    parts.append("<div class='section-divider'>Last 24 hours (raw data)</div>")
 
     new_fps = sorted(set(e["fp"] for e in events_24h if e["fp"] not in seen))
-    parts.append(f"<h2>Новые fingerprints ({len(new_fps)})</h2>")
+    parts.append(f"<h2>New fingerprints ({len(new_fps)})</h2>")
     if not new_fps:
-        parts.append("<p class='empty'>(нет)</p>")
+        parts.append("<p class='empty'>(none)</p>")
     else:
-        parts.append("<table><tr><th>fp</th><th>первая UA</th><th>первый IP / ASN</th><th>запросов</th></tr>")
+        parts.append("<table><tr><th>fp</th><th>first UA</th><th>first IP / ASN</th><th>requests</th></tr>")
         for fp in new_fps:
             sample = next(e for e in events_24h if e["fp"] == fp)
             count = sum(1 for e in events_24h if e["fp"] == fp)
@@ -2057,16 +2057,16 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
             )
         parts.append("</table>")
 
-    parts.append("<h2>Топ URIs (за сутки)</h2>")
-    parts.append("<div class='explain'>Красным выделены URI похожие на recon-сканирование (/admin, /.env, /wp-login, /.git, etc).</div>")
-    parts.append("<table><tr><th>URI</th><th>запросов</th></tr>")
+    parts.append("<h2>Top URIs (24 h)</h2>")
+    parts.append("<div class='explain'>URIs that look like recon scanning (/admin, /.env, /wp-login, /.git, etc) are highlighted in red.</div>")
+    parts.append("<table><tr><th>URI</th><th>requests</th></tr>")
     for uri, c in s24["uris"].most_common(15):
         uri_html = f"<span class='uri-suspicious'><code>{h(uri)}</code></span>" if SUSPICIOUS_URI_RE.search(uri) else f"<code>{h(uri)}</code>"
         parts.append(f"<tr><td>{uri_html}</td><td class='num'>{c}</td></tr>")
     parts.append("</table>")
 
-    parts.append("<h2>Топ-10 fingerprints за сутки</h2>")
-    parts.append("<table><tr><th>fp</th><th>запросов</th><th>ciphers</th><th>пример UA</th></tr>")
+    parts.append("<h2>Top 10 fingerprints, 24 h</h2>")
+    parts.append("<table><tr><th>fp</th><th>requests</th><th>ciphers</th><th>sample UA</th></tr>")
     for fp, c in s24["fps"].most_common(10):
         sample = next(e for e in events_24h if e["fp"] == fp)
         parts.append(
@@ -2077,8 +2077,8 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
         )
     parts.append("</table>")
 
-    parts.append("<h2>Per-ASN за сутки</h2>")
-    parts.append("<table><tr><th>ASN</th><th>страна</th><th>тип</th><th>запросов</th></tr>")
+    parts.append("<h2>Per-ASN, 24 h</h2>")
+    parts.append("<table><tr><th>ASN</th><th>country</th><th>type</th><th>requests</th></tr>")
     for (asn, hosting, country), c in s24["asns"].most_common():
         dc_tag = " <span class='dc-flag'>DC</span>" if hosting else ""
         parts.append(
@@ -2089,21 +2089,21 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
         )
     parts.append("</table>")
 
-    parts.append("<h2>UA family + verdict (за сутки)</h2>")
+    parts.append("<h2>UA family + verdict (24 h)</h2>")
     parts.append("<table style='width:auto; display:inline-block; margin-right:2em; vertical-align:top'>"
-                 "<tr><th>UA family</th><th>запросов</th></tr>")
+                 "<tr><th>UA family</th><th>requests</th></tr>")
     for fam, c in s24["fams"].most_common():
         parts.append(f"<tr><td>{h(fam)}</td><td class='num'>{c}</td></tr>")
     parts.append("</table>")
     parts.append("<table style='width:auto; display:inline-block; vertical-align:top'>"
-                 "<tr><th>verdict</th><th>запросов</th></tr>")
+                 "<tr><th>verdict</th><th>requests</th></tr>")
     for v, c in s24["verdicts"].most_common():
         parts.append(f"<tr><td>{h(v)}</td><td class='num'>{c}</td></tr>")
     parts.append("</table>")
 
-    parts.append("<div class='section-divider lifetime'>Lifetime контекст</div>")
-    parts.append("<h2>Топ-15 fingerprints lifetime</h2>")
-    parts.append("<table><tr><th>fp</th><th>total</th><th>дней</th><th>первый раз</th><th>первая UA</th></tr>")
+    parts.append("<div class='section-divider lifetime'>Lifetime context</div>")
+    parts.append("<h2>Top 15 fingerprints, lifetime</h2>")
+    parts.append("<table><tr><th>fp</th><th>total</th><th>days</th><th>first seen</th><th>first UA</th></tr>")
     for fp, c in sLT["fps"].most_common(15):
         info = seen.get(fp, {})
         days = len(set(info.get("days_seen", [])))
@@ -2117,7 +2117,7 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     parts.append("</table>")
 
     parts.append("<h2>Per-ASN lifetime</h2>")
-    parts.append("<table><tr><th>ASN</th><th>страна</th><th>тип</th><th>запросов</th></tr>")
+    parts.append("<table><tr><th>ASN</th><th>country</th><th>type</th><th>requests</th></tr>")
     for (asn, hosting, country), c in sLT["asns"].most_common():
         dc_tag = " <span class='dc-flag'>DC</span>" if hosting else ""
         parts.append(
@@ -2129,7 +2129,7 @@ def render_html(events_24h, seen, blocklist_size, ip_cache, now_utc):
     parts.append("</table>")
 
     parts.append("<hr>")
-    parts.append(f"<div class='footer'>State: <strong>{sLT['n_fps']}</strong> fp, <strong>{len(ip_cache)}</strong> IP в кеше.</div>")
+    parts.append(f"<div class='footer'>State: <strong>{sLT['n_fps']}</strong> fp, <strong>{len(ip_cache)}</strong> IPs in the cache.</div>")
     parts.append("</body></html>")
     return "".join(parts)
 
@@ -2138,8 +2138,8 @@ def render_subject(events_24h, seen, sLT, ip_cache, now_utc):
     s24 = collect_window_stats(events_24h, ip_cache)
     high, medium, low = find_blocklist_candidates(events_24h, ip_cache, seen)
     date = now_utc.astimezone().strftime("%Y-%m-%d")
-    return (f"[abuse-controls] {date} — 24ч: {s24['n_events']} events "
-            f"({s24['n_bot']} bot {s24['bot_pct']}%) · кандидаты: "
+    return (f"[abuse-controls] {date} — 24h: {s24['n_events']} events "
+            f"({s24['n_bot']} bot {s24['bot_pct']}%) · candidates: "
             f"{len(high)}H {len(medium)}M {len(low)}L · "
             f"lifetime {sLT['n_events']}/{sLT['n_fps']}")
 

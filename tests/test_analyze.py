@@ -46,7 +46,7 @@ def dc_catalog(tmp_path, monkeypatch):
     """Point the module at a temp catalogs dir holding one DC ASN (with a
     Cyrillic comment, to exercise the utf-8 read)."""
     (tmp_path / "asn_datacenters.yaml").write_text(
-        "- 15169  # Гугл ДЦ\n- 24940  # Hetzner\n", encoding="utf-8")
+        "- 15169  # Google DC\n- 24940  # Hetzner\n", encoding="utf-8")
     monkeypatch.setattr(az, "CATALOGS_DIR", tmp_path)
     return tmp_path
 
@@ -94,7 +94,7 @@ def test_seed_preserves_count_on_good_entry_resets_on_error(dc_catalog):
 
 
 def test_per_asn_table_populated_after_seed(dc_catalog):
-    """The bug: with enrichment failing every row was '(нет данных)'. After the
+    """The bug: with enrichment failing every row was '(no data)'. After the
     fix the logged asn drives the table; only asn-less events fall through."""
     events = [_ev(remote="8.8.8.8", asn="15169", geo_country="US"),
               _ev(remote="8.8.8.8", asn="15169", geo_country="US"),
@@ -103,7 +103,7 @@ def test_per_asn_table_populated_after_seed(dc_catalog):
     az.seed_ip_cache_from_log(events, cache)
     asns = az.collect_window_stats(events, cache)["asns"]
     assert asns[("15169", True, "US")] == 2
-    assert asns[("(нет данных)", False, "")] == 1
+    assert asns[("(no data)", False, "")] == 1
 
 
 # --- purity / classification ------------------------------------------------

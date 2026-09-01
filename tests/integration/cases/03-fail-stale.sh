@@ -4,8 +4,8 @@
 # Contract: when antibot-backend is unreachable, the edge keeps serving
 # the LAST successfully pulled policy indefinitely. Requests never block
 # on the backend; staleness shows up in the staleness gauge (case 04)
-# but the cascade keeps working (vision.md §«при недоступности
-# бэкенда»).
+# but the cascade keeps working (vision.md §"when the backend is
+# unreachable").
 #
 # Test shape: PATCH mode=active → wait for the edge to see it → docker
 # compose stop backend → assert /__policy STILL returns mode=active for

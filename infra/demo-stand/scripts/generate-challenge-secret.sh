@@ -16,7 +16,7 @@
 #   docker compose -f infra/demo-stand/docker-compose.demo.yml \
 #       exec nginx-demo openresty -s reload
 # Reload invalidates every clearance cookie signed under the old secret
-# (by design — vision §«Ротация»).
+# (by design — vision §"Rotation").
 
 set -eu
 

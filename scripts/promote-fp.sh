@@ -108,14 +108,14 @@ if [ "$ACTIVATE" = 1 ]; then
   cat > "$BODY" <<EOF
 ## Blocklist activate: \`$FP\` (staging → active)
 
-**Action:** staging → active (начинает эмитить verdict=block)
+**Action:** staging → active (starts emitting verdict=block)
 **Reason:** ${REASON:-staging observation clean, promoting per A11}
 **Observation (§D):** observed ${HOURS:-?}h · ${NMATCH:-?} matches · human_share ${HS_OBS:-?} · verdict \`${VERDICT:-forced}\`
 
 ### Lifecycle / rollback
-- Откат: \`scripts/demote-fp.sh $FP\` (active→staging) или git revert.
-- Silent > ${TTL_DAYS}д → автомат предложит demote.
-- SLA письмо → enforcement ≤ 4ч.
+- Rollback: \`scripts/demote-fp.sh $FP\` (active→staging) or git revert.
+- Silent > ${TTL_DAYS}d → the automation will suggest a demote.
+- SLA from the email to enforcement: ≤ 4 h.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -139,7 +139,7 @@ if [ -n "$SCORE" ]; then
   if [ "$VOL_OK" = "false" ] && [ "$FORCE_LOW_VOLUME" != 1 ]; then
     bl_die "volume gate: lifetime $LIFE / days $NDAYS below thresholds — pass --force-low-volume to override"
   fi
-  [ "$INTENT" = "false" ] && bl_warn "no impersonator/recon intent — общий tool-fp может зацепить легит-автоматизацию; рассмотри ua_blacklist/ip_blocklist"
+  [ "$INTENT" = "false" ] && bl_warn "no impersonator/recon intent — a shared tool fp may catch legitimate automation; consider ua_blacklist/ip_blocklist"
 else
   # No candidate evidence → we cannot verify the purity/allowlist/volume vetoes.
   # Refuse by default so a real-browser fp can't be promoted unchecked; --force
@@ -162,7 +162,7 @@ human_share ${HS:-n/a} · events ${LIFE:-n/a} · review-by ${REVIEW_BY}"
 cat > "$BODY" <<EOF
 ## Blocklist promote: \`$FP\` (→ $STATUS)
 
-**Action:** add → status \`$STATUS\`$([ "$STATUS" = staging ] && echo "  (наблюдение, не блокирует)")
+**Action:** add → status \`$STATUS\`$([ "$STATUS" = staging ] && echo "  (observation only, does not block)")
 **Reason:** $REASON
 **Score / Tier:** ${SCORE:-manual} / ${TIER:-—}
 **Trigger:** $([ "$AUTO" = 1 ] && echo "auto" || echo "manual")
@@ -182,10 +182,10 @@ ${REASONS:-(manual — not in current candidate set)}
 - Source: analyze.py --candidates-json (Loki)
 
 ### Lifecycle / rollback
-- staging → наблюдаем \`staging_match\` ≥48ч (FP=0) → \`scripts/promote-fp.sh $FP --activate\`.
-- Откат: \`scripts/demote-fp.sh $FP\` или git revert (runbook catalog-rollback.md).
-- Silent > ${TTL_DAYS}д → автомат предложит demote (active→staging→remove).
-- SLA письмо → enforcement ≤ 4ч.
+- staging → watch \`staging_match\` for ≥48 h (FP=0) → \`scripts/promote-fp.sh $FP --activate\`.
+- Rollback: \`scripts/demote-fp.sh $FP\` or git revert (runbook catalog-rollback.md).
+- Silent > ${TTL_DAYS}d → the automation will suggest a demote (active→staging→remove).
+- SLA from the email to enforcement: ≤ 4 h.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
