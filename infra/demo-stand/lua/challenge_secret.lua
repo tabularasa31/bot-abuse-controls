@@ -9,7 +9,7 @@
 -- the editor puts the file on the VM and the operator runs `openresty -s reload`. No
 -- Puppet/Salt/container recreate.
 --
--- Ротация = reload. init_by_lua перезапускается на каждом nginx -s reload и
+-- Rotation = a reload. init_by_lua re-runs on every nginx -s reload and
 -- rereads the file, and the secret in the shared_dict is overwritten. Cookies signed with
 -- the old secret stop passing the HMAC verify at L2.1 — the client walks the
 -- cascade to L5 and solves the challenge again (by design, see vision §"Rotation":

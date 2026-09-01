@@ -38,11 +38,11 @@ local _, vb_alts_n = require("verified_bots").build(config)
 -- TAT state). Returns the active profile count for the startup log.
 local _, rate_n = require("rate_limit").build(config)
 
--- Compile the L3 tls_fp soft-rule stage. После PR2 (ADR-006)
--- Все три staged-каталога (tls_fp_blocklist / tls_fp_catalog /
--- tls_fp_browser_profiles) приезжают через Channel C (86exrtjpc), так что
--- build() заводит только cold-start state + kill-switch flag; staging-таблицы
--- пусты на init и наполняются в tls_fp.refresh() после первого pull.
+-- Compile the L3 tls_fp soft-rule stage. After PR2 (ADR-006)
+-- all three staged catalogs (tls_fp_blocklist / tls_fp_catalog /
+-- tls_fp_browser_profiles) arrive over Channel C, so
+-- build() only sets up the cold-start state plus the kill-switch flag; the staging tables
+-- are empty at init and are filled in tls_fp.refresh() after the first pull.
 require("tls_fp").build(config)
 
 -- Open the GeoLite2 databases (country + asn) once in the master so workers
@@ -62,24 +62,24 @@ require("catalog_pull").preload_mtls(
     os.getenv("ANTIBOT_BACKEND_CLIENT_CERT"),
     os.getenv("ANTIBOT_BACKEND_CLIENT_KEY"))
 
--- [C1] Phase 4 HMAC secret для clearance cookie (vision §«HMAC secret для
--- clearance cookie», §Channel A). Доставка на демо-стенде = file/mount
--- (./certs bind-mount), ротация = `openresty -s reload`. C3/C5 ещё не
--- реализованы — load() выполняется здесь, чтобы когда они появятся, secret
--- уже лежал в shared_dict; до тех пор отсутствие файла — WARN, не fatal
--- (Phase 1-3 запросы продолжают работать).
+-- [C1] The Phase 4 HMAC secret for the clearance cookie (vision §"The HMAC secret for the
+-- clearance cookie", §Channel A). Delivery on the demo stand is a file mount
+-- (the ./certs bind mount), and rotation is `openresty -s reload`. C3/C5 are not yet
+-- implemented — load() runs here so that when they arrive the secret is
+-- already in the shared_dict; until then a missing file is a WARN, not fatal
+-- (Phase 1-3 requests keep working).
 require("challenge_secret").load(
     os.getenv("CHALLENGE_HMAC_SECRET_FILE")
         or "/etc/nginx/certs/challenge_secret.key")
 
--- [C2] Phase 4 challenge page asset (HTML+JS-шаблон, vision §5.2 «Ветка A»).
--- Доставка на демо = file/mount (Channel A на демо), путь
--- /etc/nginx/challenge/page.html. preload() читает шаблон + CASCADE_VERSION
--- один раз и сверяет meta-тег шаблона с содержимым файла версии — mismatch
--- валит init_by_lua, контейнер не стартует. Это и есть version-pin
--- инвариант: каскад и шаблон могут разъехаться только осознанным
--- одновременным bump'ом обоих. Сама выдача страницы (привязка к
--- verdict=challenge) — в C5; здесь только preload + проверка.
+-- [C2] The Phase 4 challenge page asset (the HTML+JS template, vision §5.2 "Branch A").
+-- Delivery on the demo is a file mount (Channel A on the demo), at the path
+-- /etc/nginx/challenge/page.html. preload() reads the template plus CASCADE_VERSION
+-- once and compares the template's meta tag with the contents of the version file — a mismatch
+-- fails init_by_lua and the container does not start. That is the version-pin
+-- invariant: the cascade and the template can diverge only through a deliberate
+-- simultaneous bump of both. Serving the page itself (tied to
+-- verdict=challenge) is C5; only the preload and the check happen here.
 local cascade_version = require("challenge").preload()
 
 -- Seed the tls_fp_blocklist shared_dict from tls_fp_blocklist.conf. Entries are
@@ -92,29 +92,29 @@ local cascade_version = require("challenge").preload()
 -- The static seed IS generation 0; when the Channel C catalog pull lands
 -- (task 86exmk08u) it bumps to gen 1+ and atomically swaps the set.
 --
--- PR-62 audit round-6: reload-survive. `meta` и `tls_fp_blocklist` shared_dict
--- выживают `nginx -s reload`. Если в прошлой жизни Channel C доставил gen=N
--- с расширенным набором fp (например 50 vs 10 в локальном .conf), force-reset
--- gen=0 + re-seed под `:0` СКРЫВАЕТ те 40 extra fps до следующего payload
--- change на backend (304 на первом pull → gen остаётся 0). Поэтому: seed
--- (как cold-start fallback) делаем ТОЛЬКО когда gen-key отсутствует в meta
--- (полностью fresh start). Если key уже есть — Channel C state выжил, data
--- shared_dict тоже выжил, читатели verdict.lua найдут `:N` записи как раньше.
+-- Reload survival. The `meta` and `tls_fp_blocklist` shared_dicts
+-- survive `nginx -s reload`. If in a previous life Channel C delivered gen=N
+-- with an extended fingerprint set (50 versus 10 in the local .conf, say), a force reset to
+-- gen=0 plus a re-seed under `:0` HIDES those 40 extra fingerprints until the next payload
+-- change on the backend (a 304 on the first pull → the gen stays 0). So we seed
+-- (as a cold-start fallback) ONLY when the gen key is absent from meta
+-- (a completely fresh start). If the key is already there, the Channel C state survived, the data
+-- shared_dict survived too, and readers in verdict.lua will find the `:N` records as before.
 local fp_state    = require "tls_fp_blocklist_state"
 local catalog_pull = require "catalog_pull"
 local fp_dict = ngx.shared.tls_fp_blocklist
 local meta    = ngx.shared.meta
 
--- seed_blocklist_cold — пишет локальный fallback под `:0`. Используется
--- на cold-start пути (key только что создан через meta:add). На этом
--- пути data dict гарантированно пуст или содержит только ghost-keys от
--- предыдущей worker-генерации, которые верно reader'ятся (gen=0); очищать
--- ghosts не нужно — мы их сейчас перепишем под тем же `:0` suffix.
--- Wire-формат записи (A11, store.buildTLSFPBlocklist): "<status>:block".
--- Cold-start seed несёт active-записи как "active:block" (verdict.lua блокирует
--- только active). Staged fps в seed НЕ кладём: staging-наблюдение доставляется
--- live по Channel C (tls_fp.refresh строит blocklist_staging из pulled snapshot),
--- симметрично tls_fp_catalog / tls_fp_browser_profiles staging.
+-- seed_blocklist_cold — writes the local fallback under `:0`. Used
+-- on the cold-start path (the key was just created through meta:add). On that
+-- path the data dict is guaranteed to be empty or to hold only ghost keys from a
+-- previous worker generation, which are read correctly (gen=0); there is no need to clear the
+-- ghosts — we are about to overwrite them under that same `:0` suffix.
+-- The record wire format (A11, store.buildTLSFPBlocklist) is "<status>:block".
+-- The cold-start seed carries active records as "active:block" (verdict.lua blocks
+-- only active ones). We do NOT put staged fingerprints into the seed: staging observation is delivered
+-- live over Channel C (tls_fp.refresh builds blocklist_staging from the pulled snapshot),
+-- symmetrically with tls_fp_catalog / tls_fp_browser_profiles staging.
 local function seed_blocklist_cold()
     local seeded = 0
     for _, entry in ipairs(config.tls_fp_blocklist) do
@@ -130,17 +130,17 @@ local function seed_blocklist_cold()
     return seeded
 end
 
--- seed_blocklist_after_meta_failure — пишет fallback под `:0` + очищает
--- ghost-keys предыдущей генерации перед записью. Используется ТОЛЬКО на
--- meta:add ERR-пути (no_memory), когда мы force-set'нули gen=0 поверх
--- неизвестного предыдущего значения N. data dict может содержать `:N`
--- ключи, которые никто больше не читает (мы только что сбросили gen),
--- но занимают slots — clear освобождает. Безопасность: fp_dict —
--- exclusive writer-zone для blocklist (init + catalog_pull, оба нашего
--- авторства); если будущий PR добавит admin-override или co-tenant
--- writer, эта функция wipe'нет их keys тоже — переключи на typed
--- filter `fp_state.match(k, anything)` ИЛИ запрети сторонних writers
--- комментом в tls_fp_blocklist_state.lua.
+-- seed_blocklist_after_meta_failure — writes the fallback under `:0` and clears
+-- the previous generation's ghost keys before writing. Used ONLY on the
+-- meta:add ERR path (no_memory), where we force-set gen=0 over an
+-- unknown previous value N. The data dict may hold `:N`
+-- keys that nobody reads any more (we have just reset the gen)
+-- while occupying slots — the clear frees them. On safety: fp_dict is an
+-- exclusive writer zone for the blocklist (init plus catalog_pull, both ours);
+-- if a future PR adds an admin override or a co-tenant
+-- writer, this function will wipe their keys too — switch it to a typed
+-- filter `fp_state.match(k, anything)` OR forbid third-party writers with a
+-- comment in tls_fp_blocklist_state.lua.
 local function seed_blocklist_after_meta_failure()
     for _, k in ipairs(fp_dict:get_keys(0)) do
         fp_dict:delete(k)
@@ -148,15 +148,15 @@ local function seed_blocklist_after_meta_failure()
     return seed_blocklist_cold()
 end
 
--- meta_add_gen — общий helper: meta:add(gen_key, 0) + распознание err.
--- Возвращает (status, cur_gen_for_logging) где status ∈ {"cold_start",
--- "reload", "err"}. "err" — meta:add fail с не-"exists" (no_memory). На
--- "err" вызывает meta:set(gen_key, 0) — best-effort. verdict.lua и
--- friends везде защищены `meta:get(...) or 0`, так что даже если set
--- тоже fail'нет — readers увидят gen=0 через nil-default.
--- PR-62 round-9 audit: вынесено из tls_fp_blocklist в общий helper, чтобы
--- три sibling catalogs (verified_bots / tls_fp_catalog / tls_fp_browser_profiles)
--- получили те же diagnostics+force-set fallback вместо silent SHADOW.
+-- meta_add_gen — a shared helper: meta:add(gen_key, 0) plus error recognition.
+-- It returns (status, cur_gen_for_logging) where status ∈ {"cold_start",
+-- "reload", "err"}. "err" is a meta:add failure other than "exists" (no_memory). On
+-- "err" it calls meta:set(gen_key, 0) — best effort. verdict.lua and
+-- friends are guarded everywhere with `meta:get(...) or 0`, so even if the set
+-- also fails, readers see gen=0 through the nil default.
+-- From audit: extracted out of tls_fp_blocklist into a shared helper, so that the
+-- three sibling catalogs (verified_bots / tls_fp_catalog / tls_fp_browser_profiles)
+-- get the same diagnostics plus force-set fallback instead of a silent SHADOW.
 local function meta_add_gen(gen_key)
     local was_added, add_err = meta:add(gen_key, 0)
     if was_added then return "cold_start" end
@@ -170,25 +170,25 @@ end
 local blocklist_status = meta_add_gen(fp_state.META_GEN_KEY)
 local n = 0
 if blocklist_status == "cold_start" then
-    -- Свежий старт: data dict не содержит ничего нашего, seed напрямую.
+    -- A fresh start: the data dict holds nothing of ours, so seed it directly.
     n = seed_blocklist_cold()
 elseif blocklist_status == "err" then
-    -- meta-add failed: force-set'нули gen=0 но не знаем предыдущего gen.
-    -- Чистим ghost'ы перед re-seed.
+    -- meta:add failed: we force-set gen=0 but do not know the previous gen.
+    -- Clear the ghosts before re-seeding.
     n = seed_blocklist_after_meta_failure()
 else
-    -- Reload-survive: meta:add no-op потому что key exists. Не трогаем data
-    -- shared_dict — Channel C `:N` entries уже там, verdict.lua найдёт их по
-    -- meta:get(gen)=N. Считаем выжившие entries под current gen для
-    -- blocklist_entries gauge + ACTIVE/SHADOW лог (analyze.py парсит
-    -- «tls_fp_blocklist loaded: N»). Используем typed fp_state.match() вместо
-    -- bare suffix-string — симметрично catalog_pull.sweep (PR-55 review #5
-    -- guard от sharing dict с другим writer'ом).
+    -- Reload survival: meta:add is a no-op because the key exists. We do not touch the data
+    -- shared_dict — the Channel C `:N` entries are already there and verdict.lua will find them by
+    -- meta:get(gen)=N. We count the surviving entries under the current gen for the
+    -- blocklist_entries gauge plus the ACTIVE/SHADOW log (analyze.py parses
+    -- "tls_fp_blocklist loaded: N"). We use the typed fp_state.match() rather than a
+    -- bare suffix string — symmetrically with catalog_pull.sweep (a review guard
+    -- against sharing the dict with another writer).
     local cur_gen = meta:get(fp_state.META_GEN_KEY) or 0
-    -- `n` — только ACTIVE записи (для "loaded: N active entries" + gauge);
-    -- `total` — все (active+staging) для divergence-детекции (gen=N но dict
-    -- пуст). A11: dict теперь содержит и staging-записи ("staging:block"),
-    -- поэтому считаем по статусу, чтобы staged fps не раздували active-счёт.
+    -- `n` counts only ACTIVE records (for "loaded: N active entries" plus the gauge);
+    -- `total` counts all of them (active+staging) for divergence detection (gen=N but the dict
+    -- is empty). A11: the dict now also holds staging records ("staging:block"),
+    -- so we count by status, so that staged fingerprints do not inflate the active count.
     local total = 0
     for _, k in ipairs(fp_dict:get_keys(0)) do
         if fp_state.match(k, cur_gen) then
@@ -199,14 +199,14 @@ else
         end
     end
     -- Detect divergence: meta:gen=N>0 + data dict empty. PR-62 round-8 audit:
-    -- ИНТЕНЦИОНАЛЬНО empty backend catalog и data-dict-wiped operator действие
-    -- неотличимы из init.lua. Если бы мы re-seedили локально — overрode'нули бы
-    -- product intent для legitimate empty case. Решение: только drop etag
-    -- (заставить next pull сделать полный 200 GET) + WARN. catalog_pull
-    -- следующего тика принесёт actual backend state: если empty — будет empty;
-    -- если был resize/wipe — backend re-доставит entries. Окно «между reload
-    -- и next pull» (≤30 сек) — каталог пуст; для тех редких ситуаций,
-    -- когда backend ALSO down — operator увидит WARN и решит вручную.
+    -- An INTENTIONALLY empty backend catalog and an operator wiping the data dict
+    -- are indistinguishable from init.lua. If we re-seeded locally we would override
+    -- the product intent for the legitimate empty case. The decision: only drop the etag
+    -- (forcing the next pull to make a full 200 GET) plus a WARN. The next tick of
+    -- catalog_pull brings the actual backend state: if it is empty, it stays empty;
+    -- if there was a resize or a wipe, the backend redelivers the entries. The window "between the reload
+    -- and the next pull" (≤30 s) leaves the catalog empty; for the rare situations
+    -- where the backend is ALSO down, the operator sees the WARN and decides by hand.
     if cur_gen > 0 and total == 0 then
         ngx.log(ngx.WARN, "[demo] tls_fp_blocklist: meta says gen=", cur_gen,
             " but data dict has no matching entries — possibly zone wipe or ",
@@ -221,23 +221,23 @@ else
 end
 
 -- verified_bots / tls_fp_catalog / tls_fp_browser_profiles — no static
--- seed (catalogs приезжают через Channel C). Изначально (cold start)
--- gen-keys отсутствуют в `meta`; meta shared_dict выживает `nginx -s
--- reload` (zone сохраняется при неизменном name+size), поэтому используем
--- `meta:add(key, 0)` — присвоение ТОЛЬКО если ключ не существует.
+-- seed (the catalogs arrive over Channel C). Initially (a cold start) the
+-- gen keys are absent from `meta`; the meta shared_dict survives `nginx -s
+-- reload` (the zone is preserved while the name and size are unchanged), so we use
+-- `meta:add(key, 0)` — an assignment ONLY when the key does not exist.
 --
--- check_data_dict_divergence — те же detection-семантики, что выше для
--- tls_fp_blocklist (round-8 audit, B1): meta:gen=N + data dict empty значит
--- либо operator resize zone, либо backend опубликовал empty. Drop etag,
--- WARN. Без re-seed (для этих трёх каталогов нет файлового fallback'а —
--- catalog'и приходят только через Channel C, и intentional-empty
--- неразличим от divergence).
+-- check_data_dict_divergence — the same detection semantics as above for
+-- tls_fp_blocklist (from audit, B1): meta:gen=N plus an empty data dict means
+-- either an operator resized the zone or the backend published an empty catalog. Drop the etag and
+-- WARN. With no re-seed (these three catalogs have no file fallback —
+-- they arrive only over Channel C, and an intentional empty is
+-- indistinguishable from a divergence).
 --
--- Принимает catalog-descriptor из catalog_pull.lua (single source of truth
--- для dict_name/gen_key/etag_key — устраняет sync-drift trap, который
--- round-8 fix #5 закрыл для blocklist; round-9 audit B-R8-2: тот же
--- trap не должен reintroduce'иться для siblings). dict missing → ERR
--- log + return (вместо silent — чтобы typo в catalog name ловилась).
+-- It takes a catalog descriptor from catalog_pull.lua (the single source of truth
+-- for dict_name/gen_key/etag_key — which removes the sync-drift trap that an
+-- earlier fix closed for the blocklist; from audit: the same
+-- trap must not be reintroduced for the siblings). A missing dict → an ERR
+-- log plus a return (rather than silence — so that a typo in a catalog name is caught).
 local function check_data_dict_divergence(cat)
     local dict = ngx.shared[cat.dict_name]
     if not dict then
@@ -248,12 +248,12 @@ local function check_data_dict_divergence(cat)
     end
     local cur_gen = meta:get(cat.gen_key)
     if not cur_gen or cur_gen <= 0 then return end
-    -- Bare suffix-match: writer везде кладёт `<key>:<gen>` с gen как
-    -- ПОСЛЕДНИЙ `:`-segment (catalog_pull.lua apply: `key .. ":" .. new_gen`).
-    -- Ghost от старой gen=M (M≠N) ends `:M` — НЕ match `:N`. IPv6 ключи
-    -- (verified_bots) проверены: gen всегда последний segment, false-positive
-    -- невозможен пока writer-side контракт держится. Если когда-то поменяется
-    -- на content-hash gen — добавить typed match per-catalog.
+    -- A bare suffix match: the writer everywhere stores `<key>:<gen>` with the gen as the
+    -- LAST `:` segment (catalog_pull.lua apply: `key .. ":" .. new_gen`).
+    -- A ghost from an old gen=M (M≠N) ends in `:M` and does NOT match `:N`. IPv6 keys
+    -- (verified_bots) were checked: the gen is always the last segment, so a false positive
+    -- is impossible while the writer-side contract holds. If it ever changes
+    -- to a content-hash gen, add a typed per-catalog match.
     local suffix = ":" .. cur_gen
     for _, k in ipairs(dict:get_keys(0)) do
         if k:sub(-#suffix) == suffix then return end
@@ -267,11 +267,11 @@ local function check_data_dict_divergence(cat)
     meta:delete(cat.etag_key)
 end
 
--- gen=0 seeding + divergence detection для трёх Channel-C-only каталогов.
--- meta_add_gen использует общий ERR-handling (fix B-R8-1: no_memory не
--- маскируется под reload, force-set + log). catalog descriptors берутся
--- из catalog_pull.catalogs — single source of truth для dict/gen/etag
--- имён (fix B-R8-2: literals не дублируются между init.lua и descriptors).
+-- gen=0 seeding plus divergence detection for the three Channel-C-only catalogs.
+-- meta_add_gen uses the shared ERR handling (no_memory is not
+-- masked as a reload; force-set plus a log). The catalog descriptors come
+-- from catalog_pull.catalogs — the single source of truth for the dict/gen/etag
+-- names (so the literals are not duplicated between init.lua and the descriptors).
 for _, cat_name in ipairs({"verified_bot_ips", "tls_fp_catalog", "tls_fp_browser_profiles", "policy"}) do
     local cat = catalog_pull.catalogs[cat_name]
     if not cat then
@@ -435,7 +435,7 @@ for _, spec in ipairs({
 end
 
 -- One line per catalog so a reviewer can confirm at start that every config
--- loaded (acceptance: "Lua успешно подгружает все конфиги").
+-- loaded (acceptance: "Lua successfully loads every config").
 ngx.log(ngx.NOTICE, "[demo] configs loaded from ", config.dir, ": ",
     "tls_fp_blocklist=", #config.tls_fp_blocklist,
     " ip_blocklist=", #config.blocklist_ip,
@@ -468,18 +468,18 @@ if (require "verified_bots").enabled and vb_alts_n == 0 then
 end
 ngx.log(ngx.NOTICE, "[demo] rate_limits profiles: ", rate_n,
     " active (observe-only — verdict logged, no 429/delay in Phase 1)")
--- PR2 (ADR-006): tls_fp_catalog / tls_fp_browser_profiles переехали с
--- локальных INI на Channel C, на init их ещё нет (pull тикает после
--- init_worker_by_lua). Внешний monitoring следит за метриками
+-- PR2 (ADR-006): tls_fp_catalog / tls_fp_browser_profiles moved from
+-- local INI files to Channel C, and at init they are not there yet (the pull ticks after
+-- init_worker_by_lua). External monitoring watches the metrics
 -- `antibot_tls_fp_catalog_gen` / `antibot_tls_fp_browser_profiles_gen`
--- (metrics.lua), а не за init-логом — никакой post-pull лог-маркер
--- здесь не печатается специально, чтобы дашборды не путали «нулевая
--- gen на старте» с «catalog не landed». Для tls_fp_blocklist staging
--- (всё ещё file-based) сохраняем традиционную stand-line.
+-- (metrics.lua) rather than the init log — no post-pull log marker
+-- is printed here deliberately, so that dashboards do not confuse "a zero
+-- gen at startup" with "the catalog never landed". For tls_fp_blocklist staging
+-- (still file-based) we keep the traditional stand line.
 ngx.log(ngx.NOTICE, "[demo] tls_fp staged catalogs: all three (blocklist / ",
-    "catalog / browser_profiles) — Channel C-based; staging-таблицы пусты на ",
-    "init, наполняются в tls_fp.refresh() после первого pull (см. /metrics ",
-    "antibot_staging_match_total и *_gen)")
+    "catalog / browser_profiles) — Channel C-based; the staging tables are empty at ",
+    "init and are filled in tls_fp.refresh() after the first pull (see /metrics ",
+    "antibot_staging_match_total and *_gen)")
 ngx.log(ngx.NOTICE, "[demo] challenge page template loaded, cascade_version=",
     cascade_version, " (C2 — preload only; serving wires up in C5)")
 
@@ -505,24 +505,24 @@ for _, key in ipairs({
     "tag:tls_fp:dc_browser",
     "tag:reputation:asn_dc",
     "tag:hygiene:header_anomaly",
-    -- BAC_LOG shipper (log_shipper.lua, B6 edge-side): счётчики живут
-    -- здесь, чтобы /metrics показывал их at-zero с первого scrape'a,
-    -- а не лениво после первой строки. enqueued — сколько прилетело в
-    -- очередь от bac_log.emit; dropped — overflow / shipper выключен;
-    -- shipped — сколько успешных строк уехало на backend; failed —
-    -- провальные POST'ы (батч теряется); batches_ok — счётчик удачных
-    -- POST'ов (помогает отличить «1 батч × 1000 строк» от «1000 батчей
-    -- × 1 строка» при анализе пропускной способности).
+    -- The BAC_LOG shipper (log_shipper.lua, B6 edge-side): the counters live
+    -- here so that /metrics shows them at zero from the first scrape
+    -- rather than lazily after the first line. enqueued is how much arrived in the
+    -- queue from bac_log.emit; dropped is overflow or the shipper being off;
+    -- shipped is how many lines left successfully for the backend; failed counts
+    -- failed POSTs (the batch is lost); batches_ok counts successful
+    -- POSTs (which helps tell "1 batch × 1000 lines" from "1000 batches
+    -- × 1 line" when analysing throughput).
     "bac_log_enqueued_total",
     "bac_log_dropped_overflow_total",
     "bac_log_dropped_disabled_total",
     "bac_log_shipped_total",
     "bac_log_ship_failed_total",
     "bac_log_batches_ok_total",
-    -- Gauge 0/1: 0 если log_shipper.lua не загрузился (syntax broken,
-    -- missing dep, init_worker ERR'нул и не дошёл до start()); 1 после
-    -- успешного start(). Дашборд алертит на `bac_log_shipper_loaded == 0`
-    -- — иначе silent-failure при regression в log_shipper.lua.
+    -- A 0/1 gauge: 0 if log_shipper.lua did not load (broken syntax,
+    -- a missing dependency, an init_worker ERR that never reached start()); 1 after a
+    -- successful start(). The dashboard alerts on `bac_log_shipper_loaded == 0`
+    -- — otherwise a regression in log_shipper.lua fails silently.
     "bac_log_shipper_loaded",
     -- [C3/C7] L2.1 clearance cookie verify. Outcomes from clearance.verify
     -- (metric labels match clearance.RESULT_*; metrics.lua emits the labelled
@@ -536,8 +536,8 @@ for _, key in ipairs({
     "clearance_verify_malformed_total",
     "clearance_verify_wrong_site_total",
     "clearance_verify_no_secret_total",
-    -- [C7] attack_mode=on + cookie выписан до начала атаки (длинный TTL) →
-    -- не фастпасит, идёт на L5 challenge.
+    -- [C7] attack_mode=on plus a cookie issued before the attack started (a long TTL) →
+    -- it does not fastpath and goes to the L5 challenge.
     "clearance_verify_stale_pre_attack_total",
     -- [C5] Phase 4 L5.2 challenge issuance + verify endpoint.
     -- challenge_issued_total — render of Branch A challenge page;
@@ -572,14 +572,14 @@ end
 -- patterns are staged), so unlike the fixed flag/tag list above they are
 -- primed from the compiled staging tables rather than hard-coded.
 --
--- 86exrtjpc: все три tls_fp staged-каталога (blocklist / catalog /
--- browser_profiles) теперь Channel C-based — их staging-таблицы пусты на init
--- и наполняются после первого pull. Priming staging-counter'ов делает
--- `reconcile_staging_metrics` в tls_fp.refresh() на каждом gen flip
--- (одновременно с удалением stale counters), поэтому здесь priming-loop'ов
--- для tls_fp_* больше нет. ua_blacklist / ip_blocklist staging — file-based
--- (hygiene / reputation), их counters праймятся здесь из compiled staging-веток,
--- чтобы /metrics показывал staged-паттерны at-zero с первого scrape'a.
+-- All three staged tls_fp catalogs (blocklist / catalog /
+-- browser_profiles) are now Channel C-based — their staging tables are empty at init
+-- and are filled after the first pull. Priming the staging counters is done by
+-- `reconcile_staging_metrics` in tls_fp.refresh() on every gen flip
+-- (together with deleting stale counters), so there are no priming loops
+-- for tls_fp_* here any more. ua_blacklist / ip_blocklist staging is file-based
+-- (hygiene / reputation), and their counters are primed here from the compiled staging branches,
+-- so that /metrics shows the staged patterns at zero from the first scrape.
 for _, pat in ipairs(hygiene.staging_patterns or {}) do
     metrics:safe_add("staging:ua_blacklist:" .. pat, 0)
 end
