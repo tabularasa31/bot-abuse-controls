@@ -1,58 +1,58 @@
--- Phase 4 HMAC secret для clearance cookie (vision §«HMAC secret для
--- clearance cookie», §Channel A; config-templates.md §9). Один общий для
--- всего эдж-пула секрет, которым L5 подписывает cookie (issue) и self-signed
--- nonce challenge-страницы, а L2.1 проверяет cookie на fastpath. Всё —
--- локально, без обращения к backend.
+-- The Phase 4 HMAC secret for the clearance cookie (vision §"The HMAC secret for the
+-- clearance cookie", §Channel A; config-templates.md §9). One secret shared across
+-- the whole edge pool, which L5 uses to sign the cookie (issue) and the self-signed
+-- nonce of the challenge page, and which L2.1 uses to verify the cookie on the fastpath. All of it
+-- locally, with no call to the backend.
 --
--- Доставка. В проде — Puppet (Channel A). На демо-стенде Channel A =
--- file/mount (тот же принцип, что у kill_switch.local.conf и ./certs/*.pem):
--- редактор кладёт файл на VM, оператор делает `openresty -s reload`. Никакого
+-- Delivery. In production it is Puppet (Channel A). On the demo stand Channel A is a
+-- file mount (the same principle as kill_switch.local.conf and ./certs/*.pem):
+-- the editor puts the file on the VM and the operator runs `openresty -s reload`. No
 -- Puppet/Salt/container recreate.
 --
 -- Ротация = reload. init_by_lua перезапускается на каждом nginx -s reload и
--- перечитывает файл; secret в shared_dict переписывается. Cookie, подписанные
--- старым секретом, перестают проходить HMAC verify на L2.1 — клиент идёт через
--- каскад до L5 и проходит challenge заново (by-design, см. vision §«Ротация»:
--- «новая версия через PR + reload nginx; ротация инвалидирует все ранее
--- выданные cookie разом»).
+-- rereads the file, and the secret in the shared_dict is overwritten. Cookies signed with
+-- the old secret stop passing the HMAC verify at L2.1 — the client walks the
+-- cascade to L5 and solves the challenge again (by design, see vision §"Rotation":
+-- "a new version through a PR plus an nginx reload; rotation invalidates every previously
+-- issued cookie at once").
 --
--- shared_dict переживает reload (как `meta` / `tls_fp_blocklist` — см.
--- PR-62 audit round-6 в init.lua). Это важно для отказоустойчивости readers,
--- но создаёт ловушку «зомби-секрет»: если файл случайно удалили и сделали
--- reload, старое значение осталось бы в памяти. Поэтому load() в любом
--- failure-режиме явно :delete()-ит обе записи — fail-closed.
+-- The shared_dict survives a reload (like `meta` / `tls_fp_blocklist` — see the
+-- audit note in init.lua). That matters for reader resilience,
+-- but it creates a "zombie secret" trap: if the file were deleted accidentally and a
+-- reload happened, the old value would stay in memory. So load() in any
+-- failure mode explicitly :delete()s both records — fail-closed.
 
 local DICT_NAME = "challenge_secret"
 local KEY_SECRET = "secret"
 local KEY_FP     = "fp"
--- 32 байта — минимум для HMAC-SHA256 ключа; реалистичный секрет придёт
--- через `openssl rand -base64 32` (~44 символа base64). Меньшие отвергаем,
--- чтобы случайно не подгрузить "TODO"/"changeme"/тестовую строку.
+-- 32 bytes is the minimum for an HMAC-SHA256 key; a realistic secret arrives
+-- through `openssl rand -base64 32` (~44 base64 characters). We reject shorter ones,
+-- so as not to accidentally load a "TODO"/"changeme"/test string.
 local MIN_BYTES = 32
--- Жёсткий потолок на размер файла — защита от мисмаунта (например
--- CHALLENGE_HMAC_SECRET_FILE случайно указали на /dev/urandom или на
--- большой файл): f:read('*a') блокировал бы master в init_by_lua и стенд
--- не поднимался. Реальный секрет — ~44 байта; 1024 даёт большой запас и
--- гарантированно завершается за один read. Если у кого-то когда-то появится
--- нужда в более длинных ключах — поднять этот предел осознанно.
+-- A hard ceiling on the file size — protection from a mis-mount (if
+-- CHALLENGE_HMAC_SECRET_FILE accidentally pointed at /dev/urandom or at a
+-- large file): f:read('*a') would block the master in init_by_lua and the stand
+-- would not come up. A real secret is ~44 bytes; 1024 leaves plenty of room and
+-- is guaranteed to finish in one read. If anyone ever needs longer keys,
+-- raise this limit deliberately.
 local MAX_BYTES = 1024
 
 local _M = {}
 
--- Trim trailing newline/whitespace, оставив тело base64 нетронутым.
+-- Trim the trailing newline and whitespace, leaving the base64 body untouched.
 local function rstrip(s)
     return (s:gsub("[%s%c]+$", ""))
 end
 
--- 8-hex prefix of sha256(secret). Используется в /__version и /__admin как
--- безопасный маркер, что reload подхватил именно ожидаемый файл. Сам secret
--- наружу не выводится никогда.
+-- The 8-hex prefix of sha256(secret). Used in /__version and /__admin as a
+-- safe marker that the reload picked up the file we expected. The secret itself
+-- is never exposed.
 local function fingerprint(secret)
     local sha256 = require "resty.sha256"
     local h = sha256:new()
     h:update(secret)
     local digest = h:final()
-    -- digest — 32 raw байта; превращаем первые 4 в 8 hex.
+    -- The digest is 32 raw bytes; we turn the first four into 8 hex characters.
     return (digest:sub(1, 4):gsub(".", function(c)
         return string.format("%02x", c:byte())
     end))
@@ -63,12 +63,12 @@ local function clear(dict)
     dict:delete(KEY_FP)
 end
 
--- load(path) — читает файл, валидирует, кладёт в shared_dict. Любой
--- failure-режим (нет файла / пустой / короче MIN_BYTES) логируется и
--- вычищает прежнее значение в dict (fail-closed: пусть consumers C3/C5
--- увидят «секрета нет» и пропустят cookie verify/issue, чем будут работать
--- со stale секретом). Вызывается из init_by_lua, поэтому ngx.log
--- доступен. Возвращает true при успехе, false иначе — для тестов.
+-- load(path) — reads the file, validates it and puts it into the shared_dict. Any
+-- failure mode (no file / empty / shorter than MIN_BYTES) is logged and
+-- clears the previous value in the dict (fail-closed: better that consumers C3/C5
+-- see "there is no secret" and skip the cookie verify/issue than work
+-- with a stale secret). It is called from init_by_lua, so ngx.log is
+-- available. It returns true on success and false otherwise — for the tests.
 function _M.load(path)
     if type(path) ~= "string" or path == "" then
         ngx.log(ngx.ERR, "challenge_secret: load(path) needs a non-empty string, got ",
@@ -91,9 +91,9 @@ function _M.load(path)
         clear(dict)
         return false
     end
-    -- Bounded read: MAX_BYTES + 1, чтобы отличить «ровно по лимиту» от
-    -- «больше лимита» (защита от мисмаунта на /dev/urandom или большой файл —
-    -- f:read('*a') блокировал бы master в init_by_lua).
+    -- A bounded read: MAX_BYTES + 1, to tell "exactly at the limit" from
+    -- "over the limit" (protection from a mis-mount onto /dev/urandom or a large file —
+    -- f:read('*a') would block the master in init_by_lua).
     local raw = f:read(MAX_BYTES + 1)
     f:close()
     if not raw then
@@ -136,9 +136,9 @@ function _M.load(path)
     return true
 end
 
--- get() — для C3 (verify) и C5 (issue). Возвращает (secret, fp) или nil
--- если secret не загружен. Consumers обязаны проверять nil и не пытаться
--- подписывать/проверять при его отсутствии — фастпас cookie просто пропускается.
+-- get() — for C3 (verify) and C5 (issue). It returns (secret, fp) or nil
+-- if the secret is not loaded. Consumers must check for nil and not attempt to
+-- sign or verify without one — the cookie fastpath is simply skipped.
 function _M.get()
     local dict = ngx.shared[DICT_NAME]
     if not dict then return nil end
@@ -147,9 +147,9 @@ function _M.get()
     return secret, dict:get(KEY_FP)
 end
 
--- fingerprint() — публичный 8-hex маркер для /__version и /__admin.
--- Возвращает nil если secret не загружен. Сам secret эта функция не
--- касается — read-only из dict.
+-- fingerprint() — the public 8-hex marker for /__version and /__admin.
+-- It returns nil if the secret is not loaded. This function never touches
+-- the secret itself — it is read-only from the dict.
 function _M.fingerprint()
     local dict = ngx.shared[DICT_NAME]
     if not dict then return nil end
