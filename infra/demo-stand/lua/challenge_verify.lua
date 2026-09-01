@@ -1,27 +1,27 @@
 -- challenge_verify.lua — POST /__challenge/verify endpoint (C5).
 --
--- Phase 4, vision §5.2 «Ветка A». Принимает JSON-payload от JS-solver'a из
+-- Phase 4, vision §5.2 "Branch A". It accepts the JSON payload from the JS solver in
 -- challenge/page.html: { nonce, token, cascade_version, not_a_robot, fp }.
--- При успехе — выписывает clearance cookie через clearance.issue (тот же
--- HMAC scheme, что и L2.1 verify, C3) и отдает 200, JS reload'ит исходный
--- URL и теперь проходит каскад фастпасом по cookie_valid.
+-- On success it issues a clearance cookie through clearance.issue (the same
+-- HMAC scheme as the L2.1 verify, C3) and answers 200; the JS reloads the original
+-- URL and now fastpaths the cascade on cookie_valid.
 --
--- Endpoint живёт ОТДЕЛЬНО от verdict.lua: верификация запроса с
--- неподписанной cookie уже ушла на /__challenge через ngx.exec из verdict
--- pipeline'a; этот же запрос с answer'ом приходит на новый URL вне каскада
--- (carve-out в nginx.demo.conf), иначе grey-verdict повторно бы выкинул на
--- challenge до того, как мы успели бы выписать cookie.
+-- The endpoint lives SEPARATELY from verdict.lua: verification of a request with
+-- an unsigned cookie already went to /__challenge through ngx.exec from the verdict
+-- pipeline; the same request carrying the answer arrives at a new URL outside the cascade
+-- (a carve-out in nginx.demo.conf), otherwise the grey verdict would bounce it back to
+-- a challenge before we managed to issue the cookie.
 --
--- Контракт payload — pinned к шаблону через cascade_version. Любое
--- расхождение полей / JS_SECRET / endpoint path требует одновременного
--- bump'a CASCADE_VERSION (challenge/README.md). cascade_version в POST
--- сверяется с серверной — защита от stale-кеша браузера со старой
--- challenge-страницей (бы prокидывала старый nonce-формат после rollout'a).
+-- The payload contract is pinned to the template through cascade_version. Any
+-- divergence of fields / JS_SECRET / the endpoint path requires bumping
+-- CASCADE_VERSION at the same time (challenge/README.md). The cascade_version in the POST
+-- is compared with the server's — protection against a stale browser cache holding an old
+-- challenge page (which would send the old nonce format after a rollout).
 --
--- Single-use nonce. Replay-защита по vision §5.2 строится на TTL (60с) +
--- single-use: первый успешный verify nonce'a кладёт его HMAC-сегмент в
--- ngx.shared.used_nonces с TTL = exp - now + slack; повторный verify того
--- же nonce'a (replay в окне expiry) отдаёт `consumed` и 403.
+-- A single-use nonce. Replay protection per vision §5.2 rests on the TTL (60 s) plus
+-- single use: the first successful verify of a nonce puts its HMAC segment into
+-- ngx.shared.used_nonces with TTL = exp - now + slack; a repeat verify of the same
+-- nonce (a replay inside the expiry window) returns `consumed` and a 403.
 
 local cjson  = require "cjson.safe"
 local hmac   = require "resty.openssl.hmac"
@@ -37,35 +37,35 @@ if not ok_config then config = nil end
 
 local _M = {}
 
--- JS_SECRET — должен совпадать с константой в challenge/page.html. Это
--- «pepper», который превращает nonce-only POST в proof-of-JS-execution:
--- бот без JS-движка hash не посчитает. Криптостойкость даёт HMAC nonce'a
--- (challenge.issue_nonce), pepper — только сигнал «JS реально выполнен».
--- Ротация (новое значение pepper) обязательна одновременно с bump'ом
--- CASCADE_VERSION — иначе старый шаблон в браузерном кеше отправит token
--- от старого pepper'a, и verify будет давать `bad_token` (false-positive).
+-- JS_SECRET — must match the constant in challenge/page.html. It is the
+-- "pepper" that turns a nonce-only POST into proof of JS execution: a
+-- bot with no JS engine cannot compute the hash. The cryptographic strength comes from the nonce's HMAC
+-- (challenge.issue_nonce); the pepper is only the signal "JS really executed".
+-- Rotating it (a new pepper value) is mandatory together with a bump of
+-- CASCADE_VERSION — otherwise an old template in a browser cache sends a token
+-- from the old pepper and verify returns `bad_token` (a false positive).
 local JS_SECRET = "tf_challenge_v1_proof_of_execution"
 
--- Cookie TTL — vision §2.1/§5.3 «86400 в нормальном режиме / 3600 при
--- attack_mode=on». Выбор per-request по `policy.get(host).attack_mode`
--- ИМЕННО для того host'a, на который пришёл запрос (vision §2.1: включение
--- attack_mode у одного клиента не трогает TTL чужих cookie — cookie
--- скоупится Domain=<host>). Короткий under_attack TTL — это и есть метка
--- «during-attack» для L2.1 verify (C7): такой cookie фастпасит до конца
--- атаки, а длинные pre-attack cookie под атакой не фастпасят (clearance.lua
--- RESULT_STALE_PRE_ATTACK). DEFAULT_COOKIE_TTL — fallback, если конфиг не
--- загружен.
+-- The cookie TTL — vision §2.1/§5.3, "86400 in normal mode / 3600 under
+-- attack_mode=on". The choice is made per request from `policy.get(host).attack_mode`
+-- for EXACTLY the host the request came to (vision §2.1: one customer enabling
+-- attack_mode does not touch another's cookie TTLs — a cookie is
+-- scoped Domain=<host>). The short under_attack TTL is itself the
+-- "during-attack" marker for the L2.1 verify (C7): such a cookie fastpaths until the attack
+-- ends, while long pre-attack cookies do not fastpath under attack (clearance.lua
+-- RESULT_STALE_PRE_ATTACK). DEFAULT_COOKIE_TTL is the fallback when the config is not
+-- loaded.
 local DEFAULT_COOKIE_TTL = 86400
 
--- Max request body — JSON-payload (~500B типично c fp). 4KiB запас на
--- разрастание fp-поля (canvas/audio fingerprints в будущем) и отсечка
--- spam-payload'ов до парсинга JSON.
+-- The max request body — the JSON payload (~500 B typically, with a fingerprint). 4 KiB leaves room for
+-- the fingerprint field to grow (canvas/audio fingerprints in future) and cuts
+-- spam payloads before the JSON is parsed.
 local MAX_BODY_BYTES = 4096
 
--- Result codes — пишутся в `antibot_challenge_invalid_total{reason}`
--- метрику. Названия совпадают с phase2-spec/rules-reference терминами
--- (bad_nonce / expired / replay / bad_token / wrong_version), плюс
--- bookkeeping-исходы (body / json / shape).
+-- The result codes — written into the `antibot_challenge_invalid_total{reason}`
+-- metric. The names match the phase2-spec/rules-reference terms
+-- (bad_nonce / expired / replay / bad_token / wrong_version), plus the
+-- bookkeeping outcomes (body / json / shape).
 _M.REASON_BAD_NONCE     = "bad_nonce"
 _M.REASON_EXPIRED       = "expired"
 _M.REASON_REPLAY        = "replay"
@@ -76,9 +76,9 @@ _M.REASON_BAD_METHOD    = "bad_method"
 _M.REASON_NO_SECRET     = "no_secret"
 
 -- b64url decode mirroring challenge.lua / clearance.lua (RFC 4648 §5,
--- no padding). Вынесено как локальная функция, не shared util — три
--- разных модуля держат собственную копию для минимизации coupling
--- (см. clearance.lua и challenge.lua).
+-- no padding). Kept as a local function rather than a shared util — three
+-- different modules keep their own copy to minimise coupling
+-- (see clearance.lua and challenge.lua).
 local function b64url_decode(s)
     if type(s) ~= "string" then return nil end
     s = s:gsub("-", "+"):gsub("_", "/")
@@ -87,11 +87,11 @@ local function b64url_decode(s)
     return ngx.decode_base64(s)
 end
 
--- Constant-time compare — той же формы, что и в clearance.lua. Используется
--- ТОЛЬКО для HMAC-байтового сравнения (sig vs expected). Token (hex SHA-256
--- от nonce+JS_SECRET) тоже сравниваем через ct_eq — даже если timing-oracle
--- через JS_SECRET в нашей модели меньше критичен (pepper, не secret),
--- защищает от подбора знака по таймингу при будущей замене на per-host
+-- A constant-time compare of the same shape as in clearance.lua. It is used
+-- ONLY for the byte comparison of the HMAC (sig vs expected). The token (the hex SHA-256
+-- of nonce+JS_SECRET) is also compared through ct_eq — even though a timing oracle
+-- over JS_SECRET is less critical in our model (a pepper, not a secret), it
+-- protects against guessing a character by timing should this later become a per-host
 -- pepper.
 local function ct_eq(a, b)
     if type(a) ~= "string" or type(b) ~= "string" then return false end
@@ -104,10 +104,10 @@ local function ct_eq(a, b)
 end
 
 -- verify_nonce(nonce, host) → (payload_table, sig_b64) | nil, reason
--- HMAC-стресс-тест nonce'a: парс шаблона `<payload_b64>.<sig_b64>`, HMAC
+-- HMAC stress test of the nonce: parse the `<payload_b64>.<sig_b64>` template, the HMAC
 -- recompute, ct_eq, payload decode, exp/host check. NO single-use here —
--- consume_nonce делается ПОСЛЕ token-проверки, иначе bad_token POST'ы
--- съедали бы валидный nonce и легитимный retry ломался бы.
+-- consume_nonce happens AFTER the token check, otherwise bad_token POSTs
+-- would eat a valid nonce and a legitimate retry would break.
 function _M.verify_nonce(nonce, host)
     if type(nonce) ~= "string" or nonce == "" then
         return nil, _M.REASON_BAD_NONCE
@@ -122,10 +122,10 @@ function _M.verify_nonce(nonce, host)
         return nil, _M.REASON_NO_SECRET
     end
 
-    -- HMAC recompute. Mirrors challenge.issue_nonce: payload_b64 — что
-    -- подписывалось (НЕ raw payload-JSON). Расхождение «что подписывали»
-    -- vs «что проверяем» — основной класс багов HMAC-схем, поэтому
-    -- читателю стоит держать оба места в одном глазу.
+    -- The HMAC recompute. It mirrors challenge.issue_nonce: payload_b64 is what
+    -- was signed (NOT the raw payload JSON). A divergence between "what we signed"
+    -- and "what we verify" is the main class of bug in HMAC schemes, so the
+    -- reader should keep both places in view at once.
     local h, herr = hmac.new(key, "sha256")
     if not h then
         ngx.log(ngx.ERR, "challenge_verify: hmac.new: ", herr)
@@ -150,7 +150,7 @@ function _M.verify_nonce(nonce, host)
         return nil, _M.REASON_BAD_NONCE
     end
 
-    -- Payload достоверен — HMAC прошёл. Decode + проверка exp/host.
+    -- The payload is trustworthy — the HMAC passed. Decode plus the exp/host check.
     local payload_json = b64url_decode(payload_b64)
     if not payload_json then
         return nil, _M.REASON_BAD_NONCE
@@ -165,9 +165,9 @@ function _M.verify_nonce(nonce, host)
         return nil, _M.REASON_EXPIRED
     end
 
-    -- Host-binding: nonce подписан под конкретный host. Cross-tenant
-    -- replay (получил nonce на site-A, шлёт verify на site-B) даже при
-    -- общем HMAC secret'е пула отвергается.
+    -- Host binding: the nonce was signed for a specific host. A cross-tenant
+    -- replay (obtain a nonce on site A, send the verify to site B) is rejected even with
+    -- the pool's shared HMAC secret.
     if type(payload.h) ~= "string" or payload.h == "" or payload.h ~= host then
         return nil, _M.REASON_BAD_NONCE
     end
@@ -176,7 +176,7 @@ function _M.verify_nonce(nonce, host)
 end
 
 -- verify_token(nonce, token) → bool. token = hex(SHA-256(nonce || JS_SECRET)).
--- Сравниваем как байтовые строки через ct_eq.
+-- We compare them as byte strings through ct_eq.
 function _M.verify_token(nonce, token)
     if type(nonce) ~= "string" or type(token) ~= "string" then return false end
     if #token ~= 64 then return false end  -- hex sha256 = 64 chars
@@ -191,19 +191,19 @@ function _M.verify_token(nonce, token)
 end
 
 -- consume_nonce(sig_b64, exp) → true on first use, false otherwise.
--- Ключом single-use берем HMAC-сегмент (а не весь nonce): он уникален
--- by construction (HMAC по payload), короче чем payload+sig, и не
--- утекает host'a в shared dict. TTL = exp - now + 5s slack — записи
--- автоматически сметаются после истечения nonce'a, не накапливаются.
+-- We use the HMAC segment as the single-use key (rather than the whole nonce): it is unique
+-- by construction (an HMAC over the payload), shorter than payload+sig, and does not
+-- leak the host into the shared dict. TTL = exp - now + 5 s of slack — entries
+-- are swept automatically once the nonce expires and do not accumulate.
 --
--- `dict:add` различает два класса отказа: `err == "exists"` — реальный
--- replay (nonce уже потреблён в окне TTL), `err == "no memory"` —
--- shared_dict переполнен и LRU не нашёл что вытеснить. Без отдельного
--- ERR-лога OOM маскировался бы под replay (gemini review on PR #87) —
--- метрика `challenge_invalid_total{reason="replay"}` росла бы при OOM,
--- хотя проблема в `lua_shared_dict used_nonces` sizing'е. Логируем ERR
--- и продолжаем fail-closed (тот же 403 для клиента — лучше отказать,
--- чем выписать cookie на возможный replay).
+-- `dict:add` distinguishes two classes of failure: `err == "exists"` is a real
+-- replay (the nonce was already consumed inside the TTL window), while `err == "no memory"`
+-- means the shared_dict is full and LRU found nothing to evict. Without a dedicated
+-- ERR log, OOM would masquerade as a replay (from review) —
+-- the `challenge_invalid_total{reason="replay"}` metric would grow under OOM
+-- while the real problem is the `lua_shared_dict used_nonces` sizing. We log an ERR
+-- and continue fail-closed (the same 403 for the client — better to refuse
+-- than to issue a cookie on a possible replay).
 function _M.consume_nonce(sig_b64, exp)
     local dict = ngx.shared.used_nonces
     if not dict then
@@ -221,9 +221,9 @@ function _M.consume_nonce(sig_b64, exp)
     return false
 end
 
--- bump_counter — все challenge-метрики живут в ngx.shared.metrics.
--- Невыделение отдельного шорткаката (как в verdict.lua) — модуль вызывается
--- единственным content_by_lua, нет hot-path'a.
+-- bump_counter — every challenge metric lives in ngx.shared.metrics.
+-- No dedicated shortcut (unlike verdict.lua) — the module is called by a
+-- single content_by_lua and has no hot path.
 local function bump(key)
     local m = ngx.shared.metrics
     if m then m:incr(key, 1, 0) end
@@ -233,8 +233,8 @@ local function bump_invalid(reason)
     bump("challenge_invalid_" .. reason .. "_total")
 end
 
--- handle() — content_by_lua entry. Не вызывается из verdict.lua (carve-out
--- в nginx config: location /__challenge/verify без access_by_lua).
+-- handle() — the content_by_lua entry point. It is not called from verdict.lua (a carve-out
+-- in the nginx config: location /__challenge/verify without access_by_lua).
 function _M.handle()
     if ngx.req.get_method() ~= "POST" then
         bump_invalid(_M.REASON_BAD_METHOD)
@@ -246,8 +246,8 @@ function _M.handle()
     if not body or body == "" then
         -- get_body_data() returns nil if body was written to disk
         -- (client_body_buffer_size overflow) — but MAX_BODY_BYTES <
-        -- буфера, так что для нашего payload'a этого не случится; пустое
-        -- тело реально означает «клиент не прислал ничего».
+        -- buffer, so that cannot happen for our payload; an empty
+        -- body really does mean "the client sent nothing".
         bump_invalid(_M.REASON_BAD_BODY)
         return ngx.exit(400)
     end
@@ -262,12 +262,12 @@ function _M.handle()
         return ngx.exit(400)
     end
 
-    -- Cascade version pin. Шаблон зашит на конкретную версию каскада
-    -- (challenge/page.html `data-cascade-version` + meta). После bump'a
-    -- браузер с закешированной старой страницей придёт сюда со старой
-    -- `cascade_version` — отвергаем (иначе old-format payload пройдёт
-    -- невалидно). Сравниваем со значением, которое challenge.preload()
-    -- проверил на init и положил в template_version().
+    -- The cascade version pin. The template is bound to a specific cascade version
+    -- (challenge/page.html `data-cascade-version` plus the meta tag). After a bump, a
+    -- browser with the old page cached arrives here with the old
+    -- `cascade_version` — we reject it (otherwise an old-format payload would pass
+    -- invalidly). We compare against the value challenge.preload()
+    -- checked at init and stored in template_version().
     local server_version
     local challenge_mod = require "challenge"
     server_version = challenge_mod.template_version()
@@ -279,12 +279,12 @@ function _M.handle()
 
     local host = ngx.var.host or ""
     if host == "" then
-        -- Empty host обычно значит сломанный upstream/proxy (request без
-        -- Host header'a, HTTP/1.0 без него, разделено proxy_set_header).
-        -- Без host'a verify_nonce упадёт на host-binding, а clearance.issue
-        -- — на 'host required'. Возвращаем bad_body чтобы не пачкать
-        -- no_secret/bad_nonce метрики, которые сигналят разные операционные
-        -- проблемы (code-review on PR #87).
+        -- An empty host usually means a broken upstream or proxy (a request with no
+        -- Host header, HTTP/1.0 without one, or proxy_set_header splitting it).
+        -- Without a host, verify_nonce fails on the host binding and clearance.issue
+        -- fails on 'host required'. We return bad_body so as not to pollute the
+        -- no_secret/bad_nonce metrics, which signal different operational
+        -- problems (from code review).
         bump_invalid(_M.REASON_BAD_BODY)
         return ngx.exit(400)
     end
@@ -299,25 +299,25 @@ function _M.handle()
         -- NOT consuming nonce here: legitimate retry from same page (e.g.
         -- transient subtle.digest failure → user reloads) should still
         -- be possible within the TTL window. Replay protection kicks in
-        -- only on a SUCCESSFUL verify (consume_nonce ниже).
+        -- only on a SUCCESSFUL verify (consume_nonce below).
         bump_invalid(_M.REASON_BAD_TOKEN)
         return ngx.exit(403)
     end
 
-    -- Single-use: атомарный add в shared dict. Первый — true, повторный
-    -- (replay в окне TTL) — false. Делаем ПОСЛЕ token verify, чтобы
-    -- неуспешный POST не сжигал валидный nonce (см. комментарий выше).
+    -- Single use: an atomic add into the shared dict. The first is true, a repeat
+    -- (a replay inside the TTL window) is false. We do it AFTER the token verify, so that
+    -- an unsuccessful POST does not burn a valid nonce (see the comment above).
     if not _M.consume_nonce(sig_b64, nonce_payload.exp) then
         bump_invalid(_M.REASON_REPLAY)
         return ngx.exit(403)
     end
 
-    -- Cookie TTL (C7). defaults.conf [allow.cookie_valid] держит две точки:
-    -- `ttl_seconds_normal` (vision §2.1 — 86400) и `ttl_seconds_under_attack`
-    -- (vision §2.1/§5.3 — 3600 при attack_mode=on). Ключ выбираем по
-    -- attack_mode ИМЕННО этого host'a: под атакой выписываем короткий
-    -- under_attack TTL — это during-attack-метка, по которой L2.1 verify
-    -- продолжает фастпасить cookie до конца атаки (см. clearance.lua).
+    -- The cookie TTL (C7). defaults.conf [allow.cookie_valid] holds two points:
+    -- `ttl_seconds_normal` (vision §2.1 — 86400) and `ttl_seconds_under_attack`
+    -- (vision §2.1/§5.3 — 3600 under attack_mode=on). We pick the key by
+    -- the attack_mode of EXACTLY this host: under attack we issue the short
+    -- under_attack TTL — the during-attack marker that lets the L2.1 verify
+    -- keep fastpathing the cookie until the attack ends (see clearance.lua).
     local ttl = DEFAULT_COOKIE_TTL
     if config and type(config.defaults) == "table" then
         local allow = config.defaults.allow
@@ -338,16 +338,16 @@ function _M.handle()
         return ngx.exit(500)
     end
 
-    -- Set-Cookie атрибуты — vision §5.2: HttpOnly, Secure, SameSite=Lax,
-    -- Domain=<host> (без leading dot), Path=/.
+    -- The Set-Cookie attributes — vision §5.2: HttpOnly, Secure, SameSite=Lax,
+    -- Domain=<host> (with no leading dot), Path=/.
     --
-    -- Domain attr опускаем для IPv4/IPv6/localhost: per RFC 6265 §5.2.3
+    -- We omit the Domain attribute for IPv4/IPv6/localhost: per RFC 6265 §5.2.3
     -- «If the user agent receives a cookie with a Domain attribute that
     -- contains an IP address, the user agent MUST silently ignore the
-    -- cookie», то же для `localhost`. Без атрибута браузер создаст
-    -- host-only cookie (отправляется только на этот же хост) — это и
-    -- ожидаемое поведение для демо-стенда / интеграционного харнесса,
-    -- который часто бьёт по IP/`localhost` (gemini review on PR #87).
+    -- cookie", and the same for `localhost`. Without the attribute the browser creates a
+    -- host-only cookie (sent only to that same host) — which is the
+    -- expected behaviour for the demo stand and the integration harness,
+    -- which often hit it by IP or `localhost` (from review).
     local cookie_name = clearance.cookie_name()
     local domain_attr = ""
     local is_ipv4    = host:match("^%d+%.%d+%.%d+%.%d+$") ~= nil
@@ -364,19 +364,19 @@ function _M.handle()
 
     bump("challenge_solved_total")
 
-    -- BAC_LOG challenge-pass event (vision §5.2 «Сбор browser fingerprint
-    -- для аналитики ... Уезжает вместе с challenge-pass-событием по тому
-    -- же пути, что и обычные логи»). Endpoint вне verdict.lua, поэтому
-    -- bac_log.init() здесь явный; emit() пишет в stdout + enqueue'ит в
-    -- log_shipper (тот же канал, что у обычных запросов). Без этого
-    -- block браузерный fingerprint, собранный JS solver'ом, никогда не
-    -- доезжал бы до backend telemetry — а это явный contract из vision
+    -- The BAC_LOG challenge-pass event (vision §5.2, "Collecting the browser fingerprint
+    -- for analytics ... it travels with the challenge-pass event along the
+    -- same path as ordinary logs"). The endpoint sits outside verdict.lua, so
+    -- bac_log.init() is explicit here; emit() writes to stdout and enqueues into
+    -- log_shipper (the same channel as ordinary requests). Without this
+    -- block the browser fingerprint collected by the JS solver would never
+    -- reach the backend telemetry — and that is an explicit contract from the vision
     -- (codex review on PR #87).
     --
-    -- verdict=allow, rule=challenge_pass — отдельный rule-код, чтобы
-    -- аналитика отличала «прошел challenge» от других allow-веток
-    -- (cookie_valid / bot_verified / ip_whitelist). Соответствует
-    -- entities-reference Phase 4 категории challenge events.
+    -- verdict=allow, rule=challenge_pass — a dedicated rule code, so that
+    -- analytics can tell "solved the challenge" from the other allow branches
+    -- (cookie_valid / bot_verified / ip_whitelist). It matches the
+    -- entities-reference Phase 4 category of challenge events.
     local bac_log = require "bac_log"
     bac_log.init()
     bac_log.set_verdict("verification", "allow", "challenge_pass")
@@ -392,15 +392,15 @@ function _M.handle()
     -- verdict.lua:176-177).
     local ja4 = require "ja4_compute"
     bac_log.set_tls_fp(ja4.compute())
-    -- payload.fp пришёл из attacker-controlled JSON (body уже капнут
-    -- MAX_BODY_BYTES, но fp как поддерево может занимать почти весь
-    -- лимит и при глубокой вложенности завалить cjson.encode в
-    -- bac_log.emit — emit вернётся раньше с ERR-логом, и challenge-pass
-    -- запись пропадёт целиком (атакующий молча получает cookie без
-    -- audit-trail; code-review on PR #87). Pre-validate: encode здесь
-    -- через cjson.safe, проверяем размер, и только тогда отдаём в
-    -- bac_log. На неудачу — fp=nil + WARN; cookie всё равно выписана,
-    -- но bac_log.emit точно не упадёт и запись challenge_pass дойдёт.
+    -- payload.fp came from attacker-controlled JSON (the body is already capped at
+    -- MAX_BODY_BYTES, but fp as a subtree can occupy almost the whole
+    -- limit and, if deeply nested, break cjson.encode inside
+    -- bac_log.emit — emit would return early with an ERR log and the challenge-pass
+    -- record would vanish entirely (the attacker silently gets a cookie with no
+    -- audit trail; from code review). We pre-validate: encode here
+    -- through cjson.safe, check the size, and only then hand it to
+    -- bac_log. On failure — fp=nil plus a WARN; the cookie is still issued,
+    -- but bac_log.emit definitely will not break and the challenge_pass record arrives.
     local FP_MAX_BYTES = 2048
     local fp_to_log
     if type(payload.fp) == "table" then
@@ -416,9 +416,9 @@ function _M.handle()
     bac_log.set_challenge_fp(fp_to_log)
     bac_log.emit()
 
-    -- 200 OK + пустое тело: JS на page.html делает window.location.reload(),
-    -- браузер ушлёт новый GET с прикрепленным cookie, и каскад фастпасит
-    -- на L2.1 (clearance.verify → RESULT_VALID).
+    -- 200 OK with an empty body: the JS on page.html calls window.location.reload(),
+    -- the browser sends a fresh GET with the cookie attached, and the cascade fastpaths
+    -- at L2.1 (clearance.verify → RESULT_VALID).
     ngx.status = 200
     ngx.header.content_type = "text/plain; charset=utf-8"
     ngx.print("ok")

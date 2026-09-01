@@ -1,5 +1,5 @@
 -- L3 tls_fp soft-rule + tag stage (rules-reference L3 #11/#12 + tags T2–T4;
--- phase2-spec "Правила этапа"; vision §"UA-family ↔ fp mismatch").
+-- phase2-spec "Rules of the stage"; vision §"A UA family ↔ fingerprint mismatch").
 --
 -- This module owns the NON-blocking part of the tls_fp stage. The blocking
 -- part (tls_fp_blocklist → ngx.exit(403)) stays inline in verdict.lua because
@@ -16,8 +16,8 @@
 -- stage name `tls_fp` rather than `ua_fp_consistency` (which would not cover
 -- suspicious_ciphers or the tags).
 --
--- Soft rules (category soft → накапливают флаг в `flags`; финальный verdict
--- решает L5/verification.lua по Strictness + attack_mode, см. C4):
+-- Soft rules (the soft category → they accumulate a flag in `flags`; the final verdict
+-- is decided by L5/verification.lua from Strictness plus attack_mode, see C4):
 --   * tls_fp_impersonator       — UA claims a browser family, but the fp's
 --                                 hash_b matches a known automation signature
 --                                 in tls_fp_catalog (UA Chrome + fp = curl/
@@ -39,24 +39,24 @@
 --                            profile) AND the IP is in a datacenter ASN (the
 --                            reputation:asn_dc tag set upstream this request).
 --
--- Observe-only (phase2-spec "Каскад в MVP только наблюдает"): run() записывает
--- флаги/теги через bac_log, никогда не делает ngx.exit и никогда не
--- short-circuit'ит. До C4 здесь же ставился verdict=challenge для soft-
--- сигналов; после C4 это убрано — L5/verification.lua принимает решение,
--- уважая Strictness и attack_mode. Терминальный block по-прежнему
--- не затирается soft-флагом (block остаётся `rule`, soft-флаг живёт в
--- `flags`) — это гарантирует verification.decide(): при verdict=="block"
--- он молча возвращает nil и оставляет терминал нетронутым.
+-- Observe-only (phase2-spec, "in the MVP the cascade only observes"): run() records
+-- flags and tags through bac_log, never calls ngx.exit and never
+-- short-circuits. Before C4 this is also where verdict=challenge was set for soft
+-- signals; after C4 that is gone — L5/verification.lua takes the decision,
+-- honouring Strictness and attack_mode. A terminal block is still
+-- not clobbered by a soft flag (the block stays in `rule` and the soft flag lives in
+-- `flags`) — verification.decide() guarantees that: with verdict=="block"
+-- it silently returns nil and leaves the terminal untouched.
 --
 -- Config model. After PR2 (ADR-006) tls_fp_catalog and tls_fp_browser_profiles
--- live in git-репо `catalogs/` и приезжают через Channel C: backend читает
--- YAML в catalog server, edge polls via catalog_pull.lua + atomic-swap в
--- shared_dict. refresh() — gen-cached rebuild per-worker, дёшево на каждом
--- run(), rebuild только при flip'е. До первого pull действует cold-start
--- fallback (COLD_START_PROFILES); после profiles_landed() → fallback OFF,
--- backend single source of truth. Pre-PR2 INI-парсинг в config.lua удалён.
+-- live in the `catalogs/` git repo and arrive over Channel C: the backend reads the
+-- YAML into the catalog server, the edge polls through catalog_pull.lua plus an atomic swap into a
+-- shared_dict. refresh() is a gen-cached per-worker rebuild, cheap on every
+-- run(), rebuilding only on a flip. Until the first pull, the cold-start
+-- fallback applies (COLD_START_PROFILES); after profiles_landed() → the fallback goes OFF and the
+-- backend is the single source of truth. The pre-PR2 INI parsing in config.lua was removed.
 --
--- Staging (A11, phase2-spec §"Staged rollout для PR-каталогов"). Catalog
+-- Staging (A11, phase2-spec §"Staged rollout for PR catalogs"). Catalog
 -- entries with status=staging are kept OUT of the active lookup tables (so they
 -- never produce a verdict/rule even in active mode) and instead compiled into
 -- parallel *_staging tables. When a staged entry matches the same way its
@@ -229,22 +229,22 @@ end
 -- pure: tls_fp_suspicious_ciphers decision. Fires when the UA claims a browser
 -- family with a known profile AND the observed cipher_count differs from it.
 -- Unknown family (no profile) or an unparseable cipher_count never fires.
--- Cold-start fallback для is_suspicious_ciphers / fp_looks_like_browser:
--- маленькая статичная карта семейств → expected_cipher_cnt. До PR2
--- (ADR-006) эти значения жили в infra/demo-stand/config/tls_fp_browser_profiles.conf
--- и парсились в init_by_lua, поэтому каскад работал с первой секунды и
--- продолжал работать даже при недоступном backend. После PR2 каталог
--- приезжает через Channel C, есть ~30 сек cold-start window после рестарта
--- + неограниченный простой при недоступном backend. Fallback закрывает
--- оба сценария.
+-- The cold-start fallback for is_suspicious_ciphers / fp_looks_like_browser:
+-- a small static map of families → expected_cipher_cnt. Before PR2
+-- (ADR-006) these values lived in infra/demo-stand/config/tls_fp_browser_profiles.conf
+-- and were parsed in init_by_lua, so the cascade worked from the first second and
+-- kept working even with the backend unavailable. After PR2 the catalog
+-- arrives over Channel C, leaving a ~30 s cold-start window after a restart
+-- plus an unbounded outage while the backend is unavailable. The fallback covers
+-- both scenarios.
 --
--- ВАЖНО (PR-62 re-review): fallback активен ТОЛЬКО до первого успешного
--- Channel C pull (`profiles_landed()` ниже). После того как gen флипнулся
--- хотя бы один раз (gen >= 1), Channel C — единственный source of truth:
--- если backend намеренно убрал/изменил профиль (chrome ушёл с 15 → 16,
--- или удалили целиком), edge ДОЛЖЕН follow'ить backend, не залипать на
--- старом захардкоженном значении. Без этого условия always-on fallback
--- маскировал бы реальные обновления каталога.
+-- IMPORTANT (from re-review): the fallback is active ONLY until the first successful
+-- Channel C pull (`profiles_landed()` below). Once the gen has flipped
+-- at least once (gen >= 1), Channel C is the only source of truth:
+-- if the backend deliberately removed or changed a profile (chrome moved from 15 → 16,
+-- or it was deleted entirely), the edge MUST follow the backend rather than sticking to
+-- the old hardcoded value. Without that condition an always-on fallback
+-- would mask real catalog updates.
 local COLD_START_PROFILES = {
     chrome  = 15,
     firefox = 16,
@@ -252,28 +252,28 @@ local COLD_START_PROFILES = {
     edge    = 15,
 }
 
--- profiles_landed — true если хотя бы один успешный Channel C pull
--- доставил tls_fp_browser_profiles в shared_dict (refresh() сдвинул
--- _cached_gen_profiles в число > 0). До этого момента fallback легитимен;
--- после — backend авторитетен даже если прислал пустой каталог.
+-- profiles_landed — true if at least one successful Channel C pull
+-- delivered tls_fp_browser_profiles into the shared_dict (refresh() moved
+-- _cached_gen_profiles to a number > 0). Until then the fallback is legitimate;
+-- afterwards the backend is authoritative even if it sent an empty catalog.
 --
--- Если `_M._cached_gen_profiles` пуст (тесты вызывают is_*-helpers
--- напрямую без refresh) — считаем как cold start (fallback on), чтобы
--- сохранить детерминизм юнит-тестов независимо от ngx-инициализации.
+-- If `_M._cached_gen_profiles` is empty (tests call the is_* helpers
+-- directly without refresh), we treat it as a cold start (fallback on), to
+-- keep the unit tests deterministic regardless of ngx initialisation.
 local function profiles_landed()
     local g = _M._cached_gen_profiles
     return type(g) == "number" and g > 0
 end
 
 -- is_suspicious_ciphers: returns true if `cc` doesn't match the expected
--- cipher count for `ua_family`. `profiles` — таблица для проверки (active
--- ИЛИ staging). `allow_fallback` (default false) — разрешать ли cold-start
--- fallback к COLD_START_PROFILES, когда дикт пуст и Channel C ещё не
--- landed. PR-62 round-6: fallback применять ТОЛЬКО для active-call (где
--- цель — детекция baseline до первого pull). Для staging-call —
--- запрещено: иначе пустая staging-таблица + не-landed gen эмитят
--- фантомные `staging_match` для каждого браузера с нестандартным
--- cipher_count, отравляя promotion-метрики несуществующими signatures.
+-- cipher count for `ua_family`. `profiles` is the table to check (active
+-- OR staging). `allow_fallback` (default false) decides whether the cold-start
+-- fallback to COLD_START_PROFILES is permitted when the dict is empty and Channel C has not yet
+-- landed. From review: apply the fallback ONLY for the active call (where the
+-- goal is baseline detection before the first pull). For the staging call it is
+-- forbidden: otherwise an empty staging table plus a not-landed gen emits
+-- phantom `staging_match` events for every browser with a non-standard
+-- cipher_count, poisoning the promotion metrics with signatures that do not exist.
 function _M.is_suspicious_ciphers(ua_family, cc, profiles, allow_fallback)
     local expected = profiles[ua_family]
     if not expected and allow_fallback and not profiles_landed() then
@@ -287,16 +287,16 @@ end
 -- pure: is the fp browser-shaped? Used for the tls_fp:dc_browser cross-layer
 -- tag — the L3 half of the signal. We treat "cipher_count matches some browser
 -- profile" as browser-shaped: it's a property of the TLS stack (the fp), not
--- of the spoofable UA, which is what "fp выглядит как браузер" means.
+-- of the spoofable UA, which is what "the fingerprint looks like a browser" means.
 function _M.fp_looks_like_browser(cc, profiles)
     if not cc then return false end
     for _, expected in pairs(profiles) do
         if cc == expected then return true end
     end
-    -- Fallback ТОЛЬКО на cold start (до первого Channel C pull). После
-    -- успешного pull dynamic-table — окончательный источник; пустой dynamic
-    -- значит «backend намеренно не профилирует ни одного браузера», ни
-    -- одного истинного match быть не должно.
+    -- The fallback applies ONLY on a cold start (before the first Channel C pull). After a
+    -- successful pull the dynamic table is final; an empty dynamic table
+    -- means "the backend deliberately profiles no browser at all", and not a
+    -- single true match should occur.
     if not profiles_landed() then
         for _, expected in pairs(COLD_START_PROFILES) do
             if cc == expected then return true end
@@ -313,17 +313,17 @@ function _M.has_tag(tags, want)
     return false
 end
 
--- Called once in init_by_lua, after config.load(). После PR2 (ADR-006)
--- tls_fp_catalog / tls_fp_browser_profiles больше не INI-файлы на эдже —
--- их Channel C тащит из git-репо catalogs/ через backend (см.
--- catalog_pull.lua descriptors). Здесь только cold-start: ставим пустые
--- lookup-таблицы; первая успешная pull в catalog_pull.fetch заполнит
--- shared_dict, а refresh() в run() построит per-worker Lua-таблицы по
--- этому snapshot'у. blocklist_staging тоже Channel C-based (86exrtjpc):
--- refresh() строит его из tls_fp_blocklist shared_dict; на init таблица пуста,
--- staged fps приедут с первым pull. Локальный tls_fp_blocklist.conf остаётся
--- только cold-start seed для ACTIVE fps (init.lua), staging через него больше
--- не наблюдается.
+-- Called once in init_by_lua, after config.load(). After PR2 (ADR-006)
+-- tls_fp_catalog / tls_fp_browser_profiles are no longer INI files on the edge —
+-- Channel C pulls them from the catalogs/ git repo through the backend (see
+-- the catalog_pull.lua descriptors). Only the cold start happens here: we set empty
+-- lookup tables; the first successful pull in catalog_pull.fetch fills the
+-- shared_dict, and refresh() in run() builds the per-worker Lua tables from
+-- that snapshot. blocklist_staging is Channel C-based too:
+-- refresh() builds it from the tls_fp_blocklist shared_dict; at init the table is empty and
+-- staged fingerprints arrive with the first pull. The local tls_fp_blocklist.conf remains
+-- only a cold-start seed for ACTIVE fingerprints (init.lua), and staging is no longer
+-- observed through it.
 function _M.build(config)
     _M.catalog          = {}
     _M.profiles         = {}
@@ -344,33 +344,33 @@ function _M.build(config)
     _M._cached_gen_profiles  = nil
     _M._cached_gen_blocklist = nil
 
-    -- Staged-таблицы пусты на init (pull ещё не запускался); их счётчики
-    -- видны в /metrics и в bac_log staging_match после первого тика
-    -- catalog_pull (≤ 30 сек). build() ничего не возвращает кроме модуля —
-    -- init.lua вызывает его только ради side-effects.
+    -- The staged tables are empty at init (no pull has run yet); their counters
+    -- appear in /metrics and in bac_log staging_match after the first
+    -- catalog_pull tick (≤ 30 s). build() returns nothing but the module —
+    -- init.lua calls it purely for the side effects.
     return _M
 end
 
--- refresh — читает текущий gen из meta:get(gen_key) и, если он отличается
--- от закешированного для этого worker'а, пересобирает Lua-таблицы
--- _M.catalog / _M.catalog_staging (и аналогично profiles) из shared_dict.
--- Дешево в steady state: один meta:get на катаолог + сравнение чисел.
--- Rebuild — только когда Channel C доставил новый snapshot (≈ раз в 30с).
--- Вызывается в начале run(), чтобы каскад работал на актуальном catalog'е
--- без явного pub/sub между catalog_pull и tls_fp.
+-- refresh — reads the current gen from meta:get(gen_key) and, if it differs
+-- from the one cached for this worker, rebuilds the Lua tables
+-- _M.catalog / _M.catalog_staging (and likewise the profiles) from the shared_dict.
+-- Cheap in steady state: one meta:get per catalog plus a number comparison.
+-- A rebuild happens only when Channel C delivered a new snapshot (≈ every 30 s).
+-- It is called at the start of run(), so that the cascade works from the current catalog
+-- with no explicit pub/sub between catalog_pull and tls_fp.
 --
--- Вариант с per-request dict:get_keys(0) был отвергнут: для tls_fp_catalog
--- размер маленький (десятки), но dict:get_keys лочит shared_dict на время
--- скана, что добавляет latency-вариативности per-request. Per-gen rebuild
--- амортизирует это до одного lock'а на pull.
+-- The per-request dict:get_keys(0) variant was rejected: for tls_fp_catalog
+-- the size is small (dozens), but dict:get_keys locks the shared_dict for the
+-- duration of the scan, which adds per-request latency variance. A per-gen rebuild
+-- amortises that down to one lock per pull.
 --
--- Performance trade-off (PR-62 gemini high): `dict:get_keys(0)` лочит весь
--- shared_dict на время скана. Для tls_fp_catalog (<100 записей) и
--- tls_fp_browser_profiles (≈5 записей) лок измеряется микросекундами —
--- допустимо. Если каталог вырастет за ~10K записей, нужно завести
--- side-index «keys-of-gen-N» в `meta` shared_dict и итерировать по нему
--- (тот же план оставлен открытым для fp_blocklist / verified_bot_ips,
--- см. комментарий в catalog_pull.lua sweep).
+-- The performance trade-off (from review): `dict:get_keys(0)` locks the whole
+-- shared_dict for the scan. For tls_fp_catalog (<100 entries) and
+-- tls_fp_browser_profiles (≈5 entries) the lock is measured in microseconds —
+-- acceptable. If a catalog grows past ~10K entries we will need a
+-- "keys-of-gen-N" side index in the `meta` shared_dict and iterate over it
+-- (the same plan is left open for fp_blocklist / verified_bot_ips,
+-- see the comment in the catalog_pull.lua sweep).
 local function rebuild_from_dict(dict_name, cur_gen, builder)
     local dict = ngx.shared[dict_name]
     if not dict then return {}, {} end
@@ -386,34 +386,34 @@ local function rebuild_from_dict(dict_name, cur_gen, builder)
     return builder(wire)
 end
 
--- reconcile_staging_metrics — на каждом gen flip Channel C-каталога:
---   1) Сидирует counter `staging:<catalog>:<pattern_id>` со значением 0 в
---      metrics shared_dict для всех entries новой staging-таблицы. Это
---      даёт promotion-дашбордам видеть «staged signature объявлена, ноль
---      матчей» вместо «metric absent» (отличает «PR landed, traffic не
---      было» от «PR не доехал»).
---   2) Удаляет counter ключи для entries, которые БЫЛИ в предыдущей
---      staging-таблице, но исчезли из новой (promoted-to-active или
---      удалены). Без этого stale counter живёт в metrics dict до LRU
---      eviction, и дашборд показывает фантомную «staged, zero traffic»
---      запись для signature, которую продакт уже promoted (PR-62 round 6).
+-- reconcile_staging_metrics — on every gen flip of a Channel C catalog:
+--   1) It seeds the counter `staging:<catalog>:<pattern_id>` with 0 in
+--      the metrics shared_dict for every entry of the new staging table. That
+--      lets promotion dashboards see "a staged signature is declared, zero
+--      matches" instead of "metric absent" (telling "the PR landed but there was no
+--      traffic" from "the PR never arrived").
+--   2) It deletes the counter keys for entries that WERE in the previous
+--      staging table but are gone from the new one (promoted to active or
+--      removed). Without that a stale counter lives in the metrics dict until LRU
+--      eviction, and the dashboard shows a phantom "staged, zero traffic"
+--      entry for a signature product has already promoted (from review).
 --
--- При unsupported metrics dict (нет declaration в nginx.conf) — silent
--- noop. При ошибке записи (no_memory под shm pressure) — лог WARN: фикс
--- silent-failure от round-5 (safe_add возвращает nil без exception, не
--- делает LRU evict — counter просто не появится, дашборд увидит «metric
--- absent» вопреки контракту).
+-- With an unsupported metrics dict (no declaration in nginx.conf) it is a silent
+-- no-op. On a write error (no_memory under shm pressure) it logs a WARN: the fix
+-- for the silent failure found in review (safe_add returns nil without an exception and does not
+-- LRU-evict — the counter simply never appears and the dashboard sees "metric
+-- absent" against the contract).
 local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging)
     local m = ngx.shared.metrics
     if not m then return end
     local prefix = "staging:" .. catalog_name .. ":"
 
-    -- Add zero counter для новых entries. Под shm pressure safe_add может
-    -- вернуть (nil, "no memory") для каждого entry. Hybrid log policy
-    -- (PR-62 round-8): первые VERBOSE_LIMIT failures логируем с pattern_id
-    -- (важно для дебага non-OOM ошибок типа «key too long», unique
-    -- collision); остальные агрегируем в один WARN. Сохраняем читаемость
-    -- лога под high-volume failures и attribution под low-volume.
+    -- Add a zero counter for the new entries. Under shm pressure safe_add can
+    -- return (nil, "no memory") for every entry. A hybrid log policy
+    -- (from review): the first VERBOSE_LIMIT failures are logged with the pattern_id
+    -- (which matters for debugging non-OOM errors like "key too long" or a unique
+    -- collision); the rest are aggregated into a single WARN. That keeps the log readable
+    -- under high-volume failures and attributable under low-volume ones.
     local VERBOSE_LIMIT = 3
     local fail_count, last_err = 0, nil
     for pattern_id in pairs(new_staging) do
@@ -434,12 +434,12 @@ local function reconcile_staging_metrics(catalog_name, prev_staging, new_staging
             " additional failures elided (last err: ", tostring(last_err), ")")
     end
 
-    -- Delete counter для entries, которых больше нет в new (promoted-to-active
-    -- или удалены). Но ТОЛЬКО если value == 0 — иначе мы стираем
-    -- accumulated match count (история staging→active промоута, нужна
-    -- promotion-дашборду). PR-62 round-7 trade-off: phantom entries (всегда 0)
-    -- чистим; entries с реальной историей оставляем «zombie» — operator
-    -- может вычистить вручную, но мы не теряем данные.
+    -- Delete the counter for entries that are no longer in new (promoted to active
+    -- or removed). But ONLY when value == 0 — otherwise we erase the
+    -- accumulated match count (the history of a staging→active promotion, which the
+    -- promotion dashboard needs). The trade-off from review: phantom entries (always 0)
+    -- are cleaned; entries with real history are left as "zombies" — an operator
+    -- can clear them by hand, but we do not lose data.
     if prev_staging then
         for pattern_id in pairs(prev_staging) do
             if not new_staging[pattern_id] then
@@ -461,12 +461,12 @@ function _M.refresh()
     if cat_gen ~= _M._cached_gen_catalog then
         local active, staging = rebuild_from_dict(
             "tls_fp_catalog", cat_gen, _M.build_catalog)
-        -- PR-62 round-8: swap до reconcile, чтобы log_event.incr из
-        -- параллельного запроса не race'нул с reconcile.delete-if-zero
-        -- (после swap run() уже не видит promoted/removed pattern в
-        -- staging-таблице → не вызывает incr → delete безопасен).
-        -- `prev_staging` всё ещё доступен через локальную ссылку на
-        -- ранее присвоенную table (Lua table-by-reference).
+        -- From review: swap before reconcile, so that log_event.incr from a
+        -- parallel request does not race with reconcile's delete-if-zero
+        -- (after the swap, run() no longer sees a promoted/removed pattern in the
+        -- staging table → it never calls incr → the delete is safe).
+        -- `prev_staging` is still reachable through the local reference to the
+        -- previously assigned table (Lua tables are by reference).
         local prev_staging = _M.catalog_staging
         _M.catalog          = active
         _M.catalog_staging  = staging
@@ -503,13 +503,13 @@ function _M.refresh()
 end
 
 -- Record a soft challenge flag. The flag is always accumulated (vision.md:
--- flags = every soft signal seen along the path). C4: терминальный verdict
--- больше НЕ выставляется здесь — soft-сигналы только КОПЯТСЯ, а решение
--- «выдавать challenge» принимает L5 (verification.lua) с учётом
--- per-resource Strictness и attack_mode. До C4 эта функция писала
--- verdict=challenge напрямую, что нарушало rules-reference §"L3/L4 флаги
--- ... сами на L3/L4 challenge не выдают — они только помечают запрос;
--- единственная точка, где принимается решение — этот вызов на L5".
+-- flags = every soft signal seen along the path). C4: the terminal verdict is
+-- NO LONGER set here — the soft signals only ACCUMULATE, and the decision
+-- to "issue a challenge" is taken at L5 (verification.lua), honouring the
+-- per-resource Strictness and attack_mode. Before C4 this function wrote
+-- verdict=challenge directly, which broke rules-reference §"the L3/L4 flags
+-- ... never issue a challenge themselves at L3/L4; they only mark the request, and the
+-- single point where the decision is taken is this call at L5".
 local function fire_soft(bac_log, rule)
     bac_log.add_flag(rule)
 end
@@ -524,7 +524,7 @@ function _M.run(fp)
     -- Pull-in latest Channel C snapshot for tls_fp_catalog / tls_fp_browser_profiles.
     -- Cheap in steady state (one meta:get per gen-key, compare to cached
     -- worker-local int); rebuilds Lua tables only when gen flips (≈ pull
-    -- interval, 30s по умолчанию).
+    -- interval, 30 s by default).
     _M.refresh()
 
     local bac_log = package.loaded["bac_log"] or require "bac_log"
