@@ -1,116 +1,137 @@
-# WAF — справочник сущностей (серия W)
+# WAF — entity reference (the W series)
 
-Термины и определения WAF-оси + таблицы сущностей: стадия `waf`, каталог `waf_rules`, теги/флаги, поля per-host WAF-профиля, поля лога, перечисления. Источник правды по поведению — [waf-spec.md](waf-spec.md). Перечень правил — [waf-rules-reference.md](waf-rules-reference.md), форматы — [waf-config-templates.md](waf-config-templates.md).
+Terms and definitions of the WAF axis, plus entity tables: the `waf` stage, the
+`waf_rules` catalog, tags and flags, the per-host WAF profile fields, log fields and
+enumerations. The source of truth for behaviour is [waf-spec.md](waf-spec.md). The rule
+list is [waf-rules-reference.md](waf-rules-reference.md), and the formats are in
+[waf-config-templates.md](waf-config-templates.md).
 
-**Статус:** проектный контракт (целевое поведение); движок (build-vs-buy) не выбран — открыт (решается спайком + архитектурным решением). Имена стадии/каталога/флагов/полей контрактны и держатся независимо от выбора движка.
-
----
-
-## Термины
-
-| Термин                     | Определение                                                                                                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **WAF**                    | Контентная инспекция L7 на сигнатуры атак — негативная модель безопасности (ищем известные плохие паттерны). Добавляет в каскад стадию `waf`.                                                                                     |
-| **Негативная модель**      | Подход «блокируем известное плохое». WAF реализует именно её. Комплемент — позитивная модель (контракт API: что РАЗРЕШЕНО), описана отдельной спекой; модели применяются вместе, WAF её не заменяет.                                  |
-| **Стадия `waf`**           | Новая стадия каскада контентной инспекции. Копит флаги `waf:*` и на критичных правилах сама делает hard-block через `policy.enforce` (по аналогии с `tls_fp_blocklist`). Встаёт после дешёвых identity-проверок и позитивного контракта, до rate_limits. |
-| **Движок `waf.lua`**       | Реализация стадии: пре-процессор нормализации + матч сигнатур. Путь реализации (своя Lua / Coraza+CRS / гибрид) выбирается спайком + архитектурным решением; до него код не коммитим.                                                                     |
-| **Каталог `waf_rules`**    | Набор сигнатур атак, доставляемый на proxy через Channel C ровно как `tls_fp_blocklist`: git — единственный источник истины, PR-only + CODEOWNERS, staged rollout, `git revert`. Формат правил определяется выбранным движком.        |
-| **Сигнатура**              | Одно правило-паттерн внутри `waf_rules` под конкретный класс атаки или CVE. Имеет id, класс, критичность, статус (staging/active). Внутренности (regex/seclang) абстрактны до выбора движка.                                                |
-| **Флаг (`waf:*`)**         | Challenge-flag, который soft-правило WAF ставит на запрос (`waf:sqli`, `waf:xss`, …). Сам не блокирует — копится и консолидируется на L5, как остальные soft-флаги каскада.                                                           |
-| **Критичное правило**      | Сигнатура категории `blocking critical`: при матче делает прямой hard-block через `policy.enforce`, не дожидаясь L5.                                                                                                                  |
-| **Per-host WAF-профиль**   | Расширение policy домена: `waf_enabled`, `waf_paranoia`, `waf_disabled_rules`. Редактируется через per-host политику (PATCH). Независим от `mode`/`strictness`.                                                                          |
-| **Paranoia**               | Уровень чувствительности WAF (`waf_paranoia`): сколько правил включено и насколько агрессивно. Аналог уровней paranoia в CRS. Влияет на охват сигнатур, не на mode-gate.                                                              |
-| **Virtual patching**       | Точечное правило-щит под конкретную CVE/эндпоинт клиента — запись в `waf_rules` с быстрым PR-воркфлоу. Закрывает дыру на эдже, пока origin патчат.                                                                                    |
-| **Нормализация**           | Общий пре-процессор ПЕРЕД сигнатурами (URL-decode, unicode, comment-strip), без которого тривиален evasion. Применяется к цели инспекции до матча.                                                                                   |
-| **mode-gate (`policy.enforce`)** | Механизм shadow→active: в shadow вердикт WAF пишется в лог, но физически не исполняется; в active критичные правила реально блокируют. Переиспользуется из каскада без изменений.                                              |
+**Status:** a design contract (target behaviour); the engine (build versus buy) is not
+chosen and remains open (settled by a spike plus an architectural decision). The names of
+the stage, catalog, flags and fields are contractual and hold regardless of the engine
+choice.
 
 ---
 
-## Стадия
+## Terms
 
-| Имя   | Соответствует            | Что делает                                                                                                          | Источник данных |
-| ----- | ------------------------ | ------------------------------------------------------------------------------------------------------------------- | --------------- |
-| `waf` | новая стадия инспекции контента | Нормализует и матчит цели инспекции (query/body/headers/path) на сигнатуры; ставит флаги `waf:*`; критичные правила → `policy.enforce` | `waf_rules`     |
-
-Порядок в каскаде: `hygiene → [contract (Q)] → reputation → tls_fp → [waf] → rate_limits → verification`. Точное место фиксируется при реализации; инвариант — после дешёвых identity-проверок и позитивного контракта, до дорогих поведенческих лимитов.
-
----
-
-## Каталог
-
-| Имя         | Что внутри                                                                                          | Кто наполняет     | Доставка                                  | Прецедент             |
-| ----------- | --------------------------------------------------------------------------------------------------- | ----------------- | ----------------------------------------- | --------------------- |
-| `waf_rules` | Сигнатуры атак (SQLi, XSS, path-traversal, command-injection, SSRF/LFI) + virtual-patch правила; каждая запись с id, классом, критичностью, статусом | Продакт/команда через PR (CODEOWNERS) | Channel C (git → proxy), как `tls_fp_blocklist` | `tls_fp_blocklist` — блокирующий каталог через PR + staged rollout |
-
-**Staged rollout** для `waf_rules`: новые сигнатуры добавляются в `staging` — матчатся и пишутся в `staging_match`, но не приводят к hard-block даже в `mode=active`. После калибровки (отсутствие false-positive) — отдельный PR в `active`. CI-валидация (синтаксис/компиляция) перед мержем.
-
----
-
-## Флаги (challenge-flags WAF) — копятся в `flags`, консолидируются на L5
-
-| Код                       | Класс атаки         | Где ставится | Что означает                                                                       |
-| ------------------------- | ------------------- | ------------ | ---------------------------------------------------------------------------------- |
-| `waf:sqli`                | SQL-инъекция        | стадия `waf` | Сигнатура SQLi в query/body                                                         |
-| `waf:xss`                 | XSS                 | стадия `waf` | Сигнатура XSS в query/body/headers                                                  |
-| `waf:path_traversal`      | path-traversal      | стадия `waf` | Сигнатура обхода директорий / нулевые байты / протокольные аномалии пути            |
-| `waf:command_injection`   | command-injection   | стадия `waf` | Сигнатура внедрения shell-команд                                                    |
-| `waf:ssrf_lfi`            | SSRF/LFI            | стадия `waf` | Сигнатура обращения к внутренним адресам / локальным файлам                         |
-| `waf:virtual_patch`       | virtual patch (CVE) | стадия `waf` | Совпадение с точечным правилом-щитом под конкретную CVE/эндпоинт                    |
-
-soft-правила WAF копят эти флаги в поле `flags` лога; критичные правила тех же классов вместо флага делают `policy.enforce`. Решение по soft-флагам принимает L5 (`verification`), как и по остальным soft-сигналам каскада.
+| Term | Definition |
+| --- | --- |
+| **WAF** | L7 content inspection against attack signatures — a negative security model (we look for known-bad patterns). It adds the `waf` stage to the cascade. |
+| **Negative model** | The "block the known bad" approach. This is exactly what the WAF implements. Its complement is the positive model (an API contract: what is PERMITTED), described in a separate spec; the models are applied together and the WAF does not replace it. |
+| **The `waf` stage** | A new content-inspection stage of the cascade. It accumulates `waf:*` flags and, for critical rules, performs a hard block itself through `policy.enforce` (by analogy with `tls_fp_blocklist`). It sits after the cheap identity checks and the positive contract, before rate_limits. |
+| **The `waf.lua` engine** | The implementation of the stage: a normalisation preprocessor plus signature matching. The implementation path (our own Lua / Coraza+CRS / a hybrid) is chosen by a spike plus an architectural decision; no code is committed before it. |
+| **The `waf_rules` catalog** | The set of attack signatures delivered to the proxy over Channel C exactly like `tls_fp_blocklist`: git is the single source of truth, PR-only plus CODEOWNERS, staged rollout, `git revert`. The rule format follows from the chosen engine. |
+| **Signature** | One pattern rule inside `waf_rules` for a specific attack class or CVE. It has an id, a class, a criticality and a status (staging/active). The internals (regex/seclang) stay abstract until the engine is chosen. |
+| **Flag (`waf:*`)** | The challenge flag a soft WAF rule places on a request (`waf:sqli`, `waf:xss`, …). It does not block by itself — it accumulates and is consolidated at L5, like the cascade's other soft flags. |
+| **Critical rule** | A signature of the `blocking critical` category: on a match it performs a direct hard block through `policy.enforce`, without waiting for L5. |
+| **Per-host WAF profile** | An extension of a domain's policy: `waf_enabled`, `waf_paranoia`, `waf_disabled_rules`. Edited through the per-host policy (PATCH). Independent of `mode`/`strictness`. |
+| **Paranoia** | The WAF sensitivity level (`waf_paranoia`): how many rules are enabled and how aggressively. The analogue of CRS paranoia levels. It affects signature coverage, not the mode gate. |
+| **Virtual patching** | A targeted shield rule for a specific CVE or customer endpoint — an entry in `waf_rules` with a fast PR workflow. It closes the hole at the edge while the origin is being patched. |
+| **Normalisation** | The shared preprocessor that runs BEFORE the signatures (URL decode, unicode, comment stripping), without which evasion is trivial. It is applied to the inspection target before matching. |
+| **mode gate (`policy.enforce`)** | The shadow→active mechanism: in shadow the WAF verdict is logged but not physically enforced; in active the critical rules really block. Reused from the cascade unchanged. |
 
 ---
 
-## Поля per-host WAF-профиля (внутри policy домена)
+## The stage
 
-| Поле                 | Тип             | Описание                                                                                                                | Дефолт   |
-| -------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------- | -------- |
-| `waf_enabled`        | boolean         | Включена ли WAF-инспекция для домена. `false` — стадия `waf` пропускается целиком                                        | `false`  |
-| `waf_paranoia`       | enum            | Уровень чувствительности (см. перечисление ниже) — сколько/насколько агрессивно правил включено                         | `low`    |
-| `waf_disabled_rules` | array of string | id правил из `waf_rules`, выключенных для этого домена (точечное подавление ложняков конкретного клиента)                | `[]`     |
+| Name | Corresponds to | What it does | Data source |
+| --- | --- | --- | --- |
+| `waf` | a new content-inspection stage | Normalises and matches the inspection targets (query/body/headers/path) against signatures; sets `waf:*` flags; critical rules → `policy.enforce` | `waf_rules` |
 
-Редактируются через per-host политику (PATCH). Не зависят от `mode`/`strictness`: `mode` управляет shadow/active исполнением, WAF-профиль — охватом инспекции.
-
----
-
-## Поля лога, относящиеся к WAF
-
-WAF пишет в общий JSON-лог `bac_log` и переиспользует существующие поля каскада. Класс-специфика отражается во флагах/метках, отдельных WAF-полей не вводится сверх необходимого.
-
-| Поле            | Тип             | Как заполняет WAF                                                                                                       |
-| --------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `stage`         | string (enum)   | `waf` — когда финальное (критичное) правило сработало на этой стадии                                                     |
-| `verdict`       | string (enum)   | `block` — при срабатывании критичного WAF-правила (`policy.enforce`); иначе вердикт определяет L5                        |
-| `rule`          | string          | id сработавшего критичного WAF-правила                                                                                   |
-| `flags`         | array of string | накопленные soft-флаги `waf:*` (наряду с прочими soft-флагами каскада)                                                   |
-| `staging_match` | array of string | сработавшие staging-сигнатуры WAF, формат `waf_rules:<rule_id>` — не приводят к вердикту, для аналитики промоута         |
-
-Метрика: `antibot_rule_total{stage="waf",...}` инкрементится на каждый матч (active и staging).
+The order in the cascade:
+`hygiene → [contract (Q)] → reputation → tls_fp → [waf] → rate_limits → verification`.
+The exact position is pinned down at implementation time; the invariant is: after the
+cheap identity checks and the positive contract, before the expensive behavioural limits.
 
 ---
 
-## Перечисления (enums)
+## The catalog
 
-### `waf_paranoia` — уровень чувствительности WAF
+| Name | What is inside | Who populates it | Delivery | Precedent |
+| --- | --- | --- | --- | --- |
+| `waf_rules` | Attack signatures (SQLi, XSS, path traversal, command injection, SSRF/LFI) plus virtual-patch rules; each entry with an id, class, criticality and status | Product / the team, through PRs (CODEOWNERS) | Channel C (git → proxy), like `tls_fp_blocklist` | `tls_fp_blocklist` — a blocking catalog through PRs plus staged rollout |
 
-| Значение | Поведение                                                                                                          |
-| -------- | ------------------------------------------------------------------------------------------------------------------ |
-| `low` *(дефолт)* | Включено только ядро однозначных сигнатур; минимум ложняков. Стартовый уровень для нового домена.          |
-| `medium` | + эвристики средней агрессивности. Баланс охвата и ложняков.                                                       |
-| `high`   | Максимально агрессивный набор. Аналог высокого paranoia в CRS; требует тюнинга `waf_disabled_rules`. CRS paranoia 3+ — вне MVP. |
+**Staged rollout** for `waf_rules`: new signatures are added as `staging` — they match and
+are written to `staging_match`, but never lead to a hard block, even in `mode=active`.
+After calibration (no false positives) a separate PR moves them to `active`. CI validation
+(syntax and compilation) runs before a merge.
 
-Соответствие уровней конкретным правилам — часть содержимого `waf_rules` и калибруется через staged rollout.
+---
 
-### Категория WAF-правила
+## Flags (the WAF challenge flags) — they accumulate in `flags` and are consolidated at L5
 
-| Значение            | Что делает                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------- |
-| `blocking critical` | Прямой hard-block через `policy.enforce` (403) на стадии `waf`, не дожидаясь L5              |
-| `soft flag`         | Ставит challenge-flag `waf:*`; финальное решение — на L5 (`verification`)                    |
+| Code | Attack class | Where it is set | What it means |
+| --- | --- | --- | --- |
+| `waf:sqli` | SQL injection | the `waf` stage | An SQLi signature in the query or body |
+| `waf:xss` | XSS | the `waf` stage | An XSS signature in the query, body or headers |
+| `waf:path_traversal` | path traversal | the `waf` stage | A directory-escape signature, null bytes or protocol anomalies in the path |
+| `waf:command_injection` | command injection | the `waf` stage | A shell command injection signature |
+| `waf:ssrf_lfi` | SSRF/LFI | the `waf` stage | A signature of reaching internal addresses or local files |
+| `waf:virtual_patch` | a virtual patch (CVE) | the `waf` stage | A match against a targeted shield rule for a specific CVE or endpoint |
 
-### Статус сигнатуры (staged rollout)
+Soft WAF rules accumulate these flags in the log's `flags` field; critical rules of the
+same classes call `policy.enforce` instead of setting a flag. The decision on soft flags is
+taken by L5 (`verification`), as with the cascade's other soft signals.
 
-| Значение  | Поведение                                                                                                          |
-| --------- | ------------------------------------------------------------------------------------------------------------------ |
-| `staging` | Сигнатура матчится, факт пишется в `staging_match`, но не приводит к hard-block даже в `mode=active`               |
-| `active`  | Полноценное правило: критичное блокирует через `policy.enforce`, soft ставит флаг                                  |
+---
+
+## Per-host WAF profile fields (inside a domain's policy)
+
+| Field | Type | Description | Default |
+| --- | --- | --- | --- |
+| `waf_enabled` | boolean | Whether WAF inspection is on for the domain. `false` skips the `waf` stage entirely | `false` |
+| `waf_paranoia` | enum | The sensitivity level (see the enumeration below) — how many rules are enabled and how aggressively | `low` |
+| `waf_disabled_rules` | array of string | The ids of rules from `waf_rules` disabled for this domain (targeted suppression of one customer's false positives) | `[]` |
+
+They are edited through the per-host policy (PATCH). They do not depend on
+`mode`/`strictness`: `mode` governs shadow versus active enforcement, while the WAF profile
+governs inspection coverage.
+
+---
+
+## Log fields relating to the WAF
+
+The WAF writes into the shared `bac_log` JSON log and reuses the cascade's existing fields.
+Class specifics are reflected in the flags and markers; no dedicated WAF fields are
+introduced beyond what is necessary.
+
+| Field | Type | How the WAF fills it |
+| --- | --- | --- |
+| `stage` | string (enum) | `waf` — when the final (critical) rule fired at this stage |
+| `verdict` | string (enum) | `block` — when a critical WAF rule fired (`policy.enforce`); otherwise L5 determines the verdict |
+| `rule` | string | The id of the critical WAF rule that fired |
+| `flags` | array of string | The accumulated `waf:*` soft flags (alongside the cascade's other soft flags) |
+| `staging_match` | array of string | WAF staging signatures that matched, in the form `waf_rules:<rule_id>` — they lead to no verdict and exist for promotion analytics |
+
+Metric: `antibot_rule_total{stage="waf",...}` increments on every match (active and
+staging).
+
+---
+
+## Enumerations
+
+### `waf_paranoia` — the WAF sensitivity level
+
+| Value | Behaviour |
+| --- | --- |
+| `low` *(default)* | Only the core of unambiguous signatures is enabled; minimal false positives. The starting level for a new domain. |
+| `medium` | Plus heuristics of medium aggressiveness. A balance of coverage and false positives. |
+| `high` | The most aggressive set. The analogue of high paranoia in CRS; it needs tuning through `waf_disabled_rules`. CRS paranoia 3+ is out of MVP scope. |
+
+Which rules correspond to which level is part of the `waf_rules` content and is calibrated
+through staged rollout.
+
+### The WAF rule category
+
+| Value | What it does |
+| --- | --- |
+| `blocking critical` | A direct hard block through `policy.enforce` (403) at the `waf` stage, without waiting for L5 |
+| `soft flag` | Sets a `waf:*` challenge flag; the final decision is taken at L5 (`verification`) |
+
+### Signature status (staged rollout)
+
+| Value | Behaviour |
+| --- | --- |
+| `staging` | The signature matches and the hit is written to `staging_match`, but it never leads to a hard block, even in `mode=active` |
+| `active` | A fully operational rule: a critical one blocks through `policy.enforce`, a soft one sets a flag |
