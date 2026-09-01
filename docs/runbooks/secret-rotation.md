@@ -11,8 +11,8 @@ Rotation **invalidates every previously issued cookie** — that is by design
 loads the secret from a file into `lua_shared_dict challenge_secret` during
 `init_by_lua`. `openresty -s reload` re-runs `init_by_lua`, which rereads the
 file and overwrites the dict entry. Cookies signed with the old secret stop
-passing the constant-time HMAC verify at L2.1. On the stand, Channel A is a
-bind-mount of `infra/demo-stand/certs/challenge_secret.key` (not Puppet).
+passing the constant-time HMAC verify at L2.1. Channel A here is a bind mount of
+`infra/demo-stand/certs/challenge_secret.key`.
 
 ## Procedure (on the edge VM)
 

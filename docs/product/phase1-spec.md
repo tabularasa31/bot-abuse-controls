@@ -303,9 +303,9 @@ In the proxy config repository:
 Changes go through a PR with product review.
 
 **Cross-proxy consistency.** After a PR is merged, the new config version is delivered
-to the proxies through Puppet — not instantly, but with the delay of a Puppet run across
+to the proxies over Channel A — not instantly, but with the delay of a rollout across
 the pool (typically minutes). During that window different edge nodes may see different
-config versions, which is acceptable and by design. After the Puppet run window every
+config versions, which is acceptable and by design. After the rollout window every
 proxy is on the same version.
 
 ## Operations

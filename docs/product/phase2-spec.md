@@ -335,7 +335,7 @@ Changes go through a PR with product review. They are applied without a redeploy
 without losing customer traffic (the Phase 1 mechanism is inherited).
 
 **Cross-proxy consistency.** The same as in Phase 1: after a PR is merged, delivery
-through Puppet takes minutes, and during that window different edge nodes may see
+over Channel A takes minutes, and during that window different edge nodes may see
 different catalog versions. That is acceptable.
 
 ## Operations

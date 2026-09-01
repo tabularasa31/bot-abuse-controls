@@ -87,5 +87,4 @@ the PR body, change nothing), `--auto` (draft PR — the autopilot's mode).
 The analytics and its artifacts (`candidates.json` / `staging-observation.json` /
 `stale.json`) live on the **backend+obs VM** (`antibot-analytics`, sourced from
 Loki). The promote/demote/autopilot scripts run **there too, host-side** (they
-need a git checkout and gh). A Puppet-managed production edge is not our
-territory; our delivery path is git → backend → edge.
+need a git checkout and gh). The delivery path is git → backend → edge.

@@ -175,8 +175,8 @@ By the time the TLS handshake is finished and nginx has accepted the request, th
 
 - **The per-resource policy** for every customer domain served by this pool. For each domain (`Host`): `mode` (shadow / active), Strictness, custom UA patterns, the customer's ASN block, custom rate-limit rules, the attack_mode flag (meaningful only under mode=active), and the IP whitelist of legitimate server-side integrations (used at stage 2.3, so that server integrations and API clients from known IPs fastpath before they reach the challenge at L5).
 - **The shared catalogs:** `tls_fp_blocklist`, `tls_fp_catalog` (known automation signatures by TLS fingerprint), `ua_blacklist` (a combined regex over the UA — system automation signatures plus a curated bad-bot list), `ip_blocklist`, `ip_whitelist`, `asn_datacenters`, `bot_verification_status` (the three-state catalog of search engine bots: `verified` / `rejected` / absent — see stage 2.2), and `tls_fp_browser_profiles` (the expected cipher_cnt per browser family).
-- **The HMAC secret for the clearance cookie** — a single string shared across the whole edge pool, needed to sign the cookie at L5 (issued after a challenge, stage 5.2), to verify the cookie at L2 (stage 2.1) and to sign the challenge page's self-signed nonce — all without touching the backend. It is delivered through Puppet (Channel A) and loaded on the proxy at startup. Rotation:
-  - *Scheduled* (quarterly) — through a PR to the Puppet repo, a Puppet run and an nginx reload across the pool. The inconsistency window (some proxies on the new secret, others on the old) is a few minutes; during it, clients holding a cookie issued under one secret may get "invalid" on a proxy holding the other and re-solve the challenge. That is a one-off UX annoyance and is acceptable from a product standpoint.
+- **The HMAC secret for the clearance cookie** — a single string shared across the whole edge pool, needed to sign the cookie at L5 (issued after a challenge, stage 5.2), to verify the cookie at L2 (stage 2.1) and to sign the challenge page's self-signed nonce — all without touching the backend. It is delivered over Channel A and loaded on the proxy at startup. Rotation:
+  - *Scheduled* (quarterly) — through a PR, a rollout across the pool and an nginx reload. The inconsistency window (some proxies on the new secret, others on the old) is a few minutes; during it, clients holding a cookie issued under one secret may get "invalid" on a proxy holding the other and re-solve the challenge. That is a one-off UX annoyance and is acceptable from a product standpoint.
   - *Emergency* (a compromised secret) — escalated to the edge admins through a separate incident procedure. That is neither our channel nor our SLA; the admin team works to its own playbook. The inconsistency window is the same, but the rollout pace is chosen by the admin team according to the severity of the incident.
   Rotation invalidates every previously issued cookie — that is by design (part of the point of rotating).
 
@@ -424,7 +424,7 @@ So when `should_challenge()=true` the cascade chooses the verification mechanism
 
 **Branch A: the client looks like a browser** (the UA contains Mozilla/Chrome/Safari/Firefox/Edge and it passes the basic header checks) → a JS challenge:
 
-- The browser is shown an interstitial page, "Checking your connection…". The HTML+JS template of that page is delivered to the proxy as part of the cascade's Lua code through Channel A (Puppet); the JS version always matches the version of the cascade serving it. The proxy substitutes a self-signed nonce into the template — a token signed with the same HMAC secret as the clearance cookie, carrying a `timestamp`, `domain` and `expiry` (TTL 60 s). Since the secret is identical across the pool, any proxy can verify such a nonce — a client can receive the challenge on proxy A and answer through proxy B, and it all validates with no shared state and no call to the backend. Replay protection comes from `expiry`: if the nonce is older than 60 s, the proxy rejects it.
+- The browser is shown an interstitial page, "Checking your connection…". The HTML+JS template of that page is delivered to the proxy as part of the cascade's Lua code over Channel A; the JS version always matches the version of the cascade serving it. The proxy substitutes a self-signed nonce into the template — a token signed with the same HMAC secret as the clearance cookie, carrying a `timestamp`, `domain` and `expiry` (TTL 60 s). Since the secret is identical across the pool, any proxy can verify such a nonce — a client can receive the challenge on proxy A and answer through proxy B, and it all validates with no shared state and no call to the backend. Replay protection comes from `expiry`: if the nonce is older than 60 s, the proxy rejects it.
 - The page runs a JavaScript task:
   - **Proof of execution** — the browser solves a computational task over a one-time token (the nonce) the server issued. A real browser does it imperceptibly, in a fraction of a second; a bot that does not execute the page will not solve it, and a large farm pays a noticeable price per request — which makes cheap brute force unprofitable. The verification endpoint itself is protected from abuse: the nonce is burned on the very first verification attempt, successful or not (on a failure the client takes a new one), and `/__challenge/verify` is rate-limited — so one harvested nonce cannot be turned into a stream of verifications loading the proxy.
   - **An optional checkbox**, "Confirm you are human", shown when suspicion is high.
@@ -622,7 +622,7 @@ No manual operations on the proxies or in the database — the atomic data swap 
 
 **Who flips it.** The kill switch is an infrastructure-level operational mechanism, and the operator is always an admin. The Bot & Abuse Controls product team has no self-service button — during an incident the antibot team escalates to the admins with a description of exactly what to disable. A decision that protects or disables the whole pool has to go through the people responsible for the infrastructure.
 
-**How it is delivered.** Channel A — Puppet (see the "Configuration" section). A change to `defaults.conf` → a Puppet run across the pool → an nginx reload. The SLA is as fast as the admin team can run the procedure.
+**How it is delivered.** Channel A (see the "Configuration" section). A change to `defaults.conf` → a rollout across the pool → an nginx reload. The SLA is as fast as the admin team can run the procedure.
 
 **When to use it:**
 
@@ -693,7 +693,7 @@ All the data needed for the decisions is already prepared in the proxy's local m
 
 Two independent delivery channels, with different rhythms.
 
-### Channel A — Puppet (the framework, slow)
+### Channel A — the repo (the framework, slow)
 
 It carries:
 
@@ -705,9 +705,9 @@ It carries:
 
 It carries no binaries (there are none on the proxy — no antibot runtime processes beyond nginx with Lua itself).
 
-The rhythm: a PR to the edge's puppet repo → review → a Puppet agent run on the edge nodes. Minutes to hours. That is fine — the framework does not change per request or per customer.
+The rhythm: a PR → review → a rollout onto the edge nodes. Minutes to hours. That is fine — the framework does not change per request or per customer.
 
-The failure mode: if the Puppet agent fails on an edge node, that node keeps the previous version of the framework. `nginx -t` blocks broken configs before a reload.
+The failure mode: a node that fails to update keeps the previous version of the framework. `nginx -t` blocks broken configs before a reload.
 
 ### Channel C — catalogs from the backend to the proxy (runtime data, fast)
 
@@ -895,7 +895,7 @@ The browser fingerprint collected during the JS challenge (User-Agent, screen re
 
 | Team | What they do | Input artifacts |
 | --- | --- | --- |
-| **The admins** | Implementing the Lua cascade, integrating it into their nginx config on the edge pool, maintaining the configs through Puppet/Salt, enriching the logs with TLS fields | The Phase 1 spec (ready), the Phase 2 spec (ready), the integration spec for the pull channel (to be written as part of Phase 3) |
+| **The admins** | Implementing the Lua cascade, integrating it into their nginx config on the edge pool, maintaining the configs through their own configuration management, enriching the logs with TLS fields | The Phase 1 spec (ready), the Phase 2 spec (ready), the integration spec for the pull channel (to be written as part of Phase 3) |
 | **The backend team** | The antibot backend: the catalog store and its delivery to the proxies (the mechanism is the team's choice, the product contract is in the "Channel C" section), the background rDNS worker, the log receiver, HA, deployment | This document plus the catalog contract spec (TBD, as the first Phase 3 artifact) |
 | **The frontend team** | The per-resource policy UI (Strictness, rate rules, ASN, custom UA, the attack_mode toggle) and analytics | This document plus the page design (mockup TBD) |
 | **Product** | The default policies, populating the fingerprint catalog and the UA blacklist through PRs, calibrating the thresholds from the logs, acceptance | This document as the reference point |
@@ -931,7 +931,7 @@ The main points:
 5. **A new `unchallengeable_request` rule** (branch C): the request is protocol-incompatible with a JS challenge (not a GET, a WebSocket, an `Accept` without `text/html`).
 6. **A new `hygiene:header_anomaly` tag** (L1): anomalous header combinations (HTTP/2 without `Accept`). Informational, it blocks nothing.
 7. **Rate limits — GCRA is fixed.** Customer rate rules are checked before the system ones; the rule code `rate_custom` plus the log field `client_rule_name` (unique within a host).
-8. **The clearance cookie's attributes** are stated explicitly (HttpOnly / Secure / SameSite=Lax / Path / Domain). Cross-proxy challenges through a self-signed nonce. HMAC secret rotation: scheduled through Puppet plus an emergency admin playbook. The cookie TTL is a system constant (24 h / 1 h under attack).
+8. **The clearance cookie's attributes** are stated explicitly (HttpOnly / Secure / SameSite=Lax / Path / Domain). Cross-proxy challenges through a self-signed nonce. HMAC secret rotation: scheduled over Channel A plus an emergency admin playbook. The cookie TTL is a system constant (24 h / 1 h under attack).
 
 8b. **The `flags` log field.** The log gained an array of every challenge flag accumulated along the way (the soft rules) — separately from the terminal `rule`. It fulfils the overview's promise of "a log record with the rule, the flags and the tags" and gives analytics the co-occurrence of signals.
 8a. **The clearance cookie is a partial fastpath, not a full one.** A holder of a valid cookie skips L3 (the TLS fingerprint) and L5 (the challenge) but goes through L4 (rate limits) — a cookie confers no right to abuse (brute force, scraping). A full fastpath (skipping L3-L5) remains with verified bots and the IP whitelist only. It closes the "solve one challenge → hammer rate-free for the cookie's whole TTL" hole.
@@ -960,7 +960,7 @@ What changed:
 6. **The "How it looks in the dashboard" section was removed.** The UI scope moves to a separate task; this document only notes that a dashboard exists.
 7. **The "What runs in the background and in parallel" section** was gathered into one place, in three categories: continuous background processes (the catalog pull, the rDNS worker, log delivery), catalog and policy updates triggered by the customer or product (a policy change, curation, a rollback), and the emergency levers (attack mode, the kill switch). Previously all of it was scattered across sections.
 8. **The phasing was explained** (Phase 1 observe-only → Phase 2 TLS fingerprint → Phase 3 backend plus dashboard → Phase 4 active verification → Phase 5 enforcement plus monetisation). v0.3 described the product as already working; now it is explicit that in Phase 1/2 the cascade only observes.
-9. **Configuration — the two-channel model** (the Puppet framework plus our catalog HTTP pull). Lookup by `Host`, not by `resource_id`. It closes the open question from Phase 1.
+9. **Configuration — the two-channel model** (the framework channel plus our catalog HTTP pull). Lookup by `Host`, not by `resource_id`. It closes the open question from Phase 1.
 10. **Team responsibilities** — a new dedicated section, so that the document can be handed over for review with an explicit statement of who does what.
 11. **The technical section on resource consumption** was rewritten for the new topology: we run no Go processes on the proxy.
 12. **The comparison with Cloudflare** gained a row about TLS fingerprinting.

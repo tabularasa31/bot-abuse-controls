@@ -38,9 +38,9 @@ The edge stays stateless and cheap. Everything that changes — blocklists,
 per-host policy, verified-bot IPs — is data delivered to it, never code.
 
 ```
-  Puppet ──────────────► edge (nginx + OpenResty/Lua)
-  (framework: Lua, nginx snippets)      │
-                                        │ HTTPS pull, 30s, ETag/If-None-Match
+  git checkout ────────► edge (nginx + OpenResty/Lua)
+  (framework: Lua, nginx conf)          │
+   applied by reload                    │ HTTPS pull, 30s, ETag/If-None-Match
                                         ▼
                               antibot-backend (Go)
                                  ├─ catalog server
@@ -52,7 +52,9 @@ per-host policy, verified-bot IPs — is data delivered to it, never code.
 
 Two delivery paths, split by how fast the data has to move:
 
-- Framework — the Lua sources and nginx configuration, shipped by Puppet at human cadence.
+- Framework — the Lua sources and nginx configuration. They live in the repo and
+  are mounted into the container from a checkout on the edge host; `update.sh`
+  fast-forwards it, validates the config and reloads without dropping traffic.
 - Runtime data — catalogs and policy, pulled by the edge every 30 seconds with
   conditional GETs. A failed pull is fail-stale: the last good snapshot keeps
   serving, and the cascade never blocks on a missing catalog.

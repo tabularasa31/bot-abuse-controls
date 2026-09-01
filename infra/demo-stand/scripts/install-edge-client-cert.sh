@@ -3,10 +3,8 @@
 # stand's certs/ dir. Run on the edge VM after the backend operator generated
 # edge-client.{crt,key} with infra/demo-backend/scripts/gen-certs.sh.
 #
-# This is the demo's substitute for "Distribute via Channel A (Puppet)"
-# from config-distribution §Channel C — the demo stand doesn't have Puppet,
-# so an explicit scp is the bridge. In production the same files come down
-# via the puppet repo's modules/nginx/files/antibot/edge-client.{crt,key}.
+# This is the Channel A distribution step for the client certificate: an
+# explicit scp from the backend host, with a modulus check before installing.
 #
 # Usage (on edge VM):
 #   BACKEND_HOST=backend-vm.internal ./scripts/install-edge-client-cert.sh

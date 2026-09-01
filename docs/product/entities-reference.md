@@ -216,7 +216,7 @@ they are lowercase (`strictness: standard`, `strictness: permissive`). The same 
 - **antibot-backend** — the service on our infrastructure. It hosts the catalogs,
   ingests logs and performs rDNS checks
 - **Channel A** — delivery of the framework (Lua code, configs, the HMAC secret, the
-  HTML+JS challenge template) through the edge pool's Puppet
+  HTML+JS challenge template) through the edge pool's framework channel
 - **Channel C** — delivery of runtime data (the catalogs) from the backend to the proxy
 - **Hot path** — the hot path of a request: everything that happens between accepting it
   and answering. The proxy makes no network calls on the hot path

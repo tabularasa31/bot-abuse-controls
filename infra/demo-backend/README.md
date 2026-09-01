@@ -195,8 +195,7 @@ out-of-the-box convenience; the production rule must be more specific.
 
 ### mTLS rotation
 
-Per config-distribution §Channel C, client certs are distributed to edges
-through Channel A (Puppet). Rotation without an outage:
+Client certificates reach the edges over Channel A. Rotation without an outage:
 
 1. **Issue new client cert** against the existing edge-CA:
    `EDGE_CLIENT_CN=edge-prod-v2 ./scripts/gen-certs.sh`. To replace in place
@@ -205,10 +204,7 @@ through Channel A (Puppet). Rotation without an outage:
    silently produce a cert/key mismatch). For a rolling cutover keep both
    sides intact and stage the new files under different names.
 2. **Distribute**:
-   - **Prod**: via Channel A — e.g. the puppet repo
-     `modules/nginx/files/antibot/edge-client.{crt,key}` → Puppet agent run on
-     the edge nodes → `nginx -s reload` per edge.
-   - **Demo**: there's no Puppet, so the edge VM operator runs
+   - The edge VM operator runs
      [`infra/demo-stand/scripts/install-edge-client-cert.sh`](../demo-stand/scripts/install-edge-client-cert.sh)
      which scp's the pair from this host and checks the modulus matches
      before installing. Then `.env` gets the two `ANTIBOT_BACKEND_CLIENT_*`

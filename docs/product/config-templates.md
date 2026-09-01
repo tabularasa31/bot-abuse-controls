@@ -24,7 +24,7 @@ asn_datacenters.conf     ← datacenter ASN numbers for the reputation:asn_dc ta
 tls_fp_blocklist.conf    ← TLS fingerprints of bots (Phase 2+, PR-populated, with staging)
 tls_fp_catalog.conf      ← automation signatures for impersonator detection (Phase 2+, with staging)
 tls_fp_browser_profiles.conf ← cipher_cnt per browser (Phase 2+, populated with a baseline)
-challenge_secret         ← the HMAC secret for the clearance cookie (Phase 4+, delivered through a Puppet env var or file)
+challenge_secret         ← the HMAC secret for the clearance cookie (Phase 4+, delivered through an env var or a mounted file)
 policy/<host>.yaml       ← per-resource policy (Phase 3+, arrives from the backend over Channel C, not stored locally as a file)
 ```
 
@@ -379,20 +379,20 @@ If a browser's version updates and its cipher_cnt shifts, product first adds the
 
 ## 9. `challenge_secret` — the HMAC secret for the clearance cookie (Phase 4+)
 
-Not a list file — a single secret string. Delivered through Puppet (Channel A) as an env variable or a protected file. One secret shared across the whole edge pool.
+Not a list file — a single secret string. Delivered over Channel A as an env variable or a protected file. One secret shared across the whole edge pool.
 
 ```bash
 # An example of delivery through env (on the proxy at nginx startup):
 # CHALLENGE_HMAC_SECRET=<32-bytes-base64-encoded-random-string>
 
-# Or through a file (Puppet stores the content encrypted):
+# Or through a file (stored encrypted at rest):
 # /etc/antibot/challenge_secret.key
 # (chmod 600, readable only by the nginx user)
 ```
 
 **Rotation:** in brief:
 
-- *Scheduled* — quarterly, through a PR to Puppet plus an nginx reload across the pool.
+- *Scheduled* — quarterly, through a PR plus an nginx reload across the pool.
 - *Emergency* (compromise) — escalated to the edge admins through the incident procedure.
 Any rotation invalidates every clearance cookie issued so far (by design).
 

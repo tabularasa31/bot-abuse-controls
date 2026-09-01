@@ -3,9 +3,8 @@
 A static asset the edge serves on `verdict=challenge` (Phase 4, Step 5.2,
 "Branch A" in [vision.md](../../../docs/product/vision.md)). On the demo it is delivered
 by a file mount (Channel A on the demo = bind mount, see
-[docker-compose.demo.yml](../docker-compose.demo.yml)); in production this will be
-Puppet (`modules/nginx/files/lua/nginx2/`), but the contract — "one file, read
-once at init, update = `openresty -s reload`" — is the same.
+[docker-compose.demo.yml](../docker-compose.demo.yml)). The contract is "one
+file, read once at init, update = `openresty -s reload`".
 
 ## The files
 

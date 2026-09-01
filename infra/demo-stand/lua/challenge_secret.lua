@@ -2,8 +2,8 @@
 -- nonce, and to verify the cookie on the fastpath. One secret for the whole
 -- edge pool, all of it local, with no call to the backend.
 --
--- Delivered by Puppet in production and by a file mount on the stand, so
--- rotation is a reload: init_by_lua re-reads the file and overwrites the value,
+-- Delivered as a file mount, so rotation is a reload: init_by_lua re-reads the
+-- file and overwrites the value,
 -- and every cookie signed with the old secret stops verifying. Clients then
 -- walk the cascade and solve one more challenge, which is the point.
 --

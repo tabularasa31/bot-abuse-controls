@@ -191,9 +191,8 @@ perf regression, a flood of false positives — switch it off. Two levers
   it when one layer regresses while you ship a hotfix.
 
 `defaults.conf [kill_switch.*]` is the git-tracked baseline (everything `false`).
-On the stand you flip the levers **without editing that file and without
-recreating the container** — Channel A on the demo is file/mount, no Puppet. Drop
-a gitignored override into the mounted config dir and reload:
+You flip the levers **without editing that file and without recreating the
+container**: drop a gitignored override into the mounted config dir and reload.
 
 ```sh
 cd infra/demo-stand/config
@@ -232,8 +231,7 @@ no `BAC_LOG` lines (`docker logs --since 1m nginx-demo | grep BAC_LOG`); with th
 Phase 4 (L5 active verification) signs the clearance cookie and the self-signed
 nonce of the challenge page with a local HMAC secret — without calling the backend
 (vision §"The HMAC secret for the clearance cookie", §Channel A). One secret for the whole
-edge pool; in production it is delivered through Puppet (Channel A); on the demo stand Channel
-A = a file mount, as it is for `./certs/*.pem` and `kill_switch.local.conf`.
+edge pool, delivered as a file mount like `./certs/*.pem` and `kill_switch.local.conf`.
 
 **The file.** `infra/demo-stand/certs/challenge_secret.key` — a single line of
 base64 (32+ bytes of entropy). Bind-mounted into the container at

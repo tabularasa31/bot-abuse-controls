@@ -103,8 +103,8 @@ services:
       # restarting the container re-applies it (hot-reload is a separate task).
       - ./config:/etc/nginx/config:ro
       - ./certs:/etc/nginx/certs:ro
-      # [C2] Phase 4 challenge page asset. Channel A on the demo = file
-      # mount (Puppet on prod). Read once in init_by_lua via challenge.lua;
+      # [C2] Phase 4 challenge page asset, delivered as a file mount over
+      # Channel A. Read once in init_by_lua via challenge.lua;
       # change = bump CASCADE_VERSION + edit page.html + `openresty -s
       # reload`. See infra/demo-stand/challenge/README.md.
       - ./challenge:/etc/nginx/challenge:ro

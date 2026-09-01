@@ -349,5 +349,5 @@ that are absent from the backlog entirely:
   backlog.
 - Slow attacks and HTTP/2 DoS are not added as cascade stages — they sit below
   `access_by_lua` (nginx directives plus the build plus a log shim; E1–E3 / E4–E5).
-- We do not reach into the production network (salt/Puppet/eBPF on live edges) — no
-  access, not our phase.
+- We do not reach into the network layer (eBPF or routing on live edges) — a
+  separate phase.

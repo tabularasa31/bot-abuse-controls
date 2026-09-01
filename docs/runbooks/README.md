@@ -1,8 +1,8 @@
 # Runbooks — demo stand (Phase 4 readiness)
 
 Operational procedures for the **demo stand** (`infra/demo-stand/`, a
-long-running reverse proxy on a VM). This is not the production edge: Channel A
-on the stand is a file/mount plus `openresty -s reload`, not Puppet. Every
+long-running reverse proxy on a VM). Channel A here is a file mount plus
+`openresty -s reload`. Every
 procedure below has been exercised against the live stand — see the "Verified on
 stand" section at the end of each file.
 
@@ -73,5 +73,4 @@ The backend reads the slow catalogs from the git checkout at
 behind `antibot-lb:443` (Host `antibot.internal`), bearer `DASHBOARD_API_TOKEN`
 from `infra/demo-backend/.env`.
 
-> Production edge material (Puppet/hiera/canary) is not maintained in this repo —
-> these are stand instructions only.
+> These are stand instructions.

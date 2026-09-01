@@ -7,8 +7,8 @@
 #          mTLS opt-in path (config-distribution §Channel C "Auth/transport").
 #
 # Demo only: self-signed material proves the edge -> backend HTTPS+mTLS path.
-# In a real deploy these come from an internal CA, rotated through Channel A
-# (Puppet). See README "mTLS rotation".
+# In a real deploy these come from an internal CA, rotated through Channel A.
+# See README "mTLS rotation".
 #
 # Idempotent: existing files are left alone; remove them to regenerate.
 #
