@@ -3,8 +3,8 @@
 -- Emits exactly one JSON record per request in log_by_lua. The cascade
 -- stages (hygiene / reputation / rate_limits — each a separate task)
 -- record their outcome through set_verdict()/add_tag(); the final
--- triggering rule wins (last writer), which is the "финальное
--- сработавшее правило" the schema asks for.
+-- triggering rule wins (last writer), which is the "final rule that
+-- fired" the schema asks for.
 --
 -- Forward-compatibility: the field set and enums are stable. `tls_fp` and
 -- its three sub-columns (tls_cipher_count, tls_alpn, tls_sni_present,
@@ -191,14 +191,14 @@ end
 --   <cipher_cnt> 2 digits  (%02d, GREASE-stripped, capped at 99)
 --   <alpn>       2 chars   (h2 / h1 / 00 = none)
 -- A malformed/absent fp leaves the sub-columns nil → null in the record.
--- set_challenge_fp(table). [C5] Browser fingerprint, собранный JS solver'ом
--- на challenge-странице (canvas/audio/screen/UA/etc.), приехавший в payload
--- POST /__challenge/verify. Пишется в BAC_LOG отдельным полем
--- `challenge_fp` для challenge-pass события (vision §5.2). НЕ участвует
--- в верификации запроса (bearer cookie без fp-binding); это датасет под
--- аналитику и будущие L6 ML-модели. Сохраняем как-есть, чтобы backend
--- мог нормализовать поля по своему usage (поля типа `ua/languages/
--- screen/timezone/hwc/platform` — см. challenge/page.html `fingerprint()`).
+-- set_challenge_fp(table). [C5] The browser fingerprint collected by the JS solver
+-- on the challenge page (canvas/audio/screen/UA/etc.), which arrived in the payload of
+-- POST /__challenge/verify. It is written into BAC_LOG as a separate
+-- `challenge_fp` field for the challenge-pass event (vision §5.2). It takes NO part
+-- in verifying the request (a bearer cookie with no fingerprint binding); it is a dataset for
+-- analytics and future L6 ML models. We store it as-is, so that the backend
+-- can normalise the fields for its own use (fields like `ua/languages/
+-- screen/timezone/hwc/platform` — see `fingerprint()` in challenge/page.html).
 function _M.set_challenge_fp(fp)
     local ctx = ngx.ctx.bac
     if ctx and type(fp) == "table" then
@@ -368,16 +368,16 @@ function _M.emit()
     io.stdout:flush()
 
     -- Ship to antibot-backend /v1/logs via per-worker async queue. enqueue
-    -- никогда не блокирует и не аллоцирует heavy (см. log_shipper.lua);
-    -- если shipper не сконфигурирован (ANTIBOT_BACKEND_URL не задан) — это
-    -- no-op. На стенде stdout-эмит остаётся как ground truth для analyze.py
-    -- daily-report'a; shipper — отдельный канал для backend-receiver'а.
+    -- never blocks and allocates nothing heavy (see log_shipper.lua);
+    -- if the shipper is not configured (ANTIBOT_BACKEND_URL unset) this is a
+    -- no-op. On the stand the stdout emit remains the ground truth for analyze.py's
+    -- daily report; the shipper is a separate channel for the backend receiver.
     --
-    -- Прямой доступ через package.loaded, а не pcall(require, ...): require
-    -- кэширует, но pcall + table-lookup на каждый запрос — заметный шум
-    -- на хот-пасе log_by_lua. Модуль точно загружен в init_worker (см.
-    -- nginx.demo.conf), если он там не зарегистрировался — это deploy-bug,
-    -- а не runtime-fallback. PR #54 gemini review.
+    -- Direct access through package.loaded rather than pcall(require, ...): require
+    -- caches, but a pcall plus a table lookup on every request is noticeable noise
+    -- on the log_by_lua hot path. The module is definitely loaded in init_worker (see
+    -- nginx.demo.conf); if it failed to register there, that is a deploy bug,
+    -- not a runtime fallback. From review.
     local shipper = package.loaded["log_shipper"]
     if shipper and shipper.enqueue then
         shipper.enqueue(line)

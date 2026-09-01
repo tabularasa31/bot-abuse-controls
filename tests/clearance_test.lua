@@ -259,40 +259,40 @@ tests.invalid_cookie_name_falls_back = function()
     assert_eq(result, "valid", "fallback to tf_clearance should let valid cookie through")
 end
 
--- 11. attack_mode pre-attack gate (C7). Cookie валиден во всём остальном,
---     но под attack_mode=on с длинным (normal, 24ч) TTL → выдан ДО атаки →
---     RESULT_STALE_PRE_ATTACK (не фастпасит). Порог = max_under_attack_ttl.
+-- 11. The attack_mode pre-attack gate (C7). The cookie is valid in every other respect,
+--     but under attack_mode=on with a long (normal, 24 h) TTL it was issued BEFORE the attack →
+--     RESULT_STALE_PRE_ATTACK (it does not fastpath). The threshold is max_under_attack_ttl.
 tests.attack_pre_attack_long_ttl = function()
-    set_cookie(mint("example.com", 86400))   -- normal TTL = выдан до атаки
+    set_cookie(mint("example.com", 86400))   -- a normal TTL = issued before the attack
     local result = clearance.verify("example.com",
         { attack_mode = true, max_under_attack_ttl = 3600 })
     assert_eq(result, "stale_pre_attack")
 end
 
--- 12. attack_mode during-attack cookie (короткий under_attack TTL) фастпасит
---     как обычно — это и даёт «юзер проходит challenge один раз за атаку».
+-- 12. An attack_mode during-attack cookie (the short under_attack TTL) fastpaths
+--     as usual — which is what gives "the user solves one challenge per attack".
 tests.attack_during_attack_short_ttl = function()
-    set_cookie(mint("example.com", 3600))    -- under_attack TTL = выдан во время атаки
+    set_cookie(mint("example.com", 3600))    -- an under_attack TTL = issued during the attack
     local result = clearance.verify("example.com",
         { attack_mode = true, max_under_attack_ttl = 3600 })
     assert_eq(result, "valid")
 end
 
--- 13. Без attack_mode длинный TTL фастпасит как обычно (gate не трогает
---     нормальный режим; backward-compat одноаргументного вызова).
+-- 13. Without attack_mode a long TTL fastpaths as usual (the gate does not touch
+--     normal mode; backward compatibility of the single-argument call).
 tests.no_attack_long_ttl_valid = function()
     set_cookie(mint("example.com", 86400))
     assert_eq(clearance.verify("example.com"), "valid")
-    -- даже с opts, но attack_mode=false — gate выключен.
+    -- even with opts, but attack_mode=false — the gate is off.
     assert_eq(clearance.verify("example.com",
         { attack_mode = false, max_under_attack_ttl = 3600 }), "valid")
 end
 
--- 14. attack_mode без порога (max_under_attack_ttl nil) — FAIL-CLOSED:
---     pre-attack от during-attack не различить, под атакой безопаснее не
---     доверять cookie → stale_pre_attack (запрос идёт на L5 challenge). Смысл
---     C7 — сброс доверия к накопленным cookie; fail-open молча отменял бы его
---     при отсутствии config-ключа (code-review on PR #92).
+-- 14. attack_mode with no threshold (max_under_attack_ttl nil) — FAIL-CLOSED:
+--     pre-attack cannot be told from during-attack, and under attack it is safer not to
+--     trust the cookie → stale_pre_attack (the request goes to the L5 challenge). The point of
+--     C7 is to reset trust in stockpiled cookies; failing open would silently cancel that
+--     when the config key is missing (from code review).
 tests.attack_no_threshold_fails_closed = function()
     set_cookie(mint("example.com", 86400))
     assert_eq(clearance.verify("example.com", { attack_mode = true }), "stale_pre_attack")

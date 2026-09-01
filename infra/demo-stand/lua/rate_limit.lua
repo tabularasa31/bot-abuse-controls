@@ -1,5 +1,5 @@
 -- L4 rate_limits stage (rules-reference L4, phase1-spec "rate_limits",
--- phase2-spec "Влияние на этап rate_limits"; RFC §A3).
+-- phase2-spec "Effect on the rate_limits stage"; RFC §A3).
 --
 -- System profiles, in rules-reference order (first match wins within the stage):
 --   1. rate_ip       — per source IP            (10s>100  || 60s>600)
@@ -11,16 +11,16 @@
 -- exceeded. Thresholds come from defaults.conf [blocking.rate_*] via the config
 -- module (window_10s / window_60s), so admins retune without code changes.
 --
--- rate_tls_fp (Phase 2, phase2-spec §"Влияние на этап rate_limits") keys the
+-- rate_tls_fp (Phase 2, phase2-spec §"Effect on the rate_limits stage") keys the
 -- GCRA cell on the TLS fingerprint instead of the IP, closing the IP-rotation /
 -- single-TLS-stack class. It is GRACEFUL-SKIP on an fp-cache miss: if the fp was
 -- not computed for this request (no TLS handshake captured ⇒ cipher_count 0, or
 -- an absent/malformed fp), the profile is skipped entirely (no key, no cell, no
 -- verdict) and only the per-IP / per-IP+UA limits apply — exactly as the spec
--- requires ("Если tls_fp_cache промахнулся ... правило rate_tls_fp не
--- срабатывает"). The fp is computed once in verdict.lua and passed into run().
+-- requires ("if tls_fp_cache missed ... the rate_tls_fp rule does not
+-- fire"). The fp is computed once in verdict.lua and passed into run().
 --
--- Algorithm — GCRA (phase1-spec §"Семантика sliding window"): one float TAT
+-- Algorithm — GCRA (phase1-spec §"Sliding window semantics"): one float TAT
 -- cell per (profile, window, key) in the `rate_limit` shared_dict, updated with
 -- one arithmetic op. No timestamp lists, so it scales to many keys. We roll our
 -- own over shared_dict (the spec explicitly allows this in lieu of
@@ -33,7 +33,7 @@
 -- the would-be verdict via bac_log and then calls policy.enforce(429,
 -- {Retry-After=...}). For a host with policy.mode=active that means
 -- ngx.exit(429) right inside run with a Retry-After header (the larger
--- of the profile's windows, typically 60s — phase1-spec §"429 с
+-- of the profile's windows, typically 60s — phase1-spec §"429 with
 -- Retry-After"). For mode=shadow (pool default) enforce is a no-op:
 -- run returns true, the cascade ends (rate_limit is already last), and
 -- the request continues to origin. The GCRA cell's exact retry-after
@@ -48,8 +48,8 @@
 -- Cascade order is hygiene → reputation → tls_fp → rate_limits → verification,
 -- so run() is called LAST in verdict.lua (after the tls_fp allow fall-through).
 -- bac_log is last-writer-wins, so a rate_limits block overwrites an earlier
--- observe-only hygiene/reputation verdict — matching the "финальное сработавшее
--- правило" logging contract (phase1-spec). Metrics: a fired profile is counted
+-- observe-only hygiene/reputation verdict — matching the "final rule that
+-- fired" logging contract (phase1-spec). Metrics: a fired profile is counted
 -- automatically by log_event.lua as antibot_rule_total{stage="rate_limits",
 -- rule="rate_ip"|...} — the stand's per-rule counter model. (The dedicated
 -- lua-resty-prometheus histograms are cascade task C3.)

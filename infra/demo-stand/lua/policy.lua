@@ -229,7 +229,7 @@ end
 -- analytics see the block intent in either mode.
 --
 -- Optional `headers` table is applied via ngx.header[k]=v BEFORE the
--- exit — used for rate-limit's `Retry-After` (phase1-spec §"429 с
+-- exit — used for rate-limit's `Retry-After` (phase1-spec §"429 with
 -- Retry-After") and future challenge response headers. Skipped in
 -- shadow mode: the response is going to origin, our headers would
 -- pollute the user's traffic.

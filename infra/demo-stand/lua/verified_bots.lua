@@ -3,7 +3,7 @@
 -- Read-only lookup against the `verified_bots` shared_dict that the
 -- Channel C catalog pull (catalog_pull.lua) fills from
 -- `/catalog/verified_bot_ips`. THREE states per IP-with-searchbot-UA, per
--- vision §"Шаг 2.2" / entities-reference `bot_verified*`:
+-- vision §"Stage 2.2" / entities-reference `bot_verified*`:
 --
 --   verified  → bac_log.set_verdict("reputation", "allow", "bot_verified")
 --               whitelist fastpath (production short-circuits L3-L5; the

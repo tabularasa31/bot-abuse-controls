@@ -17,7 +17,7 @@
 -- enforce is a no-op: run returns true, verdict.lua keeps going to
 -- tls_fp / rate_limit so their would-be verdicts and tags still
 -- accumulate. Last-writer-wins on the verdict matches phase1-spec
--- "финальное сработавшее правило" (a later tls_fp block can still
+-- "the final rule that fired" (a later tls_fp block can still
 -- overwrite the reputation rule in the shadow log).
 --
 -- The allow-side (ip_whitelist match, verified_bots verified/pending)

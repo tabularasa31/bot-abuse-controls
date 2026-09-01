@@ -30,7 +30,7 @@
 --   * Stable per (client TLS stack) — same client = same fp
 --
 -- NOT byte-identical to FoxIO JA4 — cannot cross-validate exact hash
--- against the FoxIO Python `ja4` library (см. ADR-004).
+-- against the FoxIO Python `ja4` library (see ADR-004).
 --
 -- Format: "L<ver><sni><cipher_cnt><alpn>_<sha256(sorted_ciphers):12>_<sha256(curves|alpn|ver):12>"
 --   prefix "L" = "lua-lite", versions/sni/count layout mirrors JA4_a

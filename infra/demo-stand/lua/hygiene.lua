@@ -10,8 +10,8 @@
 -- dies, later stages do not run). For mode=shadow (pool default) enforce
 -- is a no-op: the cascade continues to tls_fp/rate_limit so their would-be
 -- verdicts and tags still accumulate in the log, with last-writer-wins on
--- the verdict ("финальное сработавшее правило"). The per-rule choice
--- mirrors phase1-spec §36 "blocking rules return 403 in боевой режим" and
+-- the verdict ("the final rule that fired"). The per-rule choice
+-- mirrors phase1-spec §36 "blocking rules return 403 in enforcement mode" and
 -- rules-reference L1: both method_not_allowed and ua_blacklist are
 -- declared blocking.
 --

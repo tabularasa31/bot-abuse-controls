@@ -1,22 +1,22 @@
 -- Unit tests for infra/demo-stand/lua/log_shipper.lua (B6 edge-side).
--- Pure Lua; HTTP transport замокан через _M.http_module-инжекцию,
--- ngx — через тонкий stub (как в catalog_pull_test.lua).
+-- Pure Lua; the HTTP transport is mocked through _M.http_module injection, and
+-- ngx through a thin stub (as in catalog_pull_test.lua).
 --
--- Кейсы:
---   1. enqueue до start() — drop + метрика, очередь не растёт
---   2. enqueue после start() — попадает в очередь, метрика инкрементится
---   3. queue overflow (queue_max=2) — третья строка дропается
---   4. flush_now: успешный POST → shipped/batches_ok метрики, queue пустой
---   5. flush_now: backend non-202 → failed метрика, queue пустой (батч потерян)
---   6. flush_now: transport error → failed метрика
---   7. drain_batch с batch_max=2 при #queue=5 — режет первые 2, остаётся 3
---   8. enqueue("") — drop без метрики (пустая строка — не drop'ается)
+-- The cases:
+--   1. enqueue before start() — a drop plus a metric, the queue does not grow
+--   2. enqueue after start() — it lands in the queue, the metric increments
+--   3. queue overflow (queue_max=2) — the third line is dropped
+--   4. flush_now: a successful POST → shipped/batches_ok metrics, an empty queue
+--   5. flush_now: a non-202 from the backend → the failed metric, an empty queue (the batch is lost)
+--   6. flush_now: a transport error → the failed metric
+--   7. drain_batch with batch_max=2 at #queue=5 — it cuts the first 2, leaving 3
+--   8. enqueue("") — a drop with no metric (an empty string is not counted as a drop)
 
 local cjson_stub = { decode = function(s) return nil, "unused" end, encode = function() return "" end }
 package.loaded["cjson.safe"] = cjson_stub
 
 -- ngx stub: shared.metrics (incr/get), ngx.log (silent), ngx.timer (noop),
--- ngx.now (для consistency).
+-- ngx.now (for consistency).
 local metrics_store = {}
 local ngx_logged = {}
 local function reset_state()
@@ -42,7 +42,7 @@ _G.ngx = {
 -- catalog_pull stub — log_shipper requires it for parsed_cert/key.
 package.loaded["catalog_pull"] = { parsed_cert = nil, parsed_key = nil }
 
--- httpc mock — управляется через test-controlled `last_response`.
+-- The httpc mock — driven by the test-controlled `last_response`.
 local httpc_response = {}
 local last_request = nil
 local httpc_mock = {
@@ -58,13 +58,13 @@ local httpc_mock = {
     end,
 }
 
--- Загружаем shipper только после стабов. Перезагружаем между тестами
--- через package.loaded[] = nil, иначе _M.queue / _M.backend_url
--- сохранят состояние между кейсами.
+-- We load the shipper only after the stubs. We reload it between tests
+-- through package.loaded[] = nil, otherwise _M.queue / _M.backend_url
+-- would carry state between cases.
 local function load_shipper()
     package.loaded["log_shipper"] = nil
     local s = require "log_shipper"
-    s.http_module = httpc_mock  -- инжектим мок ДО start()
+    s.http_module = httpc_mock  -- inject the mock BEFORE start()
     return s
 end
 
@@ -79,44 +79,44 @@ local function reset_for_test()
     last_request = nil
 end
 
--- 1. enqueue до start() — drop + метрика (shipper выключен — это
--- реальная потеря данных, дашборд должен отличать «нет трафика»
--- от «трафик есть, но не уезжает»; PR #54 codex review).
+-- 1. enqueue before start() — a drop plus a metric (the shipper is off, which is
+-- real data loss; the dashboard must tell "no traffic"
+-- from "there is traffic but it is not leaving"; from review).
 do
     reset_for_test()
     local s = load_shipper()
     local ok = s.enqueue('{"ip":"1.2.3.4"}')
-    expect(ok == false, "1: enqueue без start возвращает false")
-    expect(s.queue_size() == 0, "1: очередь пустая")
-    expect(metrics_store.bac_log_enqueued_total == nil, "1: enqueued не двинулся")
-    expect(metrics_store.bac_log_dropped_disabled_total == 1, "1: dropped_disabled инкрементирован")
-    expect(metrics_store.bac_log_dropped_overflow_total == nil, "1: overflow не двинулся (это не overflow-путь)")
+    expect(ok == false, "1: enqueue without start returns false")
+    expect(s.queue_size() == 0, "1: the queue is empty")
+    expect(metrics_store.bac_log_enqueued_total == nil, "1: enqueued did not move")
+    expect(metrics_store.bac_log_dropped_disabled_total == 1, "1: dropped_disabled incremented")
+    expect(metrics_store.bac_log_dropped_overflow_total == nil, "1: overflow did not move (this is not the overflow path)")
 end
 
--- 2. enqueue после start() — попадает в очередь
+-- 2. enqueue after start() — it lands in the queue
 do
     reset_for_test()
     local s = load_shipper()
     s.start({ backend_url = "https://backend/test" })
     local ok = s.enqueue('{"ip":"1.1.1.1"}')
-    expect(ok == true, "2: enqueue после start вернул true")
+    expect(ok == true, "2: enqueue after start returned true")
     expect(s.queue_size() == 1, "2: queue_size == 1")
     expect(metrics_store.bac_log_enqueued_total == 1, "2: enqueued_total == 1")
 end
 
--- 3. queue overflow — третья строка дропается при queue_max=2
+-- 3. queue overflow — the third line is dropped at queue_max=2
 do
     reset_for_test()
     local s = load_shipper()
     s.start({ backend_url = "https://backend/test", queue_max = 2 })
-    expect(s.enqueue("a") == true, "3: первая принята")
-    expect(s.enqueue("b") == true, "3: вторая принята")
-    expect(s.enqueue("c") == false, "3: третья дропнута")
-    expect(s.queue_size() == 2, "3: queue не превышает 2")
+    expect(s.enqueue("a") == true, "3: the first was accepted")
+    expect(s.enqueue("b") == true, "3: the second was accepted")
+    expect(s.enqueue("c") == false, "3: the third was dropped")
+    expect(s.queue_size() == 2, "3: the queue does not exceed 2")
     expect(metrics_store.bac_log_dropped_overflow_total == 1, "3: dropped_total == 1")
 end
 
--- 4. flush_now: успешный POST → shipped/batches_ok метрики, queue пустой
+-- 4. flush_now: a successful POST → shipped/batches_ok metrics, an empty queue
 do
     reset_for_test()
     local s = load_shipper()
@@ -127,11 +127,11 @@ do
     local ok, err = s.flush_now()
     expect(ok == true, "4: flush_now ok")
     expect(err == nil, "4: err nil")
-    expect(s.queue_size() == 0, "4: очередь пустая после flush")
-    expect(metrics_store.bac_log_shipped_total == 2, "4: shipped == 2 строки")
+    expect(s.queue_size() == 0, "4: the queue is empty after the flush")
+    expect(metrics_store.bac_log_shipped_total == 2, "4: shipped == 2 lines")
     expect(metrics_store.bac_log_batches_ok_total == 1, "4: batches_ok == 1")
-    expect(last_request.method == "POST", "4: метод POST")
-    expect(last_request.body == "line1\nline2", "4: тело — \\n-joined")
+    expect(last_request.method == "POST", "4: the method is POST")
+    expect(last_request.body == "line1\nline2", "4: the body is \\n-joined")
 end
 
 -- 5. flush_now: non-202 → failed
@@ -142,11 +142,11 @@ do
     s.enqueue("x")
     httpc_response.status = 500
     local ok, err = s.flush_now()
-    expect(ok == false, "5: flush_now вернул false на 500")
-    expect(err and err:find("status=500"), "5: err описывает 500")
+    expect(ok == false, "5: flush_now returned false on a 500")
+    expect(err and err:find("status=500"), "5: err describes the 500")
     expect(metrics_store.bac_log_ship_failed_total == 1, "5: failed_total == 1")
-    expect(metrics_store.bac_log_shipped_total == nil, "5: shipped не двинулся")
-    expect(s.queue_size() == 0, "5: батч НЕ возвращён в очередь (v1 теряем)")
+    expect(metrics_store.bac_log_shipped_total == nil, "5: shipped did not move")
+    expect(s.queue_size() == 0, "5: the batch was NOT returned to the queue (in v1 we lose it)")
 end
 
 -- 6. flush_now: transport error
@@ -157,12 +157,12 @@ do
     s.enqueue("y")
     httpc_response.err = "connection refused"
     local ok, err = s.flush_now()
-    expect(ok == false, "6: flush_now вернул false на transport err")
-    expect(err and err:find("connection refused"), "6: err содержит транспортную ошибку")
+    expect(ok == false, "6: flush_now returned false on a transport error")
+    expect(err and err:find("connection refused"), "6: err carries the transport error")
     expect(metrics_store.bac_log_ship_failed_total == 1, "6: failed_total == 1")
 end
 
--- 7. batch_max режет очередь
+-- 7. batch_max cuts the queue
 do
     reset_for_test()
     local s = load_shipper()
@@ -170,30 +170,30 @@ do
     s.enqueue("a") s.enqueue("b") s.enqueue("c") s.enqueue("d") s.enqueue("e")
     httpc_response.status = 202
     s.flush_now()
-    expect(s.queue_size() == 3, "7: после батча на 2 в очереди осталось 3")
-    expect(last_request.body == "a\nb", "7: тело — первые две строки")
+    expect(s.queue_size() == 3, "7: after a batch of 2, three remain in the queue")
+    expect(last_request.body == "a\nb", "7: the body is the first two lines")
     expect(metrics_store.bac_log_shipped_total == 2, "7: shipped == batch_max")
 end
 
--- 8a. shipper_loaded gauge ставится в 1 при start() только когда setup
---     завершился — либо intentional-disabled (URL пуст), либо happy-path
---     (timer + http_module готовы). Error-пути (resty.http missing, timer
---     fail) оставляют gauge=0 — алерт ловит silent failure. PR #54 review.
+-- 8a. The shipper_loaded gauge is set to 1 in start() only once the setup
+--     completed — either intentionally disabled (an empty URL) or the happy path
+--     (the timer plus http_module are ready). The error paths (resty.http missing, a timer
+--     failure) leave gauge=0 — the alert catches the silent failure. From review.
 do
     reset_for_test()
     local s = load_shipper()
-    expect(metrics_store.bac_log_shipper_loaded == nil, "8a: до start gauge не выставлен")
-    s.start({})  -- без backend_url — intentional disabled, setup завершён
+    expect(metrics_store.bac_log_shipper_loaded == nil, "8a: before start the gauge is unset")
+    s.start({})  -- with no backend_url — intentionally disabled, the setup completed
     expect(metrics_store.bac_log_shipper_loaded == 1, "8a: intentional disabled → gauge==1")
 end
 
--- 8b. shipper_loaded НЕ ставится при error-пути: resty.http не доступен,
---     start() возвращается до timer.every — gauge остаётся 0/nil.
+-- 8b. shipper_loaded is NOT set on the error path: resty.http is unavailable and
+--     start() returns before timer.every — the gauge stays 0/nil.
 do
     reset_for_test()
-    -- НЕ инжектим httpc_mock через s.http_module — log_shipper.start()
-    -- будет пробовать pcall(require, "resty.http"). Сделаем require
-    -- проваливающимся через stub package.loaded["resty.http"]=nil и
+    -- We do NOT inject httpc_mock through s.http_module — log_shipper.start()
+    -- will try pcall(require, "resty.http"). We make the require
+    -- fail through a stub package.loaded["resty.http"]=nil and
     -- package.preload["resty.http"]=fail-loader.
     package.loaded["resty.http"] = nil
     package.preload["resty.http"] = function() error("simulated load failure") end
@@ -201,24 +201,24 @@ do
     do
         package.loaded["log_shipper"] = nil
         s = require "log_shipper"
-        -- НЕ присваиваем s.http_module — pусть start() пройдёт error-путь
+        -- We do NOT assign s.http_module — let start() take the error path
     end
     s.start({ backend_url = "https://backend/test" })
     expect(metrics_store.bac_log_shipper_loaded == nil
            or metrics_store.bac_log_shipper_loaded == 0,
-           "8b: error-путь (resty.http missing) НЕ ставит gauge")
+           "8b: the error path (resty.http missing) does NOT set the gauge")
     package.preload["resty.http"] = nil
 end
 
--- 8. enqueue("") — drop без метрики (пустая входная)
+-- 8. enqueue("") — a drop with no metric (an empty input)
 do
     reset_for_test()
     local s = load_shipper()
     s.start({ backend_url = "https://backend/test" })
     local ok = s.enqueue("")
-    expect(ok == false, "8: enqueue('') вернул false")
-    expect(s.queue_size() == 0, "8: очередь не растёт")
-    expect(metrics_store.bac_log_dropped_overflow_total == nil, "8: dropped не двинулся (пустая строка — не drop)")
+    expect(ok == false, "8: enqueue('') returned false")
+    expect(s.queue_size() == 0, "8: the queue does not grow")
+    expect(metrics_store.bac_log_dropped_overflow_total == nil, "8: dropped did not move (an empty string is not a drop)")
 end
 
 print(string.format("log_shipper: %d passed, %d failed", passed, failed))

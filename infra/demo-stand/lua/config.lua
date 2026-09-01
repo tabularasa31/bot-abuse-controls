@@ -8,10 +8,10 @@
 -- restart (hot-reload is a separate task per the A3 ticket's out-of-scope
 -- list).
 --
--- PR2 (ADR-006): tls_fp_catalog и tls_fp_browser_profiles больше не
--- читаются с диска — они приезжают через Channel C из git-репо catalogs/
--- (см. catalog_pull.lua descriptors). На эдже tls_fp.lua сам собирает
--- lookup-таблицы из shared_dict через refresh() при гене-флипе.
+-- PR2 (ADR-006): tls_fp_catalog and tls_fp_browser_profiles are no longer
+-- read from disk — they arrive over Channel C from the catalogs/ git repo
+-- (see the catalog_pull.lua descriptors). On the edge, tls_fp.lua builds its own
+-- lookup tables from the shared_dict through refresh() on a gen flip.
 --
 -- A missing or unreadable file is fatal: the acceptance criterion is that
 -- the stand loads ALL configs at start, so we fail loudly rather than run
@@ -118,8 +118,8 @@ function _M.load()
     _M.ua_blacklist            = load_or_die(loader.parse_list, "ua_blacklist.conf")
     _M.asn_datacenters         = load_or_die(loader.parse_list, "asn_datacenters.conf")
     _M.tls_fp_blocklist        = load_or_die(loader.parse_list, "tls_fp_blocklist.conf")
-    -- tls_fp_catalog / tls_fp_browser_profiles переехали в catalogs/ (PR2,
-    -- ADR-006). На эдже их собирает tls_fp.refresh() из shared_dict.
+    -- tls_fp_catalog / tls_fp_browser_profiles moved into catalogs/ (PR2,
+    -- ADR-006). On the edge they are built by tls_fp.refresh() from the shared_dict.
     return _M
 end
 
@@ -136,7 +136,7 @@ end
 -- True when the global kill-switch is set. verdict.lua checks this before the
 -- cascade (and before bac_log.init) so the whole cascade goes no-op: traffic
 -- passes straight to the origin and NO BAC_LOG record is written (vision.md
--- §"Аварийные рычаги": "Lua-модуль делает no-op ... логов антибота нет").
+-- §"Emergency levers": "the Lua module becomes a no-op ... there are no antibot logs").
 -- Distinct from stage_enabled, which folds the global switch into a per-stage
 -- skip — that path still emits a (cascade-bypassing) log; the global gate must
 -- suppress the log entirely.

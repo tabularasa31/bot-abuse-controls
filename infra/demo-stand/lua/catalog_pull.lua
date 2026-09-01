@@ -67,11 +67,11 @@ _M.catalogs = {
         gen_key     = fp_state.META_GEN_KEY,   -- "tls_fp_blocklist_gen"
         etag_key    = fp_state.META_ETAG_KEY,
         version_key = "tls_fp_blocklist_version",
-        -- Возвращает (ok, count). `ok=false` если хоть один dict:set провалился
-        -- (типично "no memory" при фрагментации shared_dict, либо ключ длиннее
-        -- 255 байт). handle_response в этом случае откатится до flip'a и
-        -- НЕ перейдёт на битое поколение — иначе sweep удалил бы старый gen,
-        -- и в worst case эдж остался бы с частично записанным/пустым каталогом
+        -- Returns (ok, count). `ok=false` if even one dict:set failed
+        -- (typically "no memory" from shared_dict fragmentation, or a key longer
+        -- than 255 bytes). In that case handle_response rolls back before the flip and
+        -- does NOT move to a broken generation — otherwise the sweep would delete the old gen,
+        -- and in the worst case the edge would be left with a partially written or empty catalog
         -- (gemini/codex review: violation of fail-stale).
         apply = function(dict, entries, new_gen)
             local n = 0
@@ -86,19 +86,19 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- get_keys(0) lock'ает весь shared_dict на время скана. Для текущего
-        -- размера каталога (десятки–сотни fp) это микросекунды; gemini-review
-        -- отметила, что на десятках тысяч ключей блокировка станет видна на
-        -- p99 — тогда поедем на side-index "keys-of-gen-N" в отдельном ключе
-        -- meta'и. Пока что 100% RFC §C1 алгоритм + комментарий.
+        -- get_keys(0) locks the whole shared_dict for the scan. At the current
+        -- catalog size (dozens to hundreds of fingerprints) that is microseconds; review
+        -- noted that at tens of thousands of keys the lock becomes visible on
+        -- p99 — at which point we move to a "keys-of-gen-N" side index in a separate
+        -- meta key. For now it is 100% the RFC §C1 algorithm plus this comment.
         --
-        -- Матчим через fp_state.match() (типизированный инверс key()) вместо
-        -- сырого `:<gen>` суффикса: если в этот dict когда-нибудь начнёт
-        -- писать что-то ещё (admin.lua, со-tenant каталог), сырой суффикс
-        -- удалил бы их по совпадению хвоста (например, `manual_override:1`
-        -- при sweep(1)). fp_state.match возвращает nil на любом ключе, чей
-        -- хвост не соответствует ИМЕННО формату tls_fp_blocklist'a — sweep
-        -- останется сфокусированным на своих записях.
+        -- We match through fp_state.match() (the typed inverse of key()) rather than a
+        -- raw `:<gen>` suffix: if anything else ever starts writing into this dict
+        -- (admin.lua, a co-tenant catalog), a raw suffix would
+        -- delete their keys by a tail match (`manual_override:1`
+        -- during sweep(1), say). fp_state.match returns nil for any key whose
+        -- tail does not match EXACTLY the tls_fp_blocklist format — so the sweep
+        -- stays focused on its own records.
         sweep = function(dict, old_gen)
             -- old_gen == 0 is the static seed from init.lua; sweeping it on
             -- the first pull is intentional — once the live catalog lands,
@@ -122,7 +122,7 @@ _M.catalogs = {
     -- Reader: verified_bots.classify(ip) composes the key from
     -- meta:get("verified_bots_gen"). Empty dict ⇒ all searchbot UAs land
     -- in provisional fastpath (bot_verified_pending), which is the
-    -- SEO-safe default for a stand without backend (vision §Шаг 2.2).
+    -- SEO-safe default for a stand without backend (vision §Stage 2.2).
     verified_bot_ips = {
         name        = "verified_bot_ips",
         endpoint    = "/catalog/verified_bot_ips",
@@ -150,17 +150,17 @@ _M.catalogs = {
         -- way fp_state.match() guards tls_fp_blocklist (see tls_fp_blocklist's
         -- sweep comment for the worked example).
         --
-        -- Перформанс — тот же trade-off, что в tls_fp_blocklist sweep'e:
-        -- `dict:get_keys(0)` лочит весь shared_dict на время скана.
-        -- nginx.demo.conf размечает verified_bots под "tens of thousands
-        -- of IPs", где блокировка становится видна на p99 (gemini-review
-        -- B5 и снова на этом PR). План тот же: side-index «keys-of-gen-N»
-        -- в отдельном ключе `meta`, чтобы sweep шёл по узкому списку
-        -- вместо полного скана. Пока что осознанно держим симметрию с
-        -- tls_fp_blocklist'ом (RFC §C1 алгоритм) — мигрируем оба каталога
-        -- одной задачей, когда реальный размер verified_bot_ips перейдёт
-        -- этот порог (на стенде без backend dict пустой, фактического
-        -- риска нет).
+        -- The performance trade-off is the same as in the tls_fp_blocklist sweep:
+        -- `dict:get_keys(0)` locks the whole shared_dict for the scan.
+        -- nginx.demo.conf sizes verified_bots for "tens of thousands
+        -- of IPs", where the lock becomes visible on p99 (raised in review
+        -- B5 and again on this PR). The plan is the same: a "keys-of-gen-N" side index
+        -- in a separate `meta` key, so that the sweep walks a narrow list
+        -- instead of a full scan. For now we deliberately keep symmetry with
+        -- tls_fp_blocklist (the RFC §C1 algorithm) — we will migrate both catalogs
+        -- in one task once the real size of verified_bot_ips crosses
+        -- that threshold (on a stand without a backend the dict is empty, so there is no
+        -- actual risk).
         sweep = function(dict, old_gen)
             -- The suffix-string match below is only safe for numeric, small,
             -- monotonically-growing generation IDs (no `:` inside, no
@@ -184,11 +184,11 @@ _M.catalogs = {
         end,
     },
 
-    -- tls_fp_catalog (PR2, ADR-006) — каталог сигнатур автоматизации для
+    -- tls_fp_catalog (PR2, ADR-006) — the catalog of automation signatures for
     -- tls_fp_impersonator (Phase 2+). Wire-payload: map(hash_b →
-    -- "<status>:<family>"), симметрично verified_bot_ips. status ∈
-    -- {active, staging}; staging читается, но эмитится только staging_match,
-    -- не verdict (A11 staged rollout). Reader — tls_fp.read_entry().
+    -- "<status>:<family>"), symmetrically with verified_bot_ips. status ∈
+    -- {active, staging}; staging is read but only emits staging_match,
+    -- never a verdict (A11 staged rollout). The reader is tls_fp.read_entry().
     tls_fp_catalog = {
         name        = "tls_fp_catalog",
         endpoint    = "/catalog/tls_fp_catalog",
@@ -209,9 +209,9 @@ _M.catalogs = {
             end
             return true, n
         end,
-        -- Тот же suffix-match подход, что и verified_bot_ips: gen — numeric,
-        -- hash_b — hex без `:`. Контракт оставляем явным assert'ом на случай,
-        -- если в будущем кто-то решит сделать gen строковым (content-hash).
+        -- The same suffix-match approach as verified_bot_ips: the gen is numeric and
+        -- hash_b is hex without a `:`. We keep the contract explicit with an assert, in case
+        -- somebody later decides to make the gen a string (a content hash).
         sweep = function(dict, old_gen)
             assert(type(old_gen) == "number",
                 "tls_fp_catalog.sweep: old_gen must be a number, got " ..
@@ -229,11 +229,11 @@ _M.catalogs = {
         end,
     },
 
-    -- tls_fp_browser_profiles (PR2, ADR-006) — каталог ожидаемых cipher_cnt
-    -- для семейств браузеров (tls_fp_suspicious_ciphers, Phase 2+).
-    -- Wire-payload: map(family → "<status>:<expected_cipher_cnt>"). Малый
-    -- размер (единицы записей), но единая модель atomic-swap для
-    -- консистентности с остальными Channel C каталогами.
+    -- tls_fp_browser_profiles (PR2, ADR-006) — the catalog of expected cipher_cnt
+    -- values per browser family (tls_fp_suspicious_ciphers, Phase 2+).
+    -- The wire payload: map(family → "<status>:<expected_cipher_cnt>"). It is small
+    -- (a handful of entries), but uses the same atomic-swap model for
+    -- consistency with the other Channel C catalogs.
     tls_fp_browser_profiles = {
         name        = "tls_fp_browser_profiles",
         endpoint    = "/catalog/tls_fp_browser_profiles",
@@ -690,11 +690,11 @@ function _M.handle_response(cat, dict, meta, res, err)
     local old_gen = meta:get(cat.gen_key) or 0
     local new_gen = old_gen + 1
 
-    -- Apply: если хоть один dict:set провалился (no memory / key too long) —
-    -- НЕ flip'аем gen и НЕ sweep'аем старый. Параллельно подчищаем уже
-    -- записанные ключи нового gen, чтобы они не висели до следующего pull'a
-    -- (occupying shared_dict впустую). Edge остаётся на прежнем gen,
-    -- следующий тик попробует снова — fail-stale (gemini/codex review).
+    -- Apply: if even one dict:set failed (no memory / key too long) we
+    -- do NOT flip the gen and do NOT sweep the old one. In parallel we clean up the already
+    -- written keys of the new gen, so that they do not linger until the next pull
+    -- (occupying the shared_dict for nothing). The edge stays on the previous gen and
+    -- the next tick tries again — fail-stale (from review).
     local apply_ok, written = cat.apply(dict, entries, new_gen)
     if not apply_ok then
         ngx.log(ngx.ERR, "catalog ", cat.endpoint,
@@ -703,9 +703,9 @@ function _M.handle_response(cat, dict, meta, res, err)
         return "skip"
     end
 
-    -- Сам flip. meta:set на 1m shared_dict с одним int практически не падает,
-    -- но если упал — каталог нового gen уже в dict, а readers всё ещё резолвят
-    -- старый. Сводим к тому же fail-stale: подчистим новый gen и держим старый.
+    -- The flip itself. A meta:set on a 1m shared_dict with a single int practically never fails,
+    -- but if it did, the new gen's catalog is already in the dict while readers still resolve
+    -- the old one. We reduce that to the same fail-stale: clean up the new gen and keep the old.
     local ok_flip, flip_err = meta:set(cat.gen_key, new_gen)
     if not ok_flip then
         ngx.log(ngx.ERR, "catalog ", cat.endpoint, ": gen flip failed: ",
@@ -803,9 +803,9 @@ function _M.fetch(catalog_name)
     end
     local res, err = httpc:request_uri(_M.backend_url .. cat.endpoint, req_opts)
 
-    -- pcall — handle_response может бросить из cat.apply/cat.sweep
-    -- (например, через ngx.log при экзотическом аргументе). В этом случае
-    -- in_flight остался бы взведённым навсегда и каталог тихо застрял.
+    -- pcall — handle_response can throw from cat.apply/cat.sweep
+    -- (through ngx.log with an exotic argument, for instance). In that case
+    -- in_flight would stay raised forever and the catalog would silently get stuck.
     local ok, perr = pcall(_M.handle_response, cat, dict, meta, res, err)
     in_flight[catalog_name] = nil
     if not ok then

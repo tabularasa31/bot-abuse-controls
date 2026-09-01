@@ -158,7 +158,7 @@ end
 -- fp_usable() — graceful-skip predicate for rate_tls_fp. A real fp (cipher_count
 -- > 0) is usable; a degenerate "no handshake" fp (cipher_count 0), an
 -- absent/empty/malformed fp is not, so rate_tls_fp is skipped on an fp-cache
--- miss (phase2-spec §"Влияние на этап rate_limits").
+-- miss (phase2-spec §"Effect on the rate_limits stage").
 -- ===========================================================================
 
 check(rl.fp_usable("L13d15h2_0a1b2c3d4e5f_aabbccddeeff"), true,

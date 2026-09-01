@@ -1,12 +1,12 @@
 -- Unit tests for infra/demo-stand/lua/verification.lua (C4 L5 should_challenge).
--- Pure Lua under host luajit: только verification.decide() — чистая функция,
--- ngx и bac_log/policy не нужны. Покрытие — четыре acceptance-сценария задачи
--- плюс guard-кейсы (block/allow priority, пустые flags, неизвестный flag).
+-- Pure Lua under host luajit: only verification.decide(), which is a pure function,
+-- so ngx and bac_log/policy are unnecessary. The coverage is the task's four acceptance scenarios
+-- plus guard cases (block/allow priority, empty flags, an unknown flag).
 
 package.path = "infra/demo-stand/lua/?.lua;" .. package.path
 
--- Стаб package.loaded для bac_log/policy — verification.lua делает
--- require, но decide() их не зовёт, так что заглушки достаточно.
+-- A package.loaded stub for bac_log/policy — verification.lua does a
+-- require, but decide() never calls them, so the stubs are enough.
 package.loaded["bac_log"] = { set_verdict = function() end, add_flag = function() end }
 package.loaded["policy"]  = { get = function() return {} end }
 
@@ -38,7 +38,7 @@ local function pol(strictness, attack_mode)
 end
 
 -- ---------------------------------------------------------------------------
--- Acceptance #1: Standard + системный flag → challenge
+-- Acceptance #1: Standard plus a system flag → challenge
 local v, r = verification.decide(
     ctx("pass", { "tls_fp_impersonator" }),
     pol("standard", false))
@@ -59,7 +59,7 @@ check(v, r, "challenge", "tls_fp_suspicious_ciphers",
     "Standard + two system flags → challenge, rule = last")
 
 -- ---------------------------------------------------------------------------
--- Acceptance #2: Permissive + системный flag → verdict=permissive
+-- Acceptance #2: Permissive plus a system flag → verdict=permissive
 v, r = verification.decide(
     ctx("pass", { "tls_fp_impersonator" }),
     pol("permissive", false))
@@ -73,15 +73,15 @@ check(v, r, "permissive", "tls_fp_suspicious_ciphers",
     "Permissive + two system flags → permissive, rule = last")
 
 -- ---------------------------------------------------------------------------
--- Acceptance #3: Permissive + клиентское rate-rule action=challenge → challenge
--- Контракт: client flag override'ит Permissive (явная настройка клиента).
+-- Acceptance #3: Permissive plus a customer rate rule with action=challenge → challenge
+-- The contract: a client flag overrides Permissive (an explicit customer setting).
 v, r = verification.decide(
     ctx("pass", {}, { "rate_custom" }),
     pol("permissive", false))
 check(v, r, "challenge", "rate_custom",
     "Permissive + client rate-rule challenge → challenge")
 
--- Client flag override'ит даже когда системные flag'и тоже есть.
+-- A client flag overrides even when system flags are present too.
 v, r = verification.decide(
     ctx("pass", { "tls_fp_impersonator" }, { "rate_custom" }),
     pol("permissive", false))
@@ -89,7 +89,7 @@ check(v, r, "challenge", "rate_custom",
     "Permissive + system + client → challenge by client (override)")
 
 -- ---------------------------------------------------------------------------
--- attack_mode (C7) override — force challenge, любой Strictness.
+-- attack_mode (C7) override — it forces a challenge at any Strictness.
 v, r = verification.decide(
     ctx("pass", { "tls_fp_impersonator" }),
     pol("permissive", true))
@@ -103,21 +103,21 @@ check(v, r, "challenge", "attack_mode",
     "attack_mode + no flags → challenge with sentinel rule=attack_mode")
 
 -- ---------------------------------------------------------------------------
--- Нет повода → ничего не делаем.
+-- No reason → we do nothing.
 v, r = verification.decide(ctx("pass", {}), pol("standard", false))
 check(v, r, nil, nil, "no flags + Standard → no decision (verdict stays pass)")
 
 v, r = verification.decide(ctx("pass", {}), pol("permissive", false))
 check(v, r, nil, nil, "no flags + Permissive → no decision")
 
--- Информационный тег (не системный flag) не триггерит — flag set явный.
+-- An informational tag (not a system flag) does not trigger — the flag set is explicit.
 v, r = verification.decide(
     ctx("pass", { "tls_fp:automation_ua" }),
     pol("standard", false))
 check(v, r, nil, nil, "non-system flag (informational) → no decision")
 
 -- ---------------------------------------------------------------------------
--- Guards: уже выставленный block не перезаписываем (даже attack_mode'ом).
+-- Guards: an already-set block is not overwritten (not even by attack_mode).
 v, r = verification.decide(
     ctx("block", { "tls_fp_impersonator" }),
     pol("standard", false))
@@ -128,11 +128,11 @@ v, r = verification.decide(
     pol("standard", true))
 check(v, r, nil, nil, "verdict=block + attack_mode → block wins, no override")
 
--- allow под attack_mode (C7) — все три allow-исхода фастпасят, L5 не трогает.
--- cookie_valid, доживший до L5 при атаке, — это during-attack cookie:
--- pre-attack cookie L2.1 уже отбросил (clearance.RESULT_STALE_PRE_ATTACK),
--- он не выставил verdict=allow,cookie_valid. Поэтому верный исход здесь —
--- fastpass, а НЕ challenge (раньше тут стоял stopgap-override до C7).
+-- allow under attack_mode (C7) — all three allow outcomes fastpath and L5 leaves them alone.
+-- A cookie_valid that survived to L5 under attack is a during-attack cookie:
+-- a pre-attack cookie was already discarded by L2.1 (clearance.RESULT_STALE_PRE_ATTACK)
+-- and never set verdict=allow,cookie_valid. So the correct outcome here is a
+-- fastpass, NOT a challenge (this used to hold a stopgap override before C7).
 v, r = verification.decide(
     ctx("allow", {}, nil, "cookie_valid"),
     pol("standard", true))
@@ -145,8 +145,8 @@ v, r = verification.decide(
 check(v, r, nil, nil,
     "attack_mode + cookie_valid allow + system flag → fastpass (during-attack cookie)")
 
--- ip_whitelist / bot_verified allow остаются fastpass даже под attack_mode
--- (rules-reference §attack_mode: verified-bot и IP-whitelist продолжают фастпасить).
+-- ip_whitelist / bot_verified allows stay a fastpass even under attack_mode
+-- (rules-reference §attack_mode: verified bots and the IP whitelist keep fastpathing).
 v, r = verification.decide(
     ctx("allow", {}, nil, "ip_whitelist"),
     pol("standard", true))
@@ -165,14 +165,14 @@ v, r = verification.decide(
 check(v, r, nil, nil,
     "attack_mode + verdict=allow,policy.ip_whitelist → fastpass stays")
 
--- allow без attack_mode — L5 не трогает вне зависимости от rule.
+-- allow without attack_mode — L5 leaves it alone regardless of the rule.
 v, r = verification.decide(
     ctx("allow", { "tls_fp_impersonator" }, { "rate_custom" }, "cookie_valid"),
     pol("permissive", false))
 check(v, r, nil, nil,
     "no attack_mode + allow + flags + client → fastpass (L5 keeps hands off)")
 
--- Defensive: client_challenge_flags non-table (boolean/string) не должен ронять
+-- Defensive: a non-table client_challenge_flags (boolean/string) must not break
 -- decide() — gemini PR #86 review.
 v, r = verification.decide(
     { verdict = "pass", flags = {}, client_challenge_flags = true },
