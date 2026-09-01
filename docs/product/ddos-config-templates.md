@@ -1,215 +1,215 @@
-# DDoS-защита — шаблоны конфигов
+# DDoS protection — config templates
 
-Иллюстративные шаблоны конфигурации для DDoS-слоя. Основной конкретный конфиг здесь —
-**connection/protocol-level** (nginx-директивы: таймауты, зона `limit_conn`, keepalive,
-HTTP/2). L7 rate-based конфигурируется средствами каскада (rate-limit/challenge/policy,
-см. [vision.md](vision.md)); волюметрика L3/L4 — вне периметра прокси. Контракт
-поведения — [ddos-spec.md](ddos-spec.md).
+Illustrative configuration templates for the DDoS layer. The concrete config here is mostly
+**connection/protocol level** (nginx directives: timeouts, the `limit_conn` zone, keepalive,
+HTTP/2). L7 rate-based is configured through the cascade (rate limits / challenge / policy,
+see [vision.md](vision.md)); volumetric L3/L4 is outside the proxy's perimeter. The behaviour
+contract is [ddos-spec.md](ddos-spec.md).
 
-**Сопутствующие материалы:** [ddos-rules-reference.md](ddos-rules-reference.md),
+**Related material:** [ddos-rules-reference.md](ddos-rules-reference.md),
 [ddos-entities-reference.md](ddos-entities-reference.md).
 
-**Формат.** Иллюстративные фрагменты nginx-конфига (`http`/`server`) и YAML для
-policy-ручки. Главное — структура и семантика, не точные значения: cap/таймауты —
-системные константы пула, не клиентская настройка.
+**Format.** Illustrative fragments of nginx config (`http`/`server`) plus YAML for
+the policy knob. What matters is the structure and semantics, not the exact values: caps and timeouts are
+system constants of the pool, not a customer setting.
 
-**Важно.** Это не конфиг стадии каскада. Директивы ниже живут до фазы решения
-каскада: они рвут/ограничивают соединение раньше, чем запрос дойдет до анализа. Слой
-наблюдения (Lua, log-фаза) только фиксирует итог дропа. Менять директивы per-request
-из Lua нельзя — отсюда грубый (coarse) характер policy-ручки.
-
----
-
-## Иерархия конфигов
-
-```
-http { … }                       ← глобальные таймауты + объявление зоны limit_conn + keepalive
-server { … }                     ← применение limit_conn, listen http2 on, http2_max_concurrent_streams
-build / Dockerfile               ← фиксация версии OpenResty/nginx ≥ 1.25.3 (Rapid Reset guard)
-log-фаза (наблюдение)            ← $status/$request_time → тег slow_client/conn_flood
-map $… → policy-ручка            ← опц., выбор жесткой зоны limit_conn под attack_mode (per-host)
-policy[host].attack_mode/strictness ← per-host knob из backend (не локальный файл)
-```
+**Important.** This is not the config of a cascade stage. The directives below live before the cascade's
+decision phase: they tear down or limit a connection before the request reaches analysis. The
+observation layer (Lua, the log phase) only records the outcome of the drop. Directives cannot be changed per request
+from Lua — hence the coarse nature of the policy knob.
 
 ---
 
-## 1. Slow-attacks: таймауты
+## Config hierarchy
 
-Самый дешевый слой: чистый nginx, 0 Lua. Срезает дефолтные 60s до 10–15s, чтобы рвать
-соединения, не завершающие заголовки/тело/чтение. Полностью обратимо.
+```
+http { … }                       ← global timeouts + the limit_conn zone declaration + keepalive
+server { … }                     ← applying limit_conn, listen http2 on, http2_max_concurrent_streams
+build / Dockerfile               ← pinning OpenResty/nginx ≥ 1.25.3 (the Rapid Reset guard)
+log phase (observation)          ← $status/$request_time → the slow_client/conn_flood tag
+map $… → the policy knob         ← optional, selecting a strict limit_conn zone under attack_mode (per host)
+policy[host].attack_mode/strictness ← the per-host knob from the backend (not a local file)
+```
+
+---
+
+## 1. Slow attacks: timeouts
+
+The cheapest layer: pure nginx, zero Lua. It cuts the default 60 s to 10–15 s so as to tear down
+connections that never finish their headers, body or read. Fully reversible.
 
 ```nginx
-# http { } — глобальные таймауты приема/отдачи
+# http { } — global receive and send timeouts
 
-# Slowloris: клиент не дослал строку запроса + заголовки в окно → 408
-client_header_timeout   15s;     # дефолт 60s — срезаем
+# Slowloris: the client never finished the request line and headers in the window → 408
+client_header_timeout   15s;     # the default is 60s — cut it
 
-# Slow POST: клиент медленно/никогда не завершает тело → 408
+# Slow POST: the client finishes the body slowly or never → 408
 client_body_timeout     15s;
 
-# Slow read: клиент медленно вычитывает ответ → обрыв соединения
+# Slow read: the client reads the response slowly → the connection is torn down
 send_timeout            15s;
 
-# Осознанные буферы под заголовки (защита от header-abuse)
+# Deliberate header buffers (protection against header abuse)
 large_client_header_buffers 4 8k;
 ```
 
-> **Гарантия для легитимных клиентов.** Типовой запрос — единицы КБ; нормальный трафик
-> укладывается в 15s с запасом. Срез бьет только по slow-attacks.
-> `client_max_body_size` задается осознанно на прокси-путях.
+> **The guarantee for legitimate clients.** A typical request is a few KB; normal traffic
+> fits inside 15 s with room to spare. The cut hits slow attacks only.
+> `client_max_body_size` is set deliberately on the proxied paths.
 
 ---
 
-## 2. Slow-attacks: зона `limit_conn` + keepalive
+## 2. Slow attacks: the `limit_conn` zone plus keepalive
 
-Cap одновременных соединений на один IP и ограничение удержания idle-keepalive-слотов.
+A cap on simultaneous connections per IP, plus a limit on how long idle keepalive slots are held.
 
 ```nginx
-# http { } — объявление зоны и код отказа
+# http { } — declaring the zone and the refusal code
 
-# Зона считает одновременные соединения по IP (binary-форма компактнее в shared memory)
+# The zone counts simultaneous connections per IP (the binary form is more compact in shared memory)
 limit_conn_zone $binary_remote_addr zone=perip_conn:10m;
 
-# Код отказа при превышении cap — целевой 503
+# The refusal code when the cap is exceeded — 503 is the target
 limit_conn_status 503;
 
-# Ограничить удержание idle-keepalive-слотов
-keepalive_requests 1000;         # сколько запросов на одно соединение
-keepalive_timeout  30s;          # время простоя до закрытия
+# Limit how long idle keepalive slots are held
+keepalive_requests 1000;         # how many requests per connection
+keepalive_timeout  30s;          # idle time before closing
 ```
 
 ```nginx
-# server { } / location { } — применение cap
+# server { } / location { } — applying the cap
 
-limit_conn perip_conn 20;        # cap одновременных соединений на IP (системная константа)
+limit_conn perip_conn 20;        # the cap on simultaneous connections per IP (a system constant)
 ```
 
-> **Семантика.** Превышение cap → nginx отказывает новому соединению кодом из
-> `limit_conn_status` (503). В log-фазе это видно как `$status=503` и порождает тег
-> `conn_flood`. Cap — системная константа пула, клиент в дашборде его не настраивает.
+> **Semantics.** Exceeding the cap makes nginx refuse the new connection with the code from
+> `limit_conn_status` (503). In the log phase that appears as `$status=503` and produces the
+> `conn_flood` tag. The cap is a system constant of the pool; the customer does not configure it in the dashboard.
 
 ---
 
-## 3. HTTP/2 DoS: билд + директивы
+## 3. HTTP/2 DoS: the build plus directives
 
-В основном свойство пропатченного билда + пара директив. Самостоятельный слой, не
-зависит от slow-таймаутов.
+Mostly a property of the patched build plus a couple of directives. An independent layer; it does not
+depend on the slow-attack timeouts.
 
 ```dockerfile
-# Dockerfile / build — зафиксировать версию с Rapid Reset guard
-# OpenResty/nginx >= 1.25.3 считает сброшенные-без-завершения HTTP/2-стримы
-# и рвет соединение при превышении (CVE-2023-44487 и родня).
-FROM openresty/openresty:1.25.3.1-alpine   # пример: версия >= 1.25.3
+# Dockerfile / build — pin a version with the Rapid Reset guard
+# OpenResty/nginx >= 1.25.3 counts HTTP/2 streams reset before completion
+# and tears down the connection when the count is exceeded (CVE-2023-44487 and relatives).
+FROM openresty/openresty:1.25.3.1-alpine   # example: a version >= 1.25.3
 ```
 
 ```nginx
-# server { } — HTTP/2-настройки
+# server { } — HTTP/2 settings
 
 listen 443 ssl;
 http2 on;
 
-# Лимит одновременных стримов в соединении (дефолт 128) — затюнить под профиль трафика
+# The limit of concurrent streams per connection (default 128) — tune it to the traffic profile
 http2_max_concurrent_streams 128;
 
-# keepalive_requests учитывается и для h2-мультиплекса
+# keepalive_requests also applies to h2 multiplexing
 keepalive_requests 1000;
 
-# Пороги CONTINUATION/PING/SETTINGS flood — задаются версией билда (см. changelog версии),
-# отдельной директивой в конфиге могут не выражаться — это build-гарантия.
+# The CONTINUATION/PING/SETTINGS flood thresholds come with the build version (see its changelog);
+# they may not be expressible as a separate config directive — this is a build guarantee.
 ```
 
-> Это HTTP/2 DoS-mitigation, а не HTTP/2 fingerprint (идентификация клиента).
-> Frame-уровень не доходит до HTTP-семантики; каскад его не видит вовсе. Идентификация
-> по h2-отпечатку — отдельный сигнал детектора, опционально дает h2-abuse для репутации.
+> This is HTTP/2 DoS mitigation, not HTTP/2 fingerprinting (client identification).
+> The frame level never reaches HTTP semantics; the cascade does not see it at all. Identification
+> by h2 fingerprint is a separate detector signal that optionally yields h2 abuse for reputation.
 
 ---
 
-## 4. Наблюдение в log-фазе
+## 4. Observation in the log phase
 
-Не конфиг митигации — Lua-хук, превращающий nginx-дроп в наблюдаемое лог-событие.
-Переиспользует тот же лог-контракт, что стадии каскада. Иллюстративно:
+Not a mitigation config — a Lua hook that turns an nginx drop into an observable log event.
+It reuses the same log contract as the cascade stages. Illustratively:
 
 ```nginx
-# server { } / location { } — наблюдательный хук в log-фазе
+# server { } / location { } — the observation hook in the log phase
 log_by_lua_block {
     local status = tonumber(ngx.var.status)
 
-    -- 408 ← таймаут заголовков/тела (client_header_timeout/client_body_timeout);
-    -- 503 ← отказ limit_conn. Slow read (send_timeout) обрывает соединение БЕЗ 408,
-    -- сюда не попадает (см. ограничение наблюдаемости ниже).
+    -- 408 ← a header or body timeout (client_header_timeout/client_body_timeout);
+    -- 503 ← a limit_conn refusal. Slow read (send_timeout) tears the connection down WITHOUT a 408,
+    -- so it never lands here (see the observability limitation below).
     if status == 408 or status == 503 then
         local bac_log = require "bac_log"
-        -- access-фаза для slow-attacks не отрабатывает → ctx пуст, инициализируем
+        -- the access phase does not run for slow attacks → ctx is empty, so initialise it
         if not ngx.ctx.bac then bac_log.init() end
 
         if status == 408 then
             bac_log.add_tag("slow_client")
-            metrics.incr_by_ip_and_subnet("slow_client")   -- счетчик по IP / /24
+            metrics.incr_by_ip_and_subnet("slow_client")   -- counters by IP and /24
         else
             bac_log.add_tag("conn_flood")
             metrics.incr_by_ip_and_subnet("conn_flood")
         end
-        bac_log.emit()   -- emit() без аргументов: сериализует накопленный ctx
+        bac_log.emit()   -- emit() with no arguments: serialises the accumulated ctx
     end
 }
 ```
 
-> **Ограничение наблюдаемости.** Видно только то, что nginx отдает в log-фазе
-> (`$status`, длительность `$request_time` → пишется в лог как `latency_ms`).
-> Сам процесс цежения медленного соединения в реальном времени Lua не видит. Slow
-> read (`send_timeout`) обрывает соединение без 408 — наблюдается лишь как
-> connection-close (обрыв, не тег `slow_client`). Счетчики по IP / /24 питают общий
-> сток репутации и через него edge-ACL feed.
+> **The observability limitation.** Only what nginx exposes in the log phase is visible
+> (`$status`, and the duration `$request_time` → written to the log as `latency_ms`).
+> Lua does not see the slow connection being drained in real time. Slow
+> read (`send_timeout`) tears the connection down without a 408 — it is observable only as a
+> connection close (a teardown, not a `slow_client` tag). The per-IP and per-/24 counters feed the shared
+> reputation sink and, through it, the edge-ACL feed.
 
 ---
 
-## 5. Policy-ручка: ужесточение под `attack_mode` (опционально)
+## 5. The policy knob: tightening under `attack_mode` (optional)
 
-Под `policy[host].attack_mode=on` / повышенной строгостью — более жесткая зона
-`limit_conn` и/или ниже таймауты.
+Under `policy[host].attack_mode=on` or heightened strictness: a stricter `limit_conn` zone
+and/or lower timeouts.
 
-> **Честное ограничение.** nginx-директивы нельзя менять per-request из Lua.
-> Реализация — `map`-driven выбор зоны per-host или грубый global-toggle, не плавная
-> per-request подстройка. Этот слой может вовсе не делаться, если таймауты +
-> наблюдение уже закрывают риск.
+> **The honest limitation.** nginx directives cannot be changed per request from Lua.
+> The implementation is a `map`-driven zone selection per host, or a coarse global toggle — not smooth
+> per-request tuning. This layer may not be built at all if the timeouts plus
+> observation already cover the risk.
 
 ```nginx
-# http { } — две зоны разной жесткости + map-выбор по host
+# http { } — two zones of differing strictness plus a map-based choice by host
 
 limit_conn_zone $binary_remote_addr zone=perip_normal:10m;
 limit_conn_zone $binary_remote_addr zone=perip_strict:10m;
 
-# attack_mode проецируется в переменную (источник — policy[host] из backend)
+# attack_mode is projected into a variable (sourced from policy[host] in the backend)
 map $host $conn_zone_for_host {
     default                     perip_normal;
-    "under-attack.example.com"  perip_strict;   # иллюстративно; в реале — из policy-merge
+    "under-attack.example.com"  perip_strict;   # illustrative; in reality it comes from the policy merge
 }
 ```
 
 ```yaml
-# per-host knob — НЕ локальный файл, приходит из backend как часть policy[host].
-# Тот же merge attack_mode/strictness, что у каскада; здесь читается на выбор зоны/таймаутов.
+# The per-host knob is NOT a local file — it arrives from the backend as part of policy[host].
+# The same attack_mode/strictness merge as the cascade uses; here it is read to choose the zone and timeouts.
 example.com:
-  attack_mode: false        # true → выбрать perip_strict + меньшие таймауты
-  strictness: standard      # повышение → может ужесточать зону аналогично
+  attack_mode: false        # true → choose perip_strict plus lower timeouts
+  strictness: standard      # raising it can tighten the zone the same way
 ```
 
-> Связка `attack_mode`/`strictness` → выбор зоны — coarse: переключение per-host (через
-> `map`) или глобально, не per-request. Значения cap/таймаутов для жесткой зоны —
-> системные константы, как и в базовом слое.
+> The `attack_mode`/`strictness` → zone selection link is coarse: it switches per host (through
+> `map`) or globally, never per request. The cap and timeout values for the strict zone are
+> system constants, as in the base layer.
 
 ---
 
-## Соглашения по раскатке
+## Rollout conventions
 
-1. **Таймауты — первыми и обратимо.** Дешевый слой; раскатывать с запасом: убедиться по
-   логам (`$request_time` легитимных запросов), что нормальный трафик укладывается, —
-   иначе ложные `408`.
-2. **`limit_conn` cap калибровать по реальному профилю.** Слишком низкий cap бьет по
-   NAT/корпоративным выходам (много легит-клиентов за одним IP). Стартовать
-   консервативно, следить за тегом `conn_flood` на легит-трафике.
-3. **HTTP/2-аудит самостоятелен.** Фиксация версии билда ≥ 1.25.3 и тюнинг
-   `http2_max_concurrent_streams` не зависят от slow-слоев; делать параллельно.
-4. **Policy-ручка опциональна и coarse** — не per-request adaptive (nginx так не умеет).
-5. **Волюметрика L3/L4 — вне этих конфигов.** Митигируется ниже периметра прокси;
-   максимум слоя — поставка нарушителей в edge-ACL feed.
+1. **Timeouts first, and reversibly.** A cheap layer; roll it out with room to spare: confirm from the
+   logs (`$request_time` of legitimate requests) that normal traffic fits, otherwise you get
+   false `408`s.
+2. **Calibrate the `limit_conn` cap against the real profile.** Too low a cap hits
+   NAT and corporate egresses (many legitimate clients behind one IP). Start
+   conservatively and watch the `conn_flood` tag on legitimate traffic.
+3. **The HTTP/2 audit is independent.** Pinning the build at ≥ 1.25.3 and tuning
+   `http2_max_concurrent_streams` do not depend on the slow-attack layers; do them in parallel.
+4. **The policy knob is optional and coarse** — not per-request adaptive (nginx cannot do that).
+5. **Volumetric L3/L4 is outside these configs.** It is mitigated below the proxy's perimeter;
+   the most the layer offers is delivering offenders into the edge-ACL feed.
