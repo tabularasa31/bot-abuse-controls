@@ -79,7 +79,7 @@ multiple harnesses without port collision.
 
 Cascade-behaviour scenarios (bot vs browser, attack_mode flow, per-host
 list matches) go into `cases/adversarial/` under
-[D9](https://app.clickup.com/t/86exmr6yf), not here — D8/B13 are
+D9, not here — D8/B13 are
 strictly about the catalog-delivery contract.
 
 ## Troubleshooting

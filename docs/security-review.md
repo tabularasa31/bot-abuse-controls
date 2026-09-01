@@ -1,6 +1,6 @@
 # Security review — abuse-controls antibot
 
-**Last reviewed:** 2026-05-16, ships in [PR #3](https://github.com/tabularasa31/abuse-controls/pull/3) + [PR #4](https://github.com/tabularasa31/abuse-controls/pull/4).
+**Last reviewed:** 2026-05-16, ships in PR #3 + PR #4.
 **Scope:** the edge Lua verdict pipeline shipping in `infra/nginx-lua-poc/lua/`. The Go sidecar has its own threat model (out of scope here).
 
 This is a self-review intended for operators deciding whether the code is safe to put behind an HTTP request. It's specific, not a generic OWASP checklist.
@@ -28,7 +28,7 @@ This boundary matters: the only way an attacker affects the pipeline's verdict i
 | `init_by_lua_file` errors at boot | nginx fails to start | Better to fail fast than serve with no blocklist. Catch in CI: [tests/ja4_helpers_test.lua](../tests/ja4_helpers_test.lua) covers the pure-Lua surface; `make ci` runs on every PR. |
 | `compute_fp()` throws at request time | nginx logs `[error]`, the request **gets `allow`** verdict and is proxied | OpenResty's default `error_log` directive captures it; we never `ngx.exit(500)` from compute. Fail-open is correct: a crashed antibot should not also break the site. |
 | `$ssl_ciphers` empty or truncated by nginx | fp is `L<ver><sni>00<alpn>_000000000000_<curves_hash>` | Falls through to `allow` (no blocklist match). Logged at INFO so we'd notice if it became frequent. |
-| `lua_shared_dict fp_blocklist` fills up | `dict:set` returns `nil, "no memory"`, logged at ERR | The blocklist is sized for catalog cardinality (1 MB ≈ 10K entries); cascade [86exmk08u](https://app.clickup.com/t/86exmk08u) productionises sizing. New entries get rejected; existing entries keep working. |
+| `lua_shared_dict fp_blocklist` fills up | `dict:set` returns `nil, "no memory"`, logged at ERR | The blocklist is sized for catalog cardinality (1 MB ≈ 10K entries); cascade 86exmk08u productionises sizing. New entries get rejected; existing entries keep working. |
 | `lua_shared_dict verdict_cache` fills up | LRU eviction (built into `shared_dict`) | Worst case: cache hit ratio drops, more shared_dict lookups, slightly higher p99. Not a correctness issue. |
 | OpenSSL CVE in the upstream image | Mitigated by `docker pull openresty/openresty:alpine && reload` | We carry no custom OpenSSL build (per [ADR-002](architecture-decisions/002-spike-2-lua-ssl-vars.md)) — no fork to patch, no rebuild to coordinate. |
 | Catalog-pull worker pulls a poisoned catalog (sidecar compromised) | The blocklist gains entries from the bad catalog | Out of scope for this review — sidecar `/catalog` endpoint owns provenance; RFC §В1 specifies SemVer + ETag + atomicity. Mitigation: the verdict cache layer means a poisoned entry blocks only requests of that specific fp, not the whole site. |
@@ -83,14 +83,14 @@ What gets logged for each request:
 - In the production pipeline ([infra/nginx-lua-poc/lua/verdict.lua](../infra/nginx-lua-poc/lua/verdict.lua)): one line at INFO level per cache miss — `verdict=allow|block (cold) fp=L13d... ua=...`. UA is included so a "user complains about a 403" investigation can join on the UA without re-parsing the access log.
 - The shadow-mode variant at [infra/nginx-shadow/lua/log_event.lua](../infra/nginx-shadow/lua/log_event.lua) emits one JSON line per request (fp + raw `$ssl_*` components truncated to 256 bytes + UA truncated to 200 chars + method/host/URI/status/request_time/remote_addr).
 
-**Remote IP is logged** in shadow mode (via the JSON event line) and in production (via nginx's default access log if enabled; the antibot's own log line does NOT include remote_addr — it only has verdict + fp + UA). For GDPR / PDN-data compliance, the operator should configure nginx's `set_real_ip_from` + `real_ip_header` to either (a) anonymise (`X-Forwarded-For` from CDN with the last octet stripped) or (b) hash before logging. Not currently implemented — operator responsibility. Flagged for the production handoff (cascade [86exmk0e5](https://app.clickup.com/t/86exmk0e5)).
+**Remote IP is logged** in shadow mode (via the JSON event line) and in production (via nginx's default access log if enabled; the antibot's own log line does NOT include remote_addr — it only has verdict + fp + UA). For GDPR / PDN-data compliance, the operator should configure nginx's `set_real_ip_from` + `real_ip_header` to either (a) anonymise (`X-Forwarded-For` from CDN with the last octet stripped) or (b) hash before logging. Not currently implemented — operator responsibility. Flagged for the production handoff (cascade 86exmk0e5).
 
 **Request bodies are never logged.** We don't even read them; the verdict pipeline runs in `access_by_lua`, before the body is processed.
 
 ## Known limitations (full disclosure)
 
 - **L-prefix fp is not byte-compatible with FoxIO JA4.** Documented in [ADR-004](architecture-decisions/004-l-prefix-not-foxio.md). Means external JA4 feeds cannot be imported directly.
-- **TLS-impersonating bots can defeat us if they perfectly mimic a browser's cipher list.** Per ADR-002, mitigation is cascade [A5](https://app.clickup.com/t/86exmk00m) — UA↔JA consistency, not strict JA4.
+- **TLS-impersonating bots can defeat us if they perfectly mimic a browser's cipher list.** Per ADR-002, mitigation is cascade A5 — UA↔JA consistency, not strict JA4.
 - **GREASE strip is whitelist-based.** We strip the 16 documented GREASE values (RFC 8701). If a new GREASE-like rotation scheme is added to TLS, we won't strip it until we update the pattern. Probability: low (RFC 8701 has been stable since 2019).
 - **Cross-validation is component-level, not byte-match.** Documented in [scripts/cross-validate-ja4.sh](../scripts/cross-validate-ja4.sh) and [docs/phase2-fp-catalog.md](phase2-fp-catalog.md).
 - **No rate limit on the verdict pipeline itself.** A pathological client can hit us at line rate. The pipeline is bounded-cost per request (above), so this is degraded service not outage — but the cascade A3 rate-limit task addresses it explicitly.

@@ -315,7 +315,7 @@ only the container recreate is brief downtime.
 cd ~
 docker compose -f ~/abuse-controls/infra/demo-stand/docker-compose.demo.yml down
 mv abuse-controls abuse-controls.bak.$(date +%F)
-git clone https://github.com/tabularasa31/abuse-controls.git abuse-controls
+git clone https://github.com/tabularasa31/bot-abuse-controls.git abuse-controls
 cd abuse-controls
 
 # Certs: repo compose mounts ./certs (not /etc/letsencrypt). Copy current
@@ -425,11 +425,11 @@ and the cascade behaves identically.
 
 ## What this does NOT show
 
-- **Hot-reload of the blocklist** (cascade task [В1](https://app.clickup.com/t/86exmk08u)). The demo uses a static blocklist loaded at init.
-- **Grey-verdict / sidecar scoring** (cascade task [В2](https://app.clickup.com/t/86exmk09b)). The demo is edge-only.
-- **JS challenge issuance** (cascade task [A8](https://app.clickup.com/t/86exmk02c)). The demo blocks or allows; no challenge flow.
-- **Rate limiting** (cascade task [A3](https://app.clickup.com/t/86exmjzxm)). Each request is independent.
-- **UA↔JA consistency** (cascade task [A5](https://app.clickup.com/t/86exmk00m)). The demo's blocklist doesn't include this signal.
+- **Hot-reload of the blocklist** (cascade task В1). The demo uses a static blocklist loaded at init.
+- **Grey-verdict / sidecar scoring** (cascade task В2). The demo is edge-only.
+- **JS challenge issuance** (cascade task A8). The demo blocks or allows; no challenge flow.
+- **Rate limiting** (cascade task A3). Each request is independent.
+- **UA↔JA consistency** (cascade task A5). The demo's blocklist doesn't include this signal.
 
 The demo is intentionally the **A1 fp blocklist** slice of the cascade only — the part that's production-ready post-PR #3/#4. Other cascade tasks are sequenced after a successful demo + integration with the prod edge.
 
