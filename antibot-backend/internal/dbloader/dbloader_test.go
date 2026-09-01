@@ -21,9 +21,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
-	"github.com/tabularasa31/antibot-backend/internal/dbloader"
-	"github.com/tabularasa31/antibot-backend/internal/filesource"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/dbloader"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/filesource"
 )
 
 func dsn(t *testing.T) string {

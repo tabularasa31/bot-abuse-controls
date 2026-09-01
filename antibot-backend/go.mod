@@ -1,4 +1,4 @@
-module github.com/tabularasa31/antibot-backend
+module github.com/tabularasa31/bot-abuse-controls/antibot-backend
 
 go 1.23
 

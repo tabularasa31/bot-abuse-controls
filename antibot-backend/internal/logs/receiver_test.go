@@ -14,7 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/tabularasa31/antibot-backend/internal/logs"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/logs"
 )
 
 func postLogs(t *testing.T, url string, body io.Reader) *http.Response {

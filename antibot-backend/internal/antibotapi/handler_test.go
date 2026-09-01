@@ -29,9 +29,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/tabularasa31/antibot-backend/internal/antibotapi"
-	"github.com/tabularasa31/antibot-backend/internal/dbloader"
-	"github.com/tabularasa31/antibot-backend/internal/logger"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/antibotapi"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/dbloader"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/logger"
 )
 
 func dsn(t *testing.T) string {

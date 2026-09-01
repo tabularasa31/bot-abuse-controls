@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
 )
 
 // ErrNotFound — there is no row for the site (on GET; for an array DELETE, the element did not exist).

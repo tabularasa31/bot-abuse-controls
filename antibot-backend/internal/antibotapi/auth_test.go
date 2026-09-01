@@ -7,7 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/tabularasa31/antibot-backend/internal/antibotapi"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/antibotapi"
 )
 
 func TestNewAuthenticator_EmptyTokenReturnsNil(t *testing.T) {

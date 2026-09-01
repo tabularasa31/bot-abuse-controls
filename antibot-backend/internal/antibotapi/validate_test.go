@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tabularasa31/antibot-backend/internal/antibotapi"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/antibotapi"
 )
 
 func TestValidateSite(t *testing.T) {

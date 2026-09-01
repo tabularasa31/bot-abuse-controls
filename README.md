@@ -1,6 +1,9 @@
 # bot-abuse-controls
 
 [![CI](https://github.com/tabularasa31/bot-abuse-controls/actions/workflows/ci.yml/badge.svg)](https://github.com/tabularasa31/bot-abuse-controls/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tabularasa31/bot-abuse-controls/antibot-backend)](https://goreportcard.com/report/github.com/tabularasa31/bot-abuse-controls/antibot-backend)
+[![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](antibot-backend/go.mod)
+[![OpenResty](https://img.shields.io/badge/OpenResty-Lua-009639?logo=nginx&logoColor=white)](infra/demo-stand/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
 Bot and abuse controls for a CDN edge: a request-scoped verdict cascade running in

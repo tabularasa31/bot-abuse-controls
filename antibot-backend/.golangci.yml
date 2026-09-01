@@ -66,7 +66,7 @@ linters-settings:
   nakedret:
     max-func-lines: 20
   goimports:
-    local-prefixes: github.com/tabularasa31/antibot-backend
+    local-prefixes: github.com/tabularasa31/bot-abuse-controls/antibot-backend
 
 issues:
   # We silence nothing by default (golangci-lint silences some things in exclude-rules

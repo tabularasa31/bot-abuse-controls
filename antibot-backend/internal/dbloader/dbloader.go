@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
 )
 
 //go:embed migrations/*.sql

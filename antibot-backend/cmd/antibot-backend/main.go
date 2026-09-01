@@ -19,8 +19,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/tabularasa31/antibot-backend/internal/app"
-	"github.com/tabularasa31/antibot-backend/internal/logger"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/app"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/logger"
 )
 
 func main() { os.Exit(realMain()) }

@@ -30,7 +30,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
 )
 
 // The list of files we track for the mtime cache. When a new catalog is added,

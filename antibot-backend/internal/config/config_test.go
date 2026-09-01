@@ -3,7 +3,7 @@ package config_test
 import (
 	"testing"
 
-	"github.com/tabularasa31/antibot-backend/internal/config"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/config"
 )
 
 // TestLoad_MigrateOnStartup_AcceptsCaseVariants —

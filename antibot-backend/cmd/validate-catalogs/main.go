@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/tabularasa31/antibot-backend/internal/filesource"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/filesource"
 )
 
 func main() {

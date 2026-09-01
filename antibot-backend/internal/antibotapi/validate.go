@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/net/publicsuffix"
 
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
 )
 
 // maxSiteLen — RFC 1035 §2.3.4 (a maximum of 253 octets for a domain name).

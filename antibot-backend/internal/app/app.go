@@ -17,16 +17,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/tabularasa31/antibot-backend/internal/antibotapi"
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
-	"github.com/tabularasa31/antibot-backend/internal/config"
-	"github.com/tabularasa31/antibot-backend/internal/db"
-	"github.com/tabularasa31/antibot-backend/internal/dbloader"
-	"github.com/tabularasa31/antibot-backend/internal/filesource"
-	"github.com/tabularasa31/antibot-backend/internal/health"
-	"github.com/tabularasa31/antibot-backend/internal/logs"
-	"github.com/tabularasa31/antibot-backend/internal/logsink"
-	"github.com/tabularasa31/antibot-backend/internal/rdns"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/antibotapi"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/config"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/db"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/dbloader"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/filesource"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/health"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/logs"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/logsink"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/rdns"
 )
 
 // App is an assembled but not yet started process. Run starts the workers and

@@ -19,8 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/tabularasa31/antibot-backend/internal/catalog"
-	"github.com/tabularasa31/antibot-backend/internal/filesource"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/catalog"
+	"github.com/tabularasa31/bot-abuse-controls/antibot-backend/internal/filesource"
 )
 
 // The first load is more generous than a tick: a cold pool pays for handshakes
