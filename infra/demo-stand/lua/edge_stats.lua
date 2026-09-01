@@ -152,9 +152,8 @@ function _M.start(opts)
     local interval = tonumber(opts.interval) or _M.interval
     if ngx.worker.id() ~= 0 then return end
     local ok, err = ngx.timer.every(interval, function(premature)
-        -- `premature` is true when the timer is cancelled on worker reload/
-        -- shutdown — skip the final fire so we don't emit mid-teardown
-        --.
+        -- `premature` is true when the timer is cancelled on a worker reload or
+        -- shutdown; skip that final fire so nothing is emitted mid-teardown.
         if premature then return end
         local pok, perr = pcall(_M.emit)
         if not pok then

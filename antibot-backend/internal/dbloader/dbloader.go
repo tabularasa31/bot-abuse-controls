@@ -182,8 +182,8 @@ func loadPolicy(ctx context.Context, tx pgx.Tx, r *catalog.RuntimeData) error {
 		if err := unmarshalIfNonEmpty(ipBLJSON, &p.IPBlocklist); err != nil {
 			return fmt.Errorf("policy[%s].ip_blocklist: %w", host, err)
 		}
-		// asn_block: a defensive decode through []*int64 plus per-element filtering
-		//. A direct Unmarshal into []uint32 failed on any
+		// asn_block: a defensive decode through []*int64 plus per-element
+		// filtering. A direct Unmarshal into []uint32 failed on any
 		// -1 / >2^32 value in one row and took the whole catalog tick down →
 		// Store.Replace was never called → the edge failed stale for ALL customers.
 		// A write through the admin API is already caught by `antibotapi.ValidateASN`, but
