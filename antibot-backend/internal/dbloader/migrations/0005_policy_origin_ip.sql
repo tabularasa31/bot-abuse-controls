@@ -9,8 +9,8 @@
 -- Empty string (not NULL) is the "unset" value, matching the Policy
 -- contract (all fields present, zero == absent; see catalog/data.go).
 --
--- Идемпотентно через IF NOT EXISTS — Migrate сериализует HA-реплики через
--- advisory_lock, повторный apply на уже мигрированной БД безвреден.
--- downgrade намеренно отсутствует (house rule: никаких drop column).
+-- Idempotent through IF NOT EXISTS — Migrate serialises the HA replicas through the
+-- advisory_lock, and a repeat apply on an already-migrated database is harmless.
+-- A downgrade is deliberately absent (a house rule: no drop column).
 
 ALTER TABLE policy ADD COLUMN IF NOT EXISTS origin_ip TEXT NOT NULL DEFAULT '';

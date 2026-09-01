@@ -1,19 +1,19 @@
--- 0004_drop_slow_catalogs.sql — медленные каталоги переехали в git-репо
--- catalogs/ (см. ADR-006). БД остаётся только для runtime state, который
--- меняется автоматически и не подходит файлам по природе: verified_bot_ips
--- (rDNS-воркер) и policy (antibotapi из дашборда).
+-- 0004_drop_slow_catalogs.sql — the slow catalogs moved into the catalogs/ git
+-- repo (see ADR-006). The database remains only for the runtime state that
+-- changes automatically and does not suit files by nature: verified_bot_ips
+-- (the rDNS worker) and policy (antibotapi from the dashboard).
 --
--- catalog_version тоже дропаем — версия теперь приходит из catalogs/version
--- (singleton-файл с одной строкой semver).
+-- catalog_version is dropped too — the version now comes from catalogs/version
+-- (a singleton file with one semver line).
 --
--- Перед накатом на стенд: запустите scripts/seed-catalogs-from-db.sh,
--- чтобы выгрузить текущее содержимое таблиц в catalogs/*.yaml и не
--- потерять состояние. На пустой БД (CI / fresh stand) можно сразу
+-- Before applying this on the stand: run scripts/seed-catalogs-from-db.sh
+-- to dump the tables' current contents into catalogs/*.yaml so that no
+-- state is lost. On an empty database (CI / a fresh stand) you can go
 -- alembic-style "upgrade head".
 --
--- Идемпотентно через IF EXISTS — HA-пара backend стартует обе реплики,
--- advisory_lock в Migrate сериализует, но повторный apply на уже
--- мигрированной БД должен быть безвреден.
+-- Idempotent through IF EXISTS — the HA pair of backends starts both replicas,
+-- the advisory_lock in Migrate serialises them, but a repeat apply on an already
+-- migrated database must be harmless.
 
 DROP TABLE IF EXISTS fp_blocklist;
 DROP TABLE IF EXISTS ua_blacklist;

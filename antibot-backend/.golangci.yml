@@ -1,7 +1,7 @@
-# Жёсткий, но без аэстетики набор линтеров для antibot-backend.
-# Принцип: линтер должен ловить баг (correctness, security, ресурсы), а не вкус.
-# Сознательно НЕ включены: длина/сложность функций, naming, расстановка пустых
-# строк, "одинаковые строки → константа", "нет globals/init" и т.п.
+# A strict but non-aesthetic set of linters for antibot-backend.
+# The principle: a linter should catch a bug (correctness, security, resources), not taste.
+# Deliberately NOT enabled: function length and complexity, naming, blank-line
+# placement, "identical strings → a constant", "no globals/init" and the like.
 run:
   timeout: 5m
 
@@ -16,61 +16,61 @@ linters:
     - unused
     - gosimple
 
-    # ---- bugs / ресурсы / контекст ----
+    # ---- bugs / resources / context ----
     - bidichk                    # Unicode-trojan source (CVE-2021-42574)
-    - bodyclose                  # незакрытый resp.Body
-    - contextcheck               # передача context, не background посреди цепочки
-    - durationcheck              # умножение time.Duration на time.Duration
-    - errchkjson                 # необработанные ошибки json.Marshal
-    - errorlint                  # ==err / type-assert вместо errors.Is/As, %w
-    - gocheckcompilerdirectives  # //go: с опечатками
-    - makezero                   # make([]T, n) с n>0 и потом append — частая ошибка
-    - nilerr                     # `return nil` после `if err != nil`
-    - noctx                      # http.NewRequest без контекста
-    - predeclared                # переменные/функции с именами builtin'ов
-    - reassign                   # переприсваивание pkg-уровневых var из stdlib
-    - rowserrcheck               # sql.Rows.Err() не проверен
-    - sqlclosecheck              # sql.Rows / sql.Stmt не закрыт
-    - unconvert                  # бесполезные приведения типов
-    - unparam                    # неиспользуемые параметры / возвращаемые значения
-    - usestdlibvars              # http.StatusOK вместо 200 и т.п.
+    - bodyclose                  # an unclosed resp.Body
+    - contextcheck               # passing a context, not a background one mid-chain
+    - durationcheck              # multiplying a time.Duration by a time.Duration
+    - errchkjson                 # unhandled json.Marshal errors
+    - errorlint                  # ==err / a type assert instead of errors.Is/As, %w
+    - gocheckcompilerdirectives  # //go: with typos
+    - makezero                   # make([]T, n) with n>0 followed by append — a common bug
+    - nilerr                     # `return nil` after `if err != nil`
+    - noctx                      # http.NewRequest without a context
+    - predeclared                # variables and functions named after builtins
+    - reassign                   # reassigning package-level vars from stdlib
+    - rowserrcheck               # sql.Rows.Err() not checked
+    - sqlclosecheck              # sql.Rows / sql.Stmt not closed
+    - unconvert                  # useless type conversions
+    - unparam                    # unused parameters and return values
+    - usestdlibvars              # http.StatusOK instead of 200 and so on
 
     # ---- security ----
-    - gosec                      # SQL-инъекции, weak crypto, file-perms, hardcoded creds
+    - gosec                      # SQL injection, weak crypto, file perms, hardcoded creds
 
-    # ---- качество (умеренно) ----
-    - gocritic                   # большой бандл, дефолт-набор разумен
-    - misspell                   # английские опечатки
-    - nakedret                   # naked return в длинных функциях
-    - prealloc                   # слайсы с известной длиной — preallocate
+    # ---- quality (in moderation) ----
+    - gocritic                   # a large bundle; the default set is sensible
+    - misspell                   # English typos
+    - nakedret                   # a naked return in long functions
+    - prealloc                   # slices with a known length should be preallocated
 
-    # ---- формат ----
+    # ---- formatting ----
     - gofmt
     - gofumpt
     - goimports
 
 linters-settings:
   errcheck:
-    # Не требуем проверять ошибки от Write в ResponseWriter / json.NewEncoder.Encode:
-    # они приходят со сломанного коннекта, реагировать поздно и некуда.
+    # We do not require checking errors from Write on a ResponseWriter / json.NewEncoder.Encode:
+    # they come from a broken connection, and it is too late and pointless to react.
     exclude-functions:
       - (net/http.ResponseWriter).Write
       - (*encoding/json.Encoder).Encode
   gosec:
     excludes:
-      - G104  # дубль errcheck
+      - G104  # a duplicate of errcheck
   gocritic:
     disabled-checks:
       - ifElseChain   # subjective
-      - singleCaseSwitch  # часто намеренно (готовим к расширению)
+      - singleCaseSwitch  # often deliberate (preparing for extension)
   nakedret:
     max-func-lines: 20
   goimports:
     local-prefixes: github.com/tabularasa31/antibot-backend
 
 issues:
-  # Не глушим ничего по умолчанию (golangci-lint глушит часть в exclude-rules
-  # для тестов — оставляем, разумно).
+  # We silence nothing by default (golangci-lint silences some things in exclude-rules
+  # for tests — we keep that, it is sensible).
   exclude-use-default: true
   max-issues-per-linter: 0
   max-same-issues: 0

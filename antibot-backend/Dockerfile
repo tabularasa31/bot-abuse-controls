@@ -8,11 +8,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/antibot-backend ./cmd/antibot-backend
 
-# B9 log-spool — пустой каталог COPY'ируется с chown=nonroot в финальный
-# образ, чтобы docker named volume, монтируемый поверх, унаследовал владельца
-# (nonroot uid 65532). Без этого MkdirAll на свежесозданном root-owned 0755
-# volume'е возвращал бы nil, а первая же запись spill-файла падала бы с
-# EACCES в рантайме (code-review #56).
+# The B9 log spool — an empty directory is COPYed with chown=nonroot into the final
+# image, so that a docker named volume mounted over it inherits the owner
+# (nonroot uid 65532). Without that, MkdirAll on a freshly created root-owned 0755
+# volume would return nil while the very first spill-file write failed with
+# EACCES at runtime (from code review).
 RUN mkdir -p /spool
 
 FROM gcr.io/distroless/static-debian12:nonroot
