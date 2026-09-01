@@ -1,56 +1,27 @@
--- policy.lua — per-host Policy reader + mode-gated enforcement helper (B11).
+-- Per-host policy reader and the mode gate for the whole cascade.
 --
--- Sources:
---   * antibot_policy shared_dict, populated by catalog_pull.lua's `policy`
---     descriptor (full map(host → Policy) pulled from Channel C
---     /catalog/policy). Keys are `<host>:<gen>`; values are cjson-encoded
---     Policy tables.
---   * meta:antibot_policy_gen, flipped atomically by catalog_pull on each
---     successful pull (§C1 atomic-swap).
+-- Policy arrives over Channel C into a shared_dict keyed `<host>:<gen>`, with
+-- the generation flipped atomically by the pull. get(host) always returns a
+-- table: an unknown host, a missing dict or a decode failure all fall back to
+-- POOL_DEFAULT, which must stay in step with the backend's PoolDefault().
 --
--- get(host) returns a non-nil Policy table. Missing host / missing
--- shared_dict / missing gen / decode failure all fall back to POOL_DEFAULT
--- below, which mirrors backend's catalog.PoolDefault() (antibot-backend/
--- internal/catalog/data.go:170). Drift between the two would surface as
--- /__policy showing one mode for an unregistered host and BAC_LOG
--- showing another — keep them in sync.
---
--- Policy fields are passed through verbatim from the Channel C payload, so
--- get(host).origin_ip (multi-tenant routing, 86exrefdz) is available without
--- a dedicated reader: proxy_target.lua treats a non-empty origin_ip as the
--- marker of a proxied tenant. POOL_DEFAULT deliberately omits origin_ip
--- (nil → unregistered host is not a tenant → dropped with 444).
---
--- enforce(status) is the single mode-gate for the cascade. Stages that
--- want to physically affect the response (status, body) MUST go through
--- it instead of calling ngx.exit() directly — otherwise `mode=shadow`
--- clients would silently start receiving 4xx from new enforcement points,
--- breaking the observe-only contract. bac_log.set_verdict is called BEFORE
--- enforce, so the would-be verdict is recorded in either mode; only the
--- physical exit is gated.
---
--- Today the only caller is verdict.lua's tls_fp_blocklist branch. Future
--- enforcement points (rate_limit 429, hygiene/reputation per-host block,
--- challenge) hook into the same helper — see PROGRESS.md follow-up tickets.
-
+-- enforce(status) is the single point where a verdict becomes a response. Any
+-- stage that wants to affect the response goes through it, or shadow-mode
+-- customers would start receiving 4xx from new enforcement points. The verdict
+-- is recorded before the call, so it lands in the log in either mode.
 local _M = {}
 
 local cjson      = require "cjson.safe"
 local cjson_base = require "cjson"   -- empty_array_mt sentinel
 
--- empty_array — short-hand for a `{}` that cjson.encode emits as JSON `[]`
--- rather than `{}`. Used for POOL_DEFAULT list fields below: dashboard and
--- other Channel C clients expect array-shape for ua_blacklist / ip_*
--- / asn_block / geo_whitelist / rate_rules (see Data.Policy json tags in
--- backend data.go), so the default returned to /__policy must match.
+-- A `{}` that cjson encodes as `[]`. The list fields are arrays on the wire, so
+-- the defaults have to encode as arrays too.
 local function empty_array()
     return setmetatable({}, cjson_base.empty_array_mt)
 end
 
--- POOL_DEFAULT: must match catalog.PoolDefault() in the backend
--- (antibot-backend/internal/catalog/data.go:170). Built per-call via
--- new_pool_default() so callers can't accidentally mutate a shared
--- instance and leak state across requests.
+-- Must match catalog.PoolDefault() in the backend. Built per call, so a caller
+-- cannot mutate a shared instance and leak it into the next request.
 local function new_pool_default()
     return {
         mode          = "shadow",
@@ -65,15 +36,9 @@ local function new_pool_default()
     }
 end
 
--- canonical_host — match the dashboard write path. Backend's antibotapi
--- stores policy rows under the {site} path param as received, but DNS host
--- names are case-insensitive (RFC 4343). nginx already lowercases
--- $host, so for a request-side caller this is a no-op; for callers that
--- pass an arbitrary string (/__policy?host=Foo.Example) we normalise here
--- so a mixed-case PATCH still resolves. Also caps length: shared_dict
--- keys are limited to 255 bytes; a malicious client-controlled Host could
--- otherwise crash the lookup. RFC 1035 says ≤253 chars total, but defence
--- in depth — hash anything past 64 to keep the dict key short.
+-- Host names are case-insensitive, so a mixed-case policy row still has to
+-- resolve. Length is capped as well: shared_dict keys stop at 255 bytes and the
+-- Host header is client-controlled.
 local function canonical_host(host)
     if not host or host == "" then return nil end
     host = string.lower(host)
@@ -83,24 +48,15 @@ local function canonical_host(host)
     return host
 end
 
--- VALID_MODES / VALID_STRICTNESSES — mirror antibot-backend's
--- ValidateMode / ValidateStrictness (validate.go:46-48). Drift here would
--- mean the edge silently demotes a valid policy (e.g., backend adds a
--- third mode the edge doesn't know about) instead of failing loud —
--- intentional fail-stale, but the operator should see it in error.log.
+-- Mirror the backend validators. If the backend gains a value the edge does not
+-- know, the edge fails stale and says so, rather than silently demoting.
 local VALID_MODES         = { shadow = true, active = true }
 local VALID_STRICTNESSES  = { standard = true, permissive = true }
 
--- decode_entry(raw, host) — decode one shared_dict raw Policy value + enum-guard
--- it. Shared by the walk-up in lookup(). Always returns a non-nil Policy table.
---
--- Enum guards: a malformed Policy missing `mode` / carrying an unknown value
--- would otherwise silently degrade an active client to shadow
--- (`nil == "active"` is false). Fail to pool default + ERR so the
--- misconfiguration is visible. origin_ip is PRESERVED through this fallback:
--- routing (proxy_target, 86exrefdz) must not depend on mode/strictness
--- validity, otherwise a forward-compat schema change would silently deroute
--- a tenant to the non-tenant 444 drop instead of just failing enforcement stale.
+-- A policy with a missing or unknown `mode` would silently demote an active
+-- customer to shadow, so it falls back loudly instead. origin_ip survives the
+-- fallback: routing must not depend on enum validity, or a schema change would
+-- drop a tenant's traffic entirely rather than just failing enforcement stale.
 local function decode_entry(raw, host)
     local p, err = cjson.decode(raw)
     if not p or type(p) ~= "table" then
@@ -127,16 +83,9 @@ local function decode_entry(raw, host)
     return p
 end
 
--- lookup(host) — uncached read path with PARENT-DOMAIN fallback (86exrefdz).
--- A client onboards a whole DOMAIN, so policy must cover its subdomains too
--- (otherwise `www.<domain>` and friends fall to pool-default shadow / non-
--- tenant). We try the exact host, then strip the leftmost label and retry up
--- the domain, returning the FIRST existing entry (most specific wins): a single
--- `пример.рф` row covers `www.пример.рф`, `app.пример.рф`, … with the same
--- mode/strictness/origin_ip, while an explicit `api.пример.рф` row still
--- overrides for that subdomain. Public-suffix-safe: the walk only matches rows
--- that actually exist, and nobody registers a policy for `рф` / `co.uk`.
--- Always returns a non-nil Policy table so callers can read fields directly.
+-- Uncached read with a parent-domain walk: a customer onboards a domain, so one
+-- row has to cover its subdomains, while an explicit subdomain row still wins.
+-- Most specific match first.
 local function lookup(host)
     if not host or host == "" then return new_pool_default() end
     local dict = ngx.shared.antibot_policy
@@ -152,43 +101,27 @@ local function lookup(host)
         if raw then
             return decode_entry(raw, candidate)
         end
-        -- Strip the leftmost label: www.x.com → x.com → com → stop.
         local dot = candidate:find(".", 1, true)
         if not dot then break end
         local parent = candidate:sub(dot + 1)
-        -- Defense-in-depth: never walk up to a single-label candidate (a bare
-        -- TLD like "com" / "рф"=xn--p1ai). The backend ValidateSite rejects
-        -- public-suffix policy rows at write time (codex P1 on PR #100), so a
-        -- public-suffix row can only exist via manual SQL — this stops the walk
-        -- from inheriting it. (Single-label EXACT lookups still work — internal
-        -- hosts like `staging` are matched on the first iteration above.)
+        -- Never walk up to a bare TLD. The backend rejects public-suffix rows on
+        -- write, so one can only exist through manual SQL, and inheriting it
+        -- would hand its policy to every domain under it. An exact single-label
+        -- lookup still matches on the first iteration.
         if not parent:find(".", 1, true) then break end
         candidate = parent
     end
     return new_pool_default()
 end
 
--- get(host) → Policy table. Per-request memoization on ngx.ctx: the same
--- host is read multiple times per request (policy.enforce in the cascade,
--- bac_log.emit in log_by_lua), each call would otherwise repeat a
--- shared_dict lookup + cjson.decode of the full Policy JSON. Cache is
--- keyed by canonical host so /__policy?host=other still gets a fresh
--- lookup for a different name. Cache lives for one request only and dies
--- with ngx.ctx; gen-flips between two reads in the same request are
--- intentionally not visible (consistency within a single request > 30s
--- staleness window across requests).
+-- Memoized per request: the cascade and the logger both read the same host, and
+-- each miss costs a dict read plus a full decode. A generation flip mid-request
+-- is deliberately invisible — consistency within one request matters more than
+-- shaving the staleness window.
 --
--- READ-ONLY CONTRACT: callers MUST NOT mutate the returned table. The
--- same instance is handed back for every get() on the same host in the
--- same request — mutating it would smash the cached view for every
--- subsequent caller in this request (most often bac_log.emit reading
--- mode/strictness for the access record). If a future caller needs to
--- augment per-host state, attach it to ngx.ctx, not to the Policy table.
---
--- The `if not ctx` fallback is a belt-and-braces guard for callers in
--- phases where ngx.ctx isn't a table (e.g., balancer_by_lua* on some
--- builds). It will never fire from init_by_lua* — accessing ngx.ctx in
--- those phases raises before this check can run.
+-- The returned table is read-only. Every caller in the request gets the same
+-- instance, so mutating it corrupts the view for the rest of them; per-request
+-- state belongs on ngx.ctx.
 function _M.get(host)
     local ctx = ngx.ctx
     if not ctx then return lookup(host) end
@@ -205,34 +138,20 @@ function _M.get(host)
     return p
 end
 
--- canonical_host is exposed so catalog_pull's `policy` apply() writes
--- shared_dict keys with the same normalisation get() reads. Drift between
--- the two would resurface the case-sensitivity bug this guards against.
+-- Exposed so the pull writes keys with the same normalisation this reads.
 _M.canonical_host = canonical_host
 
--- origin_ip(host) — ctx-free read of a host's origin_ip (or nil). Used by
--- tls_autossl.allow_domain in the ssl_certificate_by_lua phase, where
--- ngx.ctx is not reliably a per-request table (it can leak across the
--- handshake), so the ctx-memoized get() is unsafe there. This calls lookup()
--- directly — one shared_dict read + decode per TLS handshake, which is fine
--- (handshakes are far rarer than requests, and on-demand issuance only
--- happens once per domain). Returns the string origin_ip or nil.
+-- ctx-free, for the ssl_certificate_by_lua phase where ngx.ctx is not reliably
+-- per-request and the memoized get() would leak across handshakes.
 function _M.origin_ip(host)
     return lookup(host).origin_ip
 end
 
--- enforce(status, headers) — physically exit with `status` iff the
--- current Host's policy is mode=active. mode=shadow returns nil so the
--- caller falls through to its next instruction (typically continuing
--- the cascade and proxying to origin). The would-be verdict must
--- already be recorded via bac_log.set_verdict before this call so
--- analytics see the block intent in either mode.
+-- Exits with `status` only under mode=active; under shadow it returns and the
+-- caller carries on to the origin. Record the verdict before calling.
 --
--- Optional `headers` table is applied via ngx.header[k]=v BEFORE the
--- exit — used for rate-limit's `Retry-After` (phase1-spec §"429 with
--- Retry-After") and future challenge response headers. Skipped in
--- shadow mode: the response is going to origin, our headers would
--- pollute the user's traffic.
+-- `headers` is skipped in shadow mode: that response belongs to the origin and
+-- must not carry our headers.
 function _M.enforce(status, headers)
     if _M.get(ngx.var.host).mode == "active" then
         if headers then
