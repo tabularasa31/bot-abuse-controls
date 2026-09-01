@@ -1,30 +1,16 @@
--- edge_stats — periodic aggregate stats dump to stdout (push, not expose).
+-- Periodic aggregate stats pushed to stdout, one `EDGE_STATS {json}` line per
+-- interval, which promtail already tails into Loki alongside the request log.
+-- Aggregate rather than per-request, so it stays safe under a flood, and there
+-- is no pull endpoint to scan.
 --
--- Replaces the deleted /metrics pull endpoint (Phase 1 edge mgmt-plane cleanup).
--- promtail does not scrape HTTP — it tails the container stdout — so the bridge
--- to Loki is: print one `EDGE_STATS {json}` line every `interval` seconds, which
--- promtail already captures (alongside `BAC_LOG`) under a `kind="edge_stats"`
--- label. AGGREGATE (one line per interval, not per request) → no per-request log
--- I/O, safe under a flood, and no pull endpoint to scan/flood.
+-- snapshot() enumerates the whole metrics dict rather than an allowlist: a
+-- curated list had already dropped the clearance and challenge security
+-- counters, and enumeration means a new counter ships without editing here.
 --
--- COMPLETENESS (code-review on PR #147): snapshot() ENUMERATES the whole metrics
--- shared dict — exactly what the deleted metrics.lua did via m:get_keys(0) — so
--- nothing silently goes dark. A hand-curated allowlist previously dropped the
--- clearance/challenge security counters and the catalog version-mismatch counter
--- (still incremented every request, exported nowhere). Enumeration also means a
--- NEW counter added anywhere ships automatically, no edit here.
---
--- Layout: plain scalar counters/gauges go top-level; the dynamic prefixed
--- families are grouped into nested objects mirroring metrics.lua's labels:
---   rule:<stage>:<rule>                     -> rules{}
---   flag:<flag>                             -> flags{}
---   tag:<tag>                               -> tags{}
---   staging:<catalog>:<pattern>             -> staging{}   (incl. zero-traffic
---       staged patterns — these have NO BAC_LOG record, so Loki cannot
---       reconstruct them; the promotion workflow needs them here)
---   edge_sidecar_version_mismatch_total:<c> -> version_mismatch{}
--- start_time and catalog_last_pull_ts:* are internal (used to derive
--- uptime_seconds / catalog_staleness_seconds) and are not dumped raw.
+-- Scalars go top-level; the prefixed families are grouped into nested objects
+-- (rules, flags, tags, staging, version_mismatch). Staged patterns with zero
+-- traffic matter: they have no request-log record, so nothing else can
+-- reconstruct them for the promotion decision.
 
 local _M = { interval = 30 }
 
@@ -35,11 +21,8 @@ function _M.iso8601(epoch)
     return os.date("!%Y-%m-%dT%H:%M:%S", math.floor(epoch or 0)) .. "Z"
 end
 
--- pure: build the snapshot table from a flat {key=value} map of ALL metrics-dict
--- entries (collect() fills it via m:get_keys/m:get; tests inject it directly).
--- `now`/`start_time` are epoch seconds (uptime gauge); `edge_id` stamps the
--- record. No ngx dep → unit-testable, and the classification is exercised
--- without an OpenResty harness.
+-- Builds the snapshot from a flat map of every metrics-dict entry. No ngx
+-- dependency, so the classification is testable directly.
 function _M.snapshot(map, now, start_time, edge_id)
     local s = {
         type     = "edge_stats",
@@ -75,16 +58,10 @@ function _M.snapshot(map, now, start_time, edge_id)
     return s
 end
 
--- emit one EDGE_STATS line to stdout. Reads ngx.shared.metrics; pcall-guarded by
--- the timer wrapper in start(). Mirrors bac_log.lua's stdout contract: write the
--- prefix + JSON + newline straight to stdout (not via ngx.log, which would wrap
--- the line in nginx's error-log formatting and break the promtail regex).
--- read the deployed git sha: prefer the live .revision file (scripts/update.sh
--- writes it after a hot reload, so it survives reloads that froze REVISION at
--- container start), fall back to the REVISION env, then "unknown". Mirrors what
--- the removed /__version handler did. Cached per worker (gemini review on PR
--- #147): the value is static for a worker's lifetime — an update/reload spawns
--- fresh workers — so we read the file at most once instead of every 30s tick.
+-- Writes straight to stdout rather than through ngx.log, which would wrap the
+-- line in the error-log format and break the promtail regex.
+-- The file wins over the env var: it survives a hot reload that froze the env
+-- at container start. Static for a worker's life, so it is read once.
 local cached_revision
 local function revision()
     if cached_revision then return cached_revision end
@@ -98,11 +75,8 @@ local function revision()
     return cached_revision
 end
 
--- collect() — assemble the full stats table (counters + deploy metadata +
--- Channel C staleness). The single source of truth used by BOTH emit() (push to
--- stdout → Loki) and the private /__stats handler (pull, for the B13 integration
--- tests + operator debugging on the :9090 mgmt plane). Reads ngx.shared.metrics;
--- returns nil if that dict is unavailable.
+-- Shared by the stdout push and the private /__stats handler, so both report
+-- exactly the same numbers.
 function _M.collect()
     local m = ngx.shared.metrics
     if not m then return nil end
@@ -119,13 +93,10 @@ function _M.collect()
         m:get("start_time"),
         os.getenv("EDGE_ID") or "stand-bac")
 
-    -- Deploy metadata that used to live behind /__version (removed Phase 1):
-    -- folded in so operators verify "what's deployed / did the secret rotation
-    -- take / cascade version" from Loki (or /__stats) instead of an HTTP
-    -- endpoint. pcall-guarded — a load hiccup must not stop the dump.
-    -- All three are static for a worker's lifetime (a rotation/deploy = reload =
-    -- fresh workers), so resolve once and cache (gemini review on PR #147).
-    -- `false` sentinel distinguishes "resolved to nil" from "not yet resolved".
+    -- Lets an operator confirm what is deployed, and whether a secret rotation
+    -- took, from the log alone. All three are static for a worker's life, so
+    -- they resolve once; the `false` sentinel separates "resolved to nil" from
+    -- "not yet resolved".
     snap.commit = revision()
     if _M._cached_cascade_version == nil then
         local ok_cv, cv = pcall(function() return require("challenge").template_version() end)
@@ -138,11 +109,9 @@ function _M.collect()
     end
     snap.challenge_secret_fp = _M._cached_secret_fp or nil
 
-    -- Channel C liveness (was /metrics antibot_edge_catalog_staleness_seconds):
-    -- seconds since the last successful backend contact per catalog, -1 if never.
-    -- The alert signal for a dead pull channel; promtail drops nginx error.log
-    -- lines (only BAC_LOG/EDGE_STATS prefixes survive), so without this the
-    -- staleness WARNs would never reach Loki. pcall-guarded.
+    -- Seconds since the last successful pull per catalog, -1 if never. The
+    -- alert signal for a dead channel: the staleness warnings go to the error
+    -- log, which promtail drops, so they would never reach Loki otherwise.
     local ok_st, stale = pcall(function()
         local cp = require "catalog_pull"
         local now = ngx.time()

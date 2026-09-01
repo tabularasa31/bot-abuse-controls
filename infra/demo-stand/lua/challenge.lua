@@ -1,24 +1,14 @@
--- challenge.lua — HTML+JS challenge page renderer + nonce issuer (C2).
+-- Renders the HTML+JS challenge page and issues its nonce.
 --
--- Phase 4, vision §5.2 "Branch A". The edge substitutes one self-signed nonce into
--- the HTML+JS template and serves the page to the client; the JS computes SHA-256(nonce +
--- JS_SECRET) and POSTs the token to the verify endpoint. Only issuance lives here
--- (render plus issue_nonce); verify lands in C5, which reuses
--- challenge_secret.get() (C1) for the HMAC and reads the same nonce payload.
+-- The page asks the browser to compute SHA-256(nonce + JS_SECRET) and POST the
+-- token back; the verify side lives in challenge_verify and shares the secret.
 --
--- Template delivery on the demo is a file mount (Channel A on the demo). It is loaded
--- exactly once in init_by_lua (see init.lua: `require("challenge").preload`), and
--- workers inherit the cached string through fork. Changing the template means
--- bump `CASCADE_VERSION` + edit `page.html` + `openresty -s reload`.
+-- The template is loaded once in init_by_lua and inherited through fork, so
+-- changing it means bumping CASCADE_VERSION and reloading.
 --
--- The nonce format is a two-segment token `<payload-b64url>.<hmac-b64url>`:
---   payload = cjson.encode({h=<host>, ts=<issued_unix>, exp=<expiry_unix>})
---   hmac    = HMAC-SHA256(secret = challenge_secret.get(), data = payload-b64url)
--- C5 decodes the payload, verifies the HMAC, checks `exp > ngx.time()` and
--- checks that `h` matches the request host. The TTL is ≈60 s (defaults.conf
--- [challenge].nonce_ttl_seconds) — that is the "single use" of the nonce from the
--- acceptance criteria: the usage window is bounded hard by the expiry, and a replay
--- after it is rejected.
+-- The nonce is `<payload-b64url>.<hmac-b64url>`, where the payload carries the
+-- host and an expiry about 60 s out. That expiry is what makes it single-use:
+-- the window is bounded and a later replay is rejected.
 
 local cjson  = require "cjson.safe"
 local hmac   = require "resty.openssl.hmac"
@@ -32,11 +22,8 @@ if not ok_config then config = nil end
 
 local _M = {}
 
--- DEFAULT_NONCE_TTL — fallback only. Source of truth is defaults.conf
--- [challenge].nonce_ttl_seconds (vision §5.2, "TTL 60 s"). We keep a baked-in
--- default so issue_nonce stays operational if the config section is missing
--- (e.g., older defaults.conf during a partial rollout) — never silently
--- "no TTL" / "TTL=0", which would invalidate every nonce instantly.
+-- Fallback for a missing config section. Never silently zero, which would
+-- invalidate every nonce the moment it was issued.
 local DEFAULT_NONCE_TTL = 60
 
 -- TEMPLATE_PATH / VERSION_PATH are resolved through env, so that the integration
@@ -76,11 +63,8 @@ end
 local cached_template
 local cached_version
 
--- parse_version_from_template — the single point for extracting the version from the template
--- (used both in preload and in the render fallback). We look for
--- `<meta name="cascade-version" content="...">`. That is the only
--- machine-checked marker; the HTML comment `<!-- cascade-version: ... -->`
--- is for the human eye in curl output and is not parsed by this function.
+-- The meta tag is the machine-checked marker; the HTML comment carrying the
+-- same version is for reading curl output and is not parsed.
 local function parse_version_from_template(html)
     return html:match('<meta%s+name="cascade%-version"%s+content="([^"]+)"')
 end
@@ -147,11 +131,8 @@ function _M.issue_nonce(host, ttl_seconds)
     if not key then
         return nil, "challenge_secret not loaded (see C1: challenge_secret.lua)"
     end
-    -- TTL precedence: explicit argument > config > baked-in default. The
-    -- config branch reads through `config.defaults.challenge` so an empty
-    -- or missing [challenge] section in defaults.conf doesn't crash —
-    -- falls through to DEFAULT_NONCE_TTL. tonumber() guards a stringly-
-    -- typed INI value like "60".
+    -- Argument, then config, then the baked-in default. tonumber guards the
+    -- stringly-typed INI value.
     local ttl = tonumber(ttl_seconds)
     if not ttl and config and type(config.defaults) == "table" then
         local ch = config.defaults.challenge
@@ -169,12 +150,8 @@ function _M.issue_nonce(host, ttl_seconds)
     end
     local payload_b64 = b64url(payload)
 
-    -- Explicit update()+final() rather than final(data). Both shapes are
-    -- accepted by current lua-resty-openssl (final() calls update()
-    -- internally if data is passed), but the explicit form is bug-resistant
-    -- against version drift and lets the test fake mirror the real API
-    -- precisely (so a future regression to `final(data)` would fail loud
-    -- in unit tests, not silently sign the empty string).
+    -- Explicit update() then final(): the one-call form would let a version
+    -- drift silently sign the empty string instead of failing.
     local h, hmac_err = hmac.new(key, "sha256")
     if not h then return nil, "hmac.new: " .. tostring(hmac_err) end
     local upd_ok, upd_err = h:update(payload_b64)
@@ -185,11 +162,8 @@ function _M.issue_nonce(host, ttl_seconds)
     return payload_b64 .. "." .. b64url(sig), exp
 end
 
--- substitute — a targeted placeholder replacement. gsub is in pattern mode (the 4th
--- argument is nil), but the template placeholders `{{NONCE}}` /
--- `{{EXPIRY}}` / `{{CASCADE_VERSION}}` contain no Lua pattern
--- metacharacters, so that is fine. The replacement is a function (rather than a string), so that
--- values containing `%` in the output do not break the back-reference.
+-- The replacement is a function so that a `%` in the value cannot be read as a
+-- back-reference.
 local function substitute(tpl, vars)
     local function repl(name)
         return tostring(vars[name] or "")

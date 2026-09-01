@@ -1,21 +1,12 @@
--- policy_matchers.lua — per-host policy lists compiled into runtime matchers
--- (86exr05xt).
+-- Compiles a host's policy lists into runtime matchers.
 --
--- policy.get(host) returns the raw Policy table (mode, strictness, plus list
--- fields ua_blacklist / ip_whitelist / ip_blocklist / asn_block /
--- geo_whitelist). Reputation and hygiene need the lists as ipmatcher
--- objects / lookup sets / a combined UA regex — compiling them per request
--- is too expensive (lua-resty-ipmatcher walks all CIDRs to build a
--- patricia trie; the regex compile is JIT'd by `jo` flag but the
--- combine-into-alternation step is still O(N)). Cache by (host, gen):
--- the gen flips atomically on every Channel C pull (catalog_pull.lua), so
--- a fresh policy invalidates the old key automatically and the old key
--- ages out via LRU. TTL on cache entries is a defence-in-depth so a
--- worker that never receives another pull (B7 broken? gen stuck) still
--- eventually re-runs the lookup.
+-- Reputation and hygiene need the raw policy lists as ipmatcher objects, lookup
+-- sets and a combined UA regex. Building those per request is too expensive, so
+-- they are cached by (host, generation): the generation flips atomically on
+-- every catalog pull, which invalidates the old entry for free. Entries also
+-- carry a TTL, so a worker that somehow stops receiving pulls still recovers.
 --
--- The module is request-time only: lookups call ngx.shared.meta and may
--- call policy.get which expects ngx.ctx. Do not call from init phase.
+-- Request-time only: the lookups touch ngx.ctx and the shared dicts.
 
 local lrucache  = require "resty.lrucache"
 local ipmatcher = require "resty.ipmatcher"
@@ -23,11 +14,8 @@ local policy    = require "policy"
 
 local _M = {}
 
--- Sized for the demo (≤O(10) clients) plus headroom for future fanout.
--- One entry per (host, gen) — gen flips on every catalog pull, so the
--- effective working set is N_hosts × 1 (the previous gen's entries
--- become unreachable on flip and age out). 256 covers ~250 hosts before
--- LRU eviction kicks in; bump if the dashboard ever onboards more.
+-- One live entry per host, since the previous generation's entries become
+-- unreachable on a flip and age out.
 local CACHE_SIZE = 256
 -- 5 minutes: longer than the catalog pull interval (30s) so the cached
 -- entry survives a few requests' worth of misses; shorter than infinity
@@ -57,12 +45,9 @@ local EMPTY = {
     ua_blacklist_re   = nil,
 }
 
--- to_set — array of strings/numbers → { [v] = true }. nil/empty array
--- (or all-empty/wrong-type entries) returns nil so callers can do
--- `if set then` cheaply. Defensive type-filter: cjson.safe decodes JSON
--- `null` as a `cjson.null` userdata and bad backend payloads could mix
--- arbitrary types into the array; tostring on userdata produces noise
--- like `"userdata: 0x...\"` which would shadow a real ASN/country key.
+-- Returns nil for an empty result, so callers can test the value directly. The
+-- type filter matters: cjson decodes JSON null as userdata, whose tostring
+-- would shadow a real key.
 local function to_set(arr)
     if not arr or #arr == 0 then return nil end
     local set = {}
@@ -75,11 +60,8 @@ local function to_set(arr)
     return next(set) and set or nil
 end
 
--- compile_ip — wraps ipmatcher.new with fail-stale: a malformed CIDR
--- (shouldn't happen after backend ValidateCIDR, but defence in depth)
--- logs ERR and yields nil so the rule simply doesn't fire — pre-PR
--- behaviour preserved for that one host. Pre-filters non-string entries
--- (e.g., a stray cjson.null) so ipmatcher.new doesn't see them.
+-- Fail-stale: a malformed CIDR logs and yields nil, so the rule does not fire
+-- for that host rather than erroring.
 local function compile_ip(cidrs, host, label)
     if not cidrs or #cidrs == 0 then return nil end
     local clean = {}
@@ -98,15 +80,9 @@ local function compile_ip(cidrs, host, label)
     return m
 end
 
--- compile_ua — combine an array of UA regex strings into a single
--- alternation, same shape hygiene's build_combined produces from the
--- attrs-list form. Returns nil if the array is empty so the caller can
--- skip the ngx.re.find entirely. No status filtering: per-host lists
--- come from the dashboard, every entry is "active" by definition (the
--- staging/active toggle is a catalog property, not a policy one).
--- Type-filtered so `table.concat` can't choke on a cjson.null userdata
--- or a stray number (a 500 from a malformed dashboard payload would be
--- a much worse outcome than a silently-skipped entry).
+-- No status filtering: a per-host list comes from the dashboard, so every entry
+-- is active by definition — staging is a catalog property, not a policy one.
+-- Type-filtered so a malformed payload cannot turn into a 500.
 local function compile_ua(patterns)
     if not patterns or #patterns == 0 then return nil end
     local nonempty = {}
@@ -138,18 +114,12 @@ local function build(host, p)
     }
 end
 
--- get(host) → matcher bundle. Always non-nil; an unregistered host or
--- a host with all-empty lists returns the shared EMPTY sentinel so
--- callers can field-test (`if m.blocklist then ...`) without nil guards.
+-- Always returns a bundle: an unregistered host gets the shared empty sentinel,
+-- so callers can test a field without nil guards.
 --
--- Two-tier cache:
---   1. ngx.ctx.policy_matchers_cache[host] — per-request memoization.
---      hygiene and reputation both call get(host) for the same Host
---      header on a single request; without this every stage would
---      repeat the canonical_host + meta:get + lrucache:get path.
---   2. Worker-level lrucache keyed by (canonical_host, gen) — survives
---      across requests within a worker. gen flips on every Channel C
---      pull and invalidates the old key automatically.
+-- Cached twice: per request, because hygiene and reputation both ask for the
+-- same host, and per worker keyed by generation, which survives across
+-- requests and is invalidated by the next pull.
 function _M.get(host)
     if not host or host == "" then return EMPTY end
     local ctx = ngx.ctx
