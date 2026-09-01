@@ -41,7 +41,7 @@ RUN apk add --no-cache libmaxminddb libmaxminddb-dev ca-certificates
 # v0.17.x calls `require "resty.openssl.x509.chain"` to validate the client
 # cert before handing it to ssl handshake. Without it, http_connect.lua emits
 # `mTLS isn't supported without lua-resty-openssl` and the fetch falls into
-# fail-stale (verified on the <EDGE_VM_IP> stand: gauge stuck at -1, log
+# fail-stale (verified on the demo stand: gauge stuck at -1, log
 # fires on every tick). We unpack only the `resty/` subtree — keeping the
 # image lean — and pin the same way.
 #

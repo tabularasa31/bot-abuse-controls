@@ -37,7 +37,7 @@ end
 -- row with empty origin_ip).
 local TENANTS = {
     ["clientx.com"]              = "203.0.113.9",
-    ["dashboard.example.com"] = "<TENANT_ORIGIN_IP>",
+    ["dashboard.example.com"] = "203.0.113.15",
     ["v6.example"]               = "2001:db8::1",
     ["observed.example"]         = "",          -- policy row, no origin_ip
 }
@@ -56,7 +56,7 @@ eq(proxy_target.origin("dashboard.example.com", TENANTS),
    "https://dashboard.example.com",
    "dashboard tenant (seeded) → https://<host>")
 eq_backend("dashboard.example.com", TENANTS,
-    "<TENANT_ORIGIN_IP>", "dashboard.example.com",
+    "203.0.113.15", "dashboard.example.com",
     "dashboard tenant backend()")
 
 -- IPv6 origin_ip passes through verbatim; origin_resolve.resolve() does the
@@ -90,7 +90,7 @@ eq(proxy_target.origin("bac.example.com", TENANTS),
 eq(proxy_target.origin("example.com", TENANTS),
    "",
    "random Host → BAC")
-eq(proxy_target.origin("<EDGE_VM_IP>", TENANTS),
+eq(proxy_target.origin("203.0.113.117", TENANTS),
    "",
    "IP-literal Host (scanner) → BAC (loop-safe)")
 eq(proxy_target.origin("localhost", TENANTS),

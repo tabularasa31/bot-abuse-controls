@@ -19,7 +19,7 @@ end
 -- Tenant set (host -> origin_ip), as policy.origin_ip would return.
 local TENANTS = {
     ["clientx.com"]              = "203.0.113.9",
-    ["dashboard.example.com"] = "<TENANT_ORIGIN_IP>", -- tenant, but under base domain
+    ["dashboard.example.com"] = "203.0.113.15", -- tenant, but under base domain
     ["observed.example"]         = "",             -- policy row, no origin_ip
 }
 local function origin_ip(h) return TENANTS[h] end

@@ -46,8 +46,8 @@ reverse proxy на VM). Это не прод-эдж: Channel A на стенде
 | edge | `ubuntu@<EDGE_VM_IP>` | контейнер `nginx-demo` (весь каскад), `promtail` |
 | backend+obs | `ubuntu@<BACKEND_VM_IP>` | `antibot-backend-1/2` + `antibot-lb` + postgres + loki + grafana + `antibot-analytics` (daily report + blocklist-candidate producer, читает Loki) |
 
-IP-адреса — **текущие VM стенда** (если VM пересоздаются/меняют IP — обнови эту
-таблицу; это единственное место с адресами). Ключ — `~/.ssh/gpu-key`. Контейнер
+Адреса VM — плейсхолдеры `<EDGE_VM_IP>` / `<BACKEND_VM_IP>`: подставь свои
+(это единственное место, где они описаны). Ключ — `~/.ssh/gpu-key`. Контейнер
 `nginx-demo` слушает на LAN-IP
 (`192.168.10.208:443`), поэтому curl к публичным эндпоинтам идет через контейнер:
 

@@ -18,7 +18,7 @@ end
 
 -- DASHBOARD_PUBLIC_HOST / DASHBOARD_BACKEND_IP defaults used by the stand.
 -- Tests pass them explicitly; `D` and `IP` keep call sites short.
-local D, IP = "dashboard.example.com", "<TENANT_ORIGIN_IP>"
+local D, IP = "dashboard.example.com", "203.0.113.15"
 
 -- ====================================================================
 -- Happy path: origin's hostname matches loop_host → substitution applies,
