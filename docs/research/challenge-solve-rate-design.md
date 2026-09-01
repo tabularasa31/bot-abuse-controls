@@ -1,233 +1,269 @@
-# Дизайн #1 — challenge solve-rate как сигнал скоринга
+# Design #1 — challenge solve rate as a scoring signal
 
-> **Статус: РЕАЛИЗОВАНО (D12).** Сигнал в `analyze.py` + 1 строка на эдже
-> (`attack_mode` в `bac_log`); тесты в `tests/test_analyze.py`. Пороги
-> (`LOW_SOLVE_RATE`/`HUMAN_SOLVE_RATE`) остаются на калибровку по реальным
-> active-staging-данным (env-overridable). Развивает идею #1 из
-> [bot-detector-roadmap.md](bot-detector-roadmap.md). Базируется на D1
-> ([blocklist-scoring.md](../blocklist-scoring.md)) и C5 (challenge verify).
+> **Status: IMPLEMENTED (D12).** The signal lives in `analyze.py` plus one line on
+> the edge (`attack_mode` in `bac_log`); tests are in `tests/test_analyze.py`. The
+> thresholds (`LOW_SOLVE_RATE`/`HUMAN_SOLVE_RATE`) still need calibration against
+> real active-staging data (they are env-overridable). This develops idea #1 from
+> [bot-detector-roadmap.md](bot-detector-roadmap.md) and builds on D1
+> ([blocklist-scoring.md](../blocklist-scoring.md)) and C5 (challenge verify).
 
-## Идея в одну строку
+## The idea in one line
 
-Fp, которому массово выдавали JS-challenge и который его почти не решает
-(`solve_rate ≈ 0` при N выданных), — это near-ground-truth метка бота, сильнее любой
-статической эвристики из таблицы score. Сигнал **уже эмитится**, но в скоринг не течёт.
+A fingerprint that receives JS challenges en masse and almost never solves them
+(`solve_rate ≈ 0` over N issued) is a near-ground-truth bot label, stronger than any
+static heuristic in the score table. The signal is **already emitted** but never
+flows into the scoring.
 
-## Главное открытие: данные уже в Loki, per-fp
+## The key finding: the data is already in Loki, per fingerprint
 
-Оба плеча уже пишутся в `BAC_LOG` с `tls_fp` и доезжают в Loki (тот же канал
-`log_shipper`), откуда `analyze.py` уже читает:
+Both halves are already written to `BAC_LOG` with `tls_fp` and reach Loki (the same
+`log_shipper` channel) that `analyze.py` already reads:
 
-| Плечо | Как выглядит событие | Откуда |
+| Half | What the event looks like | Where it comes from |
 |---|---|---|
-| **issued** | `verdict=challenge`, есть `tls_fp` | основной поток, verdict.lua Branch A (emit до `ngx.exit(200)`) |
-| **solved** | `verdict=allow`, `rule=challenge_pass`, `tls_fp` выставлен | [challenge_verify.lua](../../infra/demo-stand/lua/challenge_verify.lua) |
+| **issued** | `verdict=challenge`, with `tls_fp` | the main flow, verdict.lua Branch A (emitted before `ngx.exit(200)`) |
+| **solved** | `verdict=allow`, `rule=challenge_pass`, `tls_fp` set | [challenge_verify.lua](../../infra/demo-stand/lua/challenge_verify.lua) |
 
-> **Правка при реализации (D12).** Изначально дизайн считал, что solved-плечо уже
-> несёт `tls_fp`. Это было неверно: `/__challenge/verify` — carve-out без
-> `access_by_lua`, L3-стадия `tls_fp` там не запускается, и emit писал только
-> `challenge_fp` (browser JS fp) при `tls_fp=null` → `_event_from_bac_line` **дропал
-> событие**, и `challenge_solved` оставался 0 у всех. Поэтому D12 добавляет на verify-пути
-> `bac_log.set_tls_fp(ja4.compute())` — тот же клиент по TLS, его fp совпадает с issued.
-> Без этого сигнал помечал бы решающих людей как ботов. (code-review on PR.)
+> **Correction made during implementation (D12).** The design originally assumed the
+> solved half already carried `tls_fp`. That was wrong: `/__challenge/verify` is a
+> carve-out without `access_by_lua`, so the L3 `tls_fp` stage never runs there and the
+> emit wrote only `challenge_fp` (the browser JS fingerprint) with `tls_fp=null` →
+> `_event_from_bac_line` **dropped the event**, leaving `challenge_solved` at 0 for
+> everyone. So D12 adds `bac_log.set_tls_fp(ja4.compute())` on the verify path — it is
+> the same client over TLS, so its fingerprint matches the issued one. Without this the
+> signal would have labelled the humans who solve challenges as bots. (Found in code
+> review on the PR.)
 
-Значит `solve_rate(fp)` считается **в `analyze.py`** из уже доезжающих в Loki плеч —
-без новых стадий каскада. Правка Lua минимальна: `attack_mode` в `bac_log` (фильтр §C)
-и `set_tls_fp` на verify-пути (join issued↔solved выше). Это надстройка над D1, не
-новая подсистема.
+So `solve_rate(fp)` is computed **inside `analyze.py`** from halves that already reach
+Loki, with no new cascade stages. The Lua change is minimal: `attack_mode` in `bac_log`
+(the filter in §C) plus `set_tls_fp` on the verify path (the issued↔solved join above).
+This is an extension of D1, not a new subsystem.
 
-> Замечание про single-use: одно решение challenge → `clearance` cookie, дальше запросы
-> фастпасят на L2.1 (`rule=cookie_valid`, тоже `verdict=allow`). Их **нельзя** считать
-> новыми «solved» — иначе один solve раздувает числитель. Считаем `solved` строго по
-> `rule=challenge_pass`, не по любому `verdict=allow`.
+> A note on single use: one solved challenge yields a `clearance` cookie, and subsequent
+> requests fastpath at L2.1 (`rule=cookie_valid`, also `verdict=allow`). Those must
+> **not** count as new "solved" events, or one solve would inflate the numerator. We
+> count `solved` strictly by `rule=challenge_pass`, not by any `verdict=allow`.
 
-## Что не так с текущим поведением (два дефекта)
+## What is wrong with the current behaviour (two defects)
 
 `_fp_has_identity_allow` ([analyze.py:589](../../infra/demo-stand/scripts/analyze.py))
-возвращает True на **любой** `verdict=allow`, и `challenge_pass` попадает в ту же корзину,
-что `ip_whitelist` / `cookie_valid`. Следствия:
+returns True for **any** `verdict=allow`, so `challenge_pass` lands in the same bucket
+as `ip_whitelist` and `cookie_valid`. The consequences:
 
-1. **Один solve шилдит fp навсегда.** Современный headless (Playwright/UDC) решает
-   `SHA-256(nonce+secret)` тривиально. Один решённый challenge → allowlist-gate проваливается
-   → fp нельзя авто-промоутить, а на staging он даёт `fp_caught`. Бот покупает иммунитет одним
-   решением.
-2. **Сильнейший сигнал не используется.** «issued=500, solved=0» сегодня не даёт ни очков в
-   score, ни ускорения на staging. Чистая потеря информации.
+1. **One solve shields a fingerprint forever.** A modern headless browser
+   (Playwright/UDC) computes `SHA-256(nonce+secret)` trivially. One solved challenge →
+   the allowlist gate fails → the fingerprint cannot be auto-promoted, and in staging it
+   produces `fp_caught`. The bot buys immunity with a single solve.
+2. **The strongest signal goes unused.** "issued=500, solved=0" today contributes
+   neither points to the score nor acceleration in staging. Pure information loss.
 
-Корень — **бинарность**: identity-allow трактует challenge_pass так же жёстко, как настоящую
-идентичность. Решение — перевести именно challenge_pass из бинарного вето в **ставку**.
+The root cause is **binarity**: identity-allow treats challenge_pass as harshly as real
+identity. The fix is to turn challenge_pass specifically from a binary veto into a
+**wager**.
 
-## Предложение
+## The proposal
 
-### A. Определение сигнала
+### A. Defining the signal
 
-**Только `mode=active` И `attack_mode=off` события.** Сигнал валиден лишь когда challenge выдан
-**как вердикт о самом fp**, а не как блановая поза хоста:
-- *shadow*: страница физически не серверится (C5) → `solved` всегда 0 → ложный «бот» у всех. Поле
-  `mode` в логе есть (B11).
-- *attack_mode=on*: L5 форсит challenge почти всем не-`allow` запросам (C4), включая нормальные
-  браузеры. Часть живых людей уходит с неожиданного interstitial, не решив → легитимный fp копит
-  «нерешённые» challenge → ложно низкий solve_rate → риск ложного промоута. Под атакой challenge —
-  не суждение о fp, поэтому в сигнал не идёт. **Требует залогировать `attack_mode`** (см. §C).
+**Only `mode=active` AND `attack_mode=off` events.** The signal is valid only when the
+challenge was issued **as a verdict about the fingerprint itself**, not as a blanket
+posture of the host:
+- *shadow*: the page is never physically served (C5) → `solved` is always 0 → a false
+  "bot" label for everyone. The `mode` field is in the log already (B11).
+- *attack_mode=on*: L5 forces a challenge on nearly every non-`allow` request (C4),
+  including ordinary browsers. Some real people leave at the unexpected interstitial
+  without solving → a legitimate fingerprint accumulates unsolved challenges → a falsely
+  low solve rate → the risk of a false promotion. Under attack a challenge is not a
+  judgement about the fingerprint, so it stays out of the signal. **This requires logging
+  `attack_mode`** (see §C).
 
-Следствие для продукта: сигнал «включается» только для хостов в active-энфорсменте **вне атаки** —
-зависимость от раската enforcement, не баг. Атака даёт много challenge, но это самый зашумлённый
-период (форс-проверки + отвал людей), поэтому осознанно его не учитываем.
+The product consequence: the signal only "switches on" for hosts in active enforcement
+**outside an attack** — a dependency on the enforcement rollout, not a bug. An attack
+produces plenty of challenges, but it is the noisiest period (forced checks plus people
+dropping off), so we exclude it deliberately.
 
-**Окно — накопительное (lifetime), НЕ 24ч.** challenge редок, и low-and-slow бот не наберёт
-`MIN_CHALLENGE_ISSUED` за сутки (review). Поэтому `issued`/`solved` копим per-fp в `seen-fps.json`
-рядом с `count`/`days_seen`: на каждом прогоне инкрементим дельтой из свежего Loki-окна (watermark
-для дедупа уже есть у `count`), **учитывая только active-вне-атаки события**. Это же убирает
-зависимость от того, в каком суточном окне оказалось событие.
+**The window is cumulative (lifetime), NOT 24 h.** Challenges are rare, and a
+low-and-slow bot never reaches `MIN_CHALLENGE_ISSUED` within a day (from review). So
+`issued`/`solved` accumulate per fingerprint in `seen-fps.json` alongside
+`count`/`days_seen`: each run increments by the delta from the fresh Loki window (the
+dedup watermark already exists for `count`), **counting only active, non-attack events**.
+That also removes the dependence on which daily window an event happened to land in.
 
-> Счётчик — **all-time (lifetime)**, не скользящее окно: устойчив, но медленно реагирует на смену
-> поведения fp (для ботов норма). Отдельного «забывания» нет — fp выходит из рассмотрения через
-> auto-demote по молчанию > TTL (14д).
+> The counter is **all-time (lifetime)**, not a sliding window: robust, but slow to react
+> to a change in a fingerprint's behaviour (normal for bots). There is no separate
+> forgetting — a fingerprint leaves consideration through auto-demote after being silent
+> for more than the TTL (14 days).
 
 ```
-issued(fp)  = накопл. |events: mode==active AND attack_mode==off AND verdict==challenge|
-solved(fp)  = накопл. |events: mode==active AND attack_mode==off AND verdict==allow AND rule=="challenge_pass"|
-solve_rate  = min(solved / issued, 1.0)   # cap 1.0 (см. ниже), при issued > 0
+issued(fp)  = cumulative |events: mode==active AND attack_mode==off AND verdict==challenge|
+solved(fp)  = cumulative |events: mode==active AND attack_mode==off AND verdict==allow AND rule=="challenge_pass"|
+solve_rate  = min(solved / issued, 1.0)   # capped at 1.0 (see below), when issued > 0
 ```
-**Cap на 1.0 (review):** даже при накопительном счёте на самой первой загрузке fp solved-событие
-может попасть в окно, а парный issued — остаться за нижней границей ретенции → `solved > issued`.
-`min(…, 1.0)` это поглощает; накопление со временем выправляет числа.
+**The 1.0 cap (from review):** even with cumulative counting, on a fingerprint's very
+first load a solved event can fall inside the window while its paired issued event sits
+below the retention boundary → `solved > issued`. `min(…, 1.0)` absorbs that, and
+accumulation corrects the numbers over time.
 
-Порог объёма для сигнала **асимметричен** (это ключ к корректности на малых N):
-- **score-сигнал** (B1) начисляем только при `issued >= MIN_CHALLENGE_ISSUED` (старт **10**) — не
-  выводим «бот не решает» по 1-2 challenge.
-- **gate-вето** (B2) — солвы человека НЕ игнорируем даже на малых N: при `issued < MIN` любой
-  `solved > 0` всё равно ветирует (review). Подробности — в B2.
+The volume threshold for the signal is **asymmetric** (this is the key to correctness at
+small N):
+- the **score signal** (B1) is only awarded when `issued >= MIN_CHALLENGE_ISSUED`
+  (starting at **10**) — we do not conclude "the bot does not solve" from one or two
+  challenges.
+- the **gate veto** (B2) does NOT ignore human solves even at small N: when
+  `issued < MIN`, any `solved > 0` still vetoes (from review). Details in B2.
 
-### B. Два независимых применения
+### B. Two independent applications
 
-**(1) Доп-сигнал score (ранжирование):**
+**(1) An extra score signal (ranking):**
 ```
-issued >= MIN_CHALLENGE_ISSUED AND solve_rate <= LOW_SOLVE_RATE(0.05)  → +2, reason "challenge не решается (issued=N, solved=M)"
+issued >= MIN_CHALLENGE_ISSUED AND solve_rate <= LOW_SOLVE_RATE(0.05)  → +2, reason "challenge not being solved (issued=N, solved=M)"
 ```
-Вес +2: между impersonator(+3) и слабыми эвристиками(+1) — сигнал сильный (поведенческий,
-трудно подделать), но не словарный-точный как impersonator. Только ранжирует, сам не блокирует
-(инвариант D1: score ≠ допуск).
+Weight +2: between impersonator (+3) and the weak heuristics (+1) — the signal is strong
+(behavioural, hard to fake) but not dictionary-precise like impersonator. It only ranks
+and blocks nothing by itself (the D1 invariant: score ≠ admission).
 
-**(2) Уточнение gate (допуск) — главное:**
-Расщепить `_fp_has_identity_allow` на два класса вместо одного `verdict==allow`:
-- **hard identity** (`ip_whitelist`, `cookie_valid`, и пр. — НЕ challenge_pass): остаётся
-  жёстким вето, как сейчас.
-- **challenge_pass**: больше НЕ бинарное вето. Лестница по объёму (порядок важен):
-  - `issued < MIN_CHALLENGE_ISSUED` — **данных мало, судить по rate нельзя**:
-    - `solved > 0` → **вето** (человек/клиент решил challenge при малом объёме — не рискуем
-      промоутить; review). Снять вето на малых N нельзя — `solved/issued` тут шумит.
-    - `solved == 0` → нейтрально (этот сигнал не ветирует). На практике такой fp почти всегда
-      отсекает volume-гейт `n_lifetime >= MIN_EVENTS(20)` — снятие вето здесь почти ни на что не влияет.
-  - `issued >= MIN_CHALLENGE_ISSUED` — **данных достаточно, судим по rate** (три зоны, не две):
-    - `solve_rate <= LOW_SOLVE_RATE(0.05)` → **НЕ вето** (бот, который не решает) — промоут разрешён,
-      **даже если было несколько случайных solved** (это и есть headless, «решил пару раз из сотен»;
-      ровно тот дефект «один solve шилдит навсегда», который дизайн чинит);
-    - `solve_rate >= HUMAN_SOLVE_RATE(0.5)` → **вето** (реально решают → есть люди/легит-браузеры);
-    - `LOW < solve_rate < HUMAN` — **серая зона → не авто-промоут, но и не хард-вето**: сигнал
-      неубедителен, отдаём решение staging-наблюдению (см. ниже). На practике: fp **не** становится
-      `auto_eligible`, но как кандидат на staging допустим (через ручной promote или просто
-      остаётся в отчёте). Staging безвреден — только логирует, не блокирует, — поэтому «припарковать
-      сомнительный fp в наблюдении» безопаснее, чем поспешно блокировать или поспешно простить.
+**(2) Refining the gate (admission) — the main change:**
+Split `_fp_has_identity_allow` into two classes instead of one `verdict==allow`:
+- **hard identity** (`ip_whitelist`, `cookie_valid`, and so on — NOT challenge_pass):
+  stays a hard veto, as today.
+- **challenge_pass**: no longer a binary veto. A ladder by volume (order matters):
+  - `issued < MIN_CHALLENGE_ISSUED` — **too little data to judge by rate**:
+    - `solved > 0` → **veto** (a human or client solved a challenge at low volume; we do
+      not risk a promotion — from review). The veto cannot be lifted at small N, where
+      `solved/issued` is pure noise.
+    - `solved == 0` → neutral (this signal does not veto). In practice such a fingerprint
+      is almost always cut by the volume gate `n_lifetime >= MIN_EVENTS(20)`, so lifting
+      the veto here changes almost nothing.
+  - `issued >= MIN_CHALLENGE_ISSUED` — **enough data, judge by rate** (three zones, not
+    two):
+    - `solve_rate <= LOW_SOLVE_RATE(0.05)` → **no veto** (a bot that does not solve) —
+      promotion is allowed **even if there were a few incidental solves** (that is exactly
+      the headless case, "solved a couple out of hundreds", and precisely the "one solve
+      shields forever" defect this design fixes);
+    - `solve_rate >= HUMAN_SOLVE_RATE(0.5)` → **veto** (people really do solve it → there
+      are humans or legitimate browsers behind it);
+    - `LOW < solve_rate < HUMAN` — **a grey zone → no auto-promotion, but no hard veto
+      either**: the signal is inconclusive, so we hand the decision to staging observation
+      (below). In practice the fingerprint does **not** become `auto_eligible`, but it is
+      an acceptable staging candidate (through a manual promote, or simply by staying in
+      the report). Staging is harmless — it only logs and never blocks — so "parking a
+      doubtful fingerprint under observation" is safer than either blocking hastily or
+      forgiving hastily.
 
-  > Асимметрия осознанная: **добавить/сохранить** вето можно по одному solved (защита человека),
-  > **снять** вето — только при достаточном `issued`; в промежутке — не блок и не прощение, а
-  > наблюдение.
+  > The asymmetry is deliberate: a veto can be **added or kept** on the strength of a
+  > single solve (protecting humans), while **lifting** a veto requires sufficient
+  > `issued`; in between there is neither a block nor a pardon, only observation.
 
-То же расщепление — в `find_staging_observation`
-([analyze.py:964](../../infra/demo-stand/scripts/analyze.py)), и **здесь у `HUMAN_SOLVE_RATE`
-появляется реальный смысл** (B-решение). Сейчас любой identity-allow среди staging-матчей →
-`fp_caught`. После — по solve_rate среди матчей (только active):
-  - `>= HUMAN_SOLVE_RATE` → `fp_caught` (поймали живых → demote/remove);
-  - `<= LOW_SOLVE_RATE` (и прочие staging-гейты ок) → `activate`;
-  - серая зона → `observe` (остаёмся в staging, добираем данные по решаемости — ровно «наблюдать
-    дольше»). Парковка в `observe` безопасна: staging не блокирует.
+The same split applies in `find_staging_observation`
+([analyze.py:964](../../infra/demo-stand/scripts/analyze.py)), and **that is where
+`HUMAN_SOLVE_RATE` acquires real meaning** (decision B). Today any identity-allow among
+the staging matches gives `fp_caught`. Afterwards it is decided by the solve rate among
+the matches (active only):
+  - `>= HUMAN_SOLVE_RATE` → `fp_caught` (we caught real people → demote/remove);
+  - `<= LOW_SOLVE_RATE` (and the other staging gates pass) → `activate`;
+  - the grey zone → `observe` (stay in staging and gather more solvability data — exactly
+    "watch longer"). Parking in `observe` is safe: staging does not block.
 
-> **Важно — purity не дублирует это.** purity (`human_share`) смотрит на «выглядит как браузер»
-> по UA+cipher+hash. solve_rate смотрит на **способность пройти активную проверку**. Headless с
-> идеальным браузерным fp пройдёт purity (human_share высок), но если он не решает challenge —
-> solve_rate его ловит. Сигналы ортогональны; оба — вето-классы с разных сторон.
+> **Important — purity does not duplicate this.** Purity (`human_share`) looks at "does it
+> look like a browser" via UA, cipher and hash. Solve rate looks at the **ability to pass
+> an active check**. A headless browser with a perfect browser fingerprint passes purity
+> (its human_share is high), but if it does not solve challenges, the solve rate catches
+> it. The signals are orthogonal; both are veto classes, from different directions.
 
-### C. Изменения в коде (объём)
+### C. Code changes (scope)
 
-**Edge (одна строка):** добавить `attack_mode = p.attack_mode` в схему `bac_log`
-([bac_log.lua](../../infra/demo-stand/lua/bac_log.lua):320-321, рядом с `mode`/`strictness`; `p`
-уже читается из `policy.get`). Без этого поля аналитика не отличит атак-challenge от обычного.
-Поле `mode` уже логируется (B11) — отдельно добавлять не нужно. Приём на backend нестрогий (лишнее
-поле уходит в `raw` jsonb).
+**Edge (one line):** add `attack_mode = p.attack_mode` to the `bac_log` schema
+([bac_log.lua](../../infra/demo-stand/lua/bac_log.lua):320-321, next to
+`mode`/`strictness`; `p` is already read from `policy.get`). Without that field the
+analytics cannot tell an attack challenge from an ordinary one. The `mode` field is
+already logged (B11) and needs nothing extra. Acceptance on the backend is lenient (an
+unknown field lands in the `raw` jsonb).
 
-**`analyze.py` (основной объём):**
-1. В `_event_from_bac_line` есть `verdict`/`rule`/`mode`(если уже); добавить чтение `mode` и
-   `attack_mode` — нужно для фильтра §A (`mode==active AND attack_mode==off`).
-2. **Накопление в `seen-fps.json`:** к существующим per-fp полям (`count`/`days_seen`) добавить
-   `challenge_issued`/`challenge_solved`, инкремент дельтой на каждом прогоне **только по
-   active-вне-атаки событиям** (`load_seen`/`save_seen` уже есть, watermark-дедуп общий с `count`).
-   Это lifetime-окно сигнала (см. §A).
-3. Чистая функция `solve_signal(seen_entry) -> {issued, solved, solve_rate(cap 1.0), enough:bool}`
+**`analyze.py` (the bulk of the work):**
+1. `_event_from_bac_line` already has `verdict`/`rule`/`mode` (where present); add reading
+   of `mode` and `attack_mode` — needed for the §A filter
+   (`mode==active AND attack_mode==off`).
+2. **Accumulation in `seen-fps.json`:** alongside the existing per-fingerprint fields
+   (`count`/`days_seen`), add `challenge_issued`/`challenge_solved`, incremented by the
+   delta on each run **from active, non-attack events only** (`load_seen`/`save_seen`
+   already exist, and the watermark dedup is shared with `count`). That is the signal's
+   lifetime window (see §A).
+3. A pure function
+   `solve_signal(seen_entry) -> {issued, solved, solve_rate(capped at 1.0), enough:bool}`
    (`enough = issued >= MIN_CHALLENGE_ISSUED`).
-4. `score_fp_candidate`: добавить ветку сигнала (B1).
-5. Расщепить `_fp_has_identity_allow` → `_fp_hard_identity_allow` (без challenge_pass) +
-   отдельная проверка challenge_pass через лестницу §B2 с тремя исходами (veto / no-veto /
-   gray→no-auto). Обновить вызовы в `find_blocklist_candidates` (gate `allowlist` + снятие
-   `auto_eligible` в серой зоне) и `find_staging_observation` (исходы `fp_caught`/`activate`/
-   `observe` по solve_rate среди active-матчей).
-6. Новые константы + флаги/env (паттерн D1): `MIN_CHALLENGE_ISSUED`, `LOW_SOLVE_RATE`,
-   `HUMAN_SOLVE_RATE` (+ `BAC_*` env).
-7. Тесты: unit на `solve_signal` (cap >1.0; фильтр игнорит shadow- И attack-события) + матрица
-   лестницы §B2 (issued<MIN×{solved 0,1} ; issued≥MIN×solve_rate{0,0.03,0.3(серая),0.9}) +
-   staging-исходы fp_caught/activate/observe.
+4. `score_fp_candidate`: add the signal branch (B1).
+5. Split `_fp_has_identity_allow` → `_fp_hard_identity_allow` (without challenge_pass)
+   plus a separate challenge_pass check implementing the §B2 ladder with three outcomes
+   (veto / no veto / grey → no auto). Update the callers in `find_blocklist_candidates`
+   (the `allowlist` gate plus clearing `auto_eligible` in the grey zone) and
+   `find_staging_observation` (the `fp_caught`/`activate`/`observe` outcomes by solve rate
+   among active matches).
+6. New constants plus flags/env (the D1 pattern): `MIN_CHALLENGE_ISSUED`,
+   `LOW_SOLVE_RATE`, `HUMAN_SOLVE_RATE` (plus `BAC_*` env).
+7. Tests: a unit test for `solve_signal` (the >1.0 cap; the filter ignoring shadow AND
+   attack events) plus the §B2 ladder matrix
+   (issued<MIN×{solved 0,1}; issued≥MIN×solve_rate{0, 0.03, 0.3 (grey), 0.9}) plus the
+   staging outcomes fp_caught/activate/observe.
 
-Опциональный edge-follow-up (НЕ в этом дизайне): явный `rule=challenge_issued` маркер вместо
-вывода из `verdict=challenge`, если захотим различать Branch A render от прочих challenge-путей.
-Сейчас не нужно — `verdict=challenge` достаточно.
+An optional edge follow-up (NOT part of this design): an explicit `rule=challenge_issued`
+marker instead of inferring from `verdict=challenge`, if we ever want to distinguish a
+Branch A render from other challenge paths. Not needed now — `verdict=challenge` suffices.
 
-### D. Anti-gaming / безопасность
+### D. Anti-gaming / security
 
-- **Бот решает, чтобы поднять solve_rate и защитить fp.** Чтобы перевалить `HUMAN_SOLVE_RATE=0.5`,
-  ему надо решать ≥половину выданных challenge — это уже дорого и, главное, означает, что
-  enforcement РАБОТАЕТ (он платит CPU за каждый визит). А чтобы хотя бы выйти из зоны промоута
-  (`>0.05`), он попадает лишь в серую зону → staging-наблюдение, а не мгновенное прощение: добиться
-  блокировки сложно, но и иммунитет одним-двумя solve не купить.
-- **Загрязнение чужого fp.** solve_rate per-fp; подмешать «нерешения» в чужой fp = слать трафик с
-  тем же ClientHello — та же модель угроз, что у purity-poisoning (#5), отдельный трек.
-- **Single-use не раздувает solved** — считаем строго `rule=challenge_pass` (см. выше).
+- **A bot solving challenges to raise its solve rate and shield its fingerprint.** To get
+  past `HUMAN_SOLVE_RATE=0.5` it must solve at least half the challenges issued — already
+  expensive, and more importantly it means enforcement is WORKING (it pays CPU for every
+  visit). And merely to leave the promotion zone (`>0.05`) it only reaches the grey zone →
+  staging observation, not instant forgiveness: getting blocked is hard, but immunity
+  cannot be bought with one or two solves either.
+- **Poisoning someone else's fingerprint.** The solve rate is per fingerprint; injecting
+  non-solves into another fingerprint means sending traffic with the same ClientHello —
+  the same threat model as purity poisoning (#5), a separate track.
+- **Single use does not inflate solved** — we count strictly `rule=challenge_pass` (see
+  above).
 
-## Пороги (стартовые, переопределяемы)
+## Thresholds (starting values, overridable)
 
-| Параметр | Старт | Флаг / env |
+| Parameter | Start | Flag / env |
 |---|---|---|
-| min issued для сигнала | 10 | `--min-challenge-issued` / `BAC_MIN_CHALLENGE_ISSUED` |
-| low solve-rate (бот) | 0.05 | `--low-solve-rate` / `BAC_LOW_SOLVE_RATE` |
-| human solve-rate (вето) | 0.50 | `--human-solve-rate` / `BAC_HUMAN_SOLVE_RATE` |
-| вес сигнала в score | +2 | константа |
+| min issued for the signal | 10 | `--min-challenge-issued` / `BAC_MIN_CHALLENGE_ISSUED` |
+| low solve rate (bot) | 0.05 | `--low-solve-rate` / `BAC_LOW_SOLVE_RATE` |
+| human solve rate (veto) | 0.50 | `--human-solve-rate` / `BAC_HUMAN_SOLVE_RATE` |
+| weight of the signal in the score | +2 | a constant |
 
-## Не входит (non-goals)
+## Non-goals
 
-- Новые стадии каскада, изменение challenge-механики C5, привязка nonce к fp.
-- HTTP/2 fp, поведенческие сигналы (#2-#4) — отдельные треки.
-- Per-fp метрики на эдже (на стенде нет per-host метрик-инфры; считаем в аналитике из Loki).
+- New cascade stages, changes to the C5 challenge mechanics, binding the nonce to a
+  fingerprint.
+- HTTP/2 fingerprinting and behavioural signals (#2–#4) — separate tracks.
+- Per-fingerprint metrics on the edge (the stand has no per-host metrics infrastructure;
+  we compute this in analytics from Loki).
 
-## Решённые вопросы (обсуждение 2026-05-30)
+## Questions settled (discussion, 2026-05-30)
 
-1. **Окно для issued/solved** → накопительно в `seen-fps.json` (lifetime), не 24ч — иначе
-   low-and-slow бот не наберёт `MIN_CHALLENGE_ISSUED`. См. §A/§C.
-2. **Shadow vs active** → считаем строго по `mode==active`; под shadow страница не серверится,
-   `solved` всегда 0 → сигнал не валиден. Следствие: сигнал работает только на active-хостах. §A.
-6. **Режим атаки** → **исключаем attack-mode события** (`attack_mode==off`). Под атакой L5 форсит
-   challenge всем (C4), живые люди отваливаются с interstitial → ложно низкий solve_rate. Challenge
-   под атакой — поза хоста, не суждение о fp. Цена: **+1 строка на эдже** (`attack_mode` в
-   `bac_log`), «только analyze.py» больше неверно. §A/§C.
-3. **Branch B/C** (`non_browser_blocked`/`unchallengeable`) → **игнорируем**: каскад логирует их как
-   `verdict=block`, в знаменатель `issued` (только `verdict=challenge`) они не попадают
-   автоматически; и они уже блокируются. Паттерн «браузер, но всегда Branch C» — сигнал для трека
-   #4 (поведение), не сюда.
-4. **Структура порогов** → три зоны (не две): серая зона `LOW<rate<HUMAN` = **не авто-промоут и не
-   хард-вето**, а staging-наблюдение. Так у `HUMAN_SOLVE_RATE` появляется реальный смысл (на решении
-   staging→active). §B2.
-5. **Рост `seen-fps.json`** от двух новых полей — в пределах существующего D7 (state rotation),
-   отдельного решения не требует.
+1. **The window for issued/solved** → cumulative in `seen-fps.json` (lifetime), not 24 h —
+   otherwise a low-and-slow bot never reaches `MIN_CHALLENGE_ISSUED`. See §A/§C.
+2. **Shadow versus active** → count strictly by `mode==active`; under shadow the page is
+   never served, so `solved` is always 0 and the signal is invalid. Consequence: the signal
+   only works on active hosts. §A.
+3. **Attack mode** → **exclude attack-mode events** (`attack_mode==off`). Under attack L5
+   forces a challenge on everyone (C4) and real people abandon the interstitial → a falsely
+   low solve rate. A challenge under attack is the host's posture, not a judgement about the
+   fingerprint. The cost: **one extra line on the edge** (`attack_mode` in `bac_log`), so
+   "analyze.py only" is no longer accurate. §A/§C.
+4. **Branch B/C** (`non_browser_blocked`/`unchallengeable`) → **ignored**: the cascade logs
+   them as `verdict=block`, so they never enter the `issued` denominator (which counts only
+   `verdict=challenge`); and they are blocked already. The pattern "a browser, but always
+   Branch C" is a signal for track #4 (behaviour), not for this one.
+5. **Threshold structure** → three zones, not two: the grey zone `LOW<rate<HUMAN` means
+   **no auto-promotion and no hard veto**, only staging observation. That is what gives
+   `HUMAN_SOLVE_RATE` real meaning (on the staging→active decision). §B2.
+6. **Growth of `seen-fps.json`** from the two new fields stays within the existing D7 (state
+   rotation) and needs no separate decision.
 
-## Остаётся на калибровку (не блокирует код)
+## Left for calibration (not blocking the code)
 
-- Конкретные значения `LOW_SOLVE_RATE` (старт 0.05) и `HUMAN_SOLVE_RATE` (старт 0.5) — подстроить по
-  реальным active-staging-данным стенда, когда они накопятся. Вынесены в флаги/env, меняются без кода.
+- The concrete values of `LOW_SOLVE_RATE` (starting at 0.05) and `HUMAN_SOLVE_RATE`
+  (starting at 0.5) — to be tuned against real active-staging data from the stand once it
+  accumulates. They are exposed as flags/env and change without touching code.
