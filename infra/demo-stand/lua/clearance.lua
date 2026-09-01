@@ -1,100 +1,100 @@
 -- clearance.lua — L2.1 clearance cookie verify (C3).
 --
--- Phase 4, vision §5.2 / §2.1, rules-reference rule `cookie_valid`. Клиент
--- предъявляет HMAC-подписанный cookie (выписан L5 после прохождения JS
--- challenge — C5, ещё не реализовано); proxy проверяет подпись локально без
--- обращения к backend. Валидный cookie → verdict=allow, rule=cookie_valid;
--- пропуск L3 (tls_fp) и L5 (verification), но НЕ L4 (rate-limits всё равно
--- применяются — vision §2.1 и rules-reference rule 3).
+-- Phase 4, vision §5.2 / §2.1, rules-reference rule `cookie_valid`. The client
+-- presents an HMAC-signed cookie (issued at L5 after solving the JS
+-- challenge — C5, not implemented yet); the proxy verifies the signature locally
+-- with no call to the backend. A valid cookie → verdict=allow, rule=cookie_valid;
+-- it skips L3 (tls_fp) and L5 (verification), but NOT L4 (rate limits still
+-- apply — vision §2.1 and rules-reference rule 3).
 --
--- РАСХОЖДЕНИЕ task ↔ docs. Формулировка C3 в ClickUp предлагает payload
--- `<site>:<fp>:<expiry_ts>` с fp-binding и метрики `wrong_fp`. Это
--- противоречит vision.md §5.2 («bearer token без привязки к fingerprint —
--- кто украл cookie в течение 24-часового TTL, тот и пользуется») и
--- edge-lua-vs-sidecar §A6 (формат `body.sig`, без fp). По правилу из
--- CLAUDE.md / комментария к задаче «при расхождении приоритет у доков»
--- реализован bearer-вариант: site и iat в payload, fp НЕ binding'ится.
--- Защита от cross-tenant утечки → атрибутами cookie (Domain=<host>,
--- vision §5.2 «Атрибуты cookie tf_clearance») + проверкой site в payload
--- (defense-in-depth, метрика wrong_site). Если продукт всё-таки потребует
--- fp-binding — это отдельный тикет, который параллельно правит vision §5.2
--- и эту реализацию (memory: «Docs vs correctness»).
+-- A DIVERGENCE, task vs docs. The C3 wording in the tracker proposes a payload
+-- of `<site>:<fp>:<expiry_ts>` with fingerprint binding and a `wrong_fp` metric.
+-- That contradicts vision.md §5.2 ("a bearer token with no fingerprint binding —
+-- whoever steals the cookie within its 24-hour TTL can use it") and
+-- edge-lua-vs-sidecar §A6 (the `body.sig` format, with no fingerprint). Per the rule in
+-- CLAUDE.md and the task comment, "on a divergence the docs win", the bearer
+-- variant is implemented: site and iat in the payload, and no fingerprint binding.
+-- Protection from cross-tenant leakage comes from the cookie attributes (Domain=<host>,
+-- vision §5.2 "Attributes of the tf_clearance cookie") plus the site check in the payload
+-- (defence in depth, the wrong_site metric). If product does end up requiring
+-- fingerprint binding, that is a separate ticket which amends vision §5.2 and
+-- this implementation together ("Docs vs correctness").
 --
--- Формат cookie:
+-- The cookie format:
 --     body = b64url(<site-host>) .. ":" .. <iat> .. ":" .. <exp>
 --     sig  = b64url( HMAC-SHA256(secret, body) )
 --     cookie value = body .. "." .. sig
--- iat (issued_at unix seconds) и exp дают TTL = exp-iat, по которому C7
--- attack_mode различает «выдан до атаки» vs «выдан во время атаки» (см.
--- ниже про RESULT_STALE_PRE_ATTACK и `verify(host, opts)`).
+-- iat (issued_at, unix seconds) and exp give TTL = exp-iat, which C7
+-- attack_mode uses to tell "issued before the attack" from "issued during the attack" (see
+-- RESULT_STALE_PRE_ATTACK and `verify(host, opts)` below).
 --
--- attack_mode pre-attack gate (C7, vision §2.1 «Исключение: attack_mode=on»
--- / §5.3). Под `attack_mode=on` для host'a L2.1 не доверяет clearance
--- cookie, выписанным ДО начала атаки (атакующий мог накопить их заранее).
--- Различение — по ТИПУ TTL самого cookie (vision §5.3 «механизм на стороне
--- реализации; время выписки и/или тип TTL»): cookie, выписанный в
--- нормальном режиме, несёт длинный TTL (`ttl_seconds_normal`, 24ч), а
--- cookie, выписанный уже во время атаки (после перепрохождения challenge),
--- — короткий `ttl_seconds_under_attack` (1ч). Под атакой verify фастпасит
--- только короткие (during-attack) cookie; длинные (pre-attack) → отдельный
--- RESULT_STALE_PRE_ATTACK, который caller НЕ фастпасит — запрос идёт по
--- каскаду до L5 на challenge. Это и даёт «реальный юзер проходит challenge
--- один раз за атаку»: его during-attack cookie фастпасит до конца атаки.
--- Порог берётся из opts.max_under_attack_ttl (caller читает defaults.conf),
--- чтобы verify оставалась чистой функцией без config-зависимости в решении.
--- Если под атакой порог не пришёл — fail-closed (см. сам gate ниже).
+-- The attack_mode pre-attack gate (C7, vision §2.1 "The exception: attack_mode=on"
+-- and §5.3). Under `attack_mode=on` for a host, L2.1 does not trust clearance
+-- cookies issued BEFORE the attack started (an attacker could have stockpiled them).
+-- They are told apart by the cookie's TTL TYPE (vision §5.3, "the mechanism is up to
+-- the implementation; the issue time and/or the TTL type"): a cookie issued in
+-- normal mode carries a long TTL (`ttl_seconds_normal`, 24 h), while a
+-- cookie issued during the attack (after re-solving the challenge) carries
+-- the short `ttl_seconds_under_attack` (1 h). Under attack, verify fastpaths
+-- only the short (during-attack) cookies; long (pre-attack) ones give a separate
+-- RESULT_STALE_PRE_ATTACK, which the caller does NOT fastpath — the request walks
+-- the cascade to L5 for a challenge. That is what gives "a real user solves the challenge
+-- once per attack": their during-attack cookie fastpaths until the attack ends.
+-- The threshold comes from opts.max_under_attack_ttl (the caller reads defaults.conf),
+-- so that verify stays a pure function with no config dependency in the decision.
+-- If the threshold is missing under attack — fail-closed (see the gate itself below).
 --
--- ОГРАНИЧЕНИЕ TTL-механизма. Различаем по величине TTL, а не по
--- «iat vs attack_started_at», поэтому короткий cookie, выписанный во время
--- ПРЕДЫДУЩЕЙ атаки, в течение своего 1ч TTL будет принят как during-attack
--- и в НОВОЙ атаке, начавшейся в это окно. Окно ограничено TTL (1ч), и
--- держатель только что (≤1ч назад) проходил challenge, так что риск мал;
--- vision §5.3 явно санкционирует TTL-механизм. Строгое «выписан именно в
--- эту атаку» потребовало бы attack_started_at в policy + сравнения с iat —
--- отдельный тикет, если эта дельта риска станет значимой.
+-- A LIMITATION OF THE TTL MECHANISM. We distinguish by TTL magnitude rather than
+-- by "iat vs attack_started_at", so a short cookie issued during the PREVIOUS
+-- attack will, within its 1 h TTL, be accepted as during-attack in a NEW attack
+-- that starts inside that window. The window is bounded by the TTL (1 h), and the
+-- holder solved a challenge only recently (≤1 h ago), so the risk is small;
+-- vision §5.3 explicitly sanctions the TTL mechanism. A strict "issued during
+-- exactly this attack" would need attack_started_at in the policy plus a comparison with iat —
+-- a separate ticket, should that delta of risk ever become significant.
 --
--- Что НЕ покрывает этот модуль:
---   * issue cookie на L5 после challenge — C5 (переиспользует `_M.issue`
---     отсюда же; выбор TTL normal/under_attack — в challenge_verify.lua).
+-- What this module does NOT cover:
+--   * issuing the cookie at L5 after a challenge — C5 (it reuses `_M.issue`
+--     from here; the normal/under_attack TTL choice lives in challenge_verify.lua).
 --   * SECRET rotation runbook — C8.
 
 local hmac   = require "resty.openssl.hmac"
 local bit    = require "bit"
 local secret = require "challenge_secret"
 
--- Lazy config require: clearance.lua грузится в init_by_lua ПОСЛЕ
--- config.load(), но юнит-тесты bypass'ят init.lua. pcall чтобы тест без
--- настоящего config не падал на require; внутри функций перепроверяем
--- config.defaults через type(), как это делает challenge.lua.
+-- A lazy config require: clearance.lua is loaded in init_by_lua AFTER
+-- config.load(), but the unit tests bypass init.lua. The pcall keeps a test without
+-- a real config from failing on the require; inside the functions we re-check
+-- config.defaults through type(), the way challenge.lua does.
 local ok_config, config = pcall(require, "config")
 if not ok_config then config = nil end
 
 local _M = {}
 
--- Default cookie name — vision §5.2 «Атрибуты cookie tf_clearance»,
--- defaults.conf [allow.cookie_valid].cookie_name. ClickUp C3 предлагает
--- `cf_clearance` — оставляем `tf_clearance` (docs win). Per-site
--- переопределение — через [allow.cookie_valid].cookie_name в defaults.conf;
--- per-host override в policy на эдже не делается (cookie name — pool-wide
--- константа, как и HMAC secret).
+-- The default cookie name — vision §5.2 "Attributes of the tf_clearance cookie",
+-- defaults.conf [allow.cookie_valid].cookie_name. The C3 ticket proposes
+-- `cf_clearance` — we keep `tf_clearance` (docs win). A per-site
+-- override goes through [allow.cookie_valid].cookie_name in defaults.conf;
+-- there is no per-host override in the policy on the edge (the cookie name is a pool-wide
+-- constant, like the HMAC secret).
 local DEFAULT_COOKIE_NAME = "tf_clearance"
 
--- Valid result codes. Совпадают с метками метрики
--- `antibot_clearance_verify_total{result=...}` (metrics.lua) и пробрасываются
--- в bac_log как rule-suffix (`cookie_valid` для valid; для остальных
--- verdict не меняется и rule не выставляется — cookie просто игнорируется).
+-- The valid result codes. They match the labels of the
+-- `antibot_clearance_verify_total{result=...}` metric (metrics.lua) and are passed
+-- into bac_log as the rule suffix (`cookie_valid` for valid; for the rest the
+-- verdict is unchanged and no rule is set — the cookie is simply ignored).
 _M.RESULT_VALID      = "valid"
 _M.RESULT_INVALID    = "invalid"     -- HMAC signature mismatch / sig decode failed
 _M.RESULT_EXPIRED    = "expired"     -- HMAC ok, exp <= now
 _M.RESULT_MISSING    = "missing"     -- no cookie header
 _M.RESULT_MALFORMED  = "malformed"   -- structure unparseable
 _M.RESULT_WRONG_SITE = "wrong_site"  -- HMAC ok but payload.site ~= request host
--- stale_pre_attack — cookie полностью валиден (HMAC ok, не истёк, site
--- совпал), но под attack_mode=on несёт длинный (normal) TTL → выписан ДО
--- начала атаки (vision §2.1/§5.3). НЕ фастпасит: caller не ставит
--- clearance_valid, запрос идёт по каскаду до L5 на challenge. Отдельный
--- код (а не invalid/expired), чтобы attack-mode «сброс доверия» был виден
--- в метрике отдельно от криптопровалов и обычных протуханий.
+-- stale_pre_attack — the cookie is fully valid (HMAC ok, not expired, the site
+-- matched), but under attack_mode=on it carries a long (normal) TTL → it was issued BEFORE
+-- the attack started (vision §2.1/§5.3). It does NOT fastpath: the caller sets no
+-- clearance_valid and the request walks the cascade to L5 for a challenge. A separate
+-- code (rather than invalid/expired) so that attack mode's "trust reset" is visible
+-- in the metric separately from crypto failures and ordinary expiries.
 _M.RESULT_STALE_PRE_ATTACK = "stale_pre_attack"
 -- no_secret — challenge_secret not loaded (operational failure: C1 file
 -- missing/empty after reload). Distinct from `invalid` so an attack-shaped
@@ -117,8 +117,8 @@ local function valid_var_suffix(name)
 end
 
 local warned_bad_name = false
--- Once-flag для WARN про отсутствующий max_under_attack_ttl под атакой
--- (см. attack_mode pre-attack gate в verify). Per-worker, как warned_bad_name.
+-- A once-flag for the WARN about a missing max_under_attack_ttl under attack
+-- (see the attack_mode pre-attack gate in verify). Per worker, like warned_bad_name.
 local warned_missing_threshold = false
 local function get_cookie_name()
     if config and type(config.defaults) == "table" then
@@ -157,11 +157,11 @@ local function b64url_decode(s)
     return ngx.decode_base64(s)
 end
 
--- ct_eq — constant-time equality для HMAC compare. Lua `==` на строках
--- разной длины early-exit'ит (длину проверяет первой) — это OK, длина
--- HMAC-SHA256 фиксирована (32 байта raw). Но побайтовое сравнение должно
--- идти до конца, иначе timing-oracle позволит подобрать sig по символу.
--- bit.bxor + bit.bor накапливают разницу без ветвлений по содержимому.
+-- ct_eq — constant-time equality for the HMAC compare. Lua `==` on strings
+-- of different lengths early-exits (it checks the length first) — which is fine, the length of
+-- an HMAC-SHA256 is fixed (32 raw bytes). But the byte-by-byte comparison must
+-- run to the end, otherwise a timing oracle lets an attacker guess the signature character by character.
+-- bit.bxor plus bit.bor accumulate the difference without branching on content.
 local function ct_eq(a, b)
     if type(a) ~= "string" or type(b) ~= "string" then return false end
     if #a ~= #b then return false end
@@ -184,16 +184,16 @@ end
 
 -- issue(host, ttl_seconds, now) → (cookie_value, exp) | nil, err
 --
--- Реализована здесь (не в challenge.lua) чтобы формат payload жил в
--- ОДНОМ модуле с verify — рассинхрон issue/verify обнулил бы все cookies
--- после rollout'a. C5 (cookie issue после JS challenge) будет вызывать
--- этот `_M.issue` и выставлять Set-Cookie с атрибутами per vision §5.2
+-- Implemented here (not in challenge.lua) so that the payload format lives in
+-- ONE module with verify — an issue/verify divergence would zero every cookie
+-- after a rollout. C5 (issuing the cookie after the JS challenge) will call
+-- this `_M.issue` and set Set-Cookie with the attributes per vision §5.2
 -- (HttpOnly / Secure / SameSite=Lax / Domain=<host> / Path=/).
 --
--- ttl_seconds: по vision §2.1 — 86400 в нормальном режиме, 3600 при
--- attack_mode=on для host'a. Выбор делает caller (C5), не этот модуль:
--- здесь нет доступа к per-host policy/attack_mode без лишнего coupling.
--- `now` — optional override для детерминированных тестов (default ngx.time()).
+-- ttl_seconds: per vision §2.1 — 86400 in normal mode, 3600 under
+-- attack_mode=on for the host. The caller (C5) makes the choice, not this module:
+-- there is no access to the per-host policy/attack_mode here without extra coupling.
+-- `now` is an optional override for deterministic tests (it defaults to ngx.time()).
 function _M.issue(host, ttl_seconds, now)
     if type(host) ~= "string" or host == "" then
         return nil, "host required"
@@ -210,27 +210,27 @@ function _M.issue(host, ttl_seconds, now)
     return body .. "." .. b64url_encode(sig), exp
 end
 
--- verify(host) → result-code (одна из _M.RESULT_*). Чистая функция: не
--- трогает ngx.ctx, не пишет метрики, не зовёт bac_log. Caller (verdict.lua)
--- интерпретирует код, обновляет verdict / ставит skip-flag / инкрементит
--- counter — это позволяет тестам гонять verify в host-luajit без полного
--- ngx.ctx stub'а.
+-- verify(host) → a result code (one of _M.RESULT_*). A pure function: it does not
+-- touch ngx.ctx, write metrics or call bac_log. The caller (verdict.lua)
+-- interprets the code, updates the verdict, sets the skip flag and increments the
+-- counter — which lets tests run verify in host luajit without a full
+-- ngx.ctx stub.
 --
--- Порядок проверок выбран так, чтобы security-важные шаги (HMAC verify)
--- не текли через ранний return на дешевых signal'ах — иначе malformed/
--- expired cookie дали бы timing-oracle для распознавания «HMAC прошёл или
--- нет». Здесь:
---   1. парсим структуру cookie (malformed → exit, безопасно: до HMAC не дошли);
---   2. считаем HMAC, ct_eq;
---   3. ПОСЛЕ verify проверяем site и exp.
--- Если HMAC битый, exp/site вообще не смотрим — payload недостоверен.
--- opts (optional) — attack_mode context из caller'а (verdict.lua). Поля:
---   * attack_mode          — bool, attack_mode[host]=on для этого запроса;
---   * max_under_attack_ttl — number, верхняя граница TTL «выдан во время
---                            атаки» (= ttl_seconds_under_attack из конфига).
--- Когда attack_mode=on и cookie несёт TTL больше порога → pre-attack →
--- RESULT_STALE_PRE_ATTACK (см. модульный заголовок). Чистоту функции
--- сохраняем: порог приходит аргументом, config здесь не читается.
+-- The order of checks is chosen so that the security-critical step (the HMAC verify)
+-- does not leak through an early return on cheap signals — otherwise a malformed or
+-- expired cookie would give a timing oracle for telling "the HMAC passed or
+-- it did not". Here:
+--   1. we parse the cookie's structure (malformed → exit, safely: we never reached the HMAC);
+--   2. we compute the HMAC and ct_eq;
+--   3. AFTER the verify we check the site and exp.
+-- If the HMAC is broken we never look at exp/site — the payload is untrustworthy.
+-- opts (optional) is the attack_mode context from the caller (verdict.lua). Its fields:
+--   * attack_mode          — bool, attack_mode[host]=on for this request;
+--   * max_under_attack_ttl — number, the upper bound of a TTL meaning "issued during
+--                            the attack" (= ttl_seconds_under_attack from the config).
+-- When attack_mode=on and the cookie carries a TTL above the threshold → pre-attack →
+-- RESULT_STALE_PRE_ATTACK (see the module header). Purity is preserved:
+-- the threshold arrives as an argument and no config is read here.
 function _M.verify(host, opts)
     local name = get_cookie_name()
     local raw  = ngx.var["cookie_" .. name]
@@ -238,23 +238,23 @@ function _M.verify(host, opts)
         return _M.RESULT_MISSING
     end
 
-    -- Двухсегментный формат `<body>.<sig>`. Используем последний `.` как
-    -- разделитель (body содержит `:` и base64url-алфавит, ни одного `.`
-    -- по построению — но writer'ы будущего расширения payload могут
-    -- добавить, так что match'им rightmost `.` через "^(.+)%.([^.]+)$").
+    -- The two-segment format `<body>.<sig>`. We use the last `.` as the
+    -- separator (the body contains `:` and the base64url alphabet, and no `.`
+    -- by construction — but writers of a future payload extension might
+    -- add one, so we match the rightmost `.` through "^(.+)%.([^.]+)$").
     local body, sig_b64 = raw:match("^(.+)%.([^.]+)$")
     if not body or not sig_b64 then
         return _M.RESULT_MALFORMED
     end
 
-    -- body shape: `<b64url(site)>:<iat>:<exp>`. Парсим строго — любое
-    -- отклонение → malformed (не доверяем содержимому без HMAC, но
-    -- structural check без HMAC безопасен — данные были бы отвергнуты
-    -- HMAC'ом тоже, просто экономим crypto-вычисление на garbage cookie).
-    -- iat нужен под C7 attack_mode для вычисления TTL (exp-iat) — по типу
-    -- TTL различаем pre-attack vs during-attack cookie (см. модульный
-    -- заголовок). Парсим строго, как и раньше, чтобы malformed body
-    -- отсекался до HMAC compute.
+    -- The body shape: `<b64url(site)>:<iat>:<exp>`. We parse strictly — any
+    -- deviation → malformed (we do not trust the content without the HMAC, but
+    -- a structural check before the HMAC is safe — the data would have been rejected
+    -- by the HMAC too, and this just saves the crypto work on a garbage cookie).
+    -- iat is needed under C7 attack_mode to compute the TTL (exp-iat) — the TTL type
+    -- tells a pre-attack cookie from a during-attack one (see the module
+    -- header). We parse strictly, as before, so that a malformed body
+    -- is cut before the HMAC is computed.
     local site_b64, iat_s, exp_s = body:match("^([%w%-_]+):(%d+):(%d+)$")
     if not site_b64 then
         return _M.RESULT_MALFORMED
@@ -272,11 +272,11 @@ function _M.verify(host, opts)
 
     local key = secret.get()
     if not key then
-        -- Сервер-сайд проблема (C1 не загрузил секрет). Fail-closed для
-        -- fastpath: cookie не доверяется, request идёт по полному каскаду.
-        -- Отдельный RESULT_NO_SECRET, чтобы spike при truncate/удалении
-        -- secret-файла не маскировался под attack-shaped «invalid»;
-        -- operator-алерт настраивается отдельно (review on PR #85).
+        -- A server-side problem (C1 never loaded the secret). Fail-closed for the
+        -- fastpath: the cookie is not trusted and the request walks the full cascade.
+        -- A separate RESULT_NO_SECRET, so that a spike caused by truncating or deleting
+        -- the secret file is not masked as attack-shaped "invalid";
+        -- the operator alert is configured separately (from review).
         ngx.log(ngx.WARN, "clearance.verify: challenge_secret not loaded; ",
             "cookie cannot be verified (RESULT_NO_SECRET)")
         return _M.RESULT_NO_SECRET
@@ -292,15 +292,15 @@ function _M.verify(host, opts)
         return _M.RESULT_INVALID
     end
 
-    -- С этого момента payload достоверен — HMAC прошёл. Expired раньше
-    -- wrong_site: легитимный клиент с истекшим cookie + apex-Domain
-    -- scoping (Domain=example.com, browser шлёт на api.example.com) иначе
-    -- получил бы security-окрашенный wrong_site вместо bookkeeping'ового
-    -- expired. wrong_site — реальный сигнал «cross-tenant попытка», его
-    -- хочется видеть только когда подпись и срок валидны (review on
-    -- PR #85). Trade-off: атакующий с украденным expired cookie теперь
-    -- проходит как expired, а не wrong_site, если ещё и site не совпал
-    -- — но cookie уже истёк, реального риска нет.
+    -- From here the payload is trustworthy — the HMAC passed. Expired comes before
+    -- wrong_site: a legitimate client with an expired cookie plus apex Domain
+    -- scoping (Domain=example.com, the browser sends it to api.example.com) would otherwise
+    -- get a security-flavoured wrong_site instead of a bookkeeping
+    -- expired. wrong_site is a real "cross-tenant attempt" signal, and we want to
+    -- see it only when the signature and the expiry are valid (from review).
+    -- The trade-off: an attacker with a stolen expired cookie now
+    -- comes through as expired rather than wrong_site if the site also failed to match
+    -- — but the cookie has already expired, so there is no real risk.
     local exp = tonumber(exp_s)
     if not exp or exp <= ngx.time() then
         return _M.RESULT_EXPIRED
@@ -310,21 +310,21 @@ function _M.verify(host, opts)
         return _M.RESULT_WRONG_SITE
     end
 
-    -- attack_mode pre-attack gate (C7). Cookie прошёл все проверки валидности
-    -- — без атаки это RESULT_VALID. Но под attack_mode=on длинный (normal)
-    -- TTL означает «выдан до атаки» (during-attack cookie несут короткий
-    -- under_attack TTL) → не фастпасим. Используем `>` к порогу: ровно
-    -- under_attack TTL и короче — during-attack, фастпас; длиннее (24ч
-    -- normal) — pre-attack. iat/exp уже провалидированы как digits выше.
+    -- The attack_mode pre-attack gate (C7). The cookie passed every validity check
+    -- — outside an attack that is RESULT_VALID. But under attack_mode=on a long (normal)
+    -- TTL means "issued before the attack" (during-attack cookies carry the short
+    -- under_attack TTL) → we do not fastpath. We compare with `>`: exactly the
+    -- under_attack TTL or shorter is during-attack and fastpaths; longer (the 24 h
+    -- normal) is pre-attack. iat/exp were already validated as digits above.
     --
-    -- FAIL-CLOSED. Если под атакой порог не пришёл (config без
-    -- ttl_seconds_under_attack → opts.max_under_attack_ttl=nil) или iat не
-    -- распарсился — pre-attack от during-attack не различить. Под атакой
-    -- безопаснее НЕ доверять (RESULT_STALE_PRE_ATTACK → запрос на L5
-    -- challenge), чем распустить фастпас по нераспознанному cookie: cмысл C7
-    -- — сбросить доверие к накопленным cookie, fail-open это молча отменял
-    -- (code-review on PR #92). WARN однократно: это config-issue, не
-    -- нагрузка, а спамить лог на каждый запрос под атакой не нужно.
+    -- FAIL-CLOSED. If the threshold did not arrive under attack (a config without
+    -- ttl_seconds_under_attack → opts.max_under_attack_ttl=nil) or iat did not
+    -- parse, pre-attack cannot be told from during-attack. Under attack it is
+    -- safer NOT to trust (RESULT_STALE_PRE_ATTACK → the request goes to the L5
+    -- challenge) than to hand out a fastpath for an unrecognised cookie: the point of C7
+    -- is to reset trust in stockpiled cookies, and failing open silently cancelled that
+    -- (from code review). WARN once: this is a config issue, not load,
+    -- and there is no need to spam the log on every request under attack.
     if opts and opts.attack_mode then
         local max_ttl = opts.max_under_attack_ttl
         if not max_ttl then

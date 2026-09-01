@@ -41,7 +41,7 @@ local verification = require "verification"
 -- Global kill-switch (A12). When set, the whole cascade is a no-op: we return
 -- before bac_log.init so the request proxies straight to the origin and emits
 -- NO BAC_LOG record (log_event.lua skips when ngx.ctx.bac is unset). This is
--- the catastrophe lever from vision.md §"Аварийные рычаги" — protection must
+-- the catastrophe lever from vision.md §"Emergency levers" — protection must
 -- never take the site down. Toggled via the gitignored kill_switch.local.conf
 -- (config.lua), applied on `nginx -s reload`, no container recreate.
 if config.global_kill(config.defaults) then
@@ -57,7 +57,7 @@ bac_log.init()
 -- For mode=shadow (pool default) enforce is a no-op and run returns
 -- normally, so the cascade continues to tls_fp / rate_limit and their
 -- would-be verdicts/tags still accumulate — last-writer-wins matches
--- phase1-spec "финальное сработавшее правило" (e.g., a later tls_fp
+-- phase1-spec's "the final rule that fired" (e.g., a later tls_fp
 -- block overwrites the hygiene verdict in the log).
 hygiene.run()
 
@@ -73,57 +73,57 @@ hygiene.run()
 reputation.run()
 
 -- L2.1 clearance cookie verify (C3). vision §2.1 / rules-reference rule
--- `cookie_valid`. HMAC-stateless: secret загружен через C1, никаких
--- сетевых вызовов. Валидный cookie → verdict=allow,rule=cookie_valid +
--- skip-flag `ngx.ctx.clearance_valid`, который L3 (tls_fp ниже) и L5
--- (challenge, C5+ ещё не реализован) уважают и пропускают себя; L4
--- (rate_limit) применяется к держателю cookie как обычно (vision §2.1
--- «пропускает L3 и L5, но НЕ L4»).
+-- `cookie_valid`. HMAC-stateless: the secret is loaded through C1, with no
+-- network calls. A valid cookie → verdict=allow,rule=cookie_valid plus the
+-- skip flag `ngx.ctx.clearance_valid`, which L3 (tls_fp below) and L5
+-- (challenge, C5+ not implemented yet) honour by skipping themselves; L4
+-- (rate_limit) applies to the cookie holder as usual (vision §2.1,
+-- "it skips L3 and L5, but NOT L4").
 --
--- Порядок относительно hygiene/reputation. clearance.run идёт ПОСЛЕ них,
--- так что last-writer-wins работает в нашу пользу: L1 hygiene block
--- (method/ua_blacklist) выставит verdict=block ДО нас — мы поверх не
--- пишем (см. ниже `ctx.verdict ~= "block"` guard), и block корректно
--- доживёт до log_event. Аналогично reputation ip_blocklist: записан до
--- clearance, мы его не затираем. Если ничего блокирующего не сработало
--- → clearance ставит verdict=allow, который потом может быть переписан
--- L4 rate_limit (тоже by design — vision §2.1 «если сработал rate-лимит
--- → выигрывает правило L4»).
+-- Ordering relative to hygiene/reputation. clearance.run comes AFTER them,
+-- so last-writer-wins works in our favour: an L1 hygiene block
+-- (method/ua_blacklist) sets verdict=block BEFORE us — we do not write over
+-- it (see the `ctx.verdict ~= "block"` guard below), and the block correctly
+-- survives to log_event. Same for reputation ip_blocklist: written before
+-- clearance, and we do not clobber it. If nothing blocking fired,
+-- clearance sets verdict=allow, which may later be overwritten by
+-- L4 rate_limit (also by design — vision §2.1, "if a rate limit fired,
+-- the L4 rule wins").
 --
--- Все исходы (valid/invalid/expired/missing/wrong_site/malformed/no_secret)
--- идут в метрику `antibot_clearance_verify_total{result=...}` (metrics.lua).
--- Counter инкрементится здесь, а не в clearance.verify(), чтобы verify
--- осталась чистой функцией для unit-тестов (та же логика, что у policy
--- и rate_limit: модуль решает «что», caller — «что с этим сделать»).
+-- Every outcome (valid/invalid/expired/missing/wrong_site/malformed/no_secret)
+-- feeds the `antibot_clearance_verify_total{result=...}` metric (metrics.lua).
+-- The counter is incremented here rather than in clearance.verify() so that
+-- verify stays a pure function for unit tests (the same convention as policy
+-- and rate_limit: the module decides "what", the caller decides what to do with it).
 --
--- ASYMMETRY WARN — метрика отражает только запросы, дошедшие до этой
--- точки в access_by_lua. В mode=active hygiene/reputation block через
--- `policy.enforce(403)` делает `ngx.exit(403)` ВЫШЕ — clearance.run для
--- них не выполняется. Поэтому сумма шести clearance_verify_* counter'ов
--- НЕ равна requests_total для active-mode хостов; она равна
--- (requests_total - active_mode_early_blocks). Дашборды, считающие
--- «cookie funnel coverage», должны нормировать на post-L1/L2.2-blocks
--- baseline, не на сырой requests_total (review on PR #85).
+-- ASYMMETRY WARN — the metric reflects only requests that reached this
+-- point in access_by_lua. In mode=active a hygiene/reputation block through
+-- `policy.enforce(403)` calls `ngx.exit(403)` ABOVE us, so clearance.run
+-- never runs for them. So the sum of the six clearance_verify_* counters
+-- does NOT equal requests_total for active-mode hosts; it equals
+-- (requests_total - active_mode_early_blocks). Dashboards computing
+-- "cookie funnel coverage" must normalise against the post-L1/L2.2-block
+-- baseline rather than raw requests_total (from review).
 --
--- Per-stage kill-switch (A12). clearance — отдельная per-stage точка
--- выключения, чтобы при regression в clearance.verify / lua-resty-openssl
--- оператор мог потушить только L2.1 без обнуления всего каскада через
--- global A12. Гейт чекается через config.stage_enabled — тот же протокол,
--- что у hygiene/reputation/tls_fp/rate_limits/verification.
+-- The per-stage kill switch (A12). clearance is its own per-stage off
+-- switch, so that on a regression in clearance.verify / lua-resty-openssl
+-- the operator can disable L2.1 alone without zeroing the whole cascade
+-- through the global A12. The gate is checked through config.stage_enabled —
+-- the same protocol as hygiene/reputation/tls_fp/rate_limits/verification.
 if config.stage_enabled(config.defaults, "clearance") then
     local host = ngx.var.host or ""
-    -- attack_mode pre-attack gate (C7). Под attack_mode=on для host'a
-    -- передаём в verify порог under_attack TTL: cookie с длинным (normal)
-    -- TTL = выдан ДО начала атаки → verify вернёт RESULT_STALE_PRE_ATTACK,
-    -- мы его НЕ фастпасим (clearance_valid не ставим, verdict не трогаем) —
-    -- запрос идёт по каскаду до L5 на challenge. During-attack cookie
-    -- (короткий TTL) фастпасит как обычно. Различение по типу TTL — vision
-    -- §5.3, см. clearance.lua header. ip_whitelist/verified_bot фастпас при
-    -- атаке не трогаем — он на L2 (reputation выше), не здесь.
-    local opts
-    -- policy.get контрактно non-nil (POOL_DEFAULT fallback), но guard'имся
-    -- `p and` для консистентности с challenge_verify.lua / verification.lua —
-    -- единый паттерн чтения policy на эдже (gemini review on PR #92).
+    -- The attack_mode pre-attack gate (C7). Under attack_mode=on for the host
+    -- we pass the under-attack TTL threshold into verify: a cookie with a long
+    -- (normal) TTL was issued BEFORE the attack started → verify returns
+    -- RESULT_STALE_PRE_ATTACK and we do NOT fastpath it (we set no
+    -- clearance_valid and leave the verdict alone) — the request walks the
+    -- cascade to L5 for a challenge. A during-attack cookie (a short TTL)
+    -- fastpaths as usual. Telling them apart by TTL type is vision §5.3, see
+    -- the clearance.lua header. The ip_whitelist/verified_bot fastpath under
+    -- attack is untouched — it lives at L2 (reputation above), not here.
+    -- policy.get is contractually non-nil (the POOL_DEFAULT fallback), but we
+    -- guard with `p and` for consistency with challenge_verify.lua /
+    -- verification.lua — one pattern for reading policy on the edge (from review).
     local p = policy.get(host)
     if p and p.attack_mode then
         local max_ttl
@@ -137,18 +137,18 @@ if config.stage_enabled(config.defaults, "clearance") then
     ngx.shared.metrics:incr("clearance_verify_" .. result .. "_total", 1, 0)
     if result == clearance.RESULT_VALID then
         local ctx = ngx.ctx.bac
-        -- Не затираем уже сработавший block (hygiene/reputation выше).
-        -- Per rules-reference: cookie_valid пропускает L3 и L5, но L1 и
-        -- L2.2/2.3 (включая ip_blocklist) всё равно применяются — их
-        -- блок > наш allow. Если block уже выставлен:
-        --   * verdict в логе НЕ перетираем;
-        --   * clearance_valid НЕ ставим — L3 soft rules (tls_fp:*-tags +
-        --     impersonator/suspicious_ciphers flags) должны прогнаться,
-        --     чтобы shadow-mode log сохранил полную «would-be»-картину
-        --     для блокированного-но-cookie-holding запроса (review on
-        --     PR #85). Без этого guard'а L3 observability silently
-        --     теряется для именно того профиля — украденный cookie + bad
-        --     fp — против которого soft rules и проектировались.
+        -- Do not clobber a block that already fired (hygiene/reputation above).
+        -- Per rules-reference: cookie_valid skips L3 and L5, but L1 and
+        -- L2.2/2.3 (including ip_blocklist) still apply — their block
+        -- outranks our allow. When a block is already set:
+        --   * we do NOT overwrite the verdict in the log;
+        --   * we do NOT set clearance_valid — the L3 soft rules (tls_fp:* tags
+        --     plus the impersonator/suspicious_ciphers flags) must still run,
+        --     so that the shadow-mode log keeps the full "would-be" picture
+        --     for a blocked-but-cookie-holding request (from review).
+        --     Without this guard, L3 observability is silently lost for
+        --     exactly the profile the soft rules were designed against —
+        --     a stolen cookie plus a bad fingerprint.
         if ctx and ctx.verdict ~= "block" then
             ngx.ctx.clearance_valid = true
             bac_log.set_verdict("reputation", "allow", "cookie_valid")
@@ -165,12 +165,12 @@ end
 -- [C3] Clearance fastpath skips ONLY the L3 decision (blocklist hit + soft
 -- rules + tls_fp:* tags), NOT the fp compute. rate_tls_fp is part of L4
 -- (rate_limits), and per vision §2.1 / rules-reference rule 3 cookie_valid
--- «пропускает L3 и L5, но НЕ L4» — including rate_tls_fp. Если бы fp
--- оставался nil под cookie, rate_limit.run скипал бы rate_tls_fp_profile
--- (rate_limit.lua `fp_ok`-guard), и держатель cookie получил бы бесплатный
--- bypass per-fp лимита на 24 часа TTL (codex review on PR #85). Поэтому
--- fp всё равно считаем + кладём в bac_log, но `if not clearance_valid`
--- оборачивает только cache/blocklist check и `tls_fp.run(fp)`.
+-- "it skips L3 and L5, but NOT L4" — including rate_tls_fp. If the fingerprint
+-- stayed nil under a cookie, rate_limit.run would skip rate_tls_fp_profile
+-- (the `fp_ok` guard in rate_limit.lua) and a cookie holder would get a free
+-- bypass of the per-fingerprint limit for the cookie's 24-hour TTL (from review).
+-- So we still compute the fingerprint and put it into bac_log, while
+-- `if not clearance_valid` wraps only the cache/blocklist check and `tls_fp.run(fp)`.
 local fp
 if config.stage_enabled(config.defaults, "tls_fp") then
     fp = ja4.compute()
@@ -246,39 +246,39 @@ end
 -- for this request).
 rate_limit.run(fp)
 
--- L5 verification — should_challenge() (C4). Решение про challenge — ровно
--- здесь. До C4 verdict=challenge выставлял сам tls_fp soft-блок, что
--- нарушало rules-reference («L3/L4 flags only mark, decision happens at L5»)
--- и игнорировало per-resource Strictness. Теперь tls_fp лишь копит flag'и,
--- а verification.decide() читает (flags, policy.strictness, policy.attack_mode)
--- и пишет verdict=challenge / verdict=permissive / ничего. Observe-only:
+-- L5 verification — should_challenge() (C4). The challenge decision happens
+-- exactly here. Before C4 the tls_fp soft block set verdict=challenge itself,
+-- which broke rules-reference ("L3/L4 flags only mark, the decision happens at L5")
+-- and ignored the per-resource Strictness. Now tls_fp only accumulates flags,
+-- and verification.decide() reads (flags, policy.strictness, policy.attack_mode)
+-- and writes verdict=challenge / verdict=permissive / nothing. Observe-only:
 -- physical challenge issuance (Branch A — JS challenge, Branch B/C — block)
--- — отдельный ticket C5; сейчас вердикт идёт только в bac_log.
+-- is a separate ticket, C5; for now the verdict only goes into bac_log.
 --
--- Гейтится per-stage kill-switch'ем `verification` (defaults.conf
--- [kill_switch.per_stage]). При выключении системные soft-флаги остаются
--- в `flags` (для аналитики), но не превращаются ни в challenge, ни в
--- permissive — verdict остаётся таким, каким его оставил L4 (pass /
+-- It is gated by the `verification` per-stage kill switch (defaults.conf
+-- [kill_switch.per_stage]). When disabled, the system soft flags stay in
+-- `flags` (for analytics) but turn into neither a challenge nor a
+-- permissive — the verdict stays as L4 left it (pass /
 -- block / allow).
 if config.stage_enabled(config.defaults, "verification") then
     verification.run()
 
-    -- L5.2 — physical dispatch (C5). verification.run() выставил
-    -- verdict=challenge в bac_log; physically делаем разводку по веткам
-    -- здесь, чтобы policy.enforce был единой точкой mode-gating'a (то же
-    -- соглашение, что и у tls_fp_blocklist выше + rate_limit). decide()
-    -- chooses verdict; classify_branch() chooses ветку A/B/C; этот блок —
-    -- единственная точка physical issue/block в L5.
+    -- L5.2 — the physical dispatch (C5). verification.run() set
+    -- verdict=challenge in bac_log; the physical branch routing happens
+    -- here, so that policy.enforce stays the single point of mode gating (the
+    -- same convention as tls_fp_blocklist above plus rate_limit). decide()
+    -- chooses the verdict; classify_branch() chooses branch A/B/C; this block
+    -- is the only point of physical issue/block at L5.
     --
     -- Mode-gating:
-    --   * Branch A в mode=active → render challenge page, ngx.exit(200).
-    --     В shadow — НЕ серверим страницу: would-be-verdict уже в логе
-    --     (`verdict=challenge`), запрос идёт к origin как обычно. Это
-    --     сохраняет observe-only контракт shadow-режима: edge не меняет
-    --     ответ пользователю, пока клиент не переключился в active.
-    --   * Branch B/C — пишем block в лог (вне зависимости от mode) и
-    --     зовём policy.enforce(403): active → 403, shadow → no-op,
-    --     запрос продолжает идти к origin. Та же схема, что у
+    --   * Branch A in mode=active → render the challenge page, ngx.exit(200).
+    --     In shadow we do NOT serve the page: the would-be verdict is already
+    --     in the log (`verdict=challenge`) and the request goes to the origin
+    --     as usual. That preserves shadow mode's observe-only contract: the
+    --     edge does not change the response until the customer switches to active.
+    --   * Branch B/C — we write the block into the log (regardless of mode) and
+    --     call policy.enforce(403): active → 403, shadow → a no-op, and the
+    --     request continues to the origin. The same scheme as
     --     tls_fp_blocklist.
     local ctx = ngx.ctx.bac
     if ctx and ctx.verdict == "challenge" then
@@ -301,22 +301,22 @@ if config.stage_enabled(config.defaults, "verification") then
             policy.enforce(403)
             return
         else
-            -- Branch A — JS challenge. Только в active mode, иначе
-            -- shadow ломает «edge не меняет ответ». В shadow verdict
-            -- challenge остаётся в логе, запрос идёт к origin.
+            -- Branch A — the JS challenge. Only in active mode, otherwise
+            -- shadow would break "the edge does not change the response". In
+            -- shadow the challenge verdict stays in the log and the request goes to the origin.
             --
-            -- ngx.exec в internal `@challenge_page` (а не ngx.print
-            -- здесь) — стандартный паттерн §A8 edge-lua-vs-sidecar:
-            -- access_by_lua переключает запрос на content_by_lua-
-            -- handler, который и пишет body. URL клиента сохраняется
-            -- (важно: после window.location.reload() браузер уходит на
-            -- исходный URL с новым cookie, не на «/_challenge»).
-            -- policy.get guarantees a non-nil POOL_DEFAULT fallback, но
-            -- хранение в локальной переменной убирает повторный
-            -- shared_dict lookup (policy.get кеширует в ngx.ctx, но
-            -- читать `.mode` дважды через две вложенные индексации —
-            -- читается хуже) + защищает от теоретической поломки
-            -- контракта policy.get (gemini review on PR #87).
+            -- ngx.exec into the internal `@challenge_page` (rather than ngx.print
+            -- here) is the standard §A8 pattern from edge-lua-vs-sidecar:
+            -- access_by_lua switches the request to a content_by_lua
+            -- handler, which writes the body. The client's URL is preserved
+            -- (important: after window.location.reload() the browser goes to
+            -- the original URL with the new cookie, not to "/_challenge").
+            -- policy.get guarantees a non-nil POOL_DEFAULT fallback, but
+            -- keeping it in a local removes the repeated
+            -- shared_dict lookup (policy.get caches in ngx.ctx, but reading
+            -- `.mode` twice through two nested index operations reads worse)
+            -- and guards against a theoretical break of the
+            -- policy.get contract (from review).
             local p = policy.get(ngx.var.host or "")
             if p and p.mode == "active" then
                 return ngx.exec("@challenge_page")
@@ -331,5 +331,5 @@ end
 -- ngx.exit/ngx.exec and never reach here — fine, they have no upstream.
 bac_log.mark_cascade_end()
 
--- Fall through. If no rate profile fired and L5 не дал challenge/permissive,
+-- Fall through. If no rate profile fired and L5 issued no challenge/permissive,
 -- the context keeps its defaults (stage=egress, verdict=pass).
