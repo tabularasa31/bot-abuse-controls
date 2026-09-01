@@ -66,12 +66,12 @@ eq(autossl.allow_domain("dashboard.example.com", opts_nobasekey), false,
 -- _reset_cache picks up a changed STAND_BASE_DOMAIN (stub os.getenv).
 do
     local real_getenv = os.getenv
-    os.getenv = function(n) if n == "STAND_BASE_DOMAIN" then return "example.com" end return real_getenv(n) end
+    os.getenv = function(n) if n == "STAND_BASE_DOMAIN" then return "example.net" end return real_getenv(n) end
     autossl._reset_cache()
     eq(autossl.allow_domain("dashboard.example.com", opts_nobasekey), true,
-       "after _reset_cache to example.com: example host no longer base → tenant gate (allow)")
-    eq(autossl.allow_domain("foo.example.com", { origin_ip = function() return "203.0.113.99" end }), false,
-       "after _reset_cache to example.com: *.example.com is base → deny")
+       "after _reset_cache to example.net: example.com host no longer base → tenant gate (allow)")
+    eq(autossl.allow_domain("foo.example.net", { origin_ip = function() return "203.0.113.99" end }), false,
+       "after _reset_cache to example.net: *.example.net is base → deny")
     os.getenv = real_getenv
     autossl._reset_cache() -- restore default for any later cases
 end
