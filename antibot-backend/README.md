@@ -1,99 +1,99 @@
-# antibot-backend — централизованный Go-сервис (B2)
+# antibot-backend — the centralized Go service (B2)
 
-Реализация antibot-backend по
-[ADR-005](../docs/architecture-decisions/005-centralized-antibot-backend.md) и
-[config-distribution.md](../docs/architecture/config-distribution.md): три
-функции, ничего сверх:
+The implementation of antibot-backend per
+[ADR-005](../docs/architecture-decisions/005-centralized-antibot-backend.md) and
+[config-distribution.md](../docs/architecture/config-distribution.md): three
+functions, nothing more:
 
-1. **catalog server** — отдаёт каталоги на edge по Channel C
-   (`GET /catalog/<name>`, ETag/If-None-Match, `?site=<host>`). После
+1. **The catalog server** — serves the catalogs to the edge over Channel C
+   (`GET /catalog/<name>`, ETag/If-None-Match, `?site=<host>`). After
    [ADR-006](../docs/architecture-decisions/006-slow-catalogs-as-files.md)
-   источников два:
-   - **медленные каталоги** (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
-     `ip_whitelist`, `asn_datacenters` + `version`) живут в git-репо
-     `../catalogs/` и читаются `internal/filesource` с mtime-кешем;
-   - **runtime state** (`verified_bot_ips`, `policy`) — в PostgreSQL,
-     читается `dbloader.LoadRuntime`.
-   Reloader на каждом тике мерджит оба слоя через `catalog.Merge` и
-   атомарно публикует в Store.Replace. Без БД сервис идёт в skeleton-
-   режим, `/catalog/*` отвечает `503`.
-2. **log receiver** — `POST /v1/logs`, принимает поток BAC_LOG с эджей, отвечает
-   `202`. Метрика `antibot_backend_log_lines_received_total` считает строки.
-   Валидация схемы, батч в sink, disk-queue — задачи [B6]/[B9].
-3. **rDNS worker** ([B7]) — reactive фоновая горутина. Receiver, парсящий
-   BAC_LOG, дёргает `Worker.Enqueue` для каждой строки с поисковым UA
-   (Googlebot/bingbot/YandexBot/DuckDuckBot) и непустым IP. Воркер делает
-   `PTR → forward DNS` (оба этапа должны сойтись на официальный домен
-   поисковика — `.googlebot.com`, `.search.msn.com` и т.д.) и пишет
-   verdict в каталог `verified_bot_ips` с TTL 1ч симметрично для обоих
-   исходов (`verified` / `rejected`). Edge на L2.2 различает их по
-   значению (`"verified:<family>"` / `"rejected:<family>"`); отсутствие
-   ключа = provisional fastpath. Метрики: `..._rdns_enqueued_total`,
+   there are two sources:
+   - **the slow catalogs** (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
+     `ip_whitelist`, `asn_datacenters` plus `version`) live in the
+     `../catalogs/` git repo and are read by `internal/filesource` with an mtime cache;
+   - **the runtime state** (`verified_bot_ips`, `policy`) lives in PostgreSQL and is
+     read by `dbloader.LoadRuntime`.
+   On every tick the reloader merges both layers through `catalog.Merge` and
+   publishes them atomically into Store.Replace. Without a database the service goes into skeleton
+   mode and `/catalog/*` answers `503`.
+2. **The log receiver** — `POST /v1/logs` accepts the BAC_LOG stream from the edges and answers
+   `202`. The `antibot_backend_log_lines_received_total` metric counts the lines.
+   Schema validation, batching into the sink and the disk queue are tasks [B6]/[B9].
+3. **The rDNS worker** ([B7]) — a reactive background goroutine. The receiver parsing
+   BAC_LOG calls `Worker.Enqueue` for every line with a search engine UA
+   (Googlebot/bingbot/YandexBot/DuckDuckBot) and a non-empty IP. The worker performs
+   `PTR → forward DNS` (both steps must resolve to the search engine's official
+   domain — `.googlebot.com`, `.search.msn.com` and so on) and writes the
+   verdict into the `verified_bot_ips` catalog with a 1 h TTL, symmetric for both
+   outcomes (`verified` / `rejected`). At L2.2 the edge tells them apart by the
+   value (`"verified:<family>"` / `"rejected:<family>"`); a missing
+   key means the provisional fastpath. Metrics: `..._rdns_enqueued_total`,
    `..._rdns_verified_total`, `..._rdns_rejected_total`,
    `..._rdns_queue_length`.
 
-Сервис **stateless** поверх своей PostgreSQL. На hot-path edge не висит —
-fail-stale (см. config-distribution §"Channel C / Failure mode").
+The service is **stateless** on top of its own PostgreSQL. It does not sit on the edge hot path —
+fail-stale (see config-distribution §"Channel C / Failure mode").
 
-## Запуск
+## Running it
 
-Локально:
+Locally:
 
 ```bash
 go run ./cmd/antibot-backend
-# затем:
+# then:
 curl http://localhost:8080/health
-curl -i http://localhost:8080/catalog/tls_fp_blocklist        # 503 catalog_not_loaded без POSTGRES_DSN; 200 если БД + ./catalogs/ заданы
+curl -i http://localhost:8080/catalog/tls_fp_blocklist        # 503 catalog_not_loaded without POSTGRES_DSN; 200 when the database and ./catalogs/ are set
 curl -i -X POST --data 'line1\nline2\n' http://localhost:8080/v1/logs  # 202
 curl http://localhost:8080/metrics | grep antibot_backend_
 ```
 
-В составе демо-стека (HA-пара за TLS-LB + Postgres) — см.
+As part of the demo stack (an HA pair behind a TLS LB plus Postgres) — see
 [`../infra/demo-backend/`](../infra/demo-backend/).
 
-## Конфиг (env)
+## Config (env)
 
-| Переменная | Дефолт | Назначение |
+| Variable | Default | Purpose |
 |---|---|---|
-| `HTTP_ADDR` | `:8080` | listen для HTTP. LB B1-substrate'а ходит сюда. |
-| `INSTANCE_NAME` | hostname | метка в `/health` и логах (для round-robin checks). |
-| `POSTGRES_DSN` | пусто | DSN для pgxpool. Пусто = skeleton-режим без DB (Channel C отвечает 503). |
-| `CATALOGS_DIR` | `./catalogs` | папка с медленными каталогами от продакта (ADR-006). Без файлов в этой папке Bootstrap падает. |
-| `CATALOG_RELOAD_INTERVAL` | `5s` | как часто backend перечитывает каталоги (файлы + DB → Merge → Store). Короче 30 с edge-poll'a, чтобы изменения доезжали ≤30 c. |
-| `MIGRATE_ON_STARTUP` | `true` | прогон встроенных миграций до старта HTTP при `POSTGRES_DSN`. `false` для прод-сценариев с внешним мигратором (B15). |
-| `RDNS_INTERVAL` | `30m` | устаревший knob от B2-скелета. В B7 воркер reactive (триггер — поток логов), периодического тика нет; параметр игнорируется. |
-| `RDNS_QUEUE_SIZE` | `1024` | буфер reactive-очереди rDNS-воркера. Переполнение = receiver дропает задачу в метрику `..._rdns_dropped_total`, edge продолжит выдавать provisional. |
-| `RDNS_WORKERS` | `4` | параллельных DNS-резолверов на воркера. |
-| `RDNS_DNS_TIMEOUT` | `5s` | потолок на одну итерацию PTR+forward для IP. |
-| `RDNS_GC_INTERVAL` | `1h` | как часто `DELETE` протухшие строки `verified_bot_ips`. |
-| `SHUTDOWN_TIMEOUT` | `10s` | graceful-shutdown HTTP-сервера. |
+| `HTTP_ADDR` | `:8080` | the HTTP listen address. The B1 substrate's LB comes here. |
+| `INSTANCE_NAME` | hostname | the label in `/health` and the logs (for round-robin checks). |
+| `POSTGRES_DSN` | empty | the DSN for pgxpool. Empty means skeleton mode with no DB (Channel C answers 503). |
+| `CATALOGS_DIR` | `./catalogs` | the directory of slow catalogs from product (ADR-006). Without files there, Bootstrap fails. |
+| `CATALOG_RELOAD_INTERVAL` | `5s` | how often the backend rereads the catalogs (files plus DB → Merge → Store). Shorter than the 30 s edge poll, so that changes arrive within ≤30 s. |
+| `MIGRATE_ON_STARTUP` | `true` | run the embedded migrations before the HTTP start when `POSTGRES_DSN` is set. `false` for production scenarios with an external migrator (B15). |
+| `RDNS_INTERVAL` | `30m` | a deprecated knob from the B2 skeleton. In B7 the worker is reactive (triggered by the log stream) with no periodic tick; the parameter is ignored. |
+| `RDNS_QUEUE_SIZE` | `1024` | the rDNS worker's reactive queue buffer. An overflow means the receiver drops the task into the `..._rdns_dropped_total` metric and the edge keeps issuing provisional passes. |
+| `RDNS_WORKERS` | `4` | parallel DNS resolvers per worker. |
+| `RDNS_DNS_TIMEOUT` | `5s` | the ceiling on one PTR+forward iteration for an IP. |
+| `RDNS_GC_INTERVAL` | `1h` | how often we `DELETE` expired `verified_bot_ips` rows. |
+| `SHUTDOWN_TIMEOUT` | `10s` | the HTTP server's graceful shutdown. |
 
-## Схема PostgreSQL
+## The PostgreSQL schema
 
-После ADR-006 в БД остались только runtime-таблицы:
-- `policy` — per-host настройки, пишутся через antibotapi из дашборда;
-- `verified_bot_ips` — пишется rDNS-воркером (B7);
-- `logs` — приёмник BAC_LOG (B9).
+After ADR-006 only the runtime tables remain in the database:
+- `policy` — per-host settings, written through antibotapi from the dashboard;
+- `verified_bot_ips` — written by the rDNS worker (B7);
+- `logs` — the BAC_LOG receiver (B9).
 
-Slow-каталоги (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
-`ip_whitelist`, `asn_datacenters`) и singleton `catalog_version` дропнуты
-миграцией [`0004_drop_slow_catalogs.sql`](internal/dbloader/migrations/0004_drop_slow_catalogs.sql).
-Их данные теперь в `../catalogs/`; миграция содержимого со стенда —
-скриптом [`../scripts/seed-catalogs-from-db.sh`](../scripts/seed-catalogs-from-db.sh)
-до накатки 0004.
+The slow catalogs (`tls_fp_blocklist`, `ua_blacklist`, `ip_blocklist`,
+`ip_whitelist`, `asn_datacenters`) and the singleton `catalog_version` were dropped
+by migration [`0004_drop_slow_catalogs.sql`](internal/dbloader/migrations/0004_drop_slow_catalogs.sql).
+Their data now lives in `../catalogs/`; migrating the stand's contents is done
+with the [`../scripts/seed-catalogs-from-db.sh`](../scripts/seed-catalogs-from-db.sh) script
+before applying 0004.
 
-SQL-файлы лежат в [`internal/dbloader/migrations/`](internal/dbloader/migrations/),
-встраиваются через `//go:embed` и применяются на старте при
+The SQL files live in [`internal/dbloader/migrations/`](internal/dbloader/migrations/),
+are embedded through `//go:embed` and are applied at startup when
 `MIGRATE_ON_STARTUP=true`. `CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS`
-— повторный запуск безопасен; полноценный мигратор (golang-migrate с
-tracking-table) принесёт [B15].
+— rerunning them is safe; a full migrator (golang-migrate with a
+tracking table) arrives with [B15].
 
-Per-host `policy` — единственная таблица с JSONB-полями: `ua_blacklist`,
+The per-host `policy` is the only table with JSONB fields: `ua_blacklist`,
 `ip_whitelist`, `ip_blocklist`, `asn_block`, `geo_whitelist`, `rate_rules`.
-Lookup ключ — `host`. Незарегистрированный host → дефолт пула
-(`mode=shadow`, `strictness=standard`, всё пусто, `attack_mode=false`).
+The lookup key is `host`. An unregistered host → the pool default
+(`mode=shadow`, `strictness=standard`, everything empty, `attack_mode=false`).
 
-Тесты dbloader интеграционные, гейтятся `POSTGRES_TEST_DSN`:
+The dbloader tests are integration tests gated on `POSTGRES_TEST_DSN`:
 
 ```bash
 docker run -d --rm --name pg-test -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:16-alpine
