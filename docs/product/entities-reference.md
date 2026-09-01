@@ -1,235 +1,238 @@
-# Bot & Abuse Controls — справочник сущностей
+# Bot & Abuse Controls — entity reference
 
-Термины и определения базовых понятий + алфавитные/группированные таблицы всех сущностей: каталоги, правила, теги, поля лога, перечисления.
-
----
-
-## Термины
-
-
-| Термин                    | Определение                                                                                                                                                                                                                                                           |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Каскад**                | Упорядоченная цепочка слоев проверки (L1–L5), через которую проходит каждый запрос по принципу «дешево — первым». Запрос идет по слоям, пока какой-то слой не вынесет терминальный вердикт или пока не дойдет до конца.                                               |
-| **Слой / стадия (stage)** | Один этап каскада со своим назначением и стабильным строковым кодом (`hygiene`, `reputation`, `tls_fp`, `rate_limits`, `verification`, плюс `egress` / `cold_start`). L-номер (L1–L5) — визуальная иерархия; stage-код — то, что пишется в лог.                       |
-| **Правило (rule)**        | Одна именованная проверка внутри слоя с условием и категорией. При срабатывании либо выносит вердикт, либо помечает запрос флагом. Имеет короткий идентификатор (`ip_blocklist`, `rate_ip` и т.д.), который пишется в поле `rule` лога.                               |
-| **Категория правила**     | Чем правило влияет на запрос: `blocking` (→ `verdict=block`), `allow` (→ `verdict=allow`, фастпас), `soft` (не выносит вердикт сам — помечает запрос challenge-флагом, решение на L5).                                                                                |
-| **Вердикт (verdict)**     | Итоговое решение по запросу: `block` / `allow` / `challenge` / `permissive` / `pass`. В логе — ровно один на запрос (последнее сработавшее правило).                                                                                                                  |
-| **Флаг (challenge-флаг)** | Пометка на запросе «выглядит подозрительно, кандидат на верификацию», которую ставят soft-правила. Сам по себе не блокирует и не пропускает; флаги копятся по ходу каскада, решение по ним принимает L5.                                                              |
-| **Тег (tag)**             | Информационная пометка на запросе по условию (например, `reputation:asn_dc`), которая НЕ влияет ни на вердикт, ни на верификацию. Копится в поле `tags` лога для аналитики. Отличие от правила: правило влияет на судьбу запроса, тег лишь описывает.                 |
-| **Каталог**               | Именованный набор данных, который backend поставляет на proxy (списки IP, паттерны UA, TLS-сигнатуры, policy и т.д.). Proxy кэширует каталог локально и читает в hot-path. Бывают общие (ведет продакт, на всех клиентов) и per-resource (policy конкретного домена). |
-| **Политика (policy)**     | Набор настроек защиты одного домена (keyed by Host): режим, Strictness, кастомные UA/ASN/rate-правила, IP-whitelist, attack_mode. Влияет только на свой домен.                                                                                                        |
-| **Режим (mode)**          | `shadow` (наблюдение, без физических действий) или `active` (вердикты исполняются). Задается в политике домена.                                                                                                                                                       |
-| **Strictness**            | Бинарный тоггл в политике (`Standard` / `Permissive`), определяющий, триггерят ли soft-флаги challenge на L5.                                                                                                                                                         |
-| **attack_mode**           | Per-host аварийный тоггл: под атакой все, что дошло до L5, идет на верификацию.                                                                                                                                                                                       |
-| **Фастпас (fastpath)**    | Пропуск слоёв для доверенного клиента. Полный фастпас (skip L3/L4/L5, `verdict=allow`) — у verified-bot и IP-whitelist (явное доверие). Clearance-cookie — частичный: пропускает только L3 и L5 (повторно не challenge'им), но L4 (rate-limits) к нему применяется.   |
-| **shadow / observe-only** | Синонимы: каскад считает и логирует вердикт, но физически с запросом ничего не делает.                                                                                                                                                                                |
-
+Terms and definitions of the base concepts, plus alphabetical and grouped tables of
+every entity: catalogs, rules, tags, log fields and enumerations.
 
 ---
 
-## Каталоги (хранилища данных в backend → доставляются на proxy)
+## Terms
 
-
-| Имя                          | Что внутри                                                                                                                            | Кто наполняет                                                                                                                                                                                                                                                                                                                                             | Используется в (Этап)                                                      | SLA доставки |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------ |
-| `policy`                     | Map `host → policy_json`: mode, Strictness, custom UA-regex, custom ASN-блок, custom rate-rules, attack_mode, IP-whitelist клиента    | Dashboard клиента                                                                                                                                                                                                                                                                                                                                         | Этапы 2.3, 2.5, 2.6, 4 (client rules), 5.1 (Strictness), 5.3 (attack_mode) | ≤ 30 секунд  |
-| `bot_verification_status`    | Map `ip → {status: verified \| rejected, bot_family, verified_at}` (TTL 1ч на обе категории; отсутствие = неизвестно). `bot_family` для `verified` = подтвержденное семейство (`googlebot`/`bingbot`/`yandexbot`/`duckduckbot`); для `rejected` = UA-claimed семейство («что клиент в UA назвался») — это полезно в аналитике, видно «вот этот IP представлялся Googlebot, но rDNS провалил» | Фоновый rDNS-воркер backend                                                | Этап 2.2     |
-| `ua_blacklist`               | Глобальный набор UA-паттернов (combined regex или иначе). Поставляется пустым, наполняется через PR по результатам анализа логов      | Продакт через PR                                                                                                                                                                                                                                                                                                                                          | Этап 1                                                                     | ≤ 15 минут   |
-| `ip_blocklist`               | Set IP/CIDR известных плохих IP                                                                                                       | Продакт через PR                                                                                                                                                                                                                                                                                                                                          | Этап 2.4                                                                   | ≤ 15 минут   |
-| `ip_whitelist` *(системный)* | Set IP/CIDR нашего мониторинга, чек-сервисов, доверенных системных клиентов. Не путать с per-resource IP-whitelist клиента в `policy` | Внутренняя команда через PR                                                                                                                                                                                                                                                                                                                               | Этап 2.3                                                                   | ≤ 15 минут   |
-| `asn_datacenters`            | Set ASN-номеров крупных публичных датацентров (Hetzner, OVH, DigitalOcean, AWS, GCP, Azure)                                           | Продакт через PR                                                                                                                                                                                                                                                                                                                                          | Триггер для тега `reputation:asn_dc` (Этап 2)                              | ≤ 15 минут   |
-| `tls_fp_blocklist`           | Set TLS-fingerprint'ов, явно помеченных как «бот»                                                                                     | Продакт через PR                                                                                                                                                                                                                                                                                                                                          | Этап 3, правило `tls_fp_blocklist`                                         | ≤ 15 минут   |
-| `tls_fp_catalog`             | Map `hash_b → семейство автоматизации` (curl, python-requests, Go, okhttp). Нужен для impersonator-детекции                           | Продакт через PR                                                                                                                                                                                                                                                                                                                                          | Этап 3, правило `tls_fp_impersonator`                                      | ≤ 15 минут   |
-| `tls_fp_browser_profiles`    | Map `browser_family → ожидаемый cipher_cnt` (chrome: 15, firefox: 16, safari: 20)                                                     | Продакт через PR                                                                                                                                                                                                                                                                                                                                          | Этап 3, правило `tls_fp_suspicious_ciphers`                                | ≤ 15 минут   |
-
-
-**Staged rollout** для PR-каталогов: новые паттерны могут добавляться в `staging`-статус — матчатся и пишутся в `staging_match`, но не приводят к verdict=block. После калибровки промоутятся в `active`. Поддерживается для `ua_blacklist`, `ip_blocklist`, `tls_fp_blocklist`, `tls_fp_catalog`, `tls_fp_browser_profiles`.
+| Term | Definition |
+| --- | --- |
+| **Cascade** | The ordered chain of check layers (L1–L5) every request passes through, on a "cheapest first" principle. A request walks the layers until one of them issues a terminal verdict or it reaches the end. |
+| **Layer / stage** | One step of the cascade with its own purpose and a stable string code (`hygiene`, `reputation`, `tls_fp`, `rate_limits`, `verification`, plus `egress` / `cold_start`). The L number (L1–L5) is a visual hierarchy; the stage code is what goes into the log. |
+| **Rule** | One named check inside a layer, with a condition and a category. When it fires it either issues a verdict or marks the request with a flag. It has a short identifier (`ip_blocklist`, `rate_ip` and so on) that is written to the log's `rule` field. |
+| **Rule category** | How the rule affects the request: `blocking` (→ `verdict=block`), `allow` (→ `verdict=allow`, a fastpath), `soft` (issues no verdict of its own — it marks the request with a challenge flag, and L5 decides). |
+| **Verdict** | The final decision about a request: `block` / `allow` / `challenge` / `permissive` / `pass`. Exactly one per request in the log (the last rule that fired). |
+| **Flag (challenge flag)** | A mark on a request saying "looks suspicious, a candidate for verification", placed by soft rules. On its own it neither blocks nor allows; flags accumulate along the cascade and L5 decides on them. |
+| **Tag** | An informational mark on a request set by a condition (for example `reputation:asn_dc`) that affects NEITHER the verdict nor verification. It accumulates in the log's `tags` field for analytics. The difference from a rule: a rule changes the request's fate, a tag only describes it. |
+| **Catalog** | A named data set the backend delivers to the proxy (IP lists, UA patterns, TLS signatures, policy and so on). The proxy caches a catalog locally and reads it on the hot path. Catalogs are either shared (curated by product, for all customers) or per resource (the policy of one domain). |
+| **Policy** | The protection settings of one domain (keyed by Host): mode, Strictness, custom UA/ASN/rate rules, IP whitelist, attack_mode. It affects only its own domain. |
+| **Mode** | `shadow` (observation, no physical action) or `active` (verdicts are enforced). Set in the domain's policy. |
+| **Strictness** | A binary toggle in the policy (`Standard` / `Permissive`) that determines whether soft flags trigger a challenge at L5. |
+| **attack_mode** | A per-host emergency toggle: while under attack, everything that reaches L5 goes to verification. |
+| **Fastpath** | Skipping layers for a trusted client. A full fastpath (skipping L3/L4/L5, `verdict=allow`) applies to verified bots and the IP whitelist (explicit trust). The clearance cookie gives a partial one: it skips only L3 and L5 (we do not re-challenge), while L4 (rate limits) still applies. |
+| **shadow / observe-only** | Synonyms: the cascade computes and logs a verdict but physically does nothing to the request. |
 
 ---
 
-## Правила (rule codes) — эмитят verdict в логе
+## Catalogs (data stores in the backend → delivered to the proxy)
 
+| Name | What is inside | Who populates it | Used at (stage) | Delivery SLA |
+| --- | --- | --- | --- | --- |
+| `policy` | Map `host → policy_json`: mode, Strictness, custom UA regex, custom ASN block, custom rate rules, attack_mode, the customer's IP whitelist | The customer dashboard | Stages 2.3, 2.5, 2.6, 4 (client rules), 5.1 (Strictness), 5.3 (attack_mode) | ≤ 30 seconds |
+| `bot_verification_status` | Map `ip → {status: verified \| rejected, bot_family, verified_at}` (TTL 1 h for both categories; absence means unknown). For `verified`, `bot_family` is the confirmed family (`googlebot`/`bingbot`/`yandexbot`/`duckduckbot`); for `rejected` it is the UA-claimed family (what the client called itself in the UA) — useful in analytics, where you can see "this IP claimed to be Googlebot but failed rDNS" | The backend's background rDNS worker | Stage 2.2 | |
+| `ua_blacklist` | The global set of UA patterns (a combined regex, or otherwise). Ships empty and is populated through PRs based on log analysis | Product, through PRs | Stage 1 | ≤ 15 minutes |
+| `ip_blocklist` | A set of IPs/CIDRs of known bad addresses | Product, through PRs | Stage 2.4 | ≤ 15 minutes |
+| `ip_whitelist` *(system)* | A set of IPs/CIDRs for our monitoring, check services and trusted system clients. Not to be confused with the customer's per-resource IP whitelist inside `policy` | The internal team, through PRs | Stage 2.3 | ≤ 15 minutes |
+| `asn_datacenters` | A set of ASN numbers of large public datacenters (Hetzner, OVH, DigitalOcean, AWS, GCP, Azure) | Product, through PRs | The trigger for the `reputation:asn_dc` tag (stage 2) | ≤ 15 minutes |
+| `tls_fp_blocklist` | A set of TLS fingerprints explicitly marked as bots | Product, through PRs | Stage 3, rule `tls_fp_blocklist` | ≤ 15 minutes |
+| `tls_fp_catalog` | Map `hash_b → automation family` (curl, python-requests, Go, okhttp). Needed for impersonator detection | Product, through PRs | Stage 3, rule `tls_fp_impersonator` | ≤ 15 minutes |
+| `tls_fp_browser_profiles` | Map `browser_family → expected cipher_cnt` (chrome: 15, firefox: 16, safari: 20) | Product, through PRs | Stage 3, rule `tls_fp_suspicious_ciphers` | ≤ 15 minutes |
 
-| Код                         | Stage          | Категория                                                     | Что проверяет                                                                                                                                                                                                            | Источник данных                                     |
-| --------------------------- | -------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
-| `method_not_allowed`        | `hygiene`      | `blocking`                                                    | HTTP-метод не в whitelist (по умолчанию GET, HEAD, POST, OPTIONS)                                                                                                                                                        | Конфиг каскада                                      |
-| `ua_blacklist`              | `hygiene`      | `blocking`                                                    | UA matches combined regex из каталога                                                                                                                                                                                    | `ua_blacklist`                                      |
-| `cookie_valid`              | `reputation`   | `allow`                                                       | Cookie `tf_clearance` имеет валидную HMAC-подпись, совпадает привязка к клиенту (TLS-fp + подсеть IP) и не истек TTL. Не lookup, а Lua-вычисление. Пропускает L3 и L5, но НЕ L4 — rate-limits применяются к держателю cookie                                                 | HMAC secret (Channel A)                             |
-| `bot_verified`              | `reputation`   | `allow`                                                       | IP в каталоге со статусом `verified` (подтвержденный поисковик)                                                                                                                                                          | `bot_verification_status`                           |
-| `bot_verified_pending`      | `reputation`   | `allow`                                                       | IP с поисковым UA, которого нет в каталоге → provisional fastpath. Срабатывает для каждого запроса с этого IP, пока backend не опубликует verified или rejected (proxy per-IP state не хранит)                           | `bot_verification_status` (через отсутствие записи) |
-| `ip_whitelist`              | `reputation`   | `allow`                                                       | IP в системном whitelist ИЛИ в per-resource IP-whitelist клиента                                                                                                                                                         | `ip_whitelist` + `policy`                           |
-| `ip_blocklist`              | `reputation`   | `blocking`                                                    | IP в blocklist                                                                                                                                                                                                           | `ip_blocklist`                                      |
-| `asn_customer`              | `reputation`   | `blocking`                                                    | ASN запроса в per-resource ASN-блоке клиента                                                                                                                                                                             | `policy`                                            |
-| `geo_blocklist`             | `reputation`   | `blocking`                                                    | Страна не входит в per-resource whitelist стран клиента                                                                                                                                                                  | `policy` + MaxMind GeoIP                            |
-| `tls_fp_blocklist`          | `tls_fp`       | `blocking`                                                    | TLS-fp клиента есть в blocklist                                                                                                                                                                                          | `tls_fp_blocklist`                                  |
-| `tls_fp_impersonator`       | `tls_fp`       | `soft`                                                        | UA-family ↔ fp mismatch (например, UA Chrome, но fp = python-requests)                                                                                                                                                   | `tls_fp_catalog`                                    |
-| `tls_fp_suspicious_ciphers` | `tls_fp`       | `soft`                                                        | UA похож на браузер, но cipher_cnt не соответствует ожидаемому для семейства                                                                                                                                             | `tls_fp_browser_profiles`                           |
-| `tls_fp_dc_browser`         | `tls_fp`       | `soft`                                                        | TLS-fp выглядит как браузер, но IP из датацентрового ASN (cross-layer: L3-fp + L2-репутация)                                                                                                                             | L3 fp + `asn_datacenters`                           |
-| `rate_ip`                   | `rate_limits`  | `blocking`                                                    | Превышение порога per-IP (100/600 в окнах 10с/60с)                                                                                                                                                                       | Локальные счетчики proxy                            |
-| `rate_ip_ua`                | `rate_limits`  | `blocking`                                                    | Превышение порога per-IP+UA (100/600)                                                                                                                                                                                    | Локальные счетчики proxy                            |
-| `rate_api`                  | `rate_limits`  | `blocking`                                                    | Превышение порога на API-эндпоинтах per-IP (50/300)                                                                                                                                                                      | Локальные счетчики proxy                            |
-| `rate_tls_fp`               | `rate_limits`  | `blocking`                                                    | Превышение порога per-TLS-fp (50/300). Phase 2+. Не срабатывает, если fp не вычислился                                                                                                                                   | Локальные счетчики proxy                            |
-| `rate_scan_urls`            | `rate_limits`  | `blocking`                                                    | Превышение порога уникальных URL per-IP (50/200) — индикатор скрейпинга                                                                                                                                                  | Локальные счетчики proxy                            |
-| `non_browser_blocked`       | `verification` | `blocking`                                                    | non-browser клиент (UA не похож на браузер), дошел до L5 с challenge-flags, не имеет whitelist-доверенности                                                                                                              | L5 decision (Ветка B)                               |
-| `unchallengeable_request`   | `verification` | `blocking`                                                    | Запрос протокольно несовместим с JS challenge: метод не GET, WebSocket-upgrade, `Accept` без `text/html`. UA может быть браузерным                                                                                       | L5 decision (Ветка C)                               |
-| `rate_custom`               | `rate_limits`  | `blocking` или `soft` (зависит от action клиентского правила) | Сработало клиентское rate-rule. Per-path: rps, burst, action (`block`/`challenge`/`log_only`) — клиент задает в дашборде. В лог дополнительно пишется поле `client_rule_name` — человекочитаемое имя правила из дашборда | `policy`                                            |
+**Staged rollout** for the PR-driven catalogs: new patterns can be added with `staging`
+status — they match and are recorded in `staging_match`, but never lead to
+verdict=block. After calibration they are promoted to `active`. Supported for
+`ua_blacklist`, `ip_blocklist`, `tls_fp_blocklist`, `tls_fp_catalog` and
+`tls_fp_browser_profiles`.
 
+---
 
-**Подсказка:** category правила определяет, какой verdict оно эмитит:
+## Rules (rule codes) — they emit a verdict into the log
+
+| Code | Stage | Category | What it checks | Data source |
+| --- | --- | --- | --- | --- |
+| `method_not_allowed` | `hygiene` | `blocking` | The HTTP method is not in the whitelist (by default GET, HEAD, POST, OPTIONS) | Cascade config |
+| `ua_blacklist` | `hygiene` | `blocking` | The UA matches the combined regex from the catalog | `ua_blacklist` |
+| `cookie_valid` | `reputation` | `allow` | The `tf_clearance` cookie has a valid HMAC signature, a matching client binding (TLS fingerprint plus IP subnet) and an unexpired TTL. Not a lookup but a Lua computation. Skips L3 and L5, but NOT L4 — rate limits apply to the cookie holder as well | The HMAC secret (Channel A) |
+| `bot_verified` | `reputation` | `allow` | The IP is in the catalog with status `verified` (a confirmed search engine) | `bot_verification_status` |
+| `bot_verified_pending` | `reputation` | `allow` | An IP with a search engine UA that is absent from the catalog → a provisional fastpath. It fires for every request from that IP until the backend publishes verified or rejected (the proxy keeps no per-IP state) | `bot_verification_status` (via the absence of a record) |
+| `ip_whitelist` | `reputation` | `allow` | The IP is in the system whitelist OR in the customer's per-resource IP whitelist | `ip_whitelist` plus `policy` |
+| `ip_blocklist` | `reputation` | `blocking` | The IP is in the blocklist | `ip_blocklist` |
+| `asn_customer` | `reputation` | `blocking` | The request's ASN is in the customer's per-resource ASN block | `policy` |
+| `geo_blocklist` | `reputation` | `blocking` | The country is not in the customer's per-resource country whitelist | `policy` plus MaxMind GeoIP |
+| `tls_fp_blocklist` | `tls_fp` | `blocking` | The client's TLS fingerprint is in the blocklist | `tls_fp_blocklist` |
+| `tls_fp_impersonator` | `tls_fp` | `soft` | A UA family ↔ fingerprint mismatch (for example, UA Chrome but a python-requests fingerprint) | `tls_fp_catalog` |
+| `tls_fp_suspicious_ciphers` | `tls_fp` | `soft` | The UA looks like a browser but cipher_cnt does not match the expected value for the family | `tls_fp_browser_profiles` |
+| `tls_fp_dc_browser` | `tls_fp` | `soft` | The fingerprint looks like a browser but the IP is in a datacenter ASN (cross-layer: the L3 fingerprint plus L2 reputation) | The L3 fingerprint plus `asn_datacenters` |
+| `rate_ip` | `rate_limits` | `blocking` | The per-IP threshold was exceeded (100/600 over 10 s/60 s windows) | Local proxy counters |
+| `rate_ip_ua` | `rate_limits` | `blocking` | The per-IP+UA threshold was exceeded (100/600) | Local proxy counters |
+| `rate_api` | `rate_limits` | `blocking` | The per-IP threshold on API endpoints was exceeded (50/300) | Local proxy counters |
+| `rate_tls_fp` | `rate_limits` | `blocking` | The per-fingerprint threshold was exceeded (50/300). Phase 2+. Does not fire when no fingerprint was computed | Local proxy counters |
+| `rate_scan_urls` | `rate_limits` | `blocking` | The per-IP unique-URL threshold was exceeded (50/200) — a scraping indicator | Local proxy counters |
+| `non_browser_blocked` | `verification` | `blocking` | A non-browser client (its UA does not look like a browser) reached L5 with challenge flags and holds no whitelist trust | The L5 decision (branch B) |
+| `unchallengeable_request` | `verification` | `blocking` | The request is protocol-incompatible with a JS challenge: a non-GET method, a WebSocket upgrade, an `Accept` without `text/html`. The UA may still be a browser one | The L5 decision (branch C) |
+| `rate_custom` | `rate_limits` | `blocking` or `soft` (depending on the customer rule's action) | A customer rate rule fired. Per path: rps, burst, action (`block`/`challenge`/`log_only`), set by the customer in the dashboard. The log additionally carries `client_rule_name`, the human-readable rule name from the dashboard | `policy` |
+
+**A hint:** a rule's category determines which verdict it emits:
 
 - `blocking` → `verdict=block`
 - `allow` → `verdict=allow`
-- `soft` → не эмитит verdict сам, накапливает challenge-flag — финальное решение принимает L5 (Этап 5)
+- `soft` → emits no verdict of its own, accumulates a challenge flag — the final
+  decision is taken by L5 (stage 5)
 
 ---
 
-## Теги (информационные) — не эмитят verdict, копятся в `tags`
+## Tags (informational) — they emit no verdict, they accumulate in `tags`
 
+| Code | Where it appears | What it means | Source |
+| --- | --- | --- | --- |
+| `hygiene:header_anomaly` | L1 | A header combination a real browser never sends but lazy automation does. The base case: HTTP/2 without `Accept`. Catches bots with a browser-faked UA but an unrealistic header set | Header checks in Lua |
+| `reputation:asn_dc` | L2 | The request IP belongs to a large public datacenter ASN (Hetzner, OVH, DO, AWS, GCP, Azure) | `asn_datacenters` |
+| `tls_fp:automation_ua` | L3 | The UA carries explicit automation markers (curl, python-requests and so on). It duplicates what `ua_blacklist` catches, but is handy as a primary automation signal and for filtering logs by TLS fields. Useful for analytics and for calibrating `ua_blacklist` patterns | Logic on the UA plus the L3 stage |
+| `tls_fp:no_sni` | L3 | The client sent no SNI in the TLS handshake | TLS handshake data |
 
-| Код                      | Где появляется | Что означает                                                                                                                                                                                                                                                   | Источник                  |
-| ------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `hygiene:header_anomaly` | L1             | Комбинация заголовков, которую не отправляет настоящий браузер, но отправляет ленивая автоматизация. Базовый случай: HTTP/2 без `Accept`. Ловит ботов с поддельным под браузер UA, но нереалистичным набором заголовков                                        | Проверка заголовков в Lua |
-| `reputation:asn_dc`      | L2             | IP запроса из ASN крупного публичного датацентра (Hetzner, OVH, DO, AWS, GCP, Azure)                                                                                                                                                                           | `asn_datacenters`         |
-| `tls_fp:automation_ua`   | L3             | UA содержит явные признаки автоматизации (curl, python-requests и т.д.). Дублирует то, что ловит `ua_blacklist`, но удобен как первичный сигнал автоматизации и для фильтрации логов по TLS-полям. Полезен для аналитики и калибровки `ua_blacklist`-паттернов | Logic on UA + L3 stage    |
-| `tls_fp:no_sni`          | L3             | Клиент не прислал SNI в TLS-handshake                                                                                                                                                                                                                          | TLS handshake data        |
-
-
-**Формат тега:** `<stage>:<short_name>`. Namespace по stage позволяет добавлять теги других слоев без конфликтов имен. Все теги пишутся в одно поле `tags` (массив) в JSON-логе.
-
----
-
-## Поля JSON-лога
-
-
-| Поле               | Тип                                                                 | Описание                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Когда заполнено                                  |
-| ------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| `request_id`       | string                                                              | Уникальный идентификатор запроса                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Всегда                                           |
-| `timestamp`        | string (ISO 8601 с миллисекундами, e.g. `2026-05-18T14:30:00.123Z`) | Время приема запроса                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Всегда                                           |
-| `edge_id`          | string                                                              | Идентификатор proxy-узла, обработавшего запрос (значение вида `edge-042` / `stand-bac`). Имя поля — унаследованный токен, термин в продукте — proxy                                                                                                                                                                                                                                                                                                                                                                                                                 | Всегда                                           |
-| `resource_id`      | string                                                              | ID ресурса клиента в платформе. Proxy это поле не заполняет — он не знает resource_id, работает только с `host`. Поле дописывается backend'ом при приеме лога                                                                                                                                                                                                                                                                                                                                                                                                           | Заполняется backend'ом после приема лога с proxy |
-| `host`             | string                                                              | HTTP Host header                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Всегда                                           |
-| `path`             | string                                                              | Path запроса                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Всегда                                           |
-| `method`           | string                                                              | HTTP method                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Всегда                                           |
-| `status`           | int                                                                 | HTTP status code ответа                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Всегда                                           |
-| `latency_ms`       | float                                                               | Время прохождения каскада в миллисекундах                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Всегда                                           |
-| `ip`               | string                                                              | IP клиента                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Всегда                                           |
-| `asn`              | string                                                              | ASN клиента (по MaxMind)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Всегда                                           |
-| `geo_country`      | string                                                              | Страна клиента (ISO 3166-1 alpha-2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Всегда                                           |
-| `ua`               | string                                                              | Полный User-Agent                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Всегда                                           |
-| `tls_fp`           | string                                                              | Вычисленный TLS-fingerprint в формате `L<ver><sni_flag><cipher_cnt><alpn>_<hash_b>_<hash_c>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Если запрос дошел до Этапа 3 (Phase 2+)          |
-| `tls_cipher_count` | int                                                                 | Кол-во cipher'ов после strip GREASE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Phase 2+                                         |
-| `tls_alpn`         | string                                                              | Negotiated ALPN (h2, http/1.1)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Phase 2+                                         |
-| `tls_sni_present`  | boolean                                                             | Был ли SNI в handshake                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Phase 2+                                         |
-| `stage`            | string (enum)                                                       | На каком этапе финальное правило сработало                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Всегда                                           |
-| `verdict`          | string (enum)                                                       | Решение финального сработавшего правила                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Всегда                                           |
-| `rule`             | string                                                              | Код финального сработавшего правила                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Пусто при `verdict=pass`                         |
-| `action`           | string (enum)                                                       | Что должно было произойти (block / challenge / allow / log_only / pass)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Всегда                                           |
-| `mode`             | string (enum)                                                       | Режим ресурса на момент запроса (shadow / active)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Всегда                                           |
-| `tags`             | array of string                                                     | Все сработавшие информационные теги с namespace-префиксом                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Всегда (может быть `[]`)                         |
-| `flags`            | array of string                                                     | Все накопленные по пути challenge-флаги (soft-правила: `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `tls_fp_dc_browser`, клиентские rate-rule с `action=challenge`). Отличие от `rule`: `rule` — одно терминальное правило, `flags` — все soft-сигналы по пути, для аналитики                                                                                                                                                                                                                                                                                                          | Всегда (может быть `[]`)                         |
-| `staging_match`    | array of string                                                     | Сработавшие staging-паттерны из PR-каталогов (не приводят к verdict, для аналитики промоута). Формат записи: `<catalog>:<pattern_id>`, например `ua_blacklist:new_pattern_2026_05_18`. Концепт — см. раздел «Staged rollout для PR-каталогов» в vision.md                                                                                                                                                                                                                                                                                                                | Всегда (может быть `[]`)                         |
-| `rule_source`      | string (enum)                                                       | Уточняет источник для правил с одним кодом, но разными источниками: `system` (общий каталог) или `per_resource` (`policy[host]`). Применимо к `ip_whitelist` (системный `whitelist_ip.conf` vs `policy[host].ip_whitelist`) и к `ua_blacklist` (глобальный список vs кастомные паттерны клиента). Для остальных правил поле пустое                                                                                                                                                                                                                                       | При `rule=ip_whitelist` / `rule=ua_blacklist`    |
-| `client_rule_name` | string                                                              | Человекочитаемое имя клиентского rate-rule из дашборда (например, «Login Protection» или «Защита логина»). Любой UTF-8 (кириллица, emoji допустимы). Backend при сохранении в дашборде валидирует: длина ≤ 64 символов; control characters стрипнуты; leading/trailing whitespace обрезан; уникальность в пределах host'a (case-insensitive после Unicode NFC-нормализации и trim — `"Login Protection"` и `"login protection"` считаются дубликатами; дашборд возвращает ошибку при попытке создать второе такое же имя). Между разными host'ами дублирование допустимо | При `rule=rate_custom`                           |
-
+**Tag format:** `<stage>:<short_name>`. Namespacing by stage lets other layers add tags
+without name collisions. All tags are written into a single `tags` field (an array) in
+the JSON log.
 
 ---
 
-## Перечисления (enums)
+## JSON log fields
 
-### `stage` — на каком этапе остановилась обработка
-
-
-| Значение       | Соответствует слою | Описание                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `hygiene`      | L1                 | Базовая гигиена (метод, UA-blacklist)                                                                                                                                                                                                                                                                                                                                                                              |
-| `reputation`   | L2                 | Репутация источника (cookie, verified-bot, IP, ASN, гео)                                                                                                                                                                                                                                                                                                                                                           |
-| `tls_fp`       | L3                 | TLS-fingerprinting *(Phase 2+)*                                                                                                                                                                                                                                                                                                                                                                                    |
-| `rate_limits`  | L4                 | Поведенческие лимиты                                                                                                                                                                                                                                                                                                                                                                                               |
-| `verification` | L5                 | Активная верификация *(Phase 4+)*                                                                                                                                                                                                                                                                                                                                                                                  |
-| `egress`       | —                  | Запрос прошел весь каскад без сработавшего блокирующего/allow-правила, дальше идет в CDN-flow (cache/origin). Эмитится при `verdict=pass` (ни одно правило не сработало) или `verdict=permissive` (soft-флаги были, но Permissive подавил challenge). Для `verdict=block`/`allow`/`challenge` поле `stage` = слой, где сработало финальное правило (`hygiene`/`reputation`/`tls_fp`/`rate_limits`/`verification`) |
-| `cold_start`   | —                  | Proxy только запустился, каталоги еще не подтянулись. Запрос пропущен мимо проверок, см. fail-modes в Channel C                                                                                                                                                                                                                                                                                                    |
-
-
-Stage-коды стабильны между итерациями — не переименовываются и не сдвигаются при добавлении новых слоев.
-
-### `verdict` —  решение каскада
-
-
-| Значение     | Что это значит                                                                                                                                                                                                                                                                      |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pass`       | Ни одно правило не сработало, запрос прошел каскад. `rule` пустой                                                                                                                                                                                                                   |
-| `block`      | Сработало финальное правило blocking-категории. `rule` = имя правила                                                                                                                                                                                                                |
-| `challenge`  | L5 решил выдать challenge на основе накопленных soft-flags. `rule` = имя последнего soft-флага, который привел к решению                                                                                                                                                            |
-| `allow`      | Сработало финальное правило allow-категории (fastpath). `rule` = имя правила                                                                                                                                                                                                        |
-| `permissive` | Системные soft-flags накопились, но Strictness=Permissive подавил challenge — запрос прошел. `rule` = имя последнего soft-флага, который был бы триггером challenge на Standard. Так в логах сохраняется «почему не сработало». Физически = `pass` (запрос идет дальше в CDN-flow) |
-
-
-В режиме shadow verdict физически не влияет на запрос (только пишется в лог); в active — исполняется. Verdict'ы `challenge` и `permissive`, а также правила `non_browser_blocked` и `unchallengeable_request` относятся к слою L5 (verification).
-
-### `action` — что должно было произойти физически
-
-
-| Значение    | Семантика                                                                                                         |
-| ----------- | ----------------------------------------------------------------------------------------------------------------- |
-| `block`     | 403 Forbidden (или 429 Too Many Requests с Retry-After для rate-rules)                                            |
-| `challenge` | Выдать JS challenge / собрать challenge-flag для L5                                                               |
-| `allow`     | Fastpath — пропустить, скипать остальные слои                                                                     |
-| `log_only`  | Только запись в лог, никакого влияния на дальнейшие этапы (используется в клиентских rate-rules для тестирования) |
-| `pass`      | Запрос идет дальше, ни одно правило не сработало решающим                                                         |
-
-
-### `mode` (per-resource) — режим работы каскада на конкретном ресурсе
-
-
-| Значение | Описание                                                                                                                                                           |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `shadow` | По умолчанию для всех новых доменов пула и бесплатных клиентов. Каскад только наблюдает, физически не блокирует. Синонимы в прозе: «observe-only», «теневой режим». |
-| `active` | Платная защита: блокирующие правила реально блокируют, soft-flags триггерят верификацию, allow-правила дают фастпас. Синонимы в прозе: «боевой режим».             |
-
-
-### `Strictness` (per-resource) — порог чувствительности L5
-
-
-| Значение              | Поведение L5 при наличии challenge-flags                                                                                                  |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `Standard` *(дефолт)* | Любой системный challenge-flag → выдаем challenge                                                                                         |
-| `Permissive`          | Системные challenge-flags не триггерят challenge — `verdict=permissive` в лог. Для доменов с неперечислимым легит не-браузерным трафиком. |
-
-
-**Convention по нотации.** В прозе документации — `Strictness` / `Standard` / `Permissive` (как имена концептов, с заглавной). В YAML-конфигах (поле в `policy[host].strictness`) — lowercase (`strictness: standard`, `strictness: permissive`). То же для `mode`: `mode=shadow` / `mode=active` в прозе и в YAML — lowercase значения.
-
-### `category` (правила) — таксономия rule
-
-
-| Значение   | Что эмитит                                                  |
-| ---------- | ----------------------------------------------------------- |
-| `blocking` | `verdict=block`                                             |
-| `allow`    | `verdict=allow` (фастпас)                                   |
-| `soft`     | Накапливает challenge-flag (финальное решение принимает L5) |
-
-
-### `attack_mode` (per-host, живет в `policy[host]`)
-
-
-| Значение                   | Эффект                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `false` *(дефолт)*         | Каскад работает обычно                                                                                                                                                                                                                                                                                                                                                                                           |
-| `true` (Under Attack mode) | Все запросы, дошедшие до L5 на этот host, форсятся на верификацию (браузер → challenge; non-browser → block `non_browser_blocked`; протокольно несовместимый → block `unchallengeable_request`). Cookie verify на L2.1: cookie, выданные до начала атаки, не фастпасят (выданные во время атаки — фастпасят). Verified search bots и IP-whitelist продолжают фастпасить (SEO/доверенные интеграции не страдают). |
-
+| Field | Type | Description | When it is populated |
+| --- | --- | --- | --- |
+| `request_id` | string | A unique request identifier | Always |
+| `timestamp` | string (ISO 8601 with milliseconds, e.g. `2026-05-18T14:30:00.123Z`) | When the request was received | Always |
+| `edge_id` | string | The identifier of the proxy node that handled the request (values like `edge-042` / `stand-bac`). The field name is an inherited token; the product term is proxy | Always |
+| `resource_id` | string | The customer's resource ID in the platform. The proxy does not fill this in — it does not know the resource_id and works with `host` alone. The field is added by the backend when it ingests the log | Filled in by the backend after ingesting the log from the proxy |
+| `host` | string | The HTTP Host header | Always |
+| `path` | string | The request path | Always |
+| `method` | string | The HTTP method | Always |
+| `status` | int | The HTTP status code of the response | Always |
+| `latency_ms` | float | Time spent traversing the cascade, in milliseconds | Always |
+| `ip` | string | The client IP | Always |
+| `asn` | string | The client ASN (per MaxMind) | Always |
+| `geo_country` | string | The client's country (ISO 3166-1 alpha-2) | Always |
+| `ua` | string | The full User-Agent | Always |
+| `tls_fp` | string | The computed TLS fingerprint, in the form `L<ver><sni_flag><cipher_cnt><alpn>_<hash_b>_<hash_c>` | When the request reached stage 3 (Phase 2+) |
+| `tls_cipher_count` | int | The number of ciphers after stripping GREASE | Phase 2+ |
+| `tls_alpn` | string | The negotiated ALPN (h2, http/1.1) | Phase 2+ |
+| `tls_sni_present` | boolean | Whether SNI was present in the handshake | Phase 2+ |
+| `stage` | string (enum) | The stage at which the final rule fired | Always |
+| `verdict` | string (enum) | The decision of the final rule that fired | Always |
+| `rule` | string | The code of the final rule that fired | Empty when `verdict=pass` |
+| `action` | string (enum) | What should have happened (block / challenge / allow / log_only / pass) | Always |
+| `mode` | string (enum) | The resource's mode at the time of the request (shadow / active) | Always |
+| `tags` | array of string | Every informational tag that fired, with its namespace prefix | Always (may be `[]`) |
+| `flags` | array of string | Every challenge flag accumulated along the way (soft rules: `tls_fp_impersonator`, `tls_fp_suspicious_ciphers`, `tls_fp_dc_browser`, and customer rate rules with `action=challenge`). The difference from `rule`: `rule` is the one terminal rule, `flags` are all the soft signals along the way, for analytics | Always (may be `[]`) |
+| `staging_match` | array of string | Staging patterns from PR catalogs that matched (they produce no verdict; they exist for promotion analytics). The record format is `<catalog>:<pattern_id>`, for example `ua_blacklist:new_pattern_2026_05_18`. For the concept see "Staged rollout for PR catalogs" in vision.md | Always (may be `[]`) |
+| `rule_source` | string (enum) | Disambiguates rules that share a code but differ in source: `system` (a shared catalog) or `per_resource` (`policy[host]`). Applies to `ip_whitelist` (the system `whitelist_ip.conf` versus `policy[host].ip_whitelist`) and to `ua_blacklist` (the global list versus the customer's custom patterns). Empty for every other rule | When `rule=ip_whitelist` / `rule=ua_blacklist` |
+| `client_rule_name` | string | The human-readable name of a customer rate rule from the dashboard (for example "Login Protection"). Any UTF-8 (non-Latin scripts and emoji are allowed). On save, the backend validates: length ≤ 64 characters; control characters stripped; leading and trailing whitespace trimmed; uniqueness within the host (case-insensitive after Unicode NFC normalisation and trimming — `"Login Protection"` and `"login protection"` count as duplicates, and the dashboard returns an error on an attempt to create a second one). Duplicates across different hosts are allowed | When `rule=rate_custom` |
 
 ---
 
-## Глоссарий ключевых терминов
+## Enumerations
 
-- **Эдж-пул** — выделенный пул эдж-нод CDN, на котором работает каскад
-- **antibot-backend** — сервис на нашей инфре. Хостит каталоги, принимает логи, делает rDNS-проверки
-- **Channel A** — доставка framework'а (Lua-код, конфиги, HMAC secret, HTML+JS challenge-шаблон) через Puppet эдж-пула
-- **Channel C** — доставка runtime data (каталоги) с backend на proxy
-- **Hot-path** — горячий путь запроса: все что происходит между приемом и ответом. На hot-path proxy не делает сетевых вызовов
-- **Fail-stale** — поведение proxy при недоступности backend: продолжает работать с последними загруженными каталогами
-- **Provisional fastpath** — мягкий разовый allow для IP с поисковым UA, пока backend еще не верифицировал его через rDNS
-- **Challenge-flag** — внутренний флаг, выставляется правилами категории soft. L5 консолидирует все накопленные flags и принимает решение
-- **Staged rollout** — механизм безопасного добавления новых паттернов в PR-каталоги: сначала `staging`-статус (паттерн матчится при обработке запроса, факт срабатывания пишется в поле `staging_match` лога, но не приводит к verdict=block даже в `mode=active`), потом — после анализа собранной по логам статистики на отсутствие false-positive — отдельный PR промоутит паттерн в `active` (полноценная блокировка). Применяется к каталогам `ua_blacklist`, `ip_blocklist`, `tls_fp_blocklist`, `tls_fp_catalog`, `tls_fp_browser_profiles`. Подробнее — раздел «Staged rollout для PR-каталогов» в vision.md
+### `stage` — where processing stopped
+
+| Value | Corresponding layer | Description |
+| --- | --- | --- |
+| `hygiene` | L1 | Basic hygiene (method, UA blacklist) |
+| `reputation` | L2 | Source reputation (cookie, verified bot, IP, ASN, geo) |
+| `tls_fp` | L3 | TLS fingerprinting *(Phase 2+)* |
+| `rate_limits` | L4 | Behavioural limits |
+| `verification` | L5 | Active verification *(Phase 4+)* |
+| `egress` | — | The request traversed the whole cascade with no blocking or allow rule firing, and continues into the CDN flow (cache/origin). Emitted on `verdict=pass` (no rule fired) or `verdict=permissive` (soft flags were raised but Permissive suppressed the challenge). For `verdict=block`/`allow`/`challenge`, `stage` is the layer where the final rule fired (`hygiene`/`reputation`/`tls_fp`/`rate_limits`/`verification`) |
+| `cold_start` | — | The proxy has just started and the catalogs have not loaded yet. The request skipped the checks; see the fail modes in Channel C |
+
+Stage codes are stable across iterations — they are not renamed and do not shift when
+new layers are added.
+
+### `verdict` — the cascade's decision
+
+| Value | What it means |
+| --- | --- |
+| `pass` | No rule fired and the request traversed the cascade. `rule` is empty |
+| `block` | A final rule of the blocking category fired. `rule` holds its name |
+| `challenge` | L5 decided to issue a challenge based on the accumulated soft flags. `rule` holds the name of the last soft flag that led to the decision |
+| `allow` | A final rule of the allow category fired (a fastpath). `rule` holds its name |
+| `permissive` | System soft flags accumulated but Strictness=Permissive suppressed the challenge, so the request went through. `rule` holds the name of the last soft flag that would have triggered a challenge under Standard, which preserves the "why it did not fire" in the logs. Physically equivalent to `pass` (the request continues into the CDN flow) |
+
+In shadow mode the verdict has no physical effect on the request (it is only logged); in
+active mode it is enforced. The `challenge` and `permissive` verdicts, along with the
+`non_browser_blocked` and `unchallengeable_request` rules, belong to layer L5
+(verification).
+
+### `action` — what should have physically happened
+
+| Value | Semantics |
+| --- | --- |
+| `block` | 403 Forbidden (or 429 Too Many Requests with Retry-After for rate rules) |
+| `challenge` | Serve a JS challenge / collect a challenge flag for L5 |
+| `allow` | Fastpath — let it through and skip the remaining layers |
+| `log_only` | Log only, with no effect on the later stages (used in customer rate rules for testing) |
+| `pass` | The request continues; no rule fired decisively |
+
+### `mode` (per resource) — the cascade's mode on a specific resource
+
+| Value | Description |
+| --- | --- |
+| `shadow` | The default for every new domain in the pool and for free customers. The cascade only observes and blocks nothing physically. Synonyms in prose: "observe-only", "shadow mode". |
+| `active` | Paid protection: blocking rules really block, soft flags trigger verification, allow rules give a fastpath. Synonym in prose: "enforcement mode". |
+
+### `Strictness` (per resource) — the L5 sensitivity threshold
+
+| Value | L5 behaviour when challenge flags are present |
+| --- | --- |
+| `Standard` *(default)* | Any system challenge flag → issue a challenge |
+| `Permissive` | System challenge flags do not trigger a challenge — `verdict=permissive` is logged. For domains with an unenumerable amount of legitimate non-browser traffic. |
+
+**A notation convention.** In prose we write `Strictness` / `Standard` / `Permissive`
+(concept names, capitalised). In the YAML configs (the `policy[host].strictness` field)
+they are lowercase (`strictness: standard`, `strictness: permissive`). The same goes for
+`mode`: `mode=shadow` / `mode=active` in prose, and lowercase values in YAML.
+
+### `category` (of rules) — the rule taxonomy
+
+| Value | What it emits |
+| --- | --- |
+| `blocking` | `verdict=block` |
+| `allow` | `verdict=allow` (a fastpath) |
+| `soft` | Accumulates a challenge flag (L5 takes the final decision) |
+
+### `attack_mode` (per host, lives in `policy[host]`)
+
+| Value | Effect |
+| --- | --- |
+| `false` *(default)* | The cascade behaves normally |
+| `true` (Under Attack mode) | Every request that reaches L5 for this host is forced into verification (a browser → a challenge; a non-browser → block `non_browser_blocked`; a protocol-incompatible request → block `unchallengeable_request`). Cookie verify at L2.1: cookies issued before the attack started do not fastpath (those issued during the attack do). Verified search bots and the IP whitelist keep fastpathing, so SEO and trusted integrations are unaffected. |
 
 ---
 
+## Glossary of key terms
+
+- **Edge pool** — the dedicated pool of CDN edge nodes the cascade runs on
+- **antibot-backend** — the service on our infrastructure. It hosts the catalogs,
+  ingests logs and performs rDNS checks
+- **Channel A** — delivery of the framework (Lua code, configs, the HMAC secret, the
+  HTML+JS challenge template) through the edge pool's Puppet
+- **Channel C** — delivery of runtime data (the catalogs) from the backend to the proxy
+- **Hot path** — the hot path of a request: everything that happens between accepting it
+  and answering. The proxy makes no network calls on the hot path
+- **Fail-stale** — the proxy's behaviour when the backend is unreachable: it keeps
+  working from the last catalogs it loaded
+- **Provisional fastpath** — a lenient one-off allow for an IP with a search engine UA,
+  until the backend has verified it through rDNS
+- **Challenge flag** — an internal flag set by rules of the soft category. L5
+  consolidates every accumulated flag and takes the decision
+- **Staged rollout** — the mechanism for safely adding new patterns to the PR catalogs:
+  first `staging` status (the pattern matches while the request is processed and the hit
+  is recorded in the log's `staging_match` field, but it never leads to verdict=block,
+  even in `mode=active`), then — after analysing the statistics gathered from the logs
+  for the absence of false positives — a separate PR promotes the pattern to `active`
+  (real blocking). Applies to the `ua_blacklist`, `ip_blocklist`, `tls_fp_blocklist`,
+  `tls_fp_catalog` and `tls_fp_browser_profiles` catalogs. See "Staged rollout for PR
+  catalogs" in vision.md for more
+
+---
