@@ -1,6 +1,6 @@
-// Write-side для policy API. Каждая мутация — одна короткая транзакция:
-// SELECT current → no-op detection → UPSERT с PoolDefault для новых host'ов.
-// updated_at = NOW() пишется явно в UPDATE (без триггера БД — один путь записи).
+// The write side of the policy API. Every mutation is one short transaction:
+// SELECT current → no-op detection → an UPSERT with PoolDefault for new hosts.
+// updated_at = NOW() is written explicitly in the UPDATE (no database trigger — one write path).
 package antibotapi
 
 import (
@@ -15,13 +15,13 @@ import (
 	"github.com/tabularasa31/antibot-backend/internal/catalog"
 )
 
-// ErrNotFound — row для site нет (GET; для array DELETE — элемент не существовал).
+// ErrNotFound — there is no row for the site (on GET; for an array DELETE, the element did not exist).
 var ErrNotFound = errors.New("not found")
 
-// allowedStringArrayFields — белый список JSONB-полей, с которыми работают
-// array endpoints. Хардкод вместо динамики: иначе клиент мог бы передать
-// `; DROP TABLE policy;--` в URL-path. Имя поля собирается в SQL через
-// fmt.Sprintf — единственная защита от инъекции == white-list.
+// allowedStringArrayFields — the whitelist of JSONB fields the array endpoints
+// work with. Hardcoded rather than dynamic: otherwise a client could pass
+// `; DROP TABLE policy;--` in the URL path. The field name is assembled into SQL through
+// fmt.Sprintf — and the only protection from injection is the whitelist.
 var allowedStringArrayFields = map[string]struct{}{
 	"ua_blacklist":  {},
 	"ip_blocklist":  {},
@@ -29,17 +29,17 @@ var allowedStringArrayFields = map[string]struct{}{
 	"geo_whitelist": {},
 }
 
-// allowedASNField — единственное JSONB-поле с числами.
+// allowedASNField — the only JSONB field holding numbers.
 const allowedASNField = "asn_block"
 
-// PoolDefault'ы для INSERT нового row'a — JSONB-массивы маршалятся один раз
-// на старте, дальше идут как byte-slice'ы в Exec. Раньше делалось на каждый
-// PatchScalars/ensureRow вызов (PR-58 review, gemini medium).
+// The PoolDefaults for INSERTing a new row — the JSONB arrays are marshalled once
+// at startup and then travel as byte slices in Exec. This used to happen on every
+// PatchScalars/ensureRow call (from review).
 //
-// PoolDefault() гарантирует не-nil пустые срезы, json.Marshal на них даёт
-// "[]" — литералы (`[]`-jsonb-литерал в SQL) намеренно НЕ используем,
-// чтобы инициализация шла через ту же типизированную точку, что и логика
-// сравнения в дашборде / reloader'е.
+// PoolDefault() guarantees non-nil empty slices, and json.Marshal on them gives
+// "[]" — we deliberately do NOT use literals (a `[]` jsonb literal in SQL),
+// so that initialisation goes through the same typed point as the comparison
+// logic in the dashboard and the reloader.
 var (
 	poolDefaultUAJSON   = mustMarshalAtInit(catalog.PoolDefault().UABlacklist)
 	poolDefaultIPWLJSON = mustMarshalAtInit(catalog.PoolDefault().IPWhitelist)
@@ -52,8 +52,8 @@ var (
 func mustMarshalAtInit(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
-		// json.Marshal на наших фикс-типах не падает; если когда-нибудь
-		// упадёт — поймаем на process start, не в request-handler.
+		// json.Marshal does not fail on our fixed types; if it ever
+		// does, we catch it at process start rather than in a request handler.
 		panic(fmt.Sprintf("antibotapi: marshal PoolDefault: %v", err))
 	}
 	return b
@@ -65,7 +65,7 @@ type Store struct {
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
-// PolicyPatch — partial update скалярных полей. Nil-указатель = «не трогать».
+// PolicyPatch — a partial update of the scalar fields. A nil pointer means "do not touch".
 type PolicyPatch struct {
 	Mode       *string
 	Strictness *string
@@ -73,47 +73,47 @@ type PolicyPatch struct {
 	OriginIP   *string
 }
 
-// IsEmpty — все указатели nil. Handler 400-ит на пустой PATCH (бессмысленный запрос).
+// IsEmpty — every pointer is nil. The handler answers 400 on an empty PATCH (a meaningless request).
 func (p PolicyPatch) IsEmpty() bool {
 	return p.Mode == nil && p.Strictness == nil && p.AttackMode == nil && p.OriginIP == nil
 }
 
-// PatchScalars применяет patch. Возвращает (changed, changedFields, err).
+// PatchScalars applies the patch. It returns (changed, changedFields, err).
 //
-// Сценарии:
-//   - row не существует → атомарный UPSERT (ON CONFLICT DO UPDATE
-//     SET host=EXCLUDED.host) создаёт его с PoolDefault И берёт row lock
-//     одной statement; RETURNING (xmax=0) отдаёт inserted-флаг.
-//   - row существует и все переданные поля совпадают → no-op (changed=false,
-//     updated_at НЕ дёргается).
-//   - row существует и хоть одно поле отличается → UPDATE под тем же lock'ом,
+// The scenarios:
+//   - the row does not exist → an atomic UPSERT (ON CONFLICT DO UPDATE
+//     SET host=EXCLUDED.host) creates it with PoolDefault AND takes a row lock
+//     in one statement; RETURNING (xmax=0) yields the inserted flag.
+//   - the row exists and every passed field matches → a no-op (changed=false,
+//     and updated_at is NOT touched).
+//   - the row exists and at least one field differs → an UPDATE under that same lock,
 //     changed=true.
 //
-// Concurrency: ВСЁ внутри одной транзакции (Read Committed по умолчанию).
-// UPSERT с `DO UPDATE SET host=EXCLUDED.host` — это no-op assignment, но
-// он триггерит UPDATE-ветку, которая берёт ROW SHARE+EXCLUSIVE lock на
-// конфликтующую строку. Параллельные PATCH на тот же host теперь блокируют
-// друг друга на этом lock'е (без 40001 — это RepeatableRead-only артефакт);
-// loser ждёт, потом читает уже-обновлённое состояние и считает diff против
-// него. Lost-update между независимыми полями исключён (PR-58 review,
-// finding #1: до этого `mode=$2, strictness=$3, attack_mode=$4` молча
-// перетирало concurrent PATCH на соседнее поле).
+// Concurrency: EVERYTHING happens inside one transaction (Read Committed by default).
+// The UPSERT with `DO UPDATE SET host=EXCLUDED.host` is a no-op assignment, but
+// it triggers the UPDATE branch, which takes a ROW SHARE+EXCLUSIVE lock on the
+// conflicting row. Parallel PATCHes to the same host now block
+// each other on that lock (with no 40001 — that is a RepeatableRead-only artefact);
+// the loser waits, then reads the already-updated state and computes its diff against
+// it. A lost update between independent fields is impossible (from review,
+// finding #1: before this, `mode=$2, strictness=$3, attack_mode=$4` silently
+// clobbered a concurrent PATCH to a neighbouring field).
 //
-// `xmax = 0` — Postgres-трюк: только что вставленные строки имеют xmax=0,
-// строки, попавшие в DO UPDATE ветку, имеют xmax = current xid. Так одна
-// statement отдаёт и current values, и «был ли реальный insert».
+// `xmax = 0` is a Postgres trick: freshly inserted rows have xmax=0, while
+// rows that took the DO UPDATE branch have xmax = the current xid. So one
+// statement yields both the current values and "was there a real insert".
 //
 // Trade-off (PR-58 round 2 review #5): `DO UPDATE SET host=EXCLUDED.host`
-// — намеренно self-assignment, чтобы взять row lock на конфликте. Postgres
-// в DO UPDATE ветке ВСЕГДА пишет новую heap-tuple, даже если SET присваивает
-// то же значение (нет SET-to-same-value short-circuit). Это значит каждый
-// PATCH (включая no-op) генерирует одну dead tuple → autovacuum bytes
-// при высокой частоте идемпотентных PATCH'ей. Альтернатива (`DO NOTHING` +
-// fallback `SELECT FOR UPDATE`) сложнее и теряет атомарность UPSERT'a;
-// сознательно выбран churn вместо retry-loop'а. Если dashboard начнёт
-// долбить одним и тем же payload (что в текущем дизайне не предусмотрено),
-// придётся пересмотреть. updated_at сохраняется (см. ниже) — heap churn
-// не виден через X-Catalog-Version.
+// — a deliberate self-assignment, to take a row lock on the conflict. In the
+// DO UPDATE branch Postgres ALWAYS writes a new heap tuple, even when the SET assigns
+// the same value (there is no SET-to-same-value short circuit). That means every
+// PATCH (a no-op one included) generates one dead tuple → autovacuum bytes
+// under a high rate of idempotent PATCHes. The alternative (`DO NOTHING` plus a
+// fallback `SELECT FOR UPDATE`) is more complex and loses the UPSERT's atomicity;
+// we deliberately chose the churn over a retry loop. If the dashboard starts
+// hammering the same payload (which the current design does not anticipate),
+// this will have to be revisited. updated_at is preserved (see below) — the heap churn
+// is invisible through X-Catalog-Version.
 func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (bool, []string, error) {
 	if p.IsEmpty() {
 		return false, nil, fmt.Errorf("empty patch")
@@ -165,9 +165,9 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 		targetOrigin = *p.OriginIP
 	}
 
-	// UPDATE только если хоть одно поле отличается. Под row lock'ом из UPSERT
-	// выше — concurrent PATCH ждёт на нашем lock'е, потом видит уже-новое
-	// состояние и считает свой diff корректно.
+	// An UPDATE only when at least one field differs. Under the row lock from the UPSERT
+	// above — a concurrent PATCH waits on our lock, then sees the already-new
+	// state and computes its diff correctly.
 	if len(changed) > 0 {
 		if _, err := tx.Exec(ctx, `
 			UPDATE policy
@@ -185,21 +185,21 @@ func (s *Store) PatchScalars(ctx context.Context, site string, p PolicyPatch) (b
 
 	switch {
 	case inserted:
-		// Новый row: changed=true (site впервые получил настройки). diff —
-		// все ЯВНО переданные поля, чтобы dashboard видел, что именно из
-		// его PATCH'а доехало. updated_at — schema default NOW() на INSERT.
+		// A new row: changed=true (the site got settings for the first time). The diff is
+		// every EXPLICITLY passed field, so that the dashboard can see exactly what from
+		// its PATCH landed. updated_at is the schema default NOW() on INSERT.
 		return true, patchFields(p), nil
 	case len(changed) > 0:
 		return true, changed, nil
 	default:
-		// Существующий row, все переданные поля совпали → no-op,
-		// updated_at сохраняется.
+		// An existing row where every passed field matched → a no-op, and
+		// updated_at is preserved.
 		return false, nil, nil
 	}
 }
 
-// patchFields — список имён полей, явно переданных в patch (для diff
-// нового row'a, где сравнение с current бессмысленно).
+// patchFields — the list of field names explicitly passed in the patch (for the diff of a
+// new row, where comparing with current is meaningless).
 func patchFields(p PolicyPatch) []string {
 	var out []string
 	if p.Mode != nil {
@@ -217,19 +217,19 @@ func patchFields(p PolicyPatch) []string {
 	return out
 }
 
-// AppendStringArray делает идемпотентный append в JSONB-string-массив.
-// Создаёт row с PoolDefault, если site нет. changed=false → значение уже было.
+// AppendStringArray performs an idempotent append into a JSONB string array.
+// It creates the row with PoolDefault when the site is absent. changed=false means the value was already there.
 //
-// COALESCE(field, '[]'::jsonb) — defence-in-depth против row'ов с JSONB-null
-// (legacy/manual SQL/test-фикстуры). Без него `null || x = null` → WHERE NOT
-// (null @> ...) даёт null → false → silent no-op (PR-58 review #5).
+// COALESCE(field, '[]'::jsonb) is defence in depth against rows with a JSONB null
+// (legacy / manual SQL / test fixtures). Without it `null || x = null` → WHERE NOT
+// (null @> ...) yields null → false → a silent no-op (from review).
 //
-// Tx: ensureRow + UPDATE в одной транзакции (PR-58 security audit #6).
-// DELETE site endpoint теперь существует (PR-99), поэтому concurrent
-// site-DELETE между ensureRow и UPDATE — реальная гонка, а не теоретическая.
-// Закрывает её row lock в ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`),
-// который сериализует append с DELETE; без него UPDATE ловил бы RowsAffected=0
-// и тихо терял append. См. ensureRowTx.
+// Tx: ensureRow plus the UPDATE in one transaction (from the security audit).
+// A DELETE site endpoint now exists, so a concurrent
+// site DELETE between ensureRow and the UPDATE is a real race, not a theoretical one.
+// It is closed by the row lock in ensureRowTx (`DO UPDATE SET host=EXCLUDED.host`),
+// which serialises the append against the DELETE; without it the UPDATE would see RowsAffected=0
+// and silently lose the append. See ensureRowTx.
 func (s *Store) AppendStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -243,7 +243,7 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 	if err := s.ensureRowTx(ctx, tx, site); err != nil {
 		return false, err
 	}
-	// fmt.Sprintf для имени колонки безопасен после white-list проверки выше.
+	// fmt.Sprintf for the column name is safe after the whitelist check above.
 	q := fmt.Sprintf(
 		`UPDATE policy
 		 SET %[1]s = COALESCE(%[1]s, '[]'::jsonb) || to_jsonb($2::text), updated_at = NOW()
@@ -258,12 +258,12 @@ func (s *Store) AppendStringArray(ctx context.Context, site, field, value string
 	return tag.RowsAffected() == 1, nil
 }
 
-// RemoveStringArray удаляет элемент. existed=false → элемента не было,
-// handler возвращает 404 (отделяем «не было» от «было и удалили»).
-// COALESCE против jsonb-null row'ов — см. AppendStringArray (PR-58 review #5).
-// Без tx — single-statement UPDATE атомарен сам по себе; ensureRow тут не
-// нужен (delete на несуществующем site → RowsAffected=0 → 404, что
-// семантически верно).
+// RemoveStringArray removes an element. existed=false means the element was absent and the
+// handler returns 404 (separating "it was not there" from "it was there and we deleted it").
+// The COALESCE against jsonb-null rows — see AppendStringArray (from review).
+// No tx — a single-statement UPDATE is atomic by itself; ensureRow is not
+// needed here (a delete on a non-existent site → RowsAffected=0 → 404, which is
+// semantically correct).
 func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string) (bool, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return false, fmt.Errorf("unknown field: %s", field)
@@ -279,9 +279,9 @@ func (s *Store) RemoveStringArray(ctx context.Context, site, field, value string
 	return tag.RowsAffected() == 1, nil
 }
 
-// AppendASN — симметрично AppendStringArray, но для числового asn_block.
-// JSONB-containment работает на скалярных значениях, поэтому семантика та же.
-// Tx-обвязка идентична AppendStringArray (см. там про PR-58 audit #6).
+// AppendASN — symmetric with AppendStringArray, but for the numeric asn_block.
+// JSONB containment works on scalar values, so the semantics are the same.
+// The tx wrapper is identical to AppendStringArray (see the audit note there).
 func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -305,24 +305,24 @@ func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, e
 	return tag.RowsAffected() == 1, nil
 }
 
-// RemoveASN удаляет ASN из массива.
+// RemoveASN removes an ASN from the array.
 //
-// PR-58 review #2: предыдущая реализация считала new_arr в CTE до lock'а
-// UPDATE-ом, поэтому concurrent AppendASN, успевший закоммитить между CTE
-// и UPDATE, молча затирался — Read Committed re-locks row но НЕ переоценивает
-// CTE. Новая версия вычисляет new_arr подзапросом В SET — этот подзапрос
-// исполняется ПОСЛЕ row lock'а под актуальным состоянием.
+// From review: the previous implementation computed new_arr in a CTE before the UPDATE's
+// lock, so a concurrent AppendASN that committed between the CTE
+// and the UPDATE was silently clobbered — Read Committed re-locks the row but does NOT re-evaluate
+// the CTE. The new version computes new_arr in a subquery INSIDE the SET — that subquery
+// executes AFTER the row lock, against the current state.
 //
-// jsonb-null защита через COALESCE (PR-58 review #5): без неё
-// jsonb_array_elements(null) бросает 'cannot extract elements from a scalar'.
+// jsonb-null protection through COALESCE (from review): without it
+// jsonb_array_elements(null) raises 'cannot extract elements from a scalar'.
 //
-// jsonb_typeof = 'number' (PR-58 round 2 review #3): схема не констрейнит
-// типы элементов JSONB-массива; legacy/manual SQL может оставить строку
-// (`'[15169, "13335"]'::jsonb`). Прямой cast `(elem)::bigint` тогда бросает
-// «invalid input syntax for type bigint», DELETE для всего site'a возвращает
-// 500 до ручной правки БД. Фильтр jsonb_typeof оставляет только числа;
-// строки/null/массивы дропаются (defensive — но это та самая legacy-зона,
-// которую decodeASNBlock на loader-стороне тоже защищает).
+// jsonb_typeof = 'number' (from review): the schema does not constrain the
+// element types of a JSONB array; legacy or manual SQL can leave a string
+// (`'[15169, "13335"]'::jsonb`). A direct cast `(elem)::bigint` then raises
+// "invalid input syntax for type bigint", and DELETE for the whole site returns a
+// 500 until the database is fixed by hand. The jsonb_typeof filter keeps numbers only;
+// strings, nulls and arrays are dropped (defensive — but this is exactly the legacy zone
+// that decodeASNBlock on the loader side also guards).
 func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, error) {
 	q := `UPDATE policy
 		  SET asn_block = COALESCE(
@@ -339,26 +339,26 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 	return tag.RowsAffected() == 1, nil
 }
 
-// ensureRowTx создаёт row с PoolDefault если site нет, под переданной tx,
-// И берёт row lock на конфликтующую строку через `DO UPDATE SET
-// host = EXCLUDED.host` (self-assignment, как в PatchScalars).
+// ensureRowTx creates the row with PoolDefault when the site is absent, inside the passed tx,
+// AND takes a row lock on the conflicting row through `DO UPDATE SET
+// host = EXCLUDED.host` (a self-assignment, as in PatchScalars).
 //
-// Lock обязателен, а не косметика (PR-99 review): `DO NOTHING` НЕ блокирует
-// существующую строку при конфликте, поэтому concurrent DeletePolicy мог
-// закоммитить DELETE между ensureRow (no-op) и последующим UPDATE в
-// AppendStringArray/AppendASN — тот UPDATE видел RowsAffected=0 и возвращал
-// 200 changed:false, тихо теряя append (строка удалена, значение не записано).
-// Обёртка ensure+UPDATE в одну tx (PR-58 audit #6) сама по себе это НЕ
-// закрывала — нужен именно lock. `DO UPDATE` берёт ROW SHARE+EXCLUSIVE lock,
-// так что concurrent DELETE ждёт на нём; append коммитит реальную запись
-// (changed:true), и только потом DELETE удаляет host — без silent-noop.
+// The lock is mandatory rather than cosmetic (from review): `DO NOTHING` does NOT lock the
+// existing row on a conflict, so a concurrent DeletePolicy could
+// commit its DELETE between ensureRow (a no-op) and the subsequent UPDATE in
+// AppendStringArray/AppendASN — that UPDATE would see RowsAffected=0 and return
+// 200 changed:false, silently losing the append (the row was deleted and the value never written).
+// Wrapping ensure+UPDATE in one tx (from the audit) did NOT by itself
+// close it — the lock is what is needed. `DO UPDATE` takes a ROW SHARE+EXCLUSIVE lock,
+// so a concurrent DELETE waits on it; the append commits a real record
+// (changed:true), and only then does the DELETE remove the host — with no silent no-op.
 //
-// Trade-off: каждый append теперь пишет dead-tuple на ensure-ветке даже когда
-// строка уже есть (нет SET-to-same-value short-circuit) — тот же churn, что
-// задокументирован в PatchScalars; для частоты append'ов приемлемо.
+// The trade-off: every append now writes a dead tuple on the ensure branch even when
+// the row already exists (there is no SET-to-same-value short circuit) — the same churn
+// documented in PatchScalars; acceptable at the frequency of appends.
 //
-// PatchScalars свою UPSERT-with-lock делает сам (xmax=0 трюк), поэтому
-// ensureRowTx сюда не подключается.
+// PatchScalars does its own UPSERT-with-lock (the xmax=0 trick), so
+// ensureRowTx is not wired in there.
 func (s *Store) ensureRowTx(ctx context.Context, tx pgx.Tx, site string) error {
 	def := catalog.PoolDefault()
 	_, err := tx.Exec(ctx, `
@@ -377,8 +377,8 @@ func (s *Store) ensureRowTx(ctx context.Context, tx pgx.Tx, site string) error {
 	return nil
 }
 
-// GetPolicy возвращает полную Policy для site. ErrNotFound если row нет —
-// handler различает «настроено в дефолт» от «не настроено» (последнее → 404).
+// GetPolicy returns the full Policy for a site. ErrNotFound when there is no row —
+// the handler separates "configured to the default" from "not configured" (the latter → 404).
 func (s *Store) GetPolicy(ctx context.Context, site string) (catalog.Policy, error) {
 	var (
 		p                                                      catalog.Policy
@@ -415,7 +415,7 @@ func (s *Store) GetPolicy(ctx context.Context, site string) (catalog.Policy, err
 	if err := unmarshalNonNil(rateJSON, &p.RateRules); err != nil {
 		return catalog.Policy{}, fmt.Errorf("rate_rules: %w", err)
 	}
-	// nil → []T{} для JSON-стабильности (как в catalog.normalize).
+	// nil → []T{} for JSON stability (as in catalog.normalize).
 	if p.UABlacklist == nil {
 		p.UABlacklist = []string{}
 	}
@@ -437,14 +437,14 @@ func (s *Store) GetPolicy(ctx context.Context, site string) (catalog.Policy, err
 	return p, nil
 }
 
-// DeletePolicy удаляет policy-строку host'а целиком. existed=false → строки
-// не было, handler возвращает 404 (как у array DELETE — отделяем «не было»
-// от «было и удалили»). Single-statement DELETE атомарен; ensureRow не нужен.
+// DeletePolicy removes a host's policy row entirely. existed=false means the row
+// was absent and the handler returns 404 (like the array DELETE — separating "it was not there"
+// from "it was there and we deleted it"). A single-statement DELETE is atomic; ensureRow is unnecessary.
 //
-// После COMMIT host исчезает из таблицы. Reloader делает полный LoadRuntime +
-// Store.Replace, поэтому удалённый host просто не попадёт в следующий snapshot,
-// и buildPolicy отдаст PoolDefault() (mode=shadow, observe-only) — deletion
-// через Channel C обрабатывается семантикой полной перезагрузки, не upsert'ом.
+// After the COMMIT the host disappears from the table. The reloader does a full LoadRuntime plus
+// Store.Replace, so a deleted host simply does not appear in the next snapshot,
+// and buildPolicy serves PoolDefault() (mode=shadow, observe-only) — deletion
+// through Channel C is handled by full-reload semantics rather than by an upsert.
 func (s *Store) DeletePolicy(ctx context.Context, site string) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM policy WHERE host = $1`, site)
 	if err != nil {
@@ -453,8 +453,8 @@ func (s *Store) DeletePolicy(ctx context.Context, site string) (bool, error) {
 	return tag.RowsAffected() == 1, nil
 }
 
-// GetStringArray возвращает один JSONB-массив-поле. Отсутствие row = []
-// (не ErrNotFound: с точки зрения дашборда «у клиента ещё ничего нет»).
+// GetStringArray returns one JSONB array field. A missing row means []
+// (not ErrNotFound: from the dashboard's point of view "the customer has nothing yet").
 func (s *Store) GetStringArray(ctx context.Context, site, field string) ([]string, error) {
 	if _, ok := allowedStringArrayFields[field]; !ok {
 		return nil, fmt.Errorf("unknown field: %s", field)
@@ -478,7 +478,7 @@ func (s *Store) GetStringArray(ctx context.Context, site, field string) ([]strin
 	return out, nil
 }
 
-// GetASN — симметрично GetStringArray, но для числового asn_block.
+// GetASN — symmetric with GetStringArray, but for the numeric asn_block.
 func (s *Store) GetASN(ctx context.Context, site string) ([]uint32, error) {
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `SELECT asn_block FROM policy WHERE host = $1`, site).Scan(&raw)
