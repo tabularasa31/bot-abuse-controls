@@ -1,152 +1,156 @@
-# WAF — контентная инспекция L7 — спецификация (пост-MVP)
+# WAF — L7 content inspection — specification (post-MVP)
 
-**Версия:** v1.0 · Статус: проектный контракт (целевое поведение) · слой пост-MVP
+**Version:** v1.0 · Status: a design contract (target behaviour) · a post-MVP layer
 
-Документ описывает целевое поведение WAF-слоя как отдельный слой поверх каскада. Выбор движка (build-vs-buy) — сознательно открытый вопрос, решается спайком и архитектурным решением (см. §4); до этого решения код не коммитим.
+This document describes the target behaviour of the WAF layer as a separate layer on top
+of the cascade. The engine choice (build versus buy) is deliberately left open, to be
+settled by a spike and an architectural decision (see §4); no code is committed before
+that decision.
 
-**Сопутствующие материалы:**
+**Related material:**
 
- [waf-rules-reference.md](waf-rules-reference.md) — правила/сигнатуры в формате «если
-условие → вердикт»; [waf-entities-reference.md](waf-entities-reference.md) — словарь
-(стадия, каталог `waf_rules`, теги, поля лога, перечисления);
-[waf-config-templates.md](waf-config-templates.md) — формат сигнатурного каталога и
-per-host WAF-профиля.
+[waf-rules-reference.md](waf-rules-reference.md) — the rules and signatures in
+"if condition → verdict" form; [waf-entities-reference.md](waf-entities-reference.md) —
+the vocabulary (the stage, the `waf_rules` catalog, tags, log fields, enumerations);
+[waf-config-templates.md](waf-config-templates.md) — the format of the signature catalog
+and the per-host WAF profile.
 
 ---
 
-## 1. Что это
+## 1. What it is
 
-Слой контентной инспекции HTTP-запроса на сигнатуры атак (негативная модель
-безопасности): SQL-инъекции, XSS, path-traversal, command-injection, очевидный
-SSRF/LFI, плюс virtual patching — точечные правила-щиты под конкретные CVE/эндпоинты
-клиента.
+A layer that inspects the content of an HTTP request against attack signatures (a
+negative security model): SQL injection, XSS, path traversal, command injection, obvious
+SSRF/LFI, plus virtual patching — targeted shield rules for a specific CVE or customer
+endpoint.
 
-WAF — это негативная модель (ищем известные плохие паттерны). Ее комплемент —
-позитивная модель контракта API (что разрешено), см. [api-spec.md](api-spec.md).
-Граница двух моделей фиксируется тем же архитектурным решением, что и выбор движка.
+The WAF is a negative model (we look for known-bad patterns). Its complement is the
+positive model of an API contract (what is permitted), see [api-spec.md](api-spec.md).
+The boundary between the two models is pinned down by the same architectural decision as
+the engine choice.
 
-## 2. Зачем
+## 2. Why
 
-В каскаде сегодня нет инспекции тела запроса, query/POST-параметров и заголовков на
-сигнатуры. [vision.md](vision.md) называет DDoS явной целью, а WAF — лишь косвенно
-(XSS как причина `HttpOnly` на cookie). Это зеленое поле: целый класс атак уровня
-приложения (OWASP Top-10 ядро) сейчас проходит каскад насквозь к origin.
+The cascade today does not inspect request bodies, query/POST parameters or headers
+against signatures. [vision.md](vision.md) names DDoS as an explicit goal and mentions
+WAF only indirectly (XSS as the reason for `HttpOnly` on the cookie). This is greenfield:
+a whole class of application-level attacks (the OWASP Top 10 core) currently passes
+straight through the cascade to the origin.
 
-## 3. Где в каскаде
+## 3. Where it sits in the cascade
 
-WAF добавляет новую стадию инспекции контента (`waf`), которая копит флаги
-(`waf:sqli`, `waf:xss`, …) и на критичных правилах способна сама блокировать — по
-аналогии с тем, как hit блок-листа TLS-отпечатков делает прямой `policy.enforce(403)`.
+The WAF adds a new content-inspection stage (`waf`) that accumulates flags (`waf:sqli`,
+`waf:xss`, …) and, for critical rules, can block on its own — by analogy with the way a
+TLS fingerprint blocklist hit calls `policy.enforce(403)` directly.
 
 ```
 hygiene → [contract] → reputation → tls_fp → [WAF inspection] → rate_limits → verification
 ```
 
-Сохраняется инвариант каскада ([rules-reference.md](rules-reference.md)): единственная
-точка консолидации флагов — L5 (`verification`), правила не выдают вердикт сами, кроме
-явных hard-block exit-точек под `policy.enforce`. WAF встает после дешевых
-identity-проверок и позитивного контракта, до дорогих поведенческих (rate_limits) —
-точное место фиксируется при реализации.
+The cascade invariant is preserved ([rules-reference.md](rules-reference.md)): the single
+point where flags are consolidated is L5 (`verification`), and rules do not issue verdicts
+themselves apart from the explicit hard-block exit points under `policy.enforce`. The WAF
+sits after the cheap identity checks and the positive contract, before the expensive
+behavioural ones (rate_limits) — the exact position is pinned down at implementation time.
 
-## 4. Развилка движка — спайк + архитектурное решение (отложено)
+## 4. The engine fork — a spike plus an architectural decision (deferred)
 
-WAF-движок сознательно оставлен нерешенным: build-vs-buy не выбран.
+The WAF engine is deliberately left unresolved: build versus buy has not been chosen.
 
-- **Вариант A — Coraza + OWASP CRS.** Go-реализация ModSecurity seclang + проверенный
-годами Core Rule Set.
-  - **+** мгновенный охват Top-10, поддерживаемые правила, знакомый seclang.
-  - **−** чужая модель правил вне нашей доставки каталогов / shadow-mode / лога; либо
-  отдельный Go-сервис (лишний внутренний хоп, ранее отвергнут в пользу edge-Lua),
-  либо незрелый Lua-биндинг; латентность инспекции тела требует замера; ложняки CRS
-  требуют тюнинга, не ложащегося в наш staging→active «из коробки».
-- **Вариант B — свой ruleset в стиле каскада.** Стадия `waf.lua` со своими сигнатурами;
-каталог `waf_rules` доставляется как блок-лист TLS-отпечатков; shadow/active через
-`policy.enforce`; флаги в лог; staged rollout и `git revert` бесплатно.
-  - **+** единая архитектура (лог/метрики/kill-switch/mode-gate/PR-воркфлоу/
-  CI-валидация), управляемая латентность.
-  - **−** сами отвечаем за полноту и анти-evasion; медленный набор охвата; риск «свой
-  CRS хуже CRS».
-- **Вариант C — гибрид:** свой движок исполнения + импорт подмножества CRS-сигнатур как
-данных в наш каталожный формат.
+- **Option A — Coraza plus OWASP CRS.** A Go implementation of ModSecurity seclang plus a
+  Core Rule Set proven over years.
+  - **+** instant Top 10 coverage, maintained rules, familiar seclang.
+  - **−** someone else's rule model, outside our catalog delivery / shadow mode / log;
+    either a separate Go service (an extra internal hop, previously rejected in favour of
+    edge Lua) or an immature Lua binding; body-inspection latency needs measuring; CRS
+    false positives need tuning that does not fit our staging→active out of the box.
+- **Option B — our own ruleset in the style of the cascade.** A `waf.lua` stage with our
+  own signatures; the `waf_rules` catalog delivered like the TLS fingerprint blocklist;
+  shadow/active through `policy.enforce`; flags in the log; staged rollout and
+  `git revert` for free.
+  - **+** one architecture (log, metrics, kill switch, mode gate, PR workflow, CI
+    validation), controlled latency.
+  - **−** we own completeness and anti-evasion; coverage grows slowly; the risk of "our own
+    CRS, worse than CRS".
+- **Option C — a hybrid:** our own execution engine plus an import of a subset of CRS
+  signatures as data in our catalog format.
 
-**Рекомендация — спайк перед коммитом:** (1) замерить per-request латентность инспекции
-тела Coraza vs нативной Lua на репрезентативном теле; (2) оценить, ложится ли
-CRS-тюнинг в shadow→staging→active; (3) прикинуть объем своего сигнатурного ядра под
-Top-10; (4) зафиксировать границу с позитивной моделью контракта. Результат —
-архитектурное решение «WAF-движок: build vs buy».
+**The recommendation is to spike before committing:** (1) measure per-request
+body-inspection latency for Coraza versus native Lua on a representative body; (2) assess
+whether CRS tuning fits shadow→staging→active; (3) estimate the size of our own signature
+core for the Top 10; (4) pin down the boundary with the positive contract model. The
+result is an architectural decision, "WAF engine: build vs buy".
 
-## 5. Как — компоненты
+## 5. How — the components
 
-### 5.1 Скоуп MVP
+### 5.1 MVP scope
 
-- Инспекция query-string и POST-тела (form-urlencoded + JSON; multipart — фаза 2).
-- Инспекция заголовков и пути (path-traversal, нулевые байты, протокольные аномалии).
-- Сигнатуры под OWASP Top-10 ядро: SQLi, XSS, path-traversal, command-injection,
-SSRF/LFI.
-- shadow по умолчанию (как весь каскад) + per-host on/off через политику.
+- Inspection of the query string and the POST body (form-urlencoded plus JSON; multipart
+  is phase 2).
+- Inspection of headers and the path (path traversal, null bytes, protocol anomalies).
+- Signatures for the OWASP Top 10 core: SQLi, XSS, path traversal, command injection,
+  SSRF/LFI.
+- Shadow by default (like the whole cascade), plus per-host on/off through the policy.
 
-Вне MVP: ML-аномалии тела, CRS paranoia 3+, полная анти-evasion нормализация всех
-кодировок.
+Out of MVP scope: ML anomaly detection on bodies, CRS paranoia 3+, full anti-evasion
+normalisation of every encoding.
 
-### 5.2 Движок инспекции
+### 5.2 The inspection engine
 
-Стадия `waf.lua` по выбранному пути: пре-процессор нормализации + матч сигнатур;
-флаги в лог; критичные правила → `policy.enforce`. Метрики
+A `waf.lua` stage along whichever path is chosen: a normalisation preprocessor plus
+signature matching; flags into the log; critical rules → `policy.enforce`. Metrics:
 `antibot_rule_total{stage="waf",...}`.
 
-### 5.3 Сигнатурный каталог `waf_rules`
+### 5.3 The `waf_rules` signature catalog
 
-Доставляется как блок-лист TLS-отпечатков: git — единственный источник истины,
-PR-only + CODEOWNERS, staged rollout (staging→active, `staging_match` в логе),
-`git revert`. Формат правил определяется выбранным движком. CI-валидация
-(синтаксис/компиляция) перед мержем.
+Delivered like the TLS fingerprint blocklist: git is the single source of truth, PR-only
+plus CODEOWNERS, staged rollout (staging→active, `staging_match` in the log),
+`git revert`. The rule format follows from the chosen engine. CI validation (syntax and
+compilation) runs before a merge.
 
-### 5.4 Per-host WAF-профиль
+### 5.4 The per-host WAF profile
 
-Расширение политики: `waf_enabled`, `waf_paranoia` (уровень), `waf_disabled_rules`
-(массив id выключенных правил — для ложняков конкретного клиента), правится через
-per-host политику (PATCH). mode/strictness независимы от профиля.
+An extension of the policy: `waf_enabled`, `waf_paranoia` (the level) and
+`waf_disabled_rules` (an array of disabled rule ids, for one customer's false positives),
+edited through the per-host policy (PATCH). Mode and strictness are independent of the
+profile.
 
 ### 5.5 Virtual patching
 
-Точечное правило-щит под конкретную CVE/эндпоинт клиента — технически запись в
-`waf_rules` с быстрым PR-воркфлоу (как HIGH-кандидат блок-листа → PR в каталог).
-Runbook быстрого выката: PR → staging (наблюдение) → active; быстрый revert.
-Закрывает дыру на эдже за минуты, пока origin патчат.
+A targeted shield rule for a specific CVE or customer endpoint — technically an entry in
+`waf_rules` with a fast PR workflow (like a HIGH blocklist candidate → a PR to the
+catalog). The fast-rollout runbook: PR → staging (observation) → active; with a fast
+revert. It closes the hole at the edge within minutes while the origin is being patched.
 
-## 6. Открытые вопросы
+## 6. Open questions
 
-- **Буферизация тела** (`lua_need_request_body`/`request_body`) конфликтует с большими
-аплоадами → лимит размера (см. resource limits в [api-spec.md](api-spec.md)) + bypass
-для media/upload.
-- **Нормализация** (URL-decode, unicode, comment-strip) — общий пре-процессор перед
-сигнатурами, иначе тривиальный evasion.
-- **Латентность** инспекции тела на каждом запросе — замер в спайке (§4).
+- **Body buffering** (`lua_need_request_body`/`request_body`) conflicts with large uploads
+  → a size limit (see the resource limits in [api-spec.md](api-spec.md)) plus a bypass for
+  media and uploads.
+- **Normalisation** (URL decode, unicode, comment stripping) — a shared preprocessor ahead
+  of the signatures, otherwise evasion is trivial.
+- **Latency** of body inspection on every request — measured in the spike (§4).
 
-## 7. Что переиспользуем
+## 7. What we reuse
 
-Доставку slow-каталогов (PR-only git-каталоги), per-host политику, `policy.enforce`
-(mode-gate / shadow→active), лог и метрики, kill-switch, staged rollout, паттерн
-promotion блок-листа, CI-валидацию каталогов.
+The slow-catalog delivery (PR-only git catalogs), the per-host policy, `policy.enforce`
+(the mode gate / shadow→active), the log and the metrics, the kill switch, staged rollout,
+the blocklist promotion pattern, and CI validation of catalogs.
 
-## 8. Технические границы
+## 8. Technical boundaries
 
-- WAF (негативная модель) не заменяет позитивный контракт API — это разные модели,
-применяются вместе.
-- Пока движок не выбран — код не коммитим (статус-инвариант).
-- Полнота сигнатур и анти-evasion — длинный хвост, добивается итеративно (особенно в
-варианте B).
+- The WAF (a negative model) does not replace the positive API contract — they are
+  different models and are applied together.
+- Until the engine is chosen, no code is committed (a status invariant).
+- Signature completeness and anti-evasion are a long tail, filled in iteratively
+  (especially under option B).
 
-## 9. Состав и порядок внедрения
+## 9. Components and rollout order
 
-
-| Компонент                 | Суть                                           | Зависит от              |
-| ------------------------- | ---------------------------------------------- | ----------------------- |
-| Спайк + решение по движку | build-vs-buy + граница с позитивным контрактом | — (флагман, можно рано) |
-| Движок `waf.lua`          | инспекция тела/query/заголовков, Top-10        | решение по движку       |
-| Каталог `waf_rules`       | сигнатуры через доставку каталогов, staged     | движок                  |
-| Per-host WAF-профиль      | paranoia / выключенные правила / on-off        | движок                  |
-| Virtual patching          | правило-щит под CVE/эндпоинт                   | каталог                 |
-
-
-Разбор правил и сигнатур — в [waf-rules-reference.md](waf-rules-reference.md).
+| Component | The gist | Depends on |
+| --- | --- | --- |
+| The spike plus the engine decision | build versus buy plus the boundary with the positive contract | — (the flagship, can start early) |
+| The `waf.lua` engine | inspection of body/query/headers, the Top 10 | the engine decision |
+| The `waf_rules` catalog | signatures through catalog delivery, staged | the engine |
+| The per-host WAF profile | paranoia / disabled rules / on-off | the engine |
+| Virtual patching | a shield rule for a CVE or endpoint | the catalog |

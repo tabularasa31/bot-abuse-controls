@@ -1,53 +1,89 @@
-# WAF — каталог правил контентной инспекции (серия W)
+# WAF — catalog of content-inspection rules (the W series)
 
-Полный перечень WAF-правил в формате «Если условие (сигнатурный матч) → то вердикт/флаг». Источник правды по поведению — [waf-spec.md](waf-spec.md); этот документ — плоский справочник «что на что срабатывает». Словарь сущностей — [waf-entities-reference.md](waf-entities-reference.md), форматы каталога и профиля — [waf-config-templates.md](waf-config-templates.md).
+The complete list of WAF rules in "if condition (a signature match) → then verdict/flag"
+form. The source of truth for behaviour is [waf-spec.md](waf-spec.md); this document is
+the flat reference for "what fires on what". The entity vocabulary is
+[waf-entities-reference.md](waf-entities-reference.md), and the catalog and profile
+formats are in [waf-config-templates.md](waf-config-templates.md).
 
-**Статус:** проектный контракт (целевое поведение); движок (build-vs-buy) не выбран — открыт (решается спайком + архитектурным решением). Семантика правил ниже описана на уровне контракта и держится независимо от выбора движка; внутренности сигнатур (конкретные regex/seclang) намеренно абстрактны и фиксируются вместе с движком.
+**Status:** a design contract (target behaviour); the engine (build versus buy) is not
+chosen and remains open (settled by a spike plus an architectural decision). The rule
+semantics below are described at the contract level and hold regardless of the engine
+choice; the internals of the signatures (concrete regexes or seclang) are deliberately
+abstract and are pinned down together with the engine.
 
-**Как читать.** WAF — это негативная модель (ищем известные плохие паттерны). Её комплемент — позитивная модель контракта API (что РАЗРЕШЕНО) — описана отдельной спекой и применяется вместе с WAF, а не вместо. Все WAF-правила живут на одной стадии каскада — `waf`. Каждое правило либо накапливает challenge-flag (`waf:sqli`, `waf:xss`, …), консолидируемый на L5 (`verification`), либо — для критичных классов — само делает hard-block через `policy.enforce` (по аналогии с тем, как `tls_fp_blocklist` hit делает прямой 403). Сохраняется инвариант каскада: единственная точка консолидации флагов — L5; правила не выдают вердикт сами, кроме явных hard-block exit-точек под `policy.enforce`.
+**How to read it.** The WAF is a negative model (we look for known-bad patterns). Its
+complement is the positive model of an API contract (what is PERMITTED), described in a
+separate spec and applied together with the WAF rather than instead of it. Every WAF rule
+lives on one cascade stage, `waf`. Each rule either accumulates a challenge flag
+(`waf:sqli`, `waf:xss`, …) consolidated at L5 (`verification`), or — for the critical
+classes — performs a hard block itself through `policy.enforce` (by analogy with the way a
+`tls_fp_blocklist` hit returns 403 directly). The cascade invariant is preserved: the
+single point where flags are consolidated is L5; rules do not issue verdicts themselves
+apart from the explicit hard-block exit points under `policy.enforce`.
 
-Обозначения:
+Notation:
 
-- **Категория** — `blocking critical` (критичное правило → прямой hard-block через `policy.enforce`) или `soft flag` (накапливает challenge-flag, финальное решение на L5).
-- **Цель инспекции** — что именно проверяется: query-string, тело (body), заголовки (headers), путь (path).
-- **Источник** — откуда берутся сигнатуры (каталог `waf_rules`, доставка через Channel C).
-- **Стадия** — для всех WAF-правил это стадия `waf`.
+- **Category** — `blocking critical` (a critical rule → a direct hard block through
+  `policy.enforce`) or `soft flag` (accumulates a challenge flag, with the final decision
+  at L5).
+- **Inspection target** — what exactly is checked: the query string, the body, the
+  headers, the path.
+- **Source** — where the signatures come from (the `waf_rules` catalog, delivered over
+  Channel C).
+- **Stage** — for every WAF rule this is the `waf` stage.
 
-Все правила работают только при `waf_enabled=true` в per-host WAF-профиле; по умолчанию стадия в shadow (как весь каскад) — матч пишется в лог, но физически не исполняется до `mode=active`.
-
----
-
-## Классы сигнатур (OWASP Top-10 ядро)
-
-| #   | Если… (сигнатурный матч)                                                                                                       | То…                                                                                              | Категория          | Цель инспекции            | Источник     | Стадия |
-| --- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------ | ------------------------- | ------------ | ------ |
-| W1  | В query-string или теле запроса (form-urlencoded / JSON) после нормализации найдена сигнатура SQL-инъекции (SQLi)          | флаг `waf:sqli` (консолидация на L5); для критичных SQLi-правил → `policy.enforce` (hard-block)  | soft flag / blocking critical | query, body  | `waf_rules` | `waf`  |
-| W2  | В query-string, теле или заголовках после нормализации найдена сигнатура XSS (внедрение скрипта/HTML-контекста)            | флаг `waf:xss` (консолидация на L5); для критичных XSS-правил → `policy.enforce` (hard-block)    | soft flag / blocking critical | query, body, headers | `waf_rules` | `waf`  |
-| W3  | В пути, query или теле найдена сигнатура path-traversal (`../`, нулевые байты, обход директорий, протокольные аномалии пути) | флаг `waf:path_traversal`; критичные правила → `policy.enforce` (hard-block)                     | soft flag / blocking critical | path, query, body | `waf_rules` | `waf`  |
-| W4  | В query, теле или заголовках найдена сигнатура command-injection (внедрение shell-команд, метасимволы, бэктики, pipe)      | флаг `waf:command_injection`; критичные правила → `policy.enforce` (hard-block)                  | soft flag / blocking critical | query, body, headers | `waf_rules` | `waf`  |
-| W5  | В query, теле или заголовках найдена сигнатура SSRF/LFI (попытка обращения к внутренним адресам/локальным файлам)          | флаг `waf:ssrf_lfi`; критичные правила → `policy.enforce` (hard-block)                           | soft flag / blocking critical | query, body, headers | `waf_rules` | `waf`  |
-
-**Примечание про категорию.** Один класс атаки покрывается набором правил разной критичности: однозначные эксплойт-паттерны идут как `blocking critical` (прямой `policy.enforce`), а более «шумные» эвристики — как `soft flag` и копятся для решения на L5 вместе с остальными сигналами каскада. Конкретное разбиение «какое правило критично» — часть содержимого каталога `waf_rules` и калибруется через staged rollout, а не зашито в этот справочник.
-
----
-
-## Virtual patching — правила-щиты
-
-Точечные правила под конкретную CVE или уязвимый эндпоинт клиента. Технически — обычная запись в каталоге `waf_rules`, но с быстрым PR-воркфлоу (по образцу HIGH-кандидата в `tls_fp_blocklist`). Закрывают дыру на эдже за минуты, пока origin патчат.
-
-| #   | Если… (сигнатурный матч)                                                                                                          | То…                                                                       | Категория          | Цель инспекции            | Источник     | Стадия |
-| --- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------ | ------------------------- | ------------ | ------ |
-| W6  | Запрос на конкретный уязвимый эндпоинт/путь совпал с virtual-patch-сигнатурой под известную CVE (точечный shield-правило клиента) | флаг `waf:virtual_patch` или прямой `policy.enforce` — задаётся в правиле | soft flag / blocking critical | path, query, body, headers | `waf_rules` (virtual-patch запись) | `waf`  |
-
-Virtual-patch правило проходит тот же цикл, что и любая запись каталога: PR → staging (наблюдение) → active, с возможностью быстрого `git revert`. Критичность (флаг vs `policy.enforce`) задаётся прямо в правиле — для острого CVE-щита обычно сразу `policy.enforce` после короткого staging-наблюдения.
+All the rules run only when `waf_enabled=true` in the per-host WAF profile; by default the
+stage is in shadow (like the whole cascade) — a match is logged but not physically enforced
+until `mode=active`.
 
 ---
 
-## Сводка категорий
+## Signature classes (the OWASP Top 10 core)
 
-| Категория          | Что делает                                                                                                      | Где исполняется               |
-| ------------------ | --------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `blocking critical` | Прямой hard-block через `policy.enforce` (403) на самой стадии `waf`, не дожидаясь L5                            | стадия `waf` (exit-точка)     |
-| `soft flag`        | Накапливает challenge-flag `waf:*`; финальное решение (challenge/pass/permissive) — на L5 (`verification`)       | флаг ставится на `waf`, решение на L5 |
+| # | If… (a signature match) | Then… | Category | Inspection target | Source | Stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| W1 | After normalisation, a SQL injection (SQLi) signature is found in the query string or the request body (form-urlencoded / JSON) | the flag `waf:sqli` (consolidated at L5); for critical SQLi rules → `policy.enforce` (a hard block) | soft flag / blocking critical | query, body | `waf_rules` | `waf` |
+| W2 | After normalisation, an XSS signature is found in the query string, the body or the headers (script injection or an HTML context) | the flag `waf:xss` (consolidated at L5); for critical XSS rules → `policy.enforce` (a hard block) | soft flag / blocking critical | query, body, headers | `waf_rules` | `waf` |
+| W3 | A path-traversal signature is found in the path, the query or the body (`../`, null bytes, directory escapes, protocol anomalies in the path) | the flag `waf:path_traversal`; critical rules → `policy.enforce` (a hard block) | soft flag / blocking critical | path, query, body | `waf_rules` | `waf` |
+| W4 | A command-injection signature is found in the query, the body or the headers (shell command injection, metacharacters, backticks, pipes) | the flag `waf:command_injection`; critical rules → `policy.enforce` (a hard block) | soft flag / blocking critical | query, body, headers | `waf_rules` | `waf` |
+| W5 | An SSRF/LFI signature is found in the query, the body or the headers (an attempt to reach internal addresses or local files) | the flag `waf:ssrf_lfi`; critical rules → `policy.enforce` (a hard block) | soft flag / blocking critical | query, body, headers | `waf_rules` | `waf` |
 
-Любой матч (критичный или soft, active или staging) попадает в `bac_log` и инкрементит метрику `antibot_rule_total{stage="waf",...}`. Staging-матчи дополнительно пишутся в `staging_match` и не приводят к hard-block даже в `mode=active` (см. [waf-config-templates.md](waf-config-templates.md)).
+**A note on categories.** One attack class is covered by a set of rules of differing
+criticality: unambiguous exploit patterns run as `blocking critical` (a direct
+`policy.enforce`), while noisier heuristics run as `soft flag` and accumulate for the L5
+decision alongside the cascade's other signals. Exactly which rule is critical is part of
+the `waf_rules` catalog's content and is calibrated through staged rollout, not baked into
+this reference.
+
+---
+
+## Virtual patching — shield rules
+
+Targeted rules for a specific CVE or a customer's vulnerable endpoint. Technically these
+are ordinary entries in the `waf_rules` catalog, but with a fast PR workflow (modelled on a
+HIGH candidate for `tls_fp_blocklist`). They close the hole at the edge within minutes
+while the origin is being patched.
+
+| # | If… (a signature match) | Then… | Category | Inspection target | Source | Stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| W6 | A request to a specific vulnerable endpoint or path matched a virtual-patch signature for a known CVE (a customer's targeted shield rule) | the flag `waf:virtual_patch`, or a direct `policy.enforce` — specified in the rule | soft flag / blocking critical | path, query, body, headers | `waf_rules` (a virtual-patch entry) | `waf` |
+
+A virtual-patch rule goes through the same cycle as any catalog entry: PR → staging
+(observation) → active, with a fast `git revert` available. Its criticality (a flag versus
+`policy.enforce`) is set in the rule itself — for an acute CVE shield it is usually
+`policy.enforce` straight after a short staging observation.
+
+---
+
+## Category summary
+
+| Category | What it does | Where it is enforced |
+| --- | --- | --- |
+| `blocking critical` | A direct hard block through `policy.enforce` (403) at the `waf` stage itself, without waiting for L5 | the `waf` stage (an exit point) |
+| `soft flag` | Accumulates a `waf:*` challenge flag; the final decision (challenge/pass/permissive) is taken at L5 (`verification`) | the flag is set at `waf`, the decision happens at L5 |
+
+Every match (critical or soft, active or staging) lands in `bac_log` and increments the
+`antibot_rule_total{stage="waf",...}` metric. Staging matches are additionally written to
+`staging_match` and never lead to a hard block, even in `mode=active` (see
+[waf-config-templates.md](waf-config-templates.md)).
