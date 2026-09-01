@@ -270,16 +270,16 @@ func (s *Store) AppendASN(ctx context.Context, site string, asn uint32) (bool, e
 
 // RemoveASN removes an ASN from the array.
 //
-// From review: the previous implementation computed new_arr in a CTE before the UPDATE's
+// the previous implementation computed new_arr in a CTE before the UPDATE's
 // lock, so a concurrent AppendASN that committed between the CTE
 // and the UPDATE was silently clobbered — Read Committed re-locks the row but does NOT re-evaluate
 // the CTE. The new version computes new_arr in a subquery INSIDE the SET — that subquery
 // executes AFTER the row lock, against the current state.
 //
-// jsonb-null protection through COALESCE (from review): without it
+// jsonb-null protection through COALESCE: without it
 // jsonb_array_elements(null) raises 'cannot extract elements from a scalar'.
 //
-// jsonb_typeof = 'number' (from review): the schema does not constrain the
+// jsonb_typeof = 'number': the schema does not constrain the
 // element types of a JSONB array; legacy or manual SQL can leave a string
 // (`'[15169, "13335"]'::jsonb`). A direct cast `(elem)::bigint` then raises
 // "invalid input syntax for type bigint", and DELETE for the whole site returns a
@@ -306,12 +306,12 @@ func (s *Store) RemoveASN(ctx context.Context, site string, asn uint32) (bool, e
 // AND takes a row lock on the conflicting row through `DO UPDATE SET
 // host = EXCLUDED.host` (a self-assignment, as in PatchScalars).
 //
-// The lock is mandatory rather than cosmetic (from review): `DO NOTHING` does NOT lock the
+// The lock is mandatory rather than cosmetic: `DO NOTHING` does NOT lock the
 // existing row on a conflict, so a concurrent DeletePolicy could
 // commit its DELETE between ensureRow (a no-op) and the subsequent UPDATE in
 // AppendStringArray/AppendASN — that UPDATE would see RowsAffected=0 and return
 // 200 changed:false, silently losing the append (the row was deleted and the value never written).
-// Wrapping ensure+UPDATE in one tx (from the audit) did NOT by itself
+// Wrapping ensure+UPDATE in one tx did NOT by itself
 // close it — the lock is what is needed. `DO UPDATE` takes a ROW SHARE+EXCLUSIVE lock,
 // so a concurrent DELETE waits on it; the append commits a real record
 // (changed:true), and only then does the DELETE remove the host — with no silent no-op.

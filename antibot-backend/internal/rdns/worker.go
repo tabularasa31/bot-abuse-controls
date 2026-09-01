@@ -373,7 +373,7 @@ func (w *Worker) process(ctx context.Context, t task) {
 	// task that made it through classify before the cancel, spiking dbErr on
 	// every deploy. We detach the cancellation through context.WithoutCancel and
 	// set a short deadline of our own — the same trick as in
-	// dbloader.Migrate for pg_advisory_unlock. From review.
+	// dbloader.Migrate for pg_advisory_unlock.
 	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), dbWriteTimeout)
 	defer writeCancel()
 	if err := w.db.UpsertVerifiedBot(writeCtx, t.ip, family, status, expiresAt); err != nil {
@@ -433,7 +433,7 @@ func (w *Worker) classify(ctx context.Context, t task) (status, family string) {
 	// net.IP.Equal compares the bytes of the normalised IP — which is critical for IPv6:
 	// "2001:db8::1" and "2001:0db8:0000:0000:0000:0000:0000:0001" are
 	// the same address but different strings. LookupHost can return
-	// either form. We parse the target once outside the loop. From review.
+	// either form. We parse the target once outside the loop.
 	targetIP := net.ParseIP(t.ip)
 	for _, ptr := range ptrs {
 		name := normalizePTR(ptr)

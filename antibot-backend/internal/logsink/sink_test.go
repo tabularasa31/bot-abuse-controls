@@ -305,7 +305,7 @@ func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
 }
 
 // listSpoolFiles must skip .quarantine and .partial — otherwise
-// drainOnce rereads a file already in the DB and inserts duplicates (from review).
+// drainOnce rereads a file already in the DB and inserts duplicates.
 func TestListSpoolFiles_SkipsQuarantineAndPartial(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{

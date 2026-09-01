@@ -78,7 +78,6 @@ function _M.enqueue(line)
         -- start() was never called or backend_url is empty — the shipper is off.
         -- We increment dropped_disabled (separately from dropped_overflow),
         -- so that the dashboard tells "the shipper is off" from "the queue is full".
-        -- PR #54 codex+self review.
         metric_incr(M_DROPPED_DISABLED)
         return false
     end
@@ -141,7 +140,7 @@ local function ship(batch)
 
     -- We normalise a trailing `/` in backend_url: otherwise a URL of "https://h/"
     -- plus the path "/v1/logs" gives "https://h//v1/logs", which nginx sometimes
-    -- routes to a different location. From review.
+    -- routes to a different location.
     local base = _M.backend_url:gsub("/+$", "")
     local res, err = httpc:request_uri(base .. _M.path, req_opts)
     if not res then return false, "transport: " .. tostring(err) end
@@ -247,7 +246,7 @@ function _M.start(opts)
     -- A loud signal for an https:// url with missing cert/key: a backend under
     -- AUTH_MODE=mtls will reject the handshake, every batch will fly into ship_failed,
     -- and the operator will hunt for the cause on the backend. Better one WARN at startup
-    -- than a search through rate logs. From review.
+    -- than a search through rate logs.
     if _M.backend_url:sub(1, 8) == "https://"
         and not (_M.parsed_cert and _M.parsed_key)
     then

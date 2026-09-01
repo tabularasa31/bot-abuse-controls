@@ -21,7 +21,7 @@ const maxSiteLen = 253
 // hyphen. We preserve the case as given (the Postgres host PK is case-sensitive),
 // though in practice the dashboard sends lowercase hostnames.
 //
-// From the security audit: previously the check was only len ≤253, which
+// previously the check was only len ≤253, which
 // let through `..`, NUL, control characters, a percent-encoded slash (which after
 // the ServeMux URL decode becomes '/') and unicode. Not SQLi (the queries are parameterized),
 // but junk in the `host` PK plus broken correlation by `site` in SIEM logs.
@@ -44,8 +44,7 @@ func ValidateSite(s string) error {
 	// Reject registering a public suffix itself (`com`, `co.uk`, `xn--p1ai`=рф):
 	// the edge applies a parent-domain policy fallback (86exrefdz) — a row for a
 	// public suffix would then be inherited by every unrelated child host that
-	// merely points DNS at the edge, breaking unknown-host isolation (codex P1
-	// on PR #100). icann-only: internal single-label names (`staging`) return
+	// merely points DNS at the edge, breaking unknown-host isolation. icann-only: internal single-label names (`staging`) return
 	// icann=false and stay allowed.
 	if suffix, icann := publicsuffix.PublicSuffix(s); icann && suffix == s {
 		return fmt.Errorf("site: must not be a public suffix (%q)", s)

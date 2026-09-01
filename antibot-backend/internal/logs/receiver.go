@@ -125,7 +125,7 @@ func (rcv *Receiver) Register(mux *http.ServeMux) {
 // make with length maxLineBytes (rather than a cap with zero length): bufio.Scanner.Buffer
 // does `buf[0:cap(buf)]`, so the cap alone would suffice; but `len=maxLineBytes`
 // makes the pool's contract explicit ("a full-size ready buffer") without depending
-// on Scanner's internals. From review.
+// on Scanner's internals.
 var bufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, maxLineBytes)
@@ -145,7 +145,7 @@ func (rcv *Receiver) handle(w http.ResponseWriter, r *http.Request) {
 	// return a 4xx afterwards: the dispatch may already have called Enqueue/parseErr/botSpotted
 	// for the lines BEFORE the error, and without received_total we would get metrics where
 	// botSpotted > received (an inversion that breaks capacity planning).
-	// PR #53 review.
+	//
 	if n > 0 {
 		rcv.received.Add(float64(n))
 	}
@@ -218,7 +218,7 @@ func (rcv *Receiver) consume(body io.Reader) (int, error) {
 			// An oversized line never reaches sink.Submit below — the scanner rejected it.
 			// There will be no movement in antibot_backend_log_sink_*;
 			// an analytics dashboard should treat parse_errors_total at the
-			// receiver level as the full picture of losses (from code review).
+			// receiver level as the full picture of losses.
 			return count, errOversizedLine
 		}
 		return count, err

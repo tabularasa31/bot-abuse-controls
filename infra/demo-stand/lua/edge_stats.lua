@@ -117,8 +117,7 @@ function _M.collect()
         local now = ngx.time()
         local out = {}
         -- cp.catalogs is a dict keyed by name ({tls_fp_blocklist = {...}}), but
-        -- resolve from key OR value so an array form would also work (gemini
-        -- review on PR #147 — defensive against a future shape change).
+        -- resolve from key OR value so an array form would also work.
         for k, v in pairs(cp.catalogs or {}) do
             local name = (type(k) == "string") and k or v
             if type(name) == "string" then
@@ -155,7 +154,7 @@ function _M.start(opts)
     local ok, err = ngx.timer.every(interval, function(premature)
         -- `premature` is true when the timer is cancelled on worker reload/
         -- shutdown — skip the final fire so we don't emit mid-teardown
-        -- (gemini review on PR #147).
+        --.
         if premature then return end
         local pok, perr = pcall(_M.emit)
         if not pok then

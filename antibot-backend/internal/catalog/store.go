@@ -335,7 +335,7 @@ func buildAttackMode(d *Data, site string) ([]byte, error) {
 // jsonBytes — a wrapper over json.Marshal, so that calling code stays
 // uniform. It does not panic on an error: the builders return it upwards and the
 // handler answers 500 — which is better than killing the process because of our own
-// unexpected structure (from review: an error path, not a panic).
+// unexpected structure — an error path, not a panic.
 func jsonBytes(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
 	if err != nil {

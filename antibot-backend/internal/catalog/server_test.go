@@ -617,7 +617,7 @@ func TestNormalizeDedupStrings(t *testing.T) {
 
 // TestStoreNotLoaded503: before a Replace the Store serves defaultVersion; the handler
 // must answer 503 with a Retry-After rather than a "successful" 200 with an empty body —
-// otherwise the edge would overwrite its own fail-stale cache (from review).
+// otherwise the edge would overwrite its own fail-stale cache.
 func TestStoreNotLoaded503(t *testing.T) {
 	srv := New() // with no Replace
 	mux := http.NewServeMux()

@@ -187,7 +187,7 @@ func normalize(d *Data) {
 	// The system slices: dedup+sort plus a nil coercion. Without ensure*, json.Marshal
 	// would emit `null` on an empty database (the DB loader does not initialise empty
 	// slices — the append loop is empty), and the ETag would drift between "there were never
-	// any records" and "there was one and it was deleted". From review (a follow-up).
+	// any records" and "there was one and it was deleted".
 	d.UABlacklist = ensureStringSlice(dedupSortStrings(d.UABlacklist))
 	d.UABlacklistStaging = ensureStringSlice(dedupSortStrings(d.UABlacklistStaging))
 	d.IPWhitelist = ensureStringSlice(dedupSortStrings(d.IPWhitelist))
@@ -403,7 +403,7 @@ func ValidateOriginIP(s string) error {
 	// Reject a zone-scoped address (`fe80::1%eth0`): netip.ParseAddr accepts
 	// it, but the `%` is a non-routable scope id AND it would be treated as a
 	// Lua gsub replacement escape when origin_resolve.resolve() builds the
-	// proxy URL, corrupting the upstream for that tenant (codex P2 on PR #94).
+	// proxy URL, corrupting the upstream for that tenant.
 	if addr.Zone() != "" {
 		return fmt.Errorf("must not carry an IPv6 zone (got %q)", s)
 	}
@@ -416,7 +416,7 @@ func ValidateOriginIP(s string) error {
 	//     cloud metadata (SSRF-style misroute)
 	//   - multicast — not a unicast backend
 	// Private/global unicast stay allowed: a tenant origin may legitimately
-	// be a private IP (gemini/codex review on PR #94). Operators set this via
+	// be a private IP. Operators set this via
 	// the authenticated dashboard, but validating here is cheap defence.
 	switch {
 	case addr.IsUnspecified():

@@ -107,7 +107,7 @@ func Load() (Config, error) {
 		//     0/f/F/FALSE/false/False — idiomatic for YAML and k8s secrets);
 		//   - the historical 'yes'/'no' (case-insensitive) — which the previous
 		//     hand-written switch accepted and ParseBool does not know. We do not break other people's
-		//     compose files and manifests for the sake of a pure Go parser. From review.
+		//     compose files and manifests for the sake of a pure Go parser.
 		b, err := parseBoolWithYesNo(v)
 		if err != nil {
 			return cfg, fmt.Errorf("MIGRATE_ON_STARTUP: %w", err)
@@ -117,7 +117,7 @@ func Load() (Config, error) {
 	// RDNS_INTERVAL — deprecated after B7 (the worker is reactive, with no periodic tick).
 	// We accept any value, invalid / 0 / -1 included, so that old
 	// compose files from the B2 era do not break startup. It is never actually read.
-	// PR #53 review.
+	//
 	_ = os.Getenv("RDNS_INTERVAL")
 	if v := os.Getenv("RDNS_QUEUE_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -209,7 +209,6 @@ func Load() (Config, error) {
 // parseBoolWithYesNo extends strconv.ParseBool — it adds the
 // case-insensitive 'yes'/'no' the previous hand-written switch accepted
 // and which still turn up in k8s/YAML configs.
-// PR #43 follow-up.
 func parseBoolWithYesNo(v string) (bool, error) {
 	switch strings.ToLower(v) {
 	case "yes":

@@ -57,7 +57,7 @@ func TestValidate_PolicyOriginIP(t *testing.T) {
 	}
 }
 
-// From review: normalize must coerce the system slices
+// normalize must coerce the system slices
 // nil → []T{}, not only the per-host policy. Otherwise json.Marshal emits
 // `null` on an empty database and the ETag drifts.
 func TestNormalize_SystemSlicesNotNilAfterEmpty(t *testing.T) {

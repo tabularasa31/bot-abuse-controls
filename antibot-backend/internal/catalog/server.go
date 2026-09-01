@@ -84,7 +84,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// json.Marshal must not fail on our shape; if it does, an explicit
-		// 500 is better than a process panic (from review).
+		// 500 is better than a process panic.
 		writeErr(w, http.StatusInternalServerError, "serialize_failed", name)
 		return
 	}

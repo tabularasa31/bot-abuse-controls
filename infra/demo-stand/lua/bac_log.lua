@@ -87,7 +87,7 @@ function _M.mark_cascade_end()
         -- ngx.now() returns a CACHED time updated only at phase boundaries /
         -- on yields. The cascade runs synchronously without yielding, so
         -- without this the start (t_start) and end timestamps would be
-        -- identical and cascade_ms would always be 0 (gemini review on PR #97).
+        -- identical and cascade_ms would always be 0.
         ngx.update_time()
         ctx.t_cascade_end = ngx.now()
     end
@@ -223,7 +223,7 @@ function _M.emit()
     local upstream_response_ms = up_total and up_total * 1000 or nil
     -- proxy_ms is null unless an upstream was actually contacted — for
     -- blocked/challenge requests there's no origin response, so reporting
-    -- proxy_ms == cascade_ms would be misleading (gemini review on PR #97).
+    -- proxy_ms == cascade_ms would be misleading.
     local proxy_ms = (cascade_ms and upstream_response_ms)
         and (cascade_ms + upstream_response_ms) or nil
 

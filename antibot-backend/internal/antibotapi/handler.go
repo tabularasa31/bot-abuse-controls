@@ -396,7 +396,7 @@ func (s *Server) handleDeleteASN(action, site string, w http.ResponseWriter, r *
 
 // The sentinel errors of decodeJSON — handler.bad() maps them onto sanitised codes
 // without leaking internal details (the names of unknown fields, JSON decoder messages,
-// the MaxBytes size — from the security audit).
+// the MaxBytes size).
 var (
 	errBodyEmpty    = errors.New("empty body")
 	errBodyTooLarge = errors.New("body too large")

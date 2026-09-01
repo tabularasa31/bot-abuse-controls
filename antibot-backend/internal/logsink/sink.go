@@ -565,7 +565,7 @@ func parseRow(line []byte) ([]any, error) {
 	// line as jsonb in PostgreSQL is rejected and the whole CopyFrom batch
 	// fails; the sink carries it into the spool, the drainer returns it to the DB,
 	// CopyFrom fails again — and sink throughput dies on one malformed
-	// line (from review, P1). So after the Decode we check that
+	// line. So after the Decode we check that
 	// only whitespace remains in the buffer up to EOF.
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.UseNumber()
@@ -700,7 +700,7 @@ func readNDJSON(path string) ([][]byte, error) {
 // We accept only `batch-*.ndjson` — WITHOUT the exact suffix check, `.quarantine`
 // files (created by drainOnce when Remove is unavailable) and `.partial` (unfinished
 // spills) also carry the `batch-` prefix, and without checking the .ndjson suffix the
-// drainer would reread them and insert duplicates (from review, a P1 blocker).
+// drainer would reread them and insert duplicates.
 func listSpoolFiles(dir string) ([]os.DirEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

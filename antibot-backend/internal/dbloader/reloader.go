@@ -43,7 +43,7 @@ type Reloader struct {
 	reloadFail prometheus.Counter
 	// reloadDur — labelled `outcome={success,failure}`, so that the p99 in dashboards
 	// does not mix good ticks with ones where the Load hung until the per-tick deadline
-	// (see the tick and its context.WithTimeout). From review.
+	// (see the tick and its context.WithTimeout).
 	reloadDur  *prometheus.HistogramVec
 	lastReload prometheus.Gauge // unix seconds, for debugging "when was the last one"
 }
@@ -130,7 +130,7 @@ func (r *Reloader) Run(ctx context.Context) {
 // the first Acquire with a TCP/TLS handshake plus eight SELECTs on a cold
 // buffer cache easily exceed the periodic 5-second tick. Sharing that
 // budget with the hot path would mean crashing the backend at startup on a
-// slow link. A follow-up from review.
+// slow link.
 func (r *Reloader) Bootstrap(ctx context.Context) error {
 	return r.tickWith(ctx, bootstrapTimeout)
 }

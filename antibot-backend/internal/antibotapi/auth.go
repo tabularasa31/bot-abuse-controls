@@ -22,7 +22,7 @@ import (
 // The compare strategy: sha256(token) → 32 bytes → a fixed-length ConstantTimeCompare.
 // A direct ConstantTimeCompare([]byte(got), token) short-circuits when
 // len(got) != len(token), which technically leaks the length of the configured
-// token through timing (from the security audit). Hashing equalises the
+// token through timing. Hashing equalises the
 // length of the compare operands regardless of the input length.
 type Authenticator struct {
 	tokenHash     [32]byte               // sha256 of configured token
