@@ -1,85 +1,102 @@
-# Дизайн #4 — поведенческие / временны́е сигналы (ОТЛОЖЕНО)
+# Design #4 — behavioural / temporal signals (DEFERRED)
 
-> **Статус: ПЛАНИРУЕТСЯ / design draft, ОТЛОЖЕНО.** НЕ реализуем сейчас. Идея #4 из
-> [bot-detector-roadmap.md](bot-detector-roadmap.md). Решение (2026-05-30): зафиксировать дизайн,
-> с кодом **не торопиться** — у #4 худшее соотношение эффект/точность из шести идей. Открытые
-> вопросы ниже НЕ закрыты — решаются, когда задачу возьмут в работу.
+> **Status: PLANNED / design draft, DEFERRED.** Not being implemented now. This is
+> idea #4 from [bot-detector-roadmap.md](bot-detector-roadmap.md). The decision
+> (2026-05-30): freeze the design and **do not rush the code** — #4 has the worst
+> effect-to-accuracy ratio of the six ideas. The open questions below are NOT
+> settled; they get answered when the work is actually picked up.
 
-## Зачем #4 (стратегическая роль)
+## Why #4 matters (its strategic role)
 
-Ответ на ограничение, всплывавшее в #1/#3/#5: бот с **резидентного прокси-пула** и **идеальным
-браузерным fp** обходит fingerprint-сигналы, subnet-юнит и purity. Его выдаёт только
-**поведение** — даже с идеальной маскировкой он ходит не как человек. #4 — последний рычаг против
-самых сложных ботов.
+It answers the limitation that kept surfacing in #1/#3/#5: a bot on a **residential
+proxy pool** with a **perfect browser fingerprint** defeats the fingerprint
+signals, the subnet unit and purity alike. Only **behaviour** gives it away — even
+with flawless disguise it does not move like a human. #4 is the last lever against
+the most sophisticated bots.
 
-## Почему НЕ торопимся
+## Why we are not rushing
 
-- **Самый шумный / склонный к ложным срабатываниям (FP-prone)** из шести: люди разнообразны (SPA, prefetch, API-клиенты, accessibility) →
-  поведенческий сигнал обязан быть **soft (+score/challenge), НИКОГДА не hard-block в одиночку**.
-- **Реальная инфра-стоимость:** атрибуция актора во времени, per-tenant специфика, шум.
-- Приоритетнее — **довести до реализации уже спроектированные** #1/#3/#5, чем строить самый
-  неточный сигнал.
+- It is the **noisiest and most false-positive-prone** of the six: humans are
+  varied (SPAs, prefetch, API clients, accessibility tooling), so a behavioural
+  signal must be **soft (+score/challenge), NEVER a hard block on its own**.
+- **Real infrastructure cost:** attributing an actor over time, per-tenant
+  specifics, noise.
+- It is more valuable to **finish implementing the already-designed** #1/#3/#5
+  than to build the least precise signal.
 
-## Ядро проблемы — атрибуция актора во времени (главная развилка)
+## The core problem — attributing an actor over time (the main fork)
 
-Поведение надо привязать к актору на нескольких запросах. Доступные ключи и их слабости:
-- **IP** — слабо (NAT/CGNAT/резидентные прокси);
-- **fp** — ротируется;
-- **clearance-сессия** — есть только после challenge, но **самый надёжный** ключ (бот, решивший
-  капчу раз и дальше ходящий не по-человечески внутри cookie-сессии — ловится чисто).
+Behaviour has to be tied to an actor across several requests. The available keys
+and their weaknesses:
+- **IP** — weak (NAT/CGNAT/residential proxies);
+- **fingerprint** — rotates;
+- **clearance session** — only exists after a challenge, but it is the **most
+  reliable** key (a bot that solves the challenge once and then moves
+  inhumanly inside the cookie session is caught cleanly).
 
-## Что логируется сейчас vs требует изменений
+## What is logged today versus what needs changing
 
-Лог пишет `path`, `method`, `ip`, `ua`, `timestamp`, `request_id`, fp/asn. **Referer НЕ
-логируется. Стабильного session-id в логе нет.**
+The log records `path`, `method`, `ip`, `ua`, `timestamp`, `request_id`, plus
+fingerprint and ASN. **Referer is NOT logged, and there is no stable session id in
+the log.**
 
-**Доступно из текущего лога (analytics-side, → +score):**
-- **Asset-ratio** — реальный браузер тянет CSS/JS/картинки; скрапер берёт только HTML.
-  Классификация по расширению `path`. Низкая доля ассетов = бот-подобно. *Сильный и дешёвый.*
-  **Ограничение (catch review):** если ассеты тенанта вынесены на внешний CDN / отдельный домен
-  (не проходят через наш эдж), легит-юзеры тоже дадут околонулевой asset-ratio → массовые ложняки.
-  → сигнал применим **только** где ассеты реально идут через эдж; иначе калибровать per-host или
-  не использовать. Поэтому asset-ratio — контекстный (+score), не самостоятельный вердикт.
-- **Ритм** — межзапросные интервалы по актору (timestamps есть): метрономность / нечеловеческая
-  дисперсия.
-- **Breadth/enumeration** — много разных `path`, sitemap-walk, recon (частично уже
-  `SUSPICIOUS_URI_RE`).
-- **Method-распределение** — only-GET / необычные методы.
+**Available from the current log (analytics side, → +score):**
+- **Asset ratio** — a real browser pulls CSS/JS/images; a scraper takes the HTML
+  only. Classify by the `path` extension. A low asset share looks bot-like. *Strong
+  and cheap.*
+  **Limitation (from review):** if a tenant's assets are served from an external
+  CDN or a separate domain (and never traverse our edge), legitimate users will
+  also show a near-zero asset ratio → mass false positives. So the signal applies
+  **only** where assets really pass through the edge; otherwise calibrate per host
+  or do not use it. That is why the asset ratio is contextual (+score), not a
+  verdict of its own.
+- **Rhythm** — inter-request intervals per actor (timestamps are there):
+  metronomic timing or inhuman variance.
+- **Breadth/enumeration** — many distinct `path`s, sitemap walking, recon (partly
+  covered already by `SUSPICIOUS_URI_RE`).
+- **Method distribution** — GET-only, or unusual methods.
 
-**Требует изменений (Phase 2):**
-- **Навигационная связность** (ходит по ссылкам vs дёргает эндпоинты напрямую) — нужен
-  **referer** в логе (мелкая правка эджа) + модель структуры сайта.
-- **Session-атрибуция** — вывести clearance-сессию как ключ в лог.
+**Needs changes (Phase 2):**
+- **Navigational coherence** (following links versus hitting endpoints directly) —
+  needs **referer** in the log (a small edge change) plus a model of the site
+  structure.
+- **Session attribution** — expose the clearance session as a key in the log.
 
-## Предлагаемая разбивка (когда возьмём в работу)
+## Proposed breakdown (once the work is picked up)
 
-- **Phase 1 — дешёвый analytics-срез на текущих данных:** asset-ratio + ритм + breadth
-  **раздельно по `fp` И по `IP`/подсети** (НЕ комбинированный ключ `fp+IP`) → **только +score** в
-  per-fp pipeline (D1). Без edge-изменений. Низкий риск (soft).
-  **Почему раздельно, не `fp+IP` (catch review):** комбинированный ключ слеп к ротации одного из
-  параметров — резидентный прокси (IP меняется, `fp` стабилен) или fp-ротация на одном IP разбили
-  бы актора на singletons, история не накопится. Ось `fp` ловит распределённые атаки со стабильным
-  отпечатком; ось `IP`/подсеть — fp-ротацию. Это тот же мульти-осевой принцип, что в #3.
-- **Phase 2 — спайк/research:** referer-логирование + навигационная связность + session-атрибуция.
-  Много неопределённости и FP-риска → сначала спайк.
+- **Phase 1 — a cheap analytics slice over current data:** asset ratio, rhythm and
+  breadth computed **separately per `fp` AND per `IP`/subnet** (NOT a combined
+  `fp+IP` key) → **+score only**, in the per-fingerprint pipeline (D1). No edge
+  changes. Low risk (soft).
+  **Why separately rather than `fp+IP` (from review):** a combined key is blind to
+  rotation of either component — a residential proxy (IP changes, `fp` stable) or
+  fingerprint rotation on one IP would shatter the actor into singletons and no
+  history would accumulate. The `fp` axis catches distributed attacks with a stable
+  fingerprint; the `IP`/subnet axis catches fingerprint rotation. This is the same
+  multi-axis principle as in #3.
+- **Phase 2 — spike/research:** referer logging, navigational coherence and session
+  attribution. Plenty of uncertainty and false-positive risk, so spike it first.
 
-## Открытые вопросы (НЕ закрыты — решить при взятии в работу)
+## Open questions (NOT settled — decide when the work starts)
 
-1. **Актор для Phase 1:** раздельные оси `fp` и `IP`/подсеть (не комбинированный `fp+IP` — уязвим
-   к ротации одного из параметров) для ритма/asset на текущих данных? clearance-сессию (сильнейший
-   ключ) — на Phase 2?
-2. **Сигналы Phase 1:** asset-ratio + ритм + breadth, или сузить до одного **asset-ratio** для
-   старта?
-3. **Формат:** Phase 1 (D-таск, +score) + Phase 2 (спайк) — или весь #4 пока research-спайк?
+1. **The actor for Phase 1:** separate `fp` and `IP`/subnet axes (not a combined
+   `fp+IP`, which is vulnerable to rotation of either) for rhythm and asset ratio
+   over current data? And the clearance session (the strongest key) in Phase 2?
+2. **Phase 1 signals:** asset ratio plus rhythm plus breadth, or narrow it to
+   **asset ratio** alone to start?
+3. **Shape:** Phase 1 (a D-task, +score) plus Phase 2 (a spike) — or keep all of #4
+   as a research spike for now?
 
-## Инварианты (что бы ни решили)
+## Invariants (whatever we decide)
 
-- Поведение → **только soft** (+score / challenge), никогда не единственное основание для блока.
-- Финальный бэкстоп прежний: human-gated draft-PR.
-- Не дублировать rate_limit (он уже про грубый объём/частоту); #4 — про *форму* поведения, не темп.
+- Behaviour is **soft only** (+score / challenge), never the sole grounds for a block.
+- The final backstop is unchanged: a human-gated draft PR.
+- Do not duplicate rate_limit (which is about raw volume and frequency); #4 is about
+  the *shape* of behaviour, not the pace.
 
-## Связи
+## Connections
 
-- Закрывает «резидентный/идеальный-fp» пробел из #1/#3/#5.
-- Переиспользует per-fp scoring (D1) как точку вливания +score.
-- Phase 2 referer/session — общая инфра с возможным будущим richer-логированием.
+- Closes the "residential / perfect fingerprint" gap from #1/#3/#5.
+- Reuses the per-fingerprint scoring (D1) as the injection point for +score.
+- The Phase 2 referer/session work shares infrastructure with any future richer
+  logging.

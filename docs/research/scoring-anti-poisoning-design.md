@@ -1,112 +1,134 @@
-# Дизайн #5 — робастность скоринга (anti-poisoning)
+# Design #5 — scoring robustness (anti-poisoning)
 
-> **Статус: ПЛАНИРУЕТСЯ / design draft.** НЕ реализовано. Идея #5 из
-> [bot-detector-roadmap.md](bot-detector-roadmap.md). Опирается на D1 (scoring/purity/gates),
-> `enrich_ips` (hosting-флаг), D13/#2 (позитивный каталог). Кросс-тенантность (#6) подняла его
-> приоритет: отравление теперь бьёт по всем тенантам.
+> **Status: PLANNED / design draft.** Not implemented. This is idea #5 from
+> [bot-detector-roadmap.md](bot-detector-roadmap.md). It builds on D1
+> (scoring/purity/gates), `enrich_ips` (the hosting flag) and D13/#2 (the positive
+> catalog). Cross-tenancy (#6) raised its priority: poisoning now hits every
+> tenant.
 
-## Идея в одну строку
+## The idea in one line
 
-Решение «внести fp в блок-лист» частично автоматическое → атакующий попробует его обмануть.
-#5 — набор предохранителей вокруг решения, чтобы обман стоил дорого.
+The decision to put a fingerprint on the blocklist is partly automated, so an
+attacker will try to fool it. #5 is the set of safeguards around that decision
+that make fooling it expensive.
 
-## Модель угроз
+## Threat model
 
-1. **Защитное отравление** — прикрыть свой плохой fp: накачать `human_share` или вызвать
-   `fp_caught` на staging, чтобы fp не активировался.
-2. **Наступательное** — подставить чужой/легит fp под блок (налить recon под чужим отпечатком).
-3. **Кросс-тенантное усиление (#6)** — то же, но blast-radius на всех тенантов. **Уже смягчено**
-   дизайном #6: быстрый tier только пред-взвод (худшее — капча, не блок).
+1. **Defensive poisoning** — shielding your own bad fingerprint: inflate
+   `human_share`, or trigger `fp_caught` in staging so the fingerprint never
+   activates.
+2. **Offensive poisoning** — getting someone else's legitimate fingerprint
+   blocked (pour recon traffic under their fingerprint).
+3. **Cross-tenant amplification (#6)** — the same, but with a blast radius across
+   every tenant. **Already mitigated** by the #6 design: the fast tier only
+   pre-arms (the worst case is a captcha, not a block).
 
-Метафора: `human_share` = «голосование за то, что за fp живые люди». Атака = накрутка голосов.
-Предохранители — про то, **чьи голоса считаются**.
+A metaphor: `human_share` is a "vote that real people are behind this
+fingerprint". The attack is ballot stuffing. The safeguards are about **whose
+votes count**.
 
-## Находка: purity отравляется хуже, чем кажется
+## Finding: purity is easier to poison than it looks
 
-`is_genuine_browser` ([analyze.py:524](../../infra/demo-stand/scripts/analyze.py)) зависит от UA +
-`cipher_count` + хешей, но **`cipher_count` и хеши ФИКСИРОВАНЫ внутри fp** (часть токена), варьируется
-только UA. Отсюда:
-- fp не-браузер-формы (cipher_count не браузерный / хеш в tool-словаре) → `human_share`
-  **структурно = 0**, накачать нельзя;
-- накачать можно только у fp, который **уже** браузер-формы — а с такими блок-лист и так осторожен
-  (территория challenge/#1).
+`is_genuine_browser` ([analyze.py:524](../../infra/demo-stand/scripts/analyze.py))
+depends on the UA, `cipher_count` and the hashes, but **`cipher_count` and the
+hashes are FIXED within a fingerprint** (they are part of the token) — only the UA
+varies. Which means:
+- for a fingerprint of non-browser shape (a non-browser cipher_count, or a hash in
+  the tool dictionary) `human_share` is **structurally 0** and cannot be inflated;
+- inflation is only possible for a fingerprint that is **already** browser-shaped —
+  and the blocklist is cautious with those anyway (challenge territory, #1).
 
-→ Защитное отравление purity ограничено классом fp, где осторожность и так оправдана.
+→ Defensive poisoning of purity is confined to the class of fingerprints where
+caution is already warranted.
 
-## Реальная дыра: `is_genuine_browser` НЕ смотрит на источник
+## The real hole: `is_genuine_browser` does NOT look at the source
 
-`is_genuine_browser` проверяет UA+cipher+hash, но **не IP-источник**. Значит «человеческие»
-голоса можно лить **из датацентра** (живой человек оттуда почти не ходит) или **с одного
-инжектора**. Это главный незакрытый вектор.
+`is_genuine_browser` checks UA, cipher and hash, but **not the source IP**. So
+"human" votes can be poured **from a datacenter** (where a real human almost never
+browses from) or **from a single injector**. This is the main open vector.
 
-## Phase 1 — взвешенный human_share (пункты 2+3; только analyze.py)
+## Phase 1 — a weighted human_share (points 2+3; analyze.py only)
 
-`human_share` перестаёт быть простой долей и считается **взвешенно по источникам**:
+`human_share` stops being a plain ratio and is computed **weighted by source**:
 
 ```
-группируем события по источнику (IP; рассмотреть ASN//24)
-ЧИСЛИТЕЛЬ (genuine-голоса):
+group events by source (IP; consider ASN or /24)
+NUMERATOR (genuine votes):
     weighted_genuine = Σ_source  min(genuine_from_source, CAP) × source_weight
-        source_weight = W_DC (<1) если hosting иначе 1     # п.2: МЯГКИЙ дисконт DC
-        min(…, CAP)                                        # п.3: анти-концентрация
-ЗНАМЕНАТЕЛЬ (весь трафик):
-    capped_total     = Σ_source  min(total_from_source, CAP)   # п.3: ТОЛЬКО cap, БЕЗ W_DC
+        source_weight = W_DC (<1) if hosting else 1        # point 2: SOFT datacenter discount
+        min(…, CAP)                                        # point 3: anti-concentration
+DENOMINATOR (all traffic):
+    capped_total     = Σ_source  min(total_from_source, CAP)   # point 3: cap ONLY, NO W_DC
 human_share = weighted_genuine / capped_total
 ```
 
-- **Пункт 2 — мягкий дисконт DC (решение: не строгое исключение).** DC-источник genuine-события
-  считается с весом `W_DC < 1`, а не отбрасывается в 0. Ослабляет накачку из датацентров, но **не
-  рубит** легит-юзеров за корпоративным/облачным egress'ом (геолоцируются как hosting) — отсюда
-  «мягко». Полное исключение отвергнуто из-за этого edge-case.
-- **Пункт 3 — анти-концентрация, СИММЕТРИЧНО (числитель И знаменатель; catch review).** Один
-  источник вносит не больше `CAP` в обе части. Без cap на знаменателе оставалась дыра
-  **наступательного framing'а**: налить большой объём (хоть genuine-вида) с одного IP под чужой
-  fp → числитель застрял на `CAP`, а сырой `total_events` растёт → `human_share` падает ниже
-  `MAX_HUMAN_SHARE` → легит-fp под блок. Cap знаменателя по источнику это закрывает.
-- **Почему к знаменателю НЕ применяем `W_DC` (тонкость):** дисконт DC только в числителе. Если
-  дисконтировать и знаменатель, `W_DC` сократится (fp из чистого DC-трафика: `weighted_genuine` и
-  `capped_total` падают одинаково → `human_share` не меняется), и защита от защитного отравления
-  пропадёт. Знаменатель — только cap, полный вес.
-- **Применяется в ДВУХ местах:** purity-гейт промоута (`human_share` в `find_blocklist_candidates`)
-  И staging-вето (`human_share` среди матчей в `find_staging_observation`) — иначе атакующий
-  накачивает «человеческие» матчи на staging → `fp_caught` → fp не активируется.
-- **Объём:** только `analyze.py`. Нужно прокинуть `ip_cache` в `human_share` (сейчас не
-  передаётся). **Имплементационный пробел (catch review):** ветка `--staging-observation-json`
-  (`find_staging_observation`) сейчас **НЕ вызывает `enrich_ips`** (в отличие от `--candidates-json`
-  и дефолта) → `ip_cache` без hosting-данных. Реализация обязана **обогатить IP** матчей
-  (`staging_match`-события / `events_all`) перед `find_staging_observation`, иначе DC-статус на
-  staging-вето будет неверным. Новые константы/флаги: `W_DC`, `CAP` (+ `BAC_*` env). Старт
-  консервативно (W_DC не слишком мал — не блокировать сгоряча; CAP разумный).
-- **Тесты:** инъекция genuine-вида из DC (дисконт числителя), single-injector раздувает знаменатель
-  под чужой fp (cap знаменателя — framing не проходит), смешанный трафик, staging-вето с обогащением.
+- **Point 2 — a soft datacenter discount (decision: not a hard exclusion).** A
+  genuine event from a datacenter source counts with weight `W_DC < 1` rather than
+  being zeroed. This weakens inflation from datacenters without **cutting off**
+  legitimate users behind a corporate or cloud egress (which geolocates as
+  hosting) — hence "soft". Full exclusion was rejected because of that edge case.
+- **Point 3 — anti-concentration, applied SYMMETRICALLY (numerator AND
+  denominator; from review).** One source contributes at most `CAP` to both sides.
+  Without a cap on the denominator there was a hole for **offensive framing**:
+  pour a large volume (even genuine-looking) from one IP under someone else's
+  fingerprint → the numerator sticks at `CAP` while the raw `total_events` grows →
+  `human_share` falls below `MAX_HUMAN_SHARE` → the legitimate fingerprint gets
+  blocked. Capping the denominator per source closes that.
+- **Why `W_DC` is NOT applied to the denominator (a subtlety):** the datacenter
+  discount belongs in the numerator only. Discounting the denominator too would
+  cancel `W_DC` out (for a fingerprint made of pure datacenter traffic both
+  `weighted_genuine` and `capped_total` drop equally → `human_share` is unchanged),
+  and the protection against defensive poisoning would vanish. The denominator gets
+  the cap only, at full weight.
+- **It applies in TWO places:** the promotion purity gate (`human_share` in
+  `find_blocklist_candidates`) AND the staging veto (`human_share` among the
+  matches in `find_staging_observation`) — otherwise an attacker inflates "human"
+  matches in staging → `fp_caught` → the fingerprint never activates.
+- **Scope:** `analyze.py` only. `ip_cache` has to be threaded into `human_share`
+  (it is not passed today). **Implementation gap (from review):** the
+  `--staging-observation-json` path (`find_staging_observation`) currently does
+  **NOT call `enrich_ips`** (unlike `--candidates-json` and the default), so
+  `ip_cache` carries no hosting data. The implementation must **enrich the IPs** of
+  the matches (`staging_match` events / `events_all`) before
+  `find_staging_observation`, or the datacenter status in the staging veto will be
+  wrong. New constants/flags: `W_DC`, `CAP` (plus `BAC_*` env). Start conservatively
+  (W_DC not too small, so nothing is blocked in haste; a sensible CAP).
+- **Tests:** genuine-looking injection from a datacenter (numerator discounted), a
+  single injector inflating the denominator under someone else's fingerprint (the
+  denominator cap defeats framing), mixed traffic, and the staging veto with
+  enrichment.
 
-## Phase 2 — отдельно (пункты 4+5)
+## Phase 2 — separate work (points 4+5)
 
-- **Пункт 4 — known-good инвариант:** fp, совпавший с позитивным каталогом (#2 / D13) → **никогда
-  не авто-блок** (framing-защита: нельзя подставить Chrome/Firefox). Зависит от D13.
-- **Пункт 5 — snapshot-diff у границы:** ловить «доказательства резко дёрнулись ровно перед
-  промоутом/активацией» — сигнатура гейминга → пауза/человек (уже отмечен future-follow-up в
+- **Point 4 — the known-good invariant:** a fingerprint matching the positive
+  catalog (#2 / D13) is **never auto-blocked** (framing protection: you cannot
+  frame Chrome or Firefox). Depends on D13.
+- **Point 5 — a snapshot diff at the boundary:** catch "the evidence jumped right
+  before promotion or activation", which is the signature of gaming → pause and
+  escalate to a human (already noted as a future follow-up in
   blocklist-scoring.md).
 
-## Финальный бэкстоп (всегда)
+## The final backstop (always)
 
-Авто-merge'а нет — любой промоут идёт черновик-PR'ом, человек смотрит каждый. #5 поднимает **цену**
-обмана, не делает невозможным.
+There is no auto-merge — every promotion goes out as a draft PR and a human looks
+at each one. #5 raises the **cost** of deception; it does not make it impossible.
 
-## Честное ограничение
+## An honest limitation
 
-Богатый атакующий с большим **резидентным** прокси-пулом + диверсификацией всё ещё может медленно
-отравлять (резидентные IP не дисконтируются, концентрация размазана). Дорого, медленно, ловится
-человеком на финале. Это территория поведения (#4) / challenge (#1), не purity.
+A well-funded attacker with a large **residential** proxy pool plus
+diversification can still poison slowly (residential IPs are not discounted, and
+the concentration is spread out). It is expensive, slow, and caught by a human at
+the final step. That is behaviour (#4) and challenge (#1) territory, not purity.
 
-## Кросс-связи
+## Cross-links
 
-- **#2 (D13)** даёт пункт 4 (known-good инвариант) — Phase 2.
-- **#6** уже смягчён pre-arm-only; #5 — основная защита его быстрого tier'а от отравления.
-- **#3** DC-детект (`hosting`) переиспользуется в пункте 2.
+- **#2 (D13)** provides point 4 (the known-good invariant) — Phase 2.
+- **#6** is already mitigated to pre-arm-only; #5 is the main defence of its fast
+  tier against poisoning.
+- **#3** datacenter detection (`hosting`) is reused by point 2.
 
-## Не входит / non-goals
+## Non-goals
 
-- Edge-изменения — нет, всё в аналитике.
-- Полное исключение DC — отвергнуто (мягкий дисконт).
-- Поведенческое моделирование против резидентных пулов — это #4.
+- Edge changes — none, this all lives in analytics.
+- Full datacenter exclusion — rejected (soft discount instead).
+- Behavioural modelling against residential pools — that is #4.

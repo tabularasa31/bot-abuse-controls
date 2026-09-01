@@ -1,111 +1,125 @@
-# Дизайн #6 — кросс-тенантный threat-intel («сетевой эффект»)
+# Design #6 — cross-tenant threat intel (the network effect)
 
-> **Статус: ПЛАНИРУЕТСЯ / design draft.** НЕ реализовано. Идея #6 из
-> [bot-detector-roadmap.md](bot-detector-roadmap.md). Опирается на ADR-006 (глобальные
-> каталоги), B9 (log receiver), Channel C (B5/B6), G1/G2 (subnet-юнит), D12 (solve-rate).
+> **Status: PLANNED / design draft.** Not implemented. This is idea #6 from
+> [bot-detector-roadmap.md](bot-detector-roadmap.md). It builds on ADR-006 (global
+> catalogs), B9 (the log receiver), Channel C (B5/B6), G1/G2 (the subnet unit) and
+> D12 (solve rate).
 
-## Идея в одну строку
+## The idea in one line
 
-Атака на одного клиента — бесплатная разведка для защиты остальных. Когда ботнет бьёт по
-тенанту A, репутация атакующего (fp/subnet) распространяется так, что **все эджи пред-взводятся**,
-и при пивоте ботнета A→B другие реагируют за секунды, а не минуты.
+An attack on one customer is free reconnaissance protecting all the others. When a
+botnet hits tenant A, the attacker's reputation (fingerprint/subnet) propagates so
+that **every edge is pre-armed**, and when the botnet pivots from A to B the others
+react in seconds rather than minutes.
 
-## Сквозной принцип
+## The governing principle
 
-**Репутация атакующего — глобальная; поза энфорсмента — пер-тенант.**
-- Badness fp/subnet/ASN — на стороне БОТА, не жертвы → шарим глобально.
-- attack_mode / drop / strictness — состояние и риск-толерантность КОНКРЕТНОГО тенанта → не
-  навязываем военный режим A пользователям B.
-- Только атакующая сторона (fp/IP/subnet/ASN) пересекает тенантов. Данные тенанта A (хост, URL)
-  к B НЕ идут — изоляция сохраняется.
+**The attacker's reputation is global; the enforcement stance is per tenant.**
+- The badness of a fingerprint/subnet/ASN belongs to the BOT, not the victim → share
+  it globally.
+- attack_mode / drop / strictness are the state and risk tolerance of a SPECIFIC
+  tenant → do not impose A's wartime posture on B's users.
+- Only the attacking side (fp/IP/subnet/ASN) crosses tenants. Tenant A's data (host,
+  URL) never reaches B — isolation is preserved.
 
-## Два tier'а (по уверенности и скорости)
+## Two tiers (by confidence and speed)
 
-| | Медленный tier (УЖЕ есть) | Быстрый tier (НОВОЕ) |
+| | Slow tier (ALREADY exists) | Fast tier (NEW) |
 |---|---|---|
-| Что | `tls_fp_blocklist` / `asn_datacenters` (ADR-006) | `active_threats` hot-list |
-| Уверенность | высокая, **human-gated** (PR) | авто, во время атаки |
-| TTL | постоянно (до auto-demote) | минуты-часы, **само истекает** |
-| Действие у тенанта | block/challenge по policy | **только пред-взвод** (challenge-first), НЕ авто-block |
-| Канал | Channel C (PR, ≤15м) | Channel C (≤30с) |
+| What | `tls_fp_blocklist` / `asn_datacenters` (ADR-006) | the `active_threats` hot list |
+| Confidence | high, **human-gated** (PR) | automatic, during an attack |
+| TTL | permanent (until auto-demote) | minutes to hours, **self-expiring** |
+| Action at the tenant | block/challenge per policy | **pre-arm only** (challenge-first), NOT an auto-block |
+| Channel | Channel C (PR, ≤15 min) | Channel C (≤30 s) |
 
-Быстрый tier намеренно **мягче**: он авто-генерится без человека, поэтому только *пред-взводит*, а
-не блокирует. Блокирует — медленный tier с PR-гейтом.
+The fast tier is deliberately **softer**: it is generated automatically with no
+human in the loop, so it only *pre-arms* rather than blocking. Blocking stays with
+the slow, PR-gated tier.
 
-## Полный поток
+## The full flow
 
 ```
-1. Атака на тенанта A → эдж видит плохие fp/subnet (реактивные сигналы G2)
-2. Backend fast-aggregator подтверждает БЭДНЕСС НА СТОРОНЕ АТАКУЮЩЕГО (высокий порог):
-     • subnet: DC-only + churn + human_share≈0 + участие в активной атаке
-     • fp: confirmed-bad (impersonator / в blocklist / solve_rate≈0 с объёмом)
-     ← «попал под атаку» само по себе НЕ достаточно (живой юзер в окно атаки не должен попасть)
-3. Публикация в глобальный active_threats (short-TTL) → Channel C
-4. ВСЕ эджи тянут список (≤30с)
-5. У каждого тенанта — ПРЕД-ВЗВОД для этих fp/subnet:
-     • +score / ниже порог / challenge-first
-     • тенант ПОД атакой → может эскалировать до DROP (локальная логика G2)
-     • тенант НЕ под атакой → только challenge-first, НИКОГДА не авто-block
-6. Записи сами истекают по TTL
-     повторяется/подтверждается → промоут в МЕДЛЕННЫЙ tier обычным PR-gated пайплайном (D1/G1)
+1. An attack on tenant A → the edge sees bad fingerprints/subnets (reactive signals, G2)
+2. The backend fast aggregator confirms ATTACKER-SIDE BADNESS (a high bar):
+     • subnet: datacenter-only + churn + human_share≈0 + participation in an active attack
+     • fp: confirmed bad (impersonator / on the blocklist / solve_rate≈0 with volume)
+     ← "was present during an attack" is NOT sufficient on its own (a real user
+       caught in the attack window must not qualify)
+3. Publish into the global active_threats (short TTL) → Channel C
+4. ALL edges pull the list (≤30 s)
+5. At each tenant, those fingerprints/subnets are PRE-ARMED:
+     • +score / a lower threshold / challenge-first
+     • a tenant UNDER attack → may escalate to DROP (local G2 logic)
+     • a tenant NOT under attack → challenge-first only, NEVER an auto-block
+6. Entries expire on their own TTL
+     if repeated or confirmed → promoted into the SLOW tier by the usual
+     PR-gated pipeline (D1/G1)
 ```
 
-## Быстрый агрегатор (Q2 — на backend, главное быстро)
+## The fast aggregator (Q2 — on the backend, speed is the point)
 
-**Stream-driven, не Loki-batch.** Дневной `antibot-analytics` слишком медленный. Агрегатор
-**садится на уже существующий live-поток логов** (B9 log receiver принимает BAC_LOG по мере
-поступления), держит **короткое скользящее окно в памяти** (per-subnet / per-fp счётчики:
-challenge-rate, solve_rate, churn, human_share) и публикует `active_threats`, когда пороги
-пересечены. Быстро, потому что без round-trip в Loki.
+**Stream-driven, not a Loki batch.** The daily `antibot-analytics` is far too slow.
+The aggregator **sits on the live log stream that already exists** (the B9 log
+receiver takes BAC_LOG as it arrives), keeps a **short rolling window in memory**
+(per-subnet and per-fingerprint counters: challenge rate, solve rate, churn,
+human_share) and publishes `active_threats` when the thresholds are crossed. It is
+fast because there is no round trip to Loki.
 
-Реализационные нюансы:
-- In-memory rolling state теряется на рестарте — **приемлемо** (эфемерные short-TTL данные,
-  отстраиваются за минуты).
-- HA backend: если инстансов несколько, каждому нужен полный поток ИЛИ shared rolling state. На
-  стенде backend одиночный — ок; для HA — follow-up.
+Implementation notes:
+- The in-memory rolling state is lost on restart — **acceptable** (ephemeral
+  short-TTL data, rebuilt within minutes).
+- HA backend: with several instances, each needs the full stream OR a shared rolling
+  state. The stand runs a single backend, which is fine; HA is a follow-up.
 
-## Распространение (Q1 — Channel C, ≤30с)
+## Propagation (Q1 — Channel C, ≤30 s)
 
-Новый каталог `active_threats` через тот же Channel C (ETag/If-None-Match, atomic swap в
-shared_dict, как у остальных). ≤30с пивота достаточно против ручного/полу-ручного перенацеливания
-ботнета. Отдельный «быстрый канал» — оверинжиниринг, не делаем.
+A new `active_threats` catalog over the same Channel C (ETag/If-None-Match, atomic
+swap into a shared_dict, like the rest). A ≤30 s pivot window is enough against
+manual and semi-manual botnet retargeting. A dedicated "fast channel" would be
+over-engineering; we are not building one.
 
-## Действие у тенанта (Q3 — только пред-взвод)
+## The action at the tenant (Q3 — pre-arm only)
 
-Запись в `active_threats` у тенанта НЕ блокирует автоматически. Она:
-- даёт **+score** / снижает порог / делает **challenge-first** для этих fp/subnet;
-- к DROP приводит **только** если тенант сам под атакой (его attack_mode) И локальные сигналы G2
-  согласны.
+An entry in `active_threats` does not block automatically at a tenant. It:
+- adds **+score** / lowers the threshold / makes those fingerprints and subnets
+  **challenge-first**;
+- leads to a DROP **only** if the tenant is itself under attack (its own
+  attack_mode) AND the local G2 signals agree.
 
-**Это и есть встроенная защита от отравления (#5):** худшее, что даёт отравление hot-list'а —
-капча по нескольким тенантам, не блок. Авто-block остаётся за медленным human-gated tier'ом.
-Кросс-тенантность повышает рычаг отравления → **усиливает приоритет #5**.
+**That is the built-in protection against poisoning (#5):** the worst a poisoned
+hot list can do is put a captcha in front of a few tenants, not block them.
+Auto-blocking stays with the slow, human-gated tier. Cross-tenancy raises the
+leverage of poisoning, which **raises the priority of #5**.
 
-## Порог промоции (выше, чем для локального действия)
+## The promotion bar (higher than for a local action)
 
-Ложняк в `active_threats` бьёт по ВСЕМ тенантам → бар уверенности выше локального:
-- те же purity/human_share/DC-only гейты, что в D1/G1, но строже;
-- «активная атака» — контекст, не достаточное условие; комбинируем с attacker-side badness.
+A false positive in `active_threats` hits EVERY tenant, so the confidence bar is
+above the local one:
+- the same purity / human_share / datacenter-only gates as D1/G1, but stricter;
+- "an active attack" is context, not a sufficient condition; combine it with
+  attacker-side badness.
 
-## Opt-out (Q4 — НЕ нужен)
+## Opt-out (Q4 — not needed)
 
-Дефолт — on, флага opt-out НЕ заводим. Шарится только attacker-side репутация (не данные
-тенанта), изоляция не нарушается, ценность сетевого эффекта максимальна.
+The default is on, and we are not adding an opt-out flag. Only attacker-side
+reputation is shared (never tenant data), isolation is not broken, and the value of
+the network effect is maximised.
 
-## Что фиксируем в смежных тикетах
+## What this pins down in adjacent tickets
 
-- **G1:** `subnet_reputation` закладывать **глобальным** артефактом (не пер-хост), иначе
-  кросс-тенантность потом ломать. (Комментарий добавлен в G1.)
+- **G1:** `subnet_reputation` must be designed as a **global** artifact (not per
+  host), otherwise cross-tenancy has to break it later. (A comment was added to G1.)
 
-## Не входит / non-goals
+## Non-goals
 
-- HA-репликация rolling-state агрегатора — follow-up (стенд одиночный).
-- Авто-block из быстрого tier'а — отвергнут (только пред-взвод).
-- Шаринг чего-либо, кроме attacker-side идентификаторов.
+- HA replication of the aggregator's rolling state — a follow-up (the stand is a
+  single instance).
+- Auto-blocking from the fast tier — rejected (pre-arm only).
+- Sharing anything beyond attacker-side identifiers.
 
-## Зависимости
+## Dependencies
 
-- B9 (live log ingest) — источник потока для агрегатора.
-- Channel C (B5/B6) — распространение `active_threats`.
-- G1 (subnet-репутация, глобальная), G2 (реактивные сигналы атаки), D12 (solve-rate).
-- Усиливает и усиливается #5 (anti-poisoning).
+- B9 (live log ingest) — the stream source for the aggregator.
+- Channel C (B5/B6) — propagation of `active_threats`.
+- G1 (subnet reputation, global), G2 (reactive attack signals), D12 (solve rate).
+- Reinforces and is reinforced by #5 (anti-poisoning).
