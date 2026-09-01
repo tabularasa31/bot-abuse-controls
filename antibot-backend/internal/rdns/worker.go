@@ -1,33 +1,16 @@
-// Package rdns — the antibot-backend reverse-DNS worker ([B7]).
+// Package rdns verifies that a client claiming to be a search engine crawler
+// really is one.
 //
-// The backend's only active computational task per ADR-005. It is not on the
-// edge hot path: at L2.2 (B8) the edge only reads the
-// bot_verification_status catalog this worker populates.
+// It is driven by the log stream: a record carrying a search-engine User-Agent
+// enqueues its IP, and the worker resolves PTR and then forward DNS. Both have
+// to land in the crawler's official zone for the IP to be marked verified;
+// anything else is an impersonator and is marked rejected. Both verdicts carry
+// the same TTL — a shorter one for rejected would hand each impersonator a few
+// hundred free provisional passes a day between re-checks.
 //
-// The trigger is the log stream: the receiver sees a record with an IP and a search engine UA
-// (Googlebot/bingbot/YandexBot/DuckDuckBot) and calls Enqueue. The worker
-// checks PTR → forward DNS (both steps must resolve to the search engine's official
-// domain) and writes the result into the verified_bot_ips table:
-//
-//   - verified — both DNS steps agreed, the IP is a real bot, TTL 1 h.
-//   - rejected — no PTR / it is not in the official zone / forward DNS
-//     did not point back at the original IP; the IP is an impersonator, TTL 1 h symmetric
-//     with verified.
-//
-// The symmetric TTL is a v0.6 vision.md fix (stage 2.2). At 5 min for rejected,
-// one impersonator IP got ~288 free provisional passes per
-// day between re-checks; 1 h closes that.
-//
-// Reactive (not a pre-emptive sweep): the worker touches DNS only when the
-// receiver has seen a new IP with a search engine UA. Deduplication happens through catalog.Store
-// (if the IP is already in the catalog we do not touch DNS again) and an in-flight set
-// (if the IP is already queued we do not spawn parallel DNS lookups for the same
-// result).
-//
-// Concurrency: N resolvers read one queue; a queue overflow drops the
-// task into a metric and the edge keeps issuing provisional passes (the mildest
-// degradation scenario). A GC goroutine periodically deletes
-// expired rows.
+// The work is reactive rather than a sweep, and deduplicated twice: against the
+// catalog, so a known IP is never re-resolved, and against an in-flight set, so
+// a burst from one new IP produces a single lookup.
 package rdns
 
 import (
@@ -48,10 +31,8 @@ import (
 // for verified and rejected. See vision.md §Stage 2.2 (v0.6).
 const VerificationTTL = time.Hour
 
-// dbWriteTimeout — the budget for UpsertVerifiedBot after the parent ctx
-// may already have been cancelled (a graceful shutdown). An UPSERT by PK plus an index takes
-// milliseconds; 5 s leaves room to survive a busy postgres under load
-// without strangling the shutdown if the pgxpool is occupied.
+// Budget for the write after the parent context may already be cancelled, so a
+// shutdown does not lose a verdict that was already computed.
 const dbWriteTimeout = 5 * time.Second
 
 // The canonical search engine bot families. The edge tells them apart by the value
@@ -64,16 +45,9 @@ const (
 	FamilyDDG    = "ddg"
 )
 
-// ptrSuffixes — the official DNS zones a PTR must resolve into
-// for the IP to count as a real bot. The source is each search engine's public
-// documentation; we normalise the names without a trailing dot.
-//
-// google: googlebot.com and google.com are both valid (Googlebot, Google
-// Image and Google StoreBot live across both zones).
-// bing: search.msn.com is Bingbot's canonical zone.
-// yandex: yandex.com / yandex.net / yandex.ru — Yandex publishes
-// different suffixes for the crawlers of different regions.
-// ddg: duckduckgo.com is DuckDuckBot's only official zone.
+// The official zones a PTR must land in, from each crawler's own
+// documentation. Several vendors publish more than one: Google splits its
+// crawlers across two domains, and Yandex uses a different suffix per region.
 var ptrSuffixes = map[string][]string{
 	FamilyGoogle: {".googlebot.com", ".google.com"},
 	FamilyBing:   {".search.msn.com"},
@@ -81,22 +55,16 @@ var ptrSuffixes = map[string][]string{
 	FamilyDDG:    {".duckduckgo.com"},
 }
 
-// Resolver — the DNS dependencies, injected for tests (in production
-// rdns.NetResolver{} wraps net.Resolver). The contract matches
-// net.Resolver.LookupAddr/LookupHost — the same names, so that a test
-// stub needs no adapter.
+// Resolver is the DNS surface the worker needs. It mirrors net.Resolver's
+// method set, so a test stub needs no adapter.
 type Resolver interface {
 	LookupAddr(ctx context.Context, addr string) ([]string, error)
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
-// NetResolver — the production resolver on top of net.Resolver. PreferGo=true,
-// so that the pure-Go resolver uses the context for cancellation (the cgo resolver
-// ignores ctx). That matters: the worker's shutdown must be fast.
-//
-// One shared *net.Resolver for the whole worker: the methods are thread-safe, and a new
-// instance per request is pure load on the allocator. From review.
-// gemini review.
+// NetResolver is the production Resolver. It prefers the pure-Go resolver,
+// which honours context cancellation — the cgo one ignores it, and the worker's
+// shutdown has to be prompt.
 type NetResolver struct{}
 
 var sharedResolver = &net.Resolver{PreferGo: true}
@@ -133,23 +101,16 @@ type Config struct {
 	// Workers — the number of parallel DNS resolvers. DNS goes over the network,
 	// and we do not want to swamp the upstream resolver — so we keep it modest.
 	Workers int
-	// DNSTimeout — the ceiling on one IP check iteration. Protection from a
-	// hung DNS resolver; a rejected outcome still gives legitimate bots a fastpath
-	// on the next tick, and a failed timeout means
-	// rejected for 1 h, which is fine: a real Googlebot should never
-	// time out, and a slow impersonator can wait it out.
+	// Ceiling on one check. A real crawler's DNS does not time out, so treating
+	// a timeout as rejected costs nothing.
 	DNSTimeout time.Duration
 	// GCInterval — how often we delete rows with expires_at <= NOW().
 	// dbloader.Load already filters expired ones on read; the GC only
 	// keeps the table from bloating. An hour is far rarer than the TTL, so there is no load.
 	GCInterval time.Duration
-	// PostWriteHold — how long we keep an IP in inFlight AFTER a successful
-	// upsert. Between "the worker wrote it" and "the reloader
-	// put a fresh catalog into the Store" lies CatalogReloadInterval
-	// (5 s by default); without the hold, every new log from that same
-	// hot IP during that window would see HasVerifiedBotIP=false and spawn repeat
-	// DNS/UPSERTs. The default of 0 means immediate release (the old behaviour);
-	// app.New passes CatalogReloadInterval + 2 s. A follow-up from review.
+	// How long an IP stays in flight after a successful write. The catalog only
+	// reflects it after the next reload, and without the hold every log line
+	// from a hot IP in that window would start the work again.
 	PostWriteHold time.Duration
 }
 
@@ -177,11 +138,9 @@ type Worker struct {
 
 	queue chan task
 
-	// inFlight — the IPs already being checked. The receiver checks
-	// catalog.HasVerifiedBotIP before enqueuing, but between "it is not
-	// in the catalog" and "the worker wrote it into the catalog and the reloader ticked"
-	// lies a window of seconds to tens of seconds — without inFlight we would spawn
-	// the same DNS lookup hundreds of times for a popular new IP.
+	// IPs already being checked. The catalog lags the write by a reload
+	// interval, which is long enough for a popular new IP to queue hundreds of
+	// identical lookups.
 	inFlight sync.Map // ip → struct{}
 
 	// The metrics.
@@ -275,18 +234,13 @@ func New(
 	return w
 }
 
-// Enqueue — the entry point from the receiver. Non-blocking: on a queue
-// overflow it drops plus a metric; the edge keeps letting that IP through
-// provisionally, and we try again on its next log line.
+// Enqueue submits an IP for checking. Non-blocking: on a full queue the task is
+// dropped and counted, the edge keeps passing that IP provisionally, and the
+// next log line tries again.
 //
-// The parameters:
-//   - ip — the client IP as a string (what the edge sees as
-//     remote_addr; the same thing net.Resolver.LookupAddr accepts).
-//   - claimedFamily — what the client called itself in its UA (see FamilyOfUA). That is the
-//     key for choosing the official DNS zone: if the PTR went to a different
-//     zone than the UA claimed, we write rejected with claimedFamily —
-//     useful in analytics ("the IP claimed to be Googlebot, but its PTR points into
-//     .yandex.com»).
+// claimedFamily is what the User-Agent said, which selects the zone to check
+// against and is recorded on a rejection — an IP claiming one crawler while its
+// PTR points at another is worth seeing in the analytics.
 func (w *Worker) Enqueue(ip, claimedFamily string) {
 	if ip == "" || claimedFamily == "" {
 		return
@@ -295,10 +249,7 @@ func (w *Worker) Enqueue(ip, claimedFamily string) {
 		w.skipped.Inc()
 		return
 	}
-	// LoadOrStore — an atomic "store if absent". If it is already in flight,
-	// we get loaded=true and drop the task. Without that, a popular new
-	// Googlebot IP would produce N parallel DNS lookups for one and the
-	// same result, and we would write them all into the DB in turn.
+	// Atomic store-if-absent: an IP already in flight drops the task.
 	if _, loaded := w.inFlight.LoadOrStore(ip, struct{}{}); loaded {
 		w.skipped.Inc()
 		return
@@ -371,12 +322,8 @@ func (w *Worker) processSafely(ctx context.Context, t task) {
 	w.process(ctx, t)
 }
 
-// releaseInFlight clears t.ip from inFlight: immediately when hold==0
-// (the deprecated/test path), or through a PostWriteHold time.AfterFunc —
-// which has to cover the window "the worker wrote it, but the reloader has not yet put a
-// fresh Data into the Store", otherwise the next log from that same hot IP again
-// sees HasVerifiedBotIP=false and spawns a repeat DNS/UPSERT.
-// PR #53 follow-up.
+// releaseInFlight drops the IP immediately, or after the hold that covers the
+// gap until the catalog reflects the write.
 func (w *Worker) releaseInFlight(ip string) {
 	if w.cfg.PostWriteHold <= 0 {
 		w.inFlight.Delete(ip)
@@ -388,12 +335,9 @@ func (w *Worker) releaseInFlight(ip string) {
 }
 
 func (w *Worker) process(ctx context.Context, t task) {
-	// Sanitize: net.Resolver.LookupAddr expects a clean IP literal. If
-	// the log carried "1.2.3.4:54321", "[::1]:443" or anything else with
-	// emitter artefacts, the lookup fails and a legitimate bot IP
-	// would get rejected:family for an hour (HasVerifiedBotIP would block
-	// the re-check). Better to drop the task quietly with a metric —
-	// the next log event from that IP will try again. From review.
+	// The lookup needs a bare IP literal. A value carrying a port would fail
+	// resolution and mark a legitimate crawler rejected for an hour, so drop the
+	// task instead and let the next log line retry.
 	if net.ParseIP(t.ip) == nil {
 		w.skipped.Inc()
 		w.logger.Debug("rdns: skip task with unparseable ip",
@@ -410,13 +354,10 @@ func (w *Worker) process(ctx context.Context, t task) {
 
 	status, family := w.classify(taskCtx, t)
 
-	// A shutdown-induced rejected is NOT persisted. classify cannot tell an
-	// authoritative NXDOMAIN from ctx.Canceled; both turn into rejected.
-	// Without this check, an in-flight Googlebot/Bingbot whose parent
-	// ctx was cancelled during DNS would be written as rejected:google with a TTL of
-	// 1 h; HasVerifiedBotIP would block the re-check; and a legitimate bot would lose
-	// its fastpath for an hour after every deploy. A verified verdict is left
-	// alone — it was obtained BEFORE ctx.Err() and is valid. A follow-up from review.
+	// A rejection caused by shutdown must not be persisted: classification
+	// cannot tell an authoritative NXDOMAIN from a cancelled context, so every
+	// deploy would cost in-flight crawlers their fastpath for an hour. A
+	// verified verdict was reached before cancellation and still stands.
 	if status == "rejected" && ctx.Err() != nil {
 		w.skipped.Inc()
 		w.logger.Debug("rdns: skip persist of shutdown-induced rejected",

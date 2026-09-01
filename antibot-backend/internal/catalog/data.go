@@ -1,11 +1,9 @@
-// Typed data for the eight Channel C catalogs the backend serves to the
-// edges, per the contract in docs/architecture/config-distribution.md
-// (§"The 'catalog' concept"). Only the in-memory representation and the YAML
-// loader live here; HTTP delivery is in server.go and snapshot assembly in store.go.
+// Typed data for the catalogs the backend serves to the edges. This file holds
+// the in-memory representation and the loader; delivery and snapshot assembly
+// live alongside it.
 //
-// Per-resource data (`policy`, custom UA patterns, attack_mode) lives
-// in map[host]Policy; the shared lists are flat structures. Per the config-
-// distribution decision, the per-resource key is `host`, not `cdn_resource_id`.
+// Per-resource data is keyed by host rather than by a provider-side resource
+// id, so the edge can look it up straight from the request.
 package catalog
 
 import (
@@ -15,20 +13,16 @@ import (
 	"sort"
 )
 
-// defaultVersion — the semver Store serves before the first load. It also
-// goes into X-Catalog-Version (the header is always set — the §C1 contract).
-// "0.0.0" in semver means "pre-release / empty"; the edge can rely on a
-// change of the major segment to detect a breaking change in the payload schema.
+// What is served before the first load. The header is always set, so the edge
+// never has to distinguish a missing one from an empty catalog.
 const defaultVersion = "0.0.0"
 
 // Data — a snapshot of the whole catalog store. It changes atomically as a whole through
 // Store.Replace; references to an old *Data stay correct for the duration of a read, and there are no
 // partial updates across catalogs.
 type Data struct {
-	// Version — the semver placed into X-Catalog-Version on every response.
-	// It is changed by hand or by the dashboard, not generated: the edge needs to distinguish
-	// "the same schema, new content" (only the ETag changes) from "a new schema"
-	// (the parser needs updating). Content freshness is the ETag's job, not Version's.
+	// Deliberately hand-maintained rather than generated: it marks a schema
+	// change, while content freshness is the ETag's job.
 	Version string `yaml:"version"`
 
 	TLSFPBlocklist       map[string]string         `yaml:"tls_fp_blocklist"`        // fp → status (active|staging); wire format "<status>:block" (A11)
@@ -43,31 +37,21 @@ type Data struct {
 	Policy               map[string]Policy         `yaml:"policy"`                  // host → policy (including attack_mode)
 }
 
-// TLSFPCatalog — one entry of the automation signature catalog (Phase 2+).
-// Used by the tls_fp_impersonator rule in [tls_fp.lua].
-//
-// The Channel C wire format of the payload is `<status>:<family>` (symmetric with
-// verified_bot_ips, so that the edge's shared_dict stores strings with no per-entry
-// JSON parsing). See buildTLSFPCatalog in store.go.
+// TLSFPCatalog is one automation signature. It goes over the wire as
+// "<status>:<family>", so the edge can store it without parsing JSON per entry.
 type TLSFPCatalog struct {
 	Family string `yaml:"family" json:"family"`
 	Status string `yaml:"status" json:"status"` // active | staging
 }
 
-// BrowserProfile — the expected cipher_cnt for a browser family (Phase 2+).
-// Used by the tls_fp_suspicious_ciphers rule.
-//
-// The wire format is `<status>:<expected_cipher_cnt>` (the number as a decimal string).
+// BrowserProfile is the cipher count a browser family is expected to offer.
 type BrowserProfile struct {
 	ExpectedCipherCnt int    `yaml:"expected_cipher_cnt" json:"expected_cipher_cnt"`
 	Status            string `yaml:"status" json:"status"` // active | staging
 }
 
-// Policy — the per-resource settings of one host. NO field carries omitempty:
-// the `/catalog/policy?site=…` contract promises map(host → policy json) with a
-// predictable shape; a consumer (the dashboard or the edge) must see "field = zero"
-// and "field absent" identically, without distinguishing them. If a field appears later,
-// we will give it its own major Version bump.
+// Policy holds one host's settings. No field is omitempty: consumers rely on a
+// predictable shape, where an absent field and a zero value read the same.
 type Policy struct {
 	Mode         string     `yaml:"mode" json:"mode"`                   // shadow / active
 	Strictness   string     `yaml:"strictness" json:"strictness"`       // standard / permissive
@@ -92,13 +76,9 @@ type RateRule struct {
 	Action  string   `yaml:"action" json:"action"` // block | challenge | log_only
 }
 
-// SlowData — the catalog layer product maintains through PRs to the
-// catalogs/ git repo. Per ADR-006 it is the single source of truth for the slow
-// catalogs; the database is no longer used for them. It is parsed from the YAML files
-// by the filesource package and merged into *Data on every reloader tick.
-//
-// The catalog version (for X-Catalog-Version) comes from the catalogs/version file
-// and is stored here: it is part of the "config" rather than runtime state.
+// SlowData is the layer product maintains through pull requests. The git repo
+// is its only source of truth, and the version travels with it as config rather
+// than as runtime state.
 type SlowData struct {
 	Version              string
 	TLSFPBlocklist       map[string]string // fp → status (active|staging)
@@ -111,24 +91,17 @@ type SlowData struct {
 	TLSFPBrowserProfiles map[string]BrowserProfile
 }
 
-// RuntimeData — the layer of runtime state written by the backend's other
-// subsystems: policy through antibotapi (the dashboard), verified_bot_ips through the
-// rDNS worker. This is NOT config — the data changes automatically, SLA ≤ 30 s.
-// It stays in the database (see ADR-005 §Variant 3 rejected — files do not
-// suit its cadence).
+// RuntimeData is written by the system itself — policy by the dashboard,
+// verified bots by the rDNS worker. It changes on its own and lives in the
+// database, which files would not suit.
 type RuntimeData struct {
 	VerifiedBotIPs map[string]string
 	Policy         map[string]Policy
 }
 
-// Merge assembles a *Data from the two partial snapshots. It accepts nil pointers
-// (as a stand-in for "the layer has not loaded yet") and returns a correct *Data
-// with empty collections instead of a panic — the handler above answers 503 by
-// IsLoaded when both layers are empty at startup.
-//
-// The catalog version comes from SlowData (which also holds the version file). If
-// SlowData == nil we set defaultVersion — semantically "we have not read it
-// yet", the same signal as in emptyData().
+// Merge combines the two layers. A nil layer means it has not loaded yet and
+// yields empty collections rather than a panic; the handler answers 503 while
+// both are empty.
 func Merge(s *SlowData, r *RuntimeData) *Data {
 	d := &Data{
 		Version:              defaultVersion,
@@ -171,12 +144,8 @@ func Merge(s *SlowData, r *RuntimeData) *Data {
 	return d
 }
 
-// PoolDefault — what is served for an unregistered host:
-// "a new domain with no record → the pool default (mode=shadow, observe-only)"
-// (config-distribution §"Per-resource lookup", task B4). It is implemented
-// as a function rather than a global variable: every call yields a fresh
-// nil-zero slice — so no caller can accidentally mutate a
-// shared object.
+// PoolDefault is what an unregistered host gets: observe-only. A function
+// rather than a variable, so no caller can mutate a shared instance.
 func PoolDefault() Policy {
 	return Policy{
 		Mode:         "shadow",
@@ -190,10 +159,8 @@ func PoolDefault() Policy {
 	}
 }
 
-// emptyData — a deterministic zero for Store before the first Replace.
-// Version=defaultVersion (not ""), so that X-Catalog-Version is a valid
-// semver even on an empty instance — the edge must not have to distinguish "header
-// present" from "header absent" on the wire.
+// emptyData is the deterministic zero value, carrying a valid version so the
+// header is well-formed even on an empty instance.
 func emptyData() *Data {
 	return &Data{
 		Version:              defaultVersion,
