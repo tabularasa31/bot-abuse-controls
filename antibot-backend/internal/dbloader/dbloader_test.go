@@ -6,7 +6,7 @@
 // When the DSN is unset the tests call SkipNow, so local development without a database
 // is not broken.
 //
-// After ADR-006 dbloader is responsible only for the runtime tables; the slow catalogs are
+// dbloader is responsible only for the runtime tables; the slow catalogs are
 // tested in internal/filesource. The reloader tests below use an empty
 // seed catalog (version only), to isolate the DB part.
 package dbloader_test
@@ -284,7 +284,7 @@ func TestNewReloader_RejectsZeroInterval(t *testing.T) {
 }
 
 func TestNewReloader_RejectsNilFileLoader(t *testing.T) {
-	// After ADR-006 the fileLoader is mandatory — without it the merge would produce empty
+	// The fileLoader is mandatory — without it the merge would produce empty
 	// slow catalogs and the edge would get a "successful" payload missing the records
 	// product had already added to catalogs/ (a silent regression).
 	if _, err := dbloader.NewReloader(nil, catalog.NewStore(), nil, 5*time.Second, discardLogger(t), discardReg()); err == nil {

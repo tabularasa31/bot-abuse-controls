@@ -49,7 +49,7 @@ listener first. Given that, a browser driven at the endpoint reads back the same
    "every few majors", not monthly).
 2. **The positive catalog** — a **new file**, `catalogs/tls_fp_browser_known.yaml`:
    **`full_fp → {family, status}`** (a mirror of `tls_fp_catalog`, but known-good).
-   PR-only, with `status: active|staging` like every slow catalog (ADR-006).
+   PR-only, with `status: active|staging` like every slow catalog.
    *Decision 1: a new file rather than an extension of
    `tls_fp_browser_profiles.yaml` — a different key (the full fingerprint, not
    `family`) and inverted semantics.*

@@ -73,8 +73,8 @@ check(tls_fp.cipher_count("nope"), nil,        "cipher_count malformed → nil")
 
 -- ===========================================================================
 -- build_catalog / build_profiles — parse Channel C wire format
--- "<status>:<value>" into (active, staging) tables. After PR2 (ADR-006)
--- this is the only build path; on-disk INI source removed.
+-- "<status>:<value>" into (active, staging) tables. This is the only build
+-- path; there is no on-disk INI source.
 -- ===========================================================================
 
 local cat_active, cat_staging = tls_fp.build_catalog({

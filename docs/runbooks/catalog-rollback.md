@@ -11,7 +11,7 @@ in the database: the atomic `shared_dict` swap works either way (vision
 reloader (5 s) plus edge `catalog_pull` (≤30 s).
 
 **Mechanism.** The slow catalogs are a git directory,
-[`catalogs/`](../../catalogs/) (ADR-006, the single source of truth). The backend
+[`catalogs/`](../../catalogs/) (the single source of truth). The backend
 reads the files from the checkout (`~/abuse-controls/catalogs`, mounted
 `/catalogs:ro`, `CATALOGS_DIR=/catalogs`) through `internal/filesource` with an
 mtime cache, and serves them to the edge at `/catalog/<name>` with an ETag. The

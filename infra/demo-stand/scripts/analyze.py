@@ -40,7 +40,7 @@ ROOT = Path(os.environ.get("ABUSE_CONTROLS_ROOT")
             or Path(__file__).resolve().parents[3])
 STATE_DIR = ROOT / "state"
 REPORTS_DIR = ROOT / "reports"
-# Slow catalogs (ADR-006) — git source of truth. The promotion gates read
+# Slow catalogs — git source of truth. The promotion gates read
 # ip_whitelist / tls_fp_browser_profiles / tls_fp_catalog from here, and the
 # blocklist itself (tls_fp_blocklist.yaml) for the staleness/dedup views.
 CATALOGS_DIR = Path(os.environ.get("CATALOGS_DIR") or (ROOT / "catalogs"))

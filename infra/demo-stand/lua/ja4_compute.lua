@@ -1,7 +1,7 @@
 -- JA4-style fingerprint built in access_by_lua from nginx's $ssl_* variables.
 --
 -- This is deliberately not byte-identical to FoxIO JA4 and cannot be
--- cross-validated against it (ADR-004). Strict JA4 needs the full ClientHello
+-- cross-validated against it. Strict JA4 needs the full ClientHello
 -- extension list, which OpenSSL only exposes in the client-hello callback;
 -- bridging that into access_by_lua costs a few hundred lines of FFI with
 -- session-reuse edge cases. The $ssl_* variables carry every other component,

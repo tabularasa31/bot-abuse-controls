@@ -335,7 +335,7 @@ jobs:
           docker compose -f docker-compose.backend.yml down -v --remove-orphans
 
   test-integration:
-    name: Integration (Channel C contract, D8/B13)
+    name: Integration (Channel C contract)
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     # End-to-end harness from infra/test-harness/: postgres + antibot-backend

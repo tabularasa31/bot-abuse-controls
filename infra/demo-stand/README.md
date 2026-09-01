@@ -48,7 +48,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 
 Rollback: unset/remove the auto-ssl wiring → the static fallback cert path is exactly the pre-change behaviour.
 
-The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` — see the section above and `policy.lua`.
+The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml`. Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` — see the section above and `policy.lua`.
 
 ## Structured log
 

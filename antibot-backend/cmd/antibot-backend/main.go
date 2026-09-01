@@ -1,4 +1,4 @@
-// antibot-backend — the centralized Go service per ADR-005.
+// antibot-backend — the control plane: one central service for every edge.
 //
 // Three functions, nothing more:
 //  1. the catalog server   — serves the catalogs to the edge over Channel C (B3 populates it).

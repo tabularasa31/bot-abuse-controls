@@ -20,7 +20,7 @@ edge (demo-stand)  ──HTTPS:443──►  lb (nginx, TLS term)  ──RR─�
 - **lb** — small LB per config-distribution §HA ("DNS round-robin or a small
   LB"); terminates TLS on `:443` (`antibot.internal`), round-robins
   the pair, fails over on instance death.
-- **backend-1 / backend-2** — the ≥2 instances ADR-005 requires for HA.
+- **backend-1 / backend-2** — the ≥2 instances HA requires.
 - **postgres** — single instance with a named volume; bound to loopback, reached
   by the backend over the compose network.
 
@@ -427,7 +427,7 @@ that reappears. fps in the blocklist catalog are exempt. Knobs are env
 - **No alerting rules.** This is an operational-view UI for the demo,
   not a paging surface. Alertmanager and Grafana alerting are
   deliberately not wired — long-term retention + alerts belong on
-  ADR-005's BAC_LOG sink (Postgres via `log_shipper`), not Loki.
+  the BAC_LOG sink (Postgres via `log_shipper`), not Loki.
 - **Sharing same self-signed cert as the catalog API.** mTLS rotation
   for catalog clients (see "mTLS rotation" above) is also a log-push
   rotation. On prod, issue a separate `edge-logs-client` cert if you

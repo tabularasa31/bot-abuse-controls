@@ -333,8 +333,7 @@ func Validate(d *Data) error {
 }
 
 // isValidEntryStatus — the shared predicate for a slow-catalog entry status with
-// staged rollout support (see catalogs/README.md, A11). Symmetric with the
-// CHECK constraint that lived in migration 0001 before ADR-006.
+// staged rollout support (see catalogs/README.md).
 func isValidEntryStatus(s string) bool {
 	return s == "active" || s == "staging"
 }
