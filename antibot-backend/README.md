@@ -85,8 +85,8 @@ before applying 0004.
 The SQL files live in [`internal/dbloader/migrations/`](internal/dbloader/migrations/),
 are embedded through `//go:embed` and are applied at startup when
 `MIGRATE_ON_STARTUP=true`. `CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS`
-— rerunning them is safe; a full migrator (golang-migrate with a
-tracking table) arrives with .
+— rerunning them is safe. A full migrator (golang-migrate with a tracking
+table) would be a later change.
 
 The per-host `policy` is the only table with JSONB fields: `ua_blacklist`,
 `ip_whitelist`, `ip_blocklist`, `asn_block`, `geo_whitelist`, `rate_rules`.

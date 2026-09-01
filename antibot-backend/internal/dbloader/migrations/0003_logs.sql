@@ -1,22 +1,20 @@
--- 0003_logs.sql — the telemetry sink: the `logs` table for BAC_LOG from the edges ([B9]).
+-- 0003_logs.sql — the telemetry sink: the `logs` table for BAC_LOG from the edges.
 --
--- vision.md §"The log receiver" / phase1-spec §"Open questions (the telemetry
--- sink)": the Phase 1 sink is the same PostgreSQL that holds the catalogs (B1/B4);
+-- The sink is the same PostgreSQL that holds the catalogs;
 -- as the volume grows, the "receiver→sink" boundary moves the storage to DuckDB/
 -- ClickHouse with no edge-side changes and no migrations of the logs schema.
 --
--- Forward compatibility (acceptance B9: "adding a Phase 2/3 field must not require a
--- migration"). The strategy is a hybrid: typed columns for the "hot" Phase 1 fields
+-- Forward compatibility ("adding a field must not require a
+-- migration"). The strategy is a hybrid: typed columns for the hot fields
 -- (entities-reference §"JSON log fields") that analytics needs
--- today, plus one JSONB `raw` column holding the whole record. Any new Phase 2/3
--- field that appears in bac_log.lua CERTAINLY lands in `raw` with no
+-- today, plus one JSONB `raw` column holding the whole record. Any new field
+-- that appears in bac_log.lua CERTAINLY lands in `raw` with no
 -- migration; we add a typed column for it in a separate ALTER
 -- only when analytics really wants an index or a GROUP BY (which is then an
 -- "extension" migration rather than "accepting a new field").
 --
 -- Every typed column is nullable: the edge leaves some fields null
--- (resource_id is filled in by the backend on ingest, the tls_* fields appear with
--- Phase 2, and so on) — the entities-reference table states this explicitly.
+-- (resource_id is filled in by the backend on ingest, the tls_* fields appear later) — the entities-reference table states this explicitly.
 -- We do not fail a whole row because of one missing field; the strict
 -- checks (the stage/verdict enums) live in the edge's bac_log.lua itself.
 --

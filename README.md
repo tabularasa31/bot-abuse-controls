@@ -19,7 +19,7 @@ switched to enforcement without a code change.
 
 | Layer | Stage | What it decides | Cost |
 |---|---|---|---|
-| L1 | `hygiene.lua` | Method whitelist, User-Agent blacklist, header anomalies | microseconds, no I/O |
+| L1 | `hygiene.lua` | Method whitelist, User-Agent blacklist; tags header anomalies | microseconds, no I/O |
 | L2 | `reputation.lua` | Clearance cookie (HMAC verify), verified bots (rDNS), IP allow/block lists, ASN and geo | one shared_dict lookup |
 | L3 | `tls_fp.lua` | JA4-style TLS fingerprint: known automation signatures, browser-profile mismatches | fingerprint computed once per connection |
 | L4 | `rate_limit.lua` | GCRA rate limits keyed on IP, IP+UA, API path, scanned URLs, TLS fingerprint | shared_dict counters |
@@ -61,6 +61,10 @@ Two delivery paths, split by how fast the data has to move:
 
 Catalog updates land in a `lua_shared_dict` through a generation-counter swap, so a
 request never sees a half-applied list.
+
+The cascade fails open. It never returns a 5xx of its own: a Lua error, a missing
+catalog or an unreachable backend all end with the request being served. Blocking
+is something the edge does deliberately, never by accident.
 
 ## Policy and modes
 

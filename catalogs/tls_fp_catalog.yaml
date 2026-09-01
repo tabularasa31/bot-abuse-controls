@@ -2,7 +2,7 @@
 #
 # Used by the tls_fp_impersonator rule (soft category): if the UA
 # claims a browser but the TLS fp hash_b matches a known automation
-# signature — challenge. See docs/product/phase2-spec.md §"tls_fp_*".
+# signature — challenge.
 #
 # Format: map hash_b -> { family, status }.
 #   - hash_b — the 12-character hex fragment of the TLS fp (see ja4_compute.lua).

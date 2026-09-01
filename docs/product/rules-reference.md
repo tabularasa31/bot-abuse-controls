@@ -64,7 +64,7 @@ the derived rules do.
 | 10 | The computed TLS fingerprint is in the `tls_fp_blocklist` catalog | `verdict=block, rule=tls_fp_blocklist` | blocking | The `tls_fp_blocklist` catalog (empty at launch, PR-driven, staged rollout) |
 | 11 | The UA family claims one thing (say Chrome) while the fingerprint's `hash_b` matches a known automation signature (curl/python-requests/Go/okhttp) from `tls_fp_catalog` | accumulates the challenge flag `tls_fp_impersonator` (decided at L5) | soft | The `tls_fp_catalog` catalog (PR, staged rollout) |
 | 12 | The UA looks like a browser but the fingerprint's `cipher_cnt` does not match the expected value for that browser family (`tls_fp_browser_profiles`: chrome=15, firefox=16, safari=20) | accumulates the challenge flag `tls_fp_suspicious_ciphers` (decided at L5) | soft | The `tls_fp_browser_profiles` catalog (PR, staged rollout) |
-| 13 | The fingerprint looks like a browser (family by cipher profile) but the IP is in a datacenter ASN (`asn_datacenters`) — real users do not browse from a public datacenter | accumulates the challenge flag `tls_fp_dc_browser` (decided at L5) | soft | The L3 fingerprint plus the `asn_datacenters` catalog |
+| 13 | The fingerprint looks like a browser (family by cipher profile) but the IP is in a datacenter ASN (`asn_datacenters`) — real users do not browse from a public datacenter | records the analytics tag `tls_fp:dc_browser` (no verdict of its own) | soft | The L3 fingerprint plus the `asn_datacenters` catalog |
 
 ---
 

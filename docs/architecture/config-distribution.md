@@ -55,8 +55,8 @@ There is **no third delivery channel**. Per-resource policy lives in the backend
 **Failure mode:** a node that fails to update stays on the previous framework version. `nginx -t` blocks a bad config before the reload, so a broken change never reaches a running worker.
 
 **What goes here:**
-- `lua/verdict.lua`, `lua/ja4_helpers.lua`, `lua/log_emitter.lua`, etc.
-- `50_lua.conf` antibot sections: `lua_shared_dict` declarations, `init_worker_by_lua_block` registering the catalog-pull timer, `access_by_lua_file` hook on the request phase, `log_by_lua_block` for the log line.
+- `lua/verdict.lua`, `lua/ja4_helpers.lua`, `lua/bac_log.lua` and the rest of the cascade.
+- The nginx antibot sections: `lua_shared_dict` declarations, `init_worker_by_lua_block` registering the catalog-pull timer, `access_by_lua_file` hook on the request phase, `log_by_lua_block` for the log line.
 - Per-pool kill-switch flag (e.g. `lua_shared_dict antibot_killswitch 1m;` populated by an `init_by_lua` from an env var or a mounted file).
 
 **What does NOT go here:**

@@ -2,7 +2,7 @@
 // Gated on POSTGRES_TEST_DSN — the pattern from internal/dbloader/dbloader_test.go.
 // Without a DSN the test calls SkipNow (local development without a database is not broken).
 //
-// The coverage from the B10 plan:
+// Coverage:
 //   - auth: bad token → 401, missing → 401, valid → 200
 //   - PATCH attack_mode: a new site → the row is created with PoolDefault plus the patch;
 //     an existing one → an UPSERT; an idempotent repeat → updated_at is not touched;

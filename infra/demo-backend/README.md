@@ -2,20 +2,13 @@
 
 Reproducible deploy of the **antibot-backend** demo VM: PostgreSQL plus a
 ≥2-instance backend pair behind a TLS-terminating LB, with the edge → backend
-HTTPS path opened. Topology from
-the design decision
-and [config-distribution §HA](../../docs/architecture/config-distribution.md).
+HTTPS path opened. Topology per
+[config-distribution §HA](../../docs/architecture/config-distribution.md).
 
-The substrate (compose, LB, certs, firewall, provision scripts) is . The
-`backend-*` containers run the real Go service from
-[`../../antibot-backend/`](../../antibot-backend/) — task , skeleton of the
-three backend functions: catalog server, log receiver, rDNS worker. Full
-contracts for those functions land in B3 (catalog HTTP/ETag), B6/B9 (log sink),
-B7 (rDNS state machine). App-level production deploy with DB migrations is
- .
-
-> This is our own demo infra, **not** the operator's prod edge pool — see
-> [ROADMAP.md](../../ROADMAP.md) "NOT OURS".
+The substrate is compose, the load balancer, certificates, firewall rules and
+provisioning scripts. The `backend-*` containers run the real Go service from
+[`../../antibot-backend/`](../../antibot-backend/): the catalog server, the log
+receiver and the rDNS worker, all three implemented.
 
 ## Topology
 
@@ -152,16 +145,16 @@ two-backend topology comes back.
 
 `scripts/verify.sh` checks each criterion:
 
-| Criterion | Check | Task |
-|---|---|---|
-| VM(s) up, PostgreSQL accessible | `pg_isready` inside the `postgres` container | B1 |
-| Edge → backend reachable over HTTPS | `GET https://<host>/health` → `200` on `:443` | B1 |
-| Deploy reproducible | compose file + scripts; `provision.sh` re-runnable | B1 |
-| HA (≥2 instances) | `/health` round-robins ≥2 distinct `instance` tags | B1 |
-| Backend serves the three function surfaces | `/catalog/<name>` (501 until B3), `POST /v1/logs` (202), `antibot_backend_rdns_ticks_total` in `/metrics` | B2 |
-| Backend not on hot path | edge fail-stale if backend down — see [demo-stand](../demo-stand/) Channel C client | B5/B6 |
-| Channel C auth rejects unauthenticated | loopback passes; empty `allow.list` → 403 (ip-allowlist) / no client cert → 400 (mtls) | B6 |
-| Edge fail-stale on backend outage | `catalog_staleness_seconds.*` in EDGE_STATS / `:9090/__stats` grows when backend down, edge keeps serving | B6 |
+| Criterion | Check |
+|---|---|
+| VM(s) up, PostgreSQL accessible | `pg_isready` inside the `postgres` container |
+| Edge → backend reachable over HTTPS | `GET https://<host>/health` → `200` on `:443` |
+| Deploy reproducible | compose file + scripts; `provision.sh` re-runnable |
+| HA (≥2 instances) | `/health` round-robins ≥2 distinct `instance` tags |
+| Backend serves the three function surfaces | `/catalog/<name>` (503 until a catalog is loaded, then 200), `POST /v1/logs` (202), `antibot_backend_rdns_ticks_total` in `/metrics` |
+| Backend not on hot path | edge fail-stale if backend down — see [demo-stand](../demo-stand/) Channel C client |
+| Channel C auth rejects unauthenticated | loopback passes; empty `allow.list` → 403 (ip-allowlist) / no client cert → 400 (mtls) |
+| Edge fail-stale on backend outage | `catalog_staleness_seconds.*` in EDGE_STATS / `:9090/__stats` grows when backend down, edge keeps serving |
 
 From the edge VM, verify reach with the real hostname:
 
@@ -169,7 +162,7 @@ From the edge VM, verify reach with the real hostname:
 BACKEND_HOST=antibot.internal ./scripts/verify.sh
 ```
 
-## Auth / firewall (B6)
+## Auth / firewall
 
 Channel C edge → backend auth is selected via `AUTH_MODE` in `.env`. The LB
 includes `auth/${AUTH_MODE}.conf` as `/etc/nginx/conf.d/auth.conf`, picked up
@@ -224,7 +217,7 @@ Client certificates reach the edges over Channel A. Rotation without an outage:
 The edge ships the per-catalog staleness signal as
 `catalog_staleness_seconds.<catalog>` in its `EDGE_STATS {json}` line (stdout →
 promtail → Loki `{kind="edge_stats"}`; same snapshot on demand from the private
-`:9090/__stats`). B5.
+`:9090/__stats`).
 
 **Semantics**: the value is "seconds since the last successful **contact**
 with antibot-backend" — both `200` (new data landed) and `304` (ETag
@@ -235,7 +228,7 @@ backend stops answering, not when a PR-merged catalog has been the same
 payload for a week (which is the steady state for `tls_fp_blocklist`,
 `ua_blacklist`, IP lists). Pinned by `tests/catalog_pull_test.lua` case 2.
 
-Contract per config-distribution §Channel C and the B6 task:
+Contract per config-distribution §Channel C:
 
 - **≤ 30 s** — backend reachable on the 30-s pull cadence. One missed tick
   is normal jitter, two consecutive misses warrant a page.
@@ -277,7 +270,7 @@ docker compose -f docker-compose.backend.yml start backend-1 backend-2
 naming as demo-stand so a certbot deploy-hook can refresh it) on first run; never
 commit either.
 
-## Policy API for the dashboard (B10)
+## Policy API for the dashboard
 
 `antibot-backend` exposes `/antibot/v1/policy/{site}/*` for per-host mutations
 from the client dashboard-backend. Server-to-server only: the dashboard

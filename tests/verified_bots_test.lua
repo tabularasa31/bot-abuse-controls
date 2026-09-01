@@ -4,7 +4,7 @@
 -- under bare luajit, plus the ngx-touching classify() + run() paths with
 -- minimal stubs (ngx.shared, package.loaded["bac_log"]).
 --
--- Six scenarios from the B8 acceptance:
+-- Six scenarios:
 --   1. verified IP + searchbot UA → "verified", verdict bot_verified
 --   2. rejected → "rejected", NO verdict (cascade continues)
 --   3. absent → "pending", verdict bot_verified_pending (SEO-safe)

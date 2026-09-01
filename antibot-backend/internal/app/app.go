@@ -65,7 +65,7 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 	a = &App{cfg: cfg, logger: logger}
 
 	// The database is optional in the skeleton. If a DSN is set and it is unreachable, that is a clear
-	// deployment error and we fail: the B1 substrate guarantees that postgres is nearby
+	// deployment error and we fail: the substrate guarantees that postgres is nearby
 	// and healthy before the backend starts (depends_on/condition: service_healthy).
 	if cfg.PostgresDSN != "" {
 		pool, err := db.Open(ctx, cfg.PostgresDSN)
@@ -83,7 +83,7 @@ func New(ctx context.Context, logger *slog.Logger) (a *App, retErr error) {
 		}()
 		logger.Info("postgres connected")
 	} else {
-		logger.Warn("POSTGRES_DSN not set — running without DB (skeleton mode; B3/B6/B7 will require it)")
+		logger.Warn("POSTGRES_DSN not set — running without DB (the catalog, log sink and rDNS worker will require it)")
 	}
 
 	a.reg = prometheus.NewRegistry()

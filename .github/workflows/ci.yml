@@ -140,7 +140,7 @@ jobs:
           working-directory: antibot-backend
 
   test-go:
-    name: Build Go (antibot-backend)
+    name: Go (build, vet, test)
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
@@ -160,11 +160,12 @@ jobs:
         with:
           go-version: '1.23'
           cache-dependency-path: antibot-backend/go.sum
-      - name: go vet + build
+      - name: go vet + build + test
         working-directory: antibot-backend
         run: |
           go vet ./...
           go build ./...
+          go test ./...
 
   lint-shell:
     name: Lint shell (shellcheck)

@@ -8,7 +8,7 @@
 -- (no openresty deps) and the test cases drive handle_response with
 -- pre-baked res tables, dodging the HTTP layer entirely.
 --
--- Six cases from the B5 acceptance:
+-- Six cases:
 --   1. normal pull (200 → entries in shared dict, gen bumped, old swept)
 --   2. 304 → entries not touched, generation not lost (regression
 --      from RFC §C1 round-3 review)

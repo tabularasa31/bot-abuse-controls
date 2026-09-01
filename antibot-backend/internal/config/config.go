@@ -16,7 +16,7 @@ type Config struct {
 	// HTTPAddr — exactly what we listen on. The LB goes to :8080, like the B1 placeholder.
 	HTTPAddr string
 	// PostgresDSN — the DSN for pgxpool. An empty string means the DB is optional
-	// (skeleton mode: the service comes up and passes the B1 acceptance, but any
+	// (the service comes up and answers health checks, but any
 	// future B3/B6/B7 features that need the DB must check for it explicitly).
 	PostgresDSN string
 	// Deprecated and ignored: the worker is driven by the log stream, not by a

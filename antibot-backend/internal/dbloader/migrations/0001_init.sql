@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS asn_datacenters (
     added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- verified_bot_ips: populated by the rDNS worker (B7), read by backend on
+-- verified_bot_ips: populated by the rDNS worker, read by backend on
 -- every reload. bot_name is the pipe-separated taxonomy from the catalog
 -- contract ("google|bing|yandex|ddg").
 CREATE TABLE IF NOT EXISTS verified_bot_ips (

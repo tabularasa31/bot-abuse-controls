@@ -3,7 +3,7 @@
 // Three functions, nothing more:
 //  1. the catalog server   — serves the catalogs to the edge over Channel C (B3 populates it).
 //  2. the log receiver     — accepts the BAC_LOG stream from the edges (B6/B9 populate it).
-//  3. the rDNS worker      — the only active computational task (B7).
+//  3. the rDNS worker      — the only active computational task.
 //
 // The service is stateless on top of its own PostgreSQL. It does not sit on the hot path: when the
 // backend is unavailable the edge stays on the last good catalog (fail-stale,

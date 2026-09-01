@@ -1,6 +1,6 @@
 -- VENDORED — third-party, do not edit.
 --
--- lua-resty-ipmatcher (CIDR matcher used by the reputation stage, task A5).
+-- lua-resty-ipmatcher (CIDR matcher used by the reputation stage).
 --   source:  https://github.com/api7/lua-resty-ipmatcher
 --   version: v0.6.1   (file lib/resty/ipmatcher.lua, unmodified)
 --   license: Apache-2.0

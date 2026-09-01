@@ -74,7 +74,7 @@ func New(reg prometheus.Registerer) *Receiver {
 	return NewWithDeps(reg, nil, nil, nil)
 }
 
-// NewWithEnqueuer — backward compatibility with the B7 start: a receiver with rDNS
+// NewWithEnqueuer — backward compatibility: a receiver with rDNS
 // but no sink. Equivalent to NewWithDeps(..., nil).
 func NewWithEnqueuer(reg prometheus.Registerer, enqueue Enqueuer, classify FamilyClassifier) *Receiver {
 	return NewWithDeps(reg, enqueue, classify, nil)

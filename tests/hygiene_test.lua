@@ -66,7 +66,7 @@ check(
     "(curl)|(python-requests)",
     "build_combined two active")
 
--- Staged patterns are excluded from the active regex (staging is task A11).
+-- Staged patterns are excluded from the active regex.
 check(
     hygiene.build_combined({
         { value = "curl", attrs = { status = "active" } },

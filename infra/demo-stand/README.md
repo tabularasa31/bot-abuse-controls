@@ -2,7 +2,7 @@
 
 A long-running demo of the production verdict pipeline, designed to be hosted on a VM with a public URL so reviewers (edge admins, security, product) can probe it from their own machine without setting anything up.
 
-The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but the only physical exit (tls_fp_blocklist hit in `verdict.lua`) is gated on per-host `policy.mode` (). For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The whole cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
+The stand defaults to **shadow mode per client** — the cascade computes and logs a would-be verdict for every request, but every physical exit goes through `policy.enforce`, gated on the host's `policy.mode`. For clients whose Channel C policy says `mode=shadow` (pool default for any unregistered Host), all blocklist hits proxy to origin with the verdict captured in BAC_LOG; for clients with `mode=active` they return 403. The whole cascade lives in `infra/demo-stand/lua/` (`hygiene.lua` → `reputation.lua` → `verdict.lua` + `tls_fp.lua` + `rate_limit.lua`, fp compute `ja4_compute.lua` / `ja4_helpers.lua`, policy reader `policy.lua`). The multi-scenario endpoints below front this cascade. To switch a specific Host to active blocking, PATCH `/antibot/v1/policy/<host>` on antibot-backend with `{"mode":"active"}` — Channel C delivers the change to the edge in ≤30s.
 
 ## Scenarios a reviewer can probe
 
@@ -25,7 +25,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 > API (the edge no longer mutates policy). `/__fp` returns on a controlled
 > measurement surface when the browser farm is built.
 
-**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — is dropped with `444` (the edge is tenant-only; the bundled landing page was removed). `/__health` is the only public local endpoint; every other former `/__*` / `/metrics` path is gone from the public surface (moved to the private `:9090` plane or to Loki). Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change (the tracker ). There is no `ORIGIN_URL` / `DASHBOARD_*` env.
+**Origin (multi-tenant, Policy-driven).** The stand is a real reverse proxy and a **multi-tenant SaaS edge** — it fronts many tenants, not one configured origin. A *tenant* is a host whose Channel C Policy carries a non-empty `origin_ip`; the edge matches the incoming Host against the tenant set and proxies to that tenant's `origin_ip` (the upstream hostname is rewritten to the IP, loop-safe; Host header + SNI sent upstream stay the tenant hostname). A Host that is **not** a tenant — including unregistered hosts and `bac.example.com` itself — is dropped with `444` (the edge is tenant-only; the bundled landing page was removed). `/__health` is the only public local endpoint; every other former `/__*` / `/metrics` path is gone from the public surface (moved to the private `:9090` plane or to Loki). Registering a tenant is one `PATCH /antibot/v1/policy/<host> {"origin_ip": ...}` — no nginx/compose change. There is no `ORIGIN_URL` / `DASHBOARD_*` env.
 
 **TLS for tenant custom domains (on-demand certs).** The edge terminates client TLS itself (required — the cascade fingerprints the client handshake, `$ssl_*`/JA4 in `tls_fp.lua`; a TLS-terminating proxy in front would hide it and break bot detection). So when a tenant brings its **own** domain, the edge needs a browser-trusted cert for it. This is handled by `lua-resty-acme` (pure-Lua Let's Encrypt, http-01), wired in `lua/tls_autossl.lua` + `nginx.demo.conf`:
 
@@ -48,7 +48,7 @@ The stand defaults to **shadow mode per client** — the cascade computes and lo
 
 Rollback: unset/remove the auto-ssl wiring → the static fallback cert path is exactly the pre-change behaviour.
 
-The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` () — see the section above and `policy.lua`.
+The `tls_fp_blocklist` catalog ships its content via PRs in `catalogs/tls_fp_blocklist.yaml` (ADR-006). Whether a hit actually blocks the client is a separate, per-Host decision driven by `policy.mode` — see the section above and `policy.lua`.
 
 ## Structured log
 
@@ -66,7 +66,7 @@ Fields: `request_id` (nginx `$request_id`, unique per request), `timestamp` (ISO
 - `upstream_response_ms` — `$upstream_response_time`: upstream connect → last byte of the origin response (origin round-trip incl. the origin's own think-time), **excluding** delivery to the user. `null` when no upstream was contacted (blocked / challenge).
 - `proxy_ms` — `cascade_ms + upstream_response_ms`: request arrival → we hold the full origin response ready to send. This is the request's path through the proxy that adds latency, **without** the slow-client delivery tail (which is `latency_ms − proxy_ms`).
 
-`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` () — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict — always `[]` until staged catalogs land ().
+`action` is the effective action the final rule's category implies (kept separate from `verdict`); `mode` / `strictness` are the per-resource business fields read from `policy[Host]` — unregistered Host falls back to pool default (`mode=shadow, strictness=standard`); `staging_match` is the array of staged-catalog patterns that matched without affecting the verdict. Written by the tls_fp and reputation stages when a staged entry matches.
 
 `resource_id` is intentionally left `null` by the edge: the edge works from `Host` only and the backend enriches the record with `resource_id` from its DB on ingest (see vision.md Step 7, the design decision, [config-distribution.md](../../docs/architecture/config-distribution.md)).
 
@@ -269,7 +269,7 @@ verification is effectively off. Everything else keeps flowing. On an empty or t
 (<32 bytes) file — an ERR plus the same fail-closed path. The secret is never
 printed to the logs, only its fingerprint.
 
-## Challenge page asset + cascade version pin ()
+## Challenge page asset + cascade version pin
 
 L5 "Branch A" (vision §5.2) serves the browser an HTML+JS page; the JS computes
 `SHA-256(nonce + JS_SECRET)` and POSTs the token to the verify endpoint; the edge
@@ -334,7 +334,7 @@ docker logs nginx-demo 2>&1 | grep EDGE_STATS | tail -1   # confirm commit/casca
 
 The `tls_fp_blocklist` content lives in `catalogs/tls_fp_blocklist.yaml` and
 arrives via Channel C; per-Host `policy.mode` decides whether a hit blocks
-or only logs (). Analytics state (`state/`, `reports/`) is gitignored —
+or only logs. Analytics state (`state/`, `reports/`) is gitignored —
 copy it from `abuse-controls.bak.*` to keep history, or start clean. Then
 install the cron line from "Updating a running stand" above.
 
@@ -421,16 +421,6 @@ When the `observability` profile is **not** enabled (the default),
 nothing changes — `docker compose up -d` brings up only `nginx-demo`
 and the cascade behaves identically.
 
-## What this does NOT show
-
-- **Hot-reload of the blocklist** (cascade task ). The demo uses a static blocklist loaded at init.
-- **Grey-verdict / sidecar scoring** (cascade task ). The demo is edge-only.
-- **JS challenge issuance** (cascade task ). The demo blocks or allows; no challenge flow.
-- **Rate limiting** (cascade task ). Each request is independent.
-- **UA↔JA consistency** (cascade task ). The demo's blocklist doesn't include this signal.
-
-The demo is intentionally the **A1 fp blocklist** slice of the cascade only — the part that's production-ready post-PR #3/#4. Other cascade tasks are sequenced after a successful demo + integration with the prod edge.
-
 ## Files
 
 ```
@@ -446,12 +436,11 @@ infra/demo-stand/
 ├── lua/
 │   ├── verdict.lua                 verdict pipeline (production variant)
 │   ├── ja4_compute.lua             fp compute (helpers in ja4_helpers.lua)
-│   ├── blocklist.lua               seed automation fps
 │   ├── init.lua                    load blocklist, init metrics counters
 │   ├── edge_stats.lua              EDGE_STATS stdout dump (counters + deploy metadata → Loki; replaces /metrics + /__version)
 │   ├── recent.lua                  last-N request ring buffer (shared_dict; written by log_event)
 │   ├── probe.lua                   TLS-fp dump — not routed
-│   ├── bac_log.lua                 structured-log contract (init/set_verdict/add_tag()/emit)
+│   ├── bac_log.lua                 structured-log contract (init/set_verdict/add_tag/emit)
 │   ├── log_event.lua               per-request counters + rule/fp metrics + recent ring + structured JSON emit
 │   ├── challenge_secret.lua HMAC secret loader (file mount → shared_dict)
 │   └── challenge.lua challenge page renderer + nonce issuer (version-pinned)

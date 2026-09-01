@@ -90,6 +90,10 @@ delivery specs:
   between nodes resets its own limits.
 - The customer-facing dashboard is a separate product surface; this repo ships
   the policy API it would talk to.
+- The client IP is written to the log in full. Anonymising or hashing it is left
+  to the operator's `real_ip` configuration; the cascade does neither.
+- The fingerprint is not byte-compatible with FoxIO JA4, so external JA4 feeds
+  cannot be imported as-is.
 
 ### Research
 
