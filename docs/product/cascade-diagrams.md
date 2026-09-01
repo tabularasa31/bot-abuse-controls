@@ -1,65 +1,71 @@
-# Каскад Bot & Abuse Controls — схемы
+# The Bot & Abuse Controls cascade — diagrams
 
-Шесть комплементарных диаграмм, описывающих работу каскада: главный flow, decision tree L5, матрица mode × Strictness × verdict, data flow в лог, sequence-схема рантайм-взаимодействий, state верифицированного бота. Каждая фокусируется на своем аспекте — все вместе дают полную картину. Источник правды по семантике — [vision.md](vision.md), эти схемы — визуальный комментарий к нему.
+Six complementary diagrams describing how the cascade works: the main flow, the L5
+decision tree, the mode × Strictness × verdict matrix, the data flow into the log, a
+sequence diagram of the runtime interactions, and the state of a verified bot. Each
+focuses on its own aspect; together they give the full picture. The source of truth for
+the semantics is [vision.md](vision.md) — these diagrams are a visual commentary on it.
 
-Диаграммы в формате Mermaid. Рендерятся в GitHub, GitLab, IDE с расширениями. Для Google Docs / PDF — экспортировать в PNG через mermaid.live или CLI.
+The diagrams are Mermaid. They render on GitHub, on GitLab and in IDEs with the right
+extensions. For Google Docs or PDF, export them to PNG through mermaid.live or the CLI.
 
 ---
 
-## 1. Главный flow — путь запроса от приема до ответа
+## 1. The main flow — a request's path from arrival to response
 
-Высокоуровневый обзор. Показывает все слои каскада, терминальные состояния (block / allow / challenge), и куда уходит пропущенный трафик.
+A high-level overview. It shows every cascade layer, the terminal states (block / allow /
+challenge) and where the traffic that passes ends up.
 
 ```mermaid
 flowchart TD
-    Start([HTTP-запрос на защищенный домен])
-    TLS[TLS handshake<br/>nginx получает handshake-данные]
+    Start([HTTP request to a protected domain])
+    TLS[TLS handshake<br/>nginx receives the handshake data]
     L1{L1 Hygiene<br/>method whitelist, ua_blacklist}
-    L2{L2 Reputation<br/>cookie / bot_verified / ip /<br/>asn / geo + теги}
-    L3{L3 TLS-fingerprint<br/>fp_blocklist, impersonator,<br/>suspicious_ciphers, dc_browser + теги}
-    L4{L4 Rate-limits<br/>системные + клиентские правила}
-    L5{L5 Active verification<br/>консолидирует challenge-flags}
-    Cache[Отдача контента:<br/>из кэша, если есть<br/>иначе с origin клиента]
-    Response[Доставка ответа клиенту]
+    L2{L2 Reputation<br/>cookie / bot_verified / ip /<br/>asn / geo + tags}
+    L3{L3 TLS fingerprint<br/>fp_blocklist, impersonator,<br/>suspicious_ciphers, dc_browser + tags}
+    L4{L4 Rate limits<br/>system + customer rules}
+    L5{L5 Active verification<br/>consolidates challenge flags}
+    Cache[Serving content:<br/>from cache if present<br/>otherwise from the customer origin]
+    Response[Delivering the response to the client]
 
     Block([verdict=block → 403/429])
     Allow([verdict=allow → fastpath, skip L3-L5])
     Challenge([JS challenge page])
-    ChOutcome{Клиент<br/>прошел JS-задачу?}
-    GetCookie[Получает clearance cookie<br/>браузер делает retry с cookie]
-    Stuck[Застрял на странице:<br/>бот / не выполняет JS]
-    Retry[Новый запрос с cookie<br/>входит в каскад заново:<br/>L2.1 skip L3+L5, но через L4]
+    ChOutcome{Did the client<br/>solve the JS task?}
+    GetCookie[Receives a clearance cookie<br/>the browser retries with it]
+    Stuck[Stuck on the page:<br/>a bot / no JS execution]
+    Retry[A new request with the cookie<br/>re-enters the cascade:<br/>L2.1 skips L3+L5, but goes through L4]
 
     Start --> TLS
     TLS --> L1
-    L1 -->|method не в whitelist /<br/>UA в blacklist| Block
-    L1 -->|чисто| L2
+    L1 -->|method not in the whitelist /<br/>UA in the blacklist| Block
+    L1 -->|clean| L2
     L2 -->|bot_verified / bot_verified_pending /<br/>ip_whitelist| Allow
-    L2 -->|cookie_valid:<br/>skip L3 и L5, но проходит L4| L4
-    L2 -->|идем дальше<br/>+ теги в лог| L3
+    L2 -->|cookie_valid:<br/>skips L3 and L5, but goes through L4| L4
+    L2 -->|continue<br/>+ tags into the log| L3
     L2 -->|ip_blocklist / asn_customer /<br/>geo_blocklist| Block
-    L3 -->|fp в tls_fp_blocklist| Block
-    L3 -->|impersonator / suspicious_ciphers /<br/>dc_browser + challenge-flag| L4
-    L3 -->|идем дальше<br/>+ tls_fp:* теги в лог| L4
-    L4 -->|rate-limit exceeded,<br/>action=block| Block
-    L4 -->|rate-rule с action=challenge<br/>+ challenge-flag| L5
-    L4 -->|чисто| L5
-    L5 -->|есть challenge-flags<br/>+ Standard, browser| Challenge
-    L5 -->|Permissive / нет флагов| Cache
-    L5 -->|non-browser + есть флаги| Block
+    L3 -->|fingerprint in tls_fp_blocklist| Block
+    L3 -->|impersonator / suspicious_ciphers /<br/>dc_browser + challenge flag| L4
+    L3 -->|continue<br/>+ tls_fp:* tags into the log| L4
+    L4 -->|rate limit exceeded,<br/>action=block| Block
+    L4 -->|rate rule with action=challenge<br/>+ challenge flag| L5
+    L4 -->|clean| L5
+    L5 -->|challenge flags present<br/>+ Standard, browser| Challenge
+    L5 -->|Permissive / no flags| Cache
+    L5 -->|non-browser + flags present| Block
 
     Challenge --> ChOutcome
-    ChOutcome -->|да, JS вычислил токен| GetCookie
-    ChOutcome -->|нет, JS не выполняется| Stuck
+    ChOutcome -->|yes, JS computed the token| GetCookie
+    ChOutcome -->|no, JS does not run| Stuck
     GetCookie --> Retry
-    %% cookie_valid не дает полного фастпаса: L3 и L5 пропускаются, но L4 (rate-limits) применяется.
-    %% Полный skip L3-L5 (нода Allow) — только у bot_verified / bot_verified_pending / ip_whitelist.
+    %% cookie_valid is not a full fastpath: L3 and L5 are skipped, but L4 (rate limits) applies.
+    %% A full skip of L3-L5 (the Allow node) belongs to bot_verified / bot_verified_pending / ip_whitelist only.
 
     Allow --> Cache
     Cache --> Response
-    %% Логирование здесь не рисуем: каждый терминальный исход (Response / Block / Challenge)
-    %% пишет ровно одну запись лога — см. диаграмму #4 «Data flow в лог».
-    %% Stuck отдельно НЕ логируется: исходный запрос уже залогирован как verdict=challenge.
+    %% Logging is not drawn here: every terminal outcome (Response / Block / Challenge)
+    %% writes exactly one log record — see diagram #4 "Data flow into the log".
+    %% Stuck is NOT logged separately: the original request was already logged as verdict=challenge.
 
     classDef terminalBlock fill:#fee,stroke:#c00,color:#900
     classDef terminalAllow fill:#efe,stroke:#0a0,color:#060
@@ -72,39 +78,40 @@ flowchart TD
     class Challenge terminalChallenge
 ```
 
-
-
-> Логирование на этой схеме не показано, чтобы не загромождать раскладку: каждый терминальный исход (доставка ответа / `block` / `challenge`) пишет ровно одну запись лога. Как именно собирается запись — диаграмма #4 «Data flow в лог».
+> Logging is not shown on this diagram, to keep the layout readable: every terminal
+> outcome (response delivery / `block` / `challenge`) writes exactly one log record. How
+> the record is assembled is diagram #4, "Data flow into the log".
 
 ---
 
-## 2. L5 decision tree — что именно решает финальный слой
+## 2. The L5 decision tree — what the final layer actually decides
 
-Зум на самый сложный слой. Как L5 принимает решение о challenge vs pass vs block на основе накопленных сигналов.
+A zoom into the most complex layer: how L5 decides between challenge, pass and block from
+the accumulated signals.
 
 ```mermaid
 flowchart TD
-    Start([Запрос дошел до L5])
-    AM{attack_mode<br/>включен?}
-    Flags{Накоплены<br/>challenge-flags?}
+    Start([The request reached L5])
+    AM{attack_mode<br/>enabled?}
+    Flags{Challenge flags<br/>accumulated?}
     NoFlagsPass[verdict=pass<br/>→ cache/origin]
     Strict{Strictness?}
-    Permissive[verdict=permissive<br/>rule=имя последнего soft-флага<br/>физически → cache/origin]
-    Browser{Клиент похож<br/>на браузер?<br/>UA + headers}
-    BranchA[Ветка A:<br/>выдать JS challenge<br/>verdict=challenge]
-    BranchB[Ветка B:<br/>verdict=block<br/>rule=non_browser_blocked]
-    Recovery[Клиент видит блок в дашборде<br/>может добавить IP в whitelist]
+    Permissive[verdict=permissive<br/>rule=name of the last soft flag<br/>physically → cache/origin]
+    Browser{Does the client look<br/>like a browser?<br/>UA + headers}
+    BranchA[Branch A:<br/>serve a JS challenge<br/>verdict=challenge]
+    BranchB[Branch B:<br/>verdict=block<br/>rule=non_browser_blocked]
+    Recovery[The customer sees the block in the dashboard<br/>and can whitelist the IP]
 
-    ChOutcome{Прошел<br/>JS-задачу?}
-    GetCookie[Получает clearance cookie на 24ч<br/>браузер делает retry на оригинальный URL]
-    Stuck[Застрял на challenge-page<br/>JS не выполняется, контент недоступен]
-    Retry[Новый запрос с cookie:<br/>L2.1 cookie_valid → fastpath<br/>до конца TTL cookie не видит challenge]
+    ChOutcome{Solved the<br/>JS task?}
+    GetCookie[Receives a clearance cookie for 24 h<br/>the browser retries the original URL]
+    Stuck[Stuck on the challenge page<br/>no JS execution, content unreachable]
+    Retry[A new request with the cookie:<br/>L2.1 cookie_valid → fastpath<br/>no challenge until the cookie TTL expires]
 
     Start --> AM
-    AM -->|yes — любой запрос,<br/>дошедший до L5| Browser
+    AM -->|yes — any request<br/>that reached L5| Browser
     AM -->|no| Flags
-    Flags -->|нет flags| NoFlagsPass
-    Flags -->|есть flags| Strict
+    Flags -->|no flags| NoFlagsPass
+    Flags -->|flags present| Strict
     Strict -->|Permissive| Permissive
     Strict -->|Standard| Browser
     Browser -->|UA Mozilla/Chrome/etc.| BranchA
@@ -112,8 +119,8 @@ flowchart TD
     BranchB --> Recovery
 
     BranchA --> ChOutcome
-    ChOutcome -->|да| GetCookie
-    ChOutcome -->|нет| Stuck
+    ChOutcome -->|yes| GetCookie
+    ChOutcome -->|no| Stuck
     GetCookie --> Retry
 
     classDef terminalBlock fill:#fee,stroke:#c00,color:#900
@@ -128,68 +135,75 @@ flowchart TD
     class GetCookie terminalChallenge
 ```
 
+---
 
+## 3. The "what physically happens" matrix — mode × Strictness × verdict
+
+The same verdict out of the cascade leads to different real actions depending on the
+resource's settings.
+
+| Verdict from the cascade | `mode=shadow` *(free)* | `mode=active` + `Strictness=Permissive` | `mode=active` + `Strictness=Standard` |
+| --- | --- | --- | --- |
+| `block` (a blocking rule fired) | Log only | **403** (or 429 with Retry-After for a rate rule) | **403/429** |
+| `allow` (an allow rule fired) | Logged, the cascade continues | **Fastpath** — skip L3-L5 | **Fastpath** |
+| **a challenge flag** (soft, accumulated) | Log only (verdict=challenge under Standard / verdict=permissive under Permissive — a dry run) | `verdict=permissive`, → cache/origin | **A JS challenge** (if a browser) / **403 `non_browser_blocked`** (if not) |
+| `pass` (nothing fired) | → cache/origin | → cache/origin | → cache/origin |
+
+**A note on the fastpath:** a full fastpath (skipping L3-L5) belongs to `bot_verified` /
+`bot_verified_pending` / `ip_whitelist` only. `cookie_valid` is **partial**: it skips L3
+and L5 but goes through L4 (rate limits apply to the cookie holder too).
+`verdict=allow, rule=cookie_valid` is only set when L4 is clean; otherwise the L4 rule
+wins.
+
+**Separately — `attack_mode` (a toggle on top of mode=active):**
+
+- Under `attack_mode=on`, every request that reaches L5 (that is, was not cut earlier and
+  not let through by an L2 allow) goes to a challenge, regardless of Strictness and flags.
+- Verified search bots and IP whitelist holders take the `allow` path back at L2 and never
+  reach L5, so SEO is unaffected during an attack.
+- Clearance cookies under attack: those issued before the attack started do not fastpath
+  (they go to L5 for a challenge); those issued during the attack skip L3/L5 but still go
+  through L4.
 
 ---
 
-## 3. Матрица «Что физически происходит» — mode × Strictness × verdict
+## 4. Data flow into the log — what accumulates and where
 
-Один и тот же verdict из каскада ведет к разным реальным действиям в зависимости от настроек ресурса.
-
-
-| Verdict из каскада                   | `mode=shadow` *(бесплатный)*                                                              | `mode=active` + `Strictness=Permissive`       | `mode=active` + `Strictness=Standard`                                             |
-| ------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------- |
-| `block` (blocking-правило сработало) | Только лог                                                                                | **403** (или 429 для rate-rule с Retry-After) | **403/429**                                                                       |
-| `allow` (allow-правило сработало)    | Лог, каскад идет дальше                                                                   | **Fastpath** — skip L3-L5                     | **Fastpath**                                                                      |
-| **challenge-flag** (soft, накоплен)  | Только лог (verdict=challenge при Standard / verdict=permissive при Permissive — dry-run) | `verdict=permissive`, → cache/origin          | **JS challenge** (если браузер) / **403 `non_browser_blocked`** (если не браузер) |
-| `pass` (ни одного срабатывания)      | → cache/origin                                                                            | → cache/origin                                | → cache/origin                                                                    |
-
-
-**Примечание про фастпас:** полный fastpath (skip L3-L5) — только у `bot_verified` / `bot_verified_pending` / `ip_whitelist`. `cookie_valid` — **частичный**: пропускает L3 и L5, но проходит через L4 (rate-limits применяются к держателю cookie). `verdict=allow, rule=cookie_valid` выставляется, только если L4 чист; иначе выигрывает правило L4.
-
-**Отдельно — `attack_mode` (тоггл поверх mode=active):**
-
-- При `attack_mode=on` все запросы, дошедшие до L5 (т.е. не отбитые ранее и не пропущенные L2-allow), идут на challenge независимо от Strictness и флагов
-- Verified search bots и держатели IP-whitelist уходят в `allow` еще на L2 → до L5 не доходят → SEO под атакой не страдает
-- Clearance cookie под атакой: выданные до начала атаки не фастпасят (идут до L5 на challenge); выданные во время атаки — пропускают L3/L5, но проходят L4
-
----
-
-## 4. Data flow в лог — что и где накапливается
-
-Каждый этап каскада добавляет свои поля в одну итоговую JSON-запись лога. Финально она уезжает в backend асинхронно.
+Each cascade stage adds its own fields to a single final JSON log record. The finished
+record leaves for the backend asynchronously.
 
 ```mermaid
 flowchart LR
     L0[TLS handshake] -->|ssl_protocol, ciphers,<br/>curves, alpn, sni| Rec
-    L1[L1 Hygiene] -->|rule если matched<br/>request_id, host, ip, ua,<br/>method, path| Rec
-    L2[L2 Reputation] -->|rule если matched<br/>asn, geo_country<br/>+ теги reputation:*| Rec
-    L3[L3 TLS-fp] -->|tls_fp, tls_cipher_count,<br/>tls_alpn, tls_sni_present<br/>+ теги tls_fp:*<br/>+ challenge-flags| Rec
-    L4[L4 Rate-limits] -->|rule если matched<br/>+ challenge-flags| Rec
-    L5[L5 Verify] -->|финальный verdict,<br/>финальный rule| Rec
-    Cache[Отдача контента<br/>из кэша или с origin] -->|status, latency_ms| Rec
+    L1[L1 Hygiene] -->|rule if matched<br/>request_id, host, ip, ua,<br/>method, path| Rec
+    L2[L2 Reputation] -->|rule if matched<br/>asn, geo_country<br/>+ reputation:* tags| Rec
+    L3[L3 TLS fp] -->|tls_fp, tls_cipher_count,<br/>tls_alpn, tls_sni_present<br/>+ tls_fp:* tags<br/>+ challenge flags| Rec
+    L4[L4 Rate limits] -->|rule if matched<br/>+ challenge flags| Rec
+    L5[L5 Verify] -->|final verdict,<br/>final rule| Rec
+    Cache[Serving content<br/>from cache or origin] -->|status, latency_ms| Rec
 
-    Rec[Лог-запись запроса JSON<br/>request_id, edge_id, timestamp,<br/>host, path, method, status,<br/>ip, asn, geo_country, ua,<br/>tls_*, stage, verdict, rule,<br/>action, mode, tags, flags, staging_match]
+    Rec[The request's JSON log record<br/>request_id, edge_id, timestamp,<br/>host, path, method, status,<br/>ip, asn, geo_country, ua,<br/>tls_*, stage, verdict, rule,<br/>action, mode, tags, flags, staging_match]
 
-    Rec -->|async| Backend[Antibot-backend<br/>приемник логов]
-    Backend -->|batch| Telemetry[Приемник телеметрии<br/>ClickHouse]
+    Rec -->|async| Backend[Antibot backend<br/>log receiver]
+    Backend -->|batch| Telemetry[Telemetry sink<br/>ClickHouse]
 ```
 
+**Important properties:**
 
-
-**Важные свойства:**
-
-- Каждый запрос — ровно одна итоговая запись лога (не несколько)
-- `verdict` и `rule` отражают последнее (терминальное) сработавшее правило, не все
-- `tags` накапливаются — попадают все, что сработали по пути
-- `flags` накапливаются — все challenge-флаги (soft-правила) по пути попадают в это поле (отдельно от терминального `rule`)
-- Доставка лог-записи не блокирует hot-path запроса
+- Every request produces exactly one final log record, never several.
+- `verdict` and `rule` reflect the last (terminal) rule that fired, not all of them.
+- `tags` accumulate — everything that fired along the way lands there.
+- `flags` accumulate — every challenge flag (from soft rules) along the way lands in this
+  field, separately from the terminal `rule`.
+- Delivering the log record does not block the request's hot path.
 
 ---
 
-## 5. Sequence — рантайм-взаимодействия во времени
+## 5. Sequence — runtime interactions over time
 
-Кто с кем общается на одном запросе и что идёт в фоне. Главное, что видно: backend **не на hot-path** — каскад читает только локальные каталоги; backend участвует только в фоне (доставка каталогов, приём логов, rDNS).
+Who talks to whom during one request, and what happens in the background. The key point:
+the backend is **not on the hot path** — the cascade reads only local catalogs, and the
+backend participates only in the background (catalog delivery, log ingestion, rDNS).
 
 ```mermaid
 sequenceDiagram
@@ -197,69 +211,74 @@ sequenceDiagram
     participant P as Proxy (nginx+Lua)
     participant B as Backend
     participant O as Origin
-    participant Telemetry as Телеметрия
+    participant Telemetry as Telemetry
 
-    Note over B,P: Фон, не в hot-path: доставка каталогов (pull ≤30с / ≤15мин)
+    Note over B,P: Background, off the hot path: catalog delivery (pull ≤30 s / ≤15 min)
     B-->>P: policy, blocklists, verified_bot_status, ...
-    Note over P: каскад читает каталоги ТОЛЬКО из локальной памяти proxy
+    Note over P: the cascade reads catalogs ONLY from the proxy's local memory
 
-    C->>P: HTTP-запрос (после TLS-handshake)
-    Note over P: L1→L2→L3→L4→L5 локально, без вызовов к backend
+    C->>P: HTTP request (after the TLS handshake)
+    Note over P: L1→L2→L3→L4→L5 locally, with no calls to the backend
     alt verdict = allow / pass
-        P->>O: proxy_pass (если нет в кэше)
-        O-->>P: ответ
-        P-->>C: 200 (контент)
+        P->>O: proxy_pass (when not in cache)
+        O-->>P: response
+        P-->>C: 200 (content)
     else verdict = block
         P-->>C: 403 / 429
-    else verdict = challenge (браузер)
-        P-->>C: challenge-страница (HTML+JS, self-signed nonce)
-        C->>C: выполняет JS-задачу
-        C->>P: retry с clearance cookie
-        Note over P: L2.1 cookie валиден → skip L3/L5, но L4 применяется
+    else verdict = challenge (a browser)
+        P-->>C: challenge page (HTML+JS, self-signed nonce)
+        C->>C: solves the JS task
+        C->>P: retry with the clearance cookie
+        Note over P: L2.1 the cookie is valid → skip L3/L5, but L4 applies
         P->>O: proxy_pass
-        O-->>P: ответ
+        O-->>P: response
         P-->>C: 200 + Set-Cookie tf_clearance
     end
-    P-)B: лог-запись (async, не блокирует ответ клиенту)
-    Note over B: rDNS-воркер проверяет новые поисковые IP,<br/>обновляет verified_bot_status (попадёт на proxy фоном)
-    B-)Telemetry: батч в приёмник телеметрии
+    P-)B: the log record (async, it does not block the client's response)
+    Note over B: the rDNS worker checks new search engine IPs,<br/>updating verified_bot_status (which reaches the proxy in the background)
+    B-)Telemetry: a batch to the telemetry sink
 ```
-
-
 
 ---
 
-## 6. State — статус верифицированного бота (`bot_verification_status`)
+## 6. State — the verified bot status (`bot_verification_status`)
 
-Машина состояний одного IP с поисковым UA. Переходы делает фоновый rDNS-воркер; TTL возвращает запись в «нет данных».
+The state machine of one IP with a search engine UA. Transitions are made by the
+background rDNS worker; the TTL returns the record to "no data".
 
 ```mermaid
 flowchart TD
-    Start([IP с поисковым UA<br/>впервые замечен])
-    Absent[<b>Absent</b> — записи нет<br/>пропуск авансом, backend проверяет rDNS]
-    Verified[<b>Verified</b><br/>полный fastpath L2.2 — skip L3/L4/L5<br/>TTL 1ч]
-    Rejected[<b>Rejected</b><br/>fastpath нет, обычный каскад<br/>TTL 1ч]
+    Start([An IP with a search engine UA<br/>seen for the first time])
+    Absent[<b>Absent</b> — no record<br/>let through on credit, the backend checks rDNS]
+    Verified[<b>Verified</b><br/>full L2.2 fastpath — skip L3/L4/L5<br/>TTL 1 h]
+    Rejected[<b>Rejected</b><br/>no fastpath, the ordinary cascade<br/>TTL 1 h]
 
     Start --> Absent
-    Absent -->|rDNS сошёлся| Verified
-    Absent -->|rDNS не сошёлся| Rejected
+    Absent -->|rDNS matched| Verified
+    Absent -->|rDNS did not match| Rejected
 
     classDef st fill:#eef,stroke:#66a,color:#114
     class Absent,Verified,Rejected st
 ```
 
-`Absent` — это и «первое появление IP», и состояние после истечения TTL: запись удаляется, при следующем запросе IP проверяется заново. В `Absent` каждый запрос пропускается авансом (rule `bot_verified_pending`) — то есть мягко пропускается до того, как backend подтвердит или отклонит бота, чтобы не порушить SEO.
-
-
+`Absent` is both "the IP's first appearance" and the state after the TTL expires: the
+record is deleted and the IP is checked again on its next request. In `Absent` every
+request is let through on credit (rule `bot_verified_pending`) — that is, leniently, before
+the backend confirms or rejects the bot, so that SEO is not damaged.
 
 ---
 
-## Что эти диаграммы НЕ показывают
+## What these diagrams do NOT show
 
-Для полной картины смотри [vision.md](vision.md). Не вошло в диаграммы:
+For the full picture see [vision.md](vision.md). Left out of the diagrams:
 
-- **Фоновые процессы:** доставка каталогов, rDNS-воркер и доставка логов показаны на sequence-диаграмме (#5) и state-диаграмме (#6) обзорно; детали (kill-switch, частоты pull, буферизация логов, persistence) на диаграммах не раскрыты — см. vision.md.
-- **Staged rollout для PR-каталогов:** новые паттерны добавляются в `staging`-статус, матчатся и логируются (поле `staging_match`), но не влияют на verdict. После калибровки промоутятся в `active`.
-- **Recovery loop для Branch B:** заблокированные non-browser запросы попадают в дашборд клиента в список блокировок, клиент может одним кликом добавить IP в whitelist.
-- **Per-request input → output** для конкретных кейсов (Googlebot, curl, импersonator, реальный пользователь) — это уже сценарии тестирования, не схемы.
-
+- **Background processes:** catalog delivery, the rDNS worker and log delivery appear in
+  outline on the sequence diagram (#5) and the state diagram (#6); the details (the kill
+  switch, pull frequencies, log buffering, persistence) are not covered — see vision.md.
+- **Staged rollout for PR catalogs:** new patterns are added with `staging` status, match
+  and are logged (the `staging_match` field) but do not affect the verdict. After
+  calibration they are promoted to `active`.
+- **The recovery loop for Branch B:** blocked non-browser requests appear in the customer's
+  dashboard in a list of blocks, and the customer can whitelist the IP in one click.
+- **Per-request input → output** for specific cases (Googlebot, curl, an impersonator, a
+  real user) — those are test scenarios rather than diagrams.
