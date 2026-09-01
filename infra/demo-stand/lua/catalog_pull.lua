@@ -1,4 +1,4 @@
--- Channel C client on the edge (B5, RFC §В1).
+-- Channel C client on the edge (B5, RFC §C1).
 --
 -- Background ngx.timer.every per catalog: conditional GET against
 -- antibot-backend, atomic generation swap into the catalog's
@@ -47,9 +47,9 @@ _M.SUPPORTED_VERSION_MAJOR = "1"
 
 -- Per-catalog payload writers / sweepers. `apply` writes the decoded body
 -- into the dict under the NEW generation; `sweep` deletes the OLD gen's keys
--- after the gen flip (RFC §В1 explicit cleanup — per-entry TTL is wrong here
+-- after the gen flip (RFC §C1 explicit cleanup — per-entry TTL is wrong here
 -- because the 304 short-circuit means entries never get re-written and would
--- silently age out, see §В1 "Why explicit cleanup instead of per-entry TTL").
+-- silently age out, see §C1 "Why explicit cleanup instead of per-entry TTL").
 -- Each descriptor carries `name` = the catalog-identifier (key in this
 -- table) duplicated as a field, so handle_response can stamp metrics under
 -- the CATALOG name rather than the dict name. metrics.lua iterates the
@@ -90,7 +90,7 @@ _M.catalogs = {
         -- размера каталога (десятки–сотни fp) это микросекунды; gemini-review
         -- отметила, что на десятках тысяч ключей блокировка станет видна на
         -- p99 — тогда поедем на side-index "keys-of-gen-N" в отдельном ключе
-        -- meta'и. Пока что 100% RFC §В1 алгоритм + комментарий.
+        -- meta'и. Пока что 100% RFC §C1 алгоритм + комментарий.
         --
         -- Матчим через fp_state.match() (типизированный инверс key()) вместо
         -- сырого `:<gen>` суффикса: если в этот dict когда-нибудь начнёт
@@ -117,7 +117,7 @@ _M.catalogs = {
 
     -- verified_bot_ips (B8) — map(ip → "<status>:<family>") with status
     -- in {verified, rejected} (config-distribution.md §catalogs). Stored
-    -- key is `<ip>:<gen>`, mirroring tls_fp_blocklist's §В1 atomic-swap shape
+    -- key is `<ip>:<gen>`, mirroring tls_fp_blocklist's §C1 atomic-swap shape
     -- so two generations coexist during the write→flip→sweep window.
     -- Reader: verified_bots.classify(ip) composes the key from
     -- meta:get("verified_bots_gen"). Empty dict ⇒ all searchbot UAs land
@@ -157,7 +157,7 @@ _M.catalogs = {
         -- B5 и снова на этом PR). План тот же: side-index «keys-of-gen-N»
         -- в отдельном ключе `meta`, чтобы sweep шёл по узкому списку
         -- вместо полного скана. Пока что осознанно держим симметрию с
-        -- tls_fp_blocklist'ом (RFC §В1 алгоритм) — мигрируем оба каталога
+        -- tls_fp_blocklist'ом (RFC §C1 алгоритм) — мигрируем оба каталога
         -- одной задачей, когда реальный размер verified_bot_ips перейдёт
         -- этот порог (на стенде без backend dict пустой, фактического
         -- риска нет).
@@ -381,7 +381,7 @@ _M.catalogs = {
     -- NOT a per-key map: there is no per-entry status (staged rollout does not
     -- apply to the allow list — a whitelist entry either allows or it doesn't).
     -- We store each CIDR as `<cidr>:<gen>` → "1" so it mirrors ip_blocklist's
-    -- §В1 atomic-swap shape (suffix-match sweep, gen always the last `:`-segment
+    -- §C1 atomic-swap shape (suffix-match sweep, gen always the last `:`-segment
     -- even for IPv6 CIDRs). reputation.refresh_whitelist() rebuilds the active
     -- matcher on a gen flip. The per-host policy ip_whitelist is a SEPARATE
     -- catalog (policy) applied via policy_matchers — not merged here.
@@ -665,7 +665,7 @@ function _M.handle_response(cat, dict, meta, res, err)
         return "skip"
     end
 
-    -- cjson.safe returns nil + err on malformed JSON. The RFC §В1 pcall+
+    -- cjson.safe returns nil + err on malformed JSON. The RFC §C1 pcall+
     -- type-check is collapsed into one decode (.safe never throws) plus
     -- one type check. The type check guards against decoded-but-not-a-table
     -- (a top-level JSON string/number is valid JSON but would crash pairs).
@@ -685,7 +685,7 @@ function _M.handle_response(cat, dict, meta, res, err)
     -- Order matters: write the new gen first, then flip the gen counter,
     -- then sweep the old gen. A reader that read meta:gen before the flip
     -- still resolves to old_gen and finds its entries; a reader that reads
-    -- after the flip resolves to new_gen and finds those. See RFC §В1
+    -- after the flip resolves to new_gen and finds those. See RFC §C1
     -- "Atomically flip readers" and verdict.lua's `fp:gen` lookup.
     local old_gen = meta:get(cat.gen_key) or 0
     local new_gen = old_gen + 1

@@ -7,10 +7,10 @@
 -- exits, so it lives as its own stage module alongside hygiene/reputation.
 --
 -- Naming note: the A9 ticket body sketched this as `ua_fp_consistency.lua`
--- with a per-request sidecar `/__score` round-trip (RFC §В2 grey-verdict
+-- with a per-request sidecar `/__score` round-trip (RFC §C2 grey-verdict
 -- path). That path is explicitly retired in the current architecture — see
 -- docs/architecture/edge-lua-vs-sidecar.md (terminology note, 2026-05-18:
--- "§В2 ... not used in the current design (no heavy/grey-verdict scoring)").
+-- "§C2 ... not used in the current design (no heavy/grey-verdict scoring)").
 -- So A9 reduces to the doc-aligned tls_fp stage: two soft rules + three
 -- informational tags, all evaluated in Lua, all observe-only. Hence the
 -- stage name `tls_fp` rather than `ua_fp_consistency` (which would not cover

@@ -28,7 +28,7 @@
 -- where status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}.
 -- The absent state is just a missing key.
 --
--- Storage shape inside the shared_dict mirrors `tls_fp_blocklist`'s §В1 atomic
+-- Storage shape inside the shared_dict mirrors `tls_fp_blocklist`'s §C1 atomic
 -- swap: keys are `<ip>:<gen>` so two generations can coexist during the
 -- write→flip→sweep window, and readers compose the key with the gen they
 -- read from `ngx.shared.meta:get("verified_bots_gen")`. catalog_pull's

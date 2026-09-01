@@ -53,7 +53,7 @@
 --
 -- Config model. The method whitelist + the kill-switch flags are compiled once
 -- in init_by_lua (build(), master pre-fork) from defaults.conf. The ua_blacklist
--- patterns follow the production RFC §A2/§В1 model (A11, 86exrtjpc): a
+-- patterns follow the production RFC §A2/§C1 model (A11, 86exrtjpc): a
 -- backend-built combined regex (+ a staging pattern list) pushed via Channel C
 -- with a generation counter and a per-worker cache. build() seeds the
 -- cold-start matchers from the local ua_blacklist.conf and init.lua seeds gen 0

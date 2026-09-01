@@ -50,7 +50,7 @@ There is **no salt-pillars extension on the operator side**. Per-resource antibo
 
 **Purpose:** ship the static framework that doesn't change per request: Lua source files, nginx config snippets declaring `lua_shared_dict` and registering Lua hooks, kill-switch config.
 
-**Source of truth:** our repo (`infra/demo-stand/lua/*.lua` — каскад целиком, включая `ja4_compute.lua` / `ja4_helpers.lua` — и antibot-секции `infra/demo-stand/nginx.demo.conf`, которые puppet берёт как образец `50_lua.conf`-snippet'а), mirrored into the operator's puppet repo (`modules/nginx/files/lua/nginx2/`).
+**Source of truth:** our repo (`infra/demo-stand/lua/*.lua` — the whole cascade, including `ja4_compute.lua` / `ja4_helpers.lua` — plus the antibot sections of `infra/demo-stand/nginx.demo.conf`, which puppet takes as the template for its `50_lua.conf` snippet), mirrored into the operator's puppet repo (`modules/nginx/files/lua/nginx2/`).
 
 **Distribution:** the operator's standard Puppet pipeline. PR to the puppet repo → review → agent run on edge-* via their existing cadence.
 
@@ -74,7 +74,7 @@ There is **no salt-pillars extension on the operator side**. Per-resource antibo
 
 **Source of truth:** PostgreSQL inside the antibot-backend service. Populated by the client dashboard (per-resource policy), PRs (blocklists), or background workers (rDNS verified bots).
 
-**Distribution:** edge Lua calls `ngx.timer.every(30, fetch)` in `init_worker_by_lua_block`. Each tick does conditional `GET` per catalog with `If-None-Match`. On 200 — parse, atomic-swap into `lua_shared_dict` (generation-counter scheme from [RFC §В1](edge-lua-vs-sidecar.md)). On 304 — no work.
+**Distribution:** edge Lua calls `ngx.timer.every(30, fetch)` in `init_worker_by_lua_block`. Each tick does conditional `GET` per catalog with `If-None-Match`. On 200 — parse, atomic-swap into `lua_shared_dict` (generation-counter scheme from [RFC §C1](edge-lua-vs-sidecar.md)). On 304 — no work.
 
 **Cadence:** 30 s. Bounded staleness window. Sufficient for "dashboard slider moved → effect on edge" UX (sub-minute) and for emergency `attack_mode=on` (sub-minute global effect).
 
@@ -97,7 +97,7 @@ Each thing pulled in Channel C is a **catalog**: a named, fully-versioned snapsh
 | `ip_blocklist` | map(CIDR → "&lt;status&gt;:block"), status ∈ {active, staging} (A11 staged rollout) | `antibot_ip_blocklist` | PR + dashboard custom-add |
 | `ip_whitelist` | CIDR list | `antibot_ip_whitelist` | PR (monitoring, check services) |
 | `asn_datacenters` | set(asn → 1) | `antibot_asn_dc` | PR |
-| `verified_bot_ips` | map(ip → "&lt;status&gt;:&lt;family&gt;"), status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}; отсутствие ключа = provisional | `antibot_verified_bots` | backend background rDNS (B7) |
+| `verified_bot_ips` | map(ip → "&lt;status&gt;:&lt;family&gt;"), status ∈ {verified, rejected}, family ∈ {google, bing, yandex, ddg}; a missing key means provisional | `antibot_verified_bots` | backend background rDNS (B7) |
 | `policy` | map(host → policy json) | `antibot_policy` | client dashboard |
 | `attack_mode` | one flag, optionally per host | `antibot_attack_mode` | dashboard toggle |
 

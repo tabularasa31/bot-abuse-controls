@@ -87,7 +87,7 @@ local cascade_version = require("challenge").preload()
 -- and are held in tls_fp.blocklist_staging (recorded into staging_match by the
 -- tls_fp stage, A11), never seeded here. An empty file => SHADOW mode.
 --
--- Keys are written under generation 0 (`fp .. ":" .. 0`, §В1 format) and
+-- Keys are written under generation 0 (`fp .. ":" .. 0`, §C1 format) and
 -- tls_fp_blocklist_gen is published as 0 so verdict.lua's §A1 read resolves them.
 -- The static seed IS generation 0; when the Channel C catalog pull lands
 -- (task 86exmk08u) it bumps to gen 1+ and atomically swaps the set.

@@ -177,7 +177,7 @@ if config.stage_enabled(config.defaults, "tls_fp") then
     bac_log.set_tls_fp(fp)
 
     if not ngx.ctx.clearance_valid then
-        -- §A1 read: pin the generation the catalog pull (§В1) last published and
+        -- §A1 read: pin the generation the catalog pull (§C1) last published and
         -- key BOTH the verdict cache and the blocklist by `fp:gen`. Sharing the
         -- generation key makes a catalog swap atomic for the cache too: when gen
         -- bumps, old-gen cache entries become unreachable and age out on their TTL,

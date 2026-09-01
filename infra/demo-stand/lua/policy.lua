@@ -6,7 +6,7 @@
 --     /catalog/policy). Keys are `<host>:<gen>`; values are cjson-encoded
 --     Policy tables.
 --   * meta:antibot_policy_gen, flipped atomically by catalog_pull on each
---     successful pull (§В1 atomic-swap).
+--     successful pull (§C1 atomic-swap).
 --
 -- get(host) returns a non-nil Policy table. Missing host / missing
 -- shared_dict / missing gen / decode failure all fall back to POOL_DEFAULT

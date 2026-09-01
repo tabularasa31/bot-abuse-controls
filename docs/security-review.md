@@ -10,7 +10,7 @@ This is a self-review intended for operators deciding whether the code is safe t
 What the verdict pipeline **trusts**:
 
 - nginx-populated `$ssl_*` variables, populated by stock nginx code during the TLS handshake. We don't parse the handshake ourselves — nginx + OpenSSL do.
-- the `lua_shared_dict` contents written by `init_by_lua_file` (we control the loader) and, in production, by the catalog-pull worker (sidecar contract — see RFC §В1).
+- the `lua_shared_dict` contents written by `init_by_lua_file` (we control the loader) and, in production, by the catalog-pull worker (sidecar contract — see RFC §C1).
 - the `openresty/openresty:alpine` image's published checksum (we pin no other base image).
 
 What the verdict pipeline **does not trust**:
@@ -31,7 +31,7 @@ This boundary matters: the only way an attacker affects the pipeline's verdict i
 | `lua_shared_dict fp_blocklist` fills up | `dict:set` returns `nil, "no memory"`, logged at ERR | The blocklist is sized for catalog cardinality (1 MB ≈ 10K entries); cascade 86exmk08u productionises sizing. New entries get rejected; existing entries keep working. |
 | `lua_shared_dict verdict_cache` fills up | LRU eviction (built into `shared_dict`) | Worst case: cache hit ratio drops, more shared_dict lookups, slightly higher p99. Not a correctness issue. |
 | OpenSSL CVE in the upstream image | Mitigated by `docker pull openresty/openresty:alpine && reload` | We carry no custom OpenSSL build (per [ADR-002](architecture-decisions/002-spike-2-lua-ssl-vars.md)) — no fork to patch, no rebuild to coordinate. |
-| Catalog-pull worker pulls a poisoned catalog (sidecar compromised) | The blocklist gains entries from the bad catalog | Out of scope for this review — sidecar `/catalog` endpoint owns provenance; RFC §В1 specifies SemVer + ETag + atomicity. Mitigation: the verdict cache layer means a poisoned entry blocks only requests of that specific fp, not the whole site. |
+| Catalog-pull worker pulls a poisoned catalog (sidecar compromised) | The blocklist gains entries from the bad catalog | Out of scope for this review — sidecar `/catalog` endpoint owns provenance; RFC §C1 specifies SemVer + ETag + atomicity. Mitigation: the verdict cache layer means a poisoned entry blocks only requests of that specific fp, not the whole site. |
 
 ## Fail-open philosophy
 
@@ -62,7 +62,7 @@ Measured under wrk on a 4-core MacBook: 32K RPS allow path, p99 ~10 ms (see [doc
 - Lua runs inside the nginx worker process — unprivileged, sandboxed by nginx's own process model.
 - No FFI to native libraries (per [ADR-002](architecture-decisions/002-spike-2-lua-ssl-vars.md), pure Lua + `resty.sha256`/`resty.string`).
 - No `os.execute`, no shell, no filesystem writes — the Lua code touches only `lua_shared_dict` (in-memory) and `ngx.log` (write-only to the nginx error log fd).
-- No outbound network from the verdict pipeline; the catalog-pull worker (RFC §В1) is separate Lua code with its own review scope.
+- No outbound network from the verdict pipeline; the catalog-pull worker (RFC §C1) is separate Lua code with its own review scope.
 
 ## Supply chain
 

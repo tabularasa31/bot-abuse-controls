@@ -11,7 +11,7 @@
 -- Six cases from the B5 acceptance:
 --   1. normal pull (200 → entries in shared dict, gen bumped, old swept)
 --   2. 304 → entries not touched, generation not lost (regression
---      from RFC §В1 round-3 review)
+--      from RFC §C1 round-3 review)
 --   3. timeout / connection error → log + skip, no dict mutation
 --   4. malformed JSON → log + skip
 --   5. decode returns string/number → log + skip

@@ -16,7 +16,7 @@ import (
 )
 
 // defaultVersion — semver, который Store отдаёт до первой загрузки. Он же
-// уходит в X-Catalog-Version (заголовок ставится всегда — контракт §В1).
+// уходит в X-Catalog-Version (заголовок ставится всегда — контракт §C1).
 // "0.0.0" по semver значит "пред-релиз / пусто"; edge может опираться на
 // смену major-сегмента, чтобы понять breaking-change схемы payload'а.
 const defaultVersion = "0.0.0"

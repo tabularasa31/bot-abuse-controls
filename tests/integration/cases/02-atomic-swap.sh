@@ -2,7 +2,7 @@
 # B13 case 2 — atomic swap under load.
 #
 # Contract: a Channel C pull replaces the antibot_policy shared_dict
-# atomically (RFC §В1: write new gen → flip meta:gen → sweep old gen).
+# atomically (RFC §C1: write new gen → flip meta:gen → sweep old gen).
 # A reader that picks up the gen before or after the flip sees a
 # consistent snapshot; the flip itself never exposes the dict in a
 # half-written state.

@@ -1,6 +1,6 @@
 -- Key format for the tls_fp blocklist shared_dict: `fp .. ":" .. gen`.
 --
--- Keying by generation lets a catalog swap (§В1) write the new generation,
+-- Keying by generation lets a catalog swap (§C1) write the new generation,
 -- flip meta:tls_fp_blocklist_gen, then drop the old one — readers move to the new
 -- set atomically without a per-key race. This module is the single owner of
 -- that format so the §A1 read (verdict.lua), the static seed (init.lua) and
@@ -37,7 +37,7 @@ function _M.parse_value(v)
 end
 
 -- Inverse of key(): if `key` belongs to generation `gen` return the bare fp,
--- else nil. Used by the /__admin view and the §В1 pull's old-generation sweep.
+-- else nil. Used by the /__admin view and the §C1 pull's old-generation sweep.
 function _M.match(key, gen)
     local suffix = ":" .. gen
     if key:sub(-#suffix) == suffix then

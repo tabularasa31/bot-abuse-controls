@@ -7,7 +7,7 @@
 //   - ?site=<host>                   — per-tenant фильтрация (combined UA regex,
 //     per-resource ip_*, policy/attack_mode).
 //   - If-None-Match: "<etag>"        — 304 без тела, если payload не менялся.
-//   - X-Catalog-Version: <semver>    — версия схемы payload (RFC §В1).
+//   - X-Catalog-Version: <semver>    — версия схемы payload (RFC §C1).
 //   - ETag: "<sha256-hex>"           — strong, content-hash.
 //   - 503 Service Unavailable        — Store пуст (никто не вызвал Replace);
 //     fail-closed, чтобы эдж не "успешно" принимал пустые катаолги.
@@ -115,7 +115,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Контракт §В1: X-Catalog-Version всегда, ETag всегда, тело — только
+	// Контракт §C1: X-Catalog-Version всегда, ETag всегда, тело — только
 	// если If-None-Match не совпал.
 	h := w.Header()
 	h.Set("X-Catalog-Version", snap.Version)

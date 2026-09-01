@@ -689,7 +689,7 @@ Strictness — доменный тоггл (в Bot & Abuse Controls подклю
 
 **Чего на backend НЕТ в v1:**
 
-- Per-request scoring (grey-verdict callouts §В2 из RFC) — не используется
+- Per-request scoring (grey-verdict callouts §C2 из RFC) — не используется
 - ML / heavy analytics
 - Per-request верификация чего бы то ни было — все на proxy
 

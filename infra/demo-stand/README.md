@@ -425,8 +425,8 @@ and the cascade behaves identically.
 
 ## What this does NOT show
 
-- **Hot-reload of the blocklist** (cascade task В1). The demo uses a static blocklist loaded at init.
-- **Grey-verdict / sidecar scoring** (cascade task В2). The demo is edge-only.
+- **Hot-reload of the blocklist** (cascade task C1). The demo uses a static blocklist loaded at init.
+- **Grey-verdict / sidecar scoring** (cascade task C2). The demo is edge-only.
 - **JS challenge issuance** (cascade task A8). The demo blocks or allows; no challenge flow.
 - **Rate limiting** (cascade task A3). Each request is independent.
 - **UA↔JA consistency** (cascade task A5). The demo's blocklist doesn't include this signal.
@@ -471,7 +471,7 @@ infra/demo-stand/
 | "What if it crashes my edge?" | [`docs/security-review.md`](../../docs/security-review.md) §"Fail-open philosophy" — the pipeline never `ngx.exit(5xx)`s itself. If our Lua throws, the request is served. Worst case: we don't block. We never break. |
 | "How much overhead per request?" | PoC #2 ранее измерил ~32 K RPS allow path vs ~40 K baseline on a 4-core MacBook (бенчмарк-стенд из репо выпилен; `/baseline/` passthrough тоже убран в Phase 1). |
 | "How do I roll it back?" | Single config-line change (per [ADR-002](../../docs/architecture-decisions/002-spike-2-lua-ssl-vars.md) consequences). Per-Host rollback to observe-only is one PATCH against `/antibot/v1/policy/<host>` flipping `mode` back to `shadow` — Channel C delivers the change to the edge in ≤30s without redeploy. |
-| "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §А explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
+| "Why not just use cloudflare/qrator/foxio/etc?" | RFC [`docs/architecture/edge-lua-vs-sidecar.md`](../../docs/architecture/edge-lua-vs-sidecar.md) §A explains: lua-nginx-module is already on the edge; this is additive, not a stack replacement. |
 | "What do I monitor?" | The `EDGE_STATS` stdout dump → Loki (`{kind="edge_stats"}`): edge-deny drops, TLS rejects, cache ratio, fp_unique, catalog staleness, `commit` / `cascade_version`. Per-request detail via `{kind="bac_log"}`. Operational procedures (secret rotation, mode toggle, catalog rollback, challenge version pinning) are in [`docs/runbooks/`](../../docs/runbooks/). |
 
 ## Divergence WARN triage

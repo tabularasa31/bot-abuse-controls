@@ -1,27 +1,26 @@
 # bot-abuse-controls
 
-Bot & Abuse Controls v1 — антибот-каскад для CDN-эджа (OpenResty/Lua) с централизованным control plane.
+Bot & Abuse Controls v1 — an antibot cascade for a CDN edge (OpenResty/Lua) with a centralized control plane.
 
-Реализует архитектурное решение из [RFC edge Lua vs Go sidecar](docs/architecture/edge-lua-vs-sidecar.md) + [config-distribution.md](docs/architecture/config-distribution.md): фильтрация — на edge через OpenResty/Lua, control plane (каталоги, dashboard, rDNS, log sink) — централизованный Go-сервис [`antibot-backend/`](antibot-backend/). Per-edge sidecar отменён (см. config-distribution §"What was rejected").
+Implements the architectural decision from the [edge Lua vs Go sidecar RFC](docs/architecture/edge-lua-vs-sidecar.md) and [config-distribution.md](docs/architecture/config-distribution.md): filtering runs at the edge in OpenResty/Lua, while the control plane (catalogs, dashboard, rDNS, log sink) is a centralized Go service, [`antibot-backend/`](antibot-backend/). The per-edge sidecar was dropped — see config-distribution §"What was rejected".
 
-## Структура
+## Layout
 
-- `infra/demo-stand/` — long-running демо-эдж (cascade, B-серия)
-- `infra/demo-backend/` — HA-стек для antibot-backend (Postgres + LB)
-- `antibot-backend/` — централизованный Go-сервис (catalog server + log receiver + rDNS)
-- `docs/architecture/config-distribution.md` — двухканальная модель (Channel A Puppet + Channel C HTTP pull)
-- `docs/architecture/edge-lua-vs-sidecar.md` — исторический RFC (superseded ADR-005)
+- `infra/demo-stand/` — long-running demo edge (the cascade itself)
+- `infra/demo-backend/` — HA stack for antibot-backend (Postgres + LB)
+- `antibot-backend/` — centralized Go service (catalog server + log receiver + rDNS)
+- `docs/architecture/config-distribution.md` — the two-channel model (Channel A Puppet + Channel C HTTP pull)
+- `docs/architecture/edge-lua-vs-sidecar.md` — the historical RFC (superseded by ADR-005)
 
-## Запуск
+## Running it
 
-См. [`infra/demo-stand/README.md`](infra/demo-stand/README.md) для demo-эджа и
-[`antibot-backend/README.md`](antibot-backend/README.md) для backend'a.
+See [`infra/demo-stand/README.md`](infra/demo-stand/README.md) for the demo edge and
+[`antibot-backend/README.md`](antibot-backend/README.md) for the backend.
 
-## Лицензия
+## License
 
-[AGPL-3.0](LICENSE). Сетевое использование считается распространением: если ты
-запускаешь модифицированную версию как сервис, исходники модификаций нужно
-опубликовать.
+[AGPL-3.0](LICENSE). Network use counts as distribution: if you run a modified
+version as a service, you have to publish the source of your modifications.
 
-Два вендоренных Lua-файла остаются под Apache-2.0 — см.
+Two vendored Lua files stay under Apache-2.0 — see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

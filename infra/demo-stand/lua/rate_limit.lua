@@ -52,7 +52,7 @@
 -- правило" logging contract (phase1-spec). Metrics: a fired profile is counted
 -- automatically by log_event.lua as antibot_rule_total{stage="rate_limits",
 -- rule="rate_ip"|...} — the stand's per-rule counter model. (The dedicated
--- lua-resty-prometheus histograms are cascade task В3.)
+-- lua-resty-prometheus histograms are cascade task C3.)
 
 local policy = require "policy"
 

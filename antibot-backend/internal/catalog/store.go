@@ -276,7 +276,7 @@ func buildIPWhitelist(d *Data, site string) ([]byte, error) {
 
 // buildASNDatacenters пишет JSON-объект руками: ключи — числа,
 // json.Marshal(map[uint32]int) выдал бы их в лексикографическом порядке
-// ("10" < "2"), а контракт §В1 — числовой порядок (читаемее в diff'ах
+// ("10" < "2"), а контракт §C1 — числовой порядок (читаемее в diff'ах
 // между версиями каталога).
 func buildASNDatacenters(d *Data) []byte {
 	asns := d.ASNDatacenters // уже sorted+deduped в normalize()
