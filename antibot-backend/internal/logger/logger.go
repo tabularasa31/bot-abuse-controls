@@ -1,8 +1,8 @@
-// Package logger — единая точка сборки slog.Logger для процесса.
+// Package logger — the single assembly point for the process's slog.Logger.
 //
-// Вынесено из main, чтобы (а) тесты могли инстанцировать тот же логгер без
-// дублирования options-блока и (б) если завтра поедем на text-handler в dev
-// или на OTel-exporter, правка остаётся в одном файле.
+// Extracted from main so that (a) tests can instantiate the same logger without
+// duplicating the options block and (b) if we ever move to a text handler in dev
+// or to an OTel exporter, the change stays in one file.
 package logger
 
 import (
@@ -11,14 +11,14 @@ import (
 	"os"
 )
 
-// New — production-логгер: JSON-handler в stdout, уровень Info.
-// Совпадает с тем, что main() писал руками до выноса.
+// New — the production logger: a JSON handler to stdout at level Info.
+// It matches what main() wrote by hand before the extraction.
 func New() *slog.Logger {
 	return NewWithWriter(os.Stdout)
 }
 
-// NewWithWriter — для тестов и переадресации (например, в файл / в bytes.Buffer).
-// Schema идентична New(), отличается только sink.
+// NewWithWriter — for tests and redirection (to a file or a bytes.Buffer, say).
+// The schema is identical to New(); only the sink differs.
 func NewWithWriter(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }

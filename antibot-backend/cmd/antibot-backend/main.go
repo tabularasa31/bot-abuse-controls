@@ -1,16 +1,16 @@
-// antibot-backend — централизованный Go-сервис по ADR-005.
+// antibot-backend — the centralized Go service per ADR-005.
 //
-// Три функции, ничего сверх:
-//  1. catalog server   — отдаёт каталоги на edge по Channel C (B3 наполняет).
-//  2. log receiver     — принимает поток BAC_LOG с эджей (B6/B9 наполняют).
-//  3. rDNS worker      — единственная активная вычислительная задача (B7).
+// Three functions, nothing more:
+//  1. the catalog server   — serves the catalogs to the edge over Channel C (B3 populates it).
+//  2. the log receiver     — accepts the BAC_LOG stream from the edges (B6/B9 populate it).
+//  3. the rDNS worker      — the only active computational task (B7).
 //
-// Сервис stateless поверх своей PostgreSQL. На hot-path не висит: edge при
-// недоступности backend остаётся на последнем хорошем каталоге (fail-stale,
+// The service is stateless on top of its own PostgreSQL. It does not sit on the hot path: when the
+// backend is unavailable the edge stays on the last good catalog (fail-stale,
 // config-distribution §"Channel C / Failure mode").
 //
-// main здесь — только bootstrap-обвязка: логгер, signal-context, передача
-// управления в internal/app. Всё остальное — там.
+// main here is only the bootstrap wiring: the logger, the signal context, and handing
+// control to internal/app. Everything else lives there.
 package main
 
 import (
@@ -25,14 +25,14 @@ import (
 
 func main() { os.Exit(realMain()) }
 
-// realMain — отдельная функция, чтобы defer'ы (signal.Stop через stop())
-// действительно отрабатывали: os.Exit в main мимо них (gocritic
+// realMain — a separate function so that the defers (signal.Stop through stop())
+// really run: an os.Exit in main would bypass them (gocritic
 // exitAfterDefer).
 func realMain() int {
 	log := logger.New()
 
-	// signal.NotifyContext: ctx закрывается на SIGINT/SIGTERM, app.Run
-	// блокирует до этого момента и сам делает graceful shutdown.
+	// signal.NotifyContext: ctx closes on SIGINT/SIGTERM, app.Run
+	// blocks until then and performs the graceful shutdown itself.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

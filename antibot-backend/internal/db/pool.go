@@ -1,8 +1,8 @@
 // Package db opens the pgxpool connection used by all backend modules.
 //
-// Skeleton-уровень: пул либо открыт (если задан POSTGRES_DSN), либо nil.
-// Реальные SQL-запросы появятся в B3 (catalog) / B6/B9 (логи) / B7 (rDNS) +
-// миграции — в B4/B15. Здесь только pool и ping.
+// Skeleton level: the pool is either open (when POSTGRES_DSN is set) or nil.
+// Real SQL queries arrive in B3 (catalog) / B6/B9 (logs) / B7 (rDNS), and
+// the migrations in B4/B15. Only the pool and a ping live here.
 package db
 
 import (

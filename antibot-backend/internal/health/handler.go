@@ -1,12 +1,12 @@
 // Package health serves the /health endpoint the B1 LB round-robins on.
 //
-// Контракт совместим с прошлым плейсхолдером (200 + JSON c "instance"), но
-// теперь honest readiness: если задан pinger (pgxpool) и БД не отвечает за
-// pingTimeout — возвращаем 503 c reason. LB сам выкинет инстанс из ротации,
-// не дожидаясь TCP-уровневых таймаутов.
+// The contract is compatible with the previous placeholder (200 plus JSON with "instance"), but
+// it now does honest readiness: when a pinger (pgxpool) is set and the database does not answer within
+// pingTimeout, we return 503 with a reason. The LB removes the instance from rotation itself,
+// without waiting for TCP-level timeouts.
 //
-// Liveness/readiness split на скелете не делаем: один эндпоинт, B1-substrate
-// и так держит depends_on=service_healthy перед стартом backend.
+// We do not split liveness from readiness on the skeleton: one endpoint, and the B1 substrate
+// already holds depends_on=service_healthy before the backend starts.
 package health
 
 import (
@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// Pinger — минимальный интерфейс, под который подходит *pgxpool.Pool,
-// чтобы пакет health не тащил pgx в зависимости.
+// Pinger — the minimal interface *pgxpool.Pool satisfies,
+// so that the health package does not drag pgx into its dependencies.
 type Pinger interface {
 	Ping(ctx context.Context) error
 }
@@ -32,8 +32,8 @@ type response struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// Handler возвращает обработчик /health. pinger=nil — skeleton-режим без БД,
-// /health всегда 200 (используется в smoke-тестах без POSTGRES_DSN).
+// Handler returns the /health handler. pinger=nil means skeleton mode with no database, and
+// /health always returns 200 (used in smoke tests without POSTGRES_DSN).
 func Handler(instance string, pinger Pinger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body := response{

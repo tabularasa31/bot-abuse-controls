@@ -1,5 +1,5 @@
-// rDNS write-сторона поверх pgxpool. Отдельно от worker.go, чтобы тесты
-// не тянули pgx (DB-интерфейс в worker.go покрывает write-контракт).
+// The rDNS write side on top of pgxpool. Kept separate from worker.go so that tests
+// do not pull in pgx (the DB interface in worker.go covers the write contract).
 package rdns
 
 import (
@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PgxWriter реализует DB поверх *pgxpool.Pool. Конструктор берёт пул,
-// чтобы переиспользовать уже открытое соединение из app.New.
+// PgxWriter implements DB on top of *pgxpool.Pool. The constructor takes the pool,
+// to reuse the connection already opened in app.New.
 type PgxWriter struct {
 	pool *pgxpool.Pool
 }
@@ -20,13 +20,13 @@ func NewPgxWriter(pool *pgxpool.Pool) *PgxWriter {
 	return &PgxWriter{pool: pool}
 }
 
-// UpsertVerifiedBot — INSERT … ON CONFLICT (ip). Запись verdict'а для IP
-// перезатирает любой предыдущий: rDNS-проверка идемпотентна по
-// постановке, последняя проверка — авторитетная.
+// UpsertVerifiedBot — INSERT … ON CONFLICT (ip). Writing a verdict for an IP
+// overwrites any previous one: an rDNS check is idempotent by
+// construction, and the latest check is authoritative.
 //
-// verified_at оставляем дефолтным (NOW()), чтобы оператор по таблице
-// видел «когда мы это решили». expires_at — явно от воркера, чтобы
-// тесты могли подменить часы и проверить TTL.
+// verified_at is left at its default (NOW()), so that an operator reading the table
+// can see "when we decided this". expires_at comes explicitly from the worker, so that
+// tests can substitute the clock and check the TTL.
 func (w *PgxWriter) UpsertVerifiedBot(ctx context.Context, ip, family, status string, expiresAt time.Time) error {
 	_, err := w.pool.Exec(ctx, `
 		INSERT INTO verified_bot_ips (ip, bot_name, status, expires_at, verified_at)
@@ -43,9 +43,9 @@ func (w *PgxWriter) UpsertVerifiedBot(ctx context.Context, ip, family, status st
 	return nil
 }
 
-// DeleteExpired удаляет строки с expires_at <= NOW(). dbloader.Load
-// уже фильтрует их при чтении (см. dbloader.go), DELETE здесь — только
-// чтобы таблица не пухла. Возвращает число удалённых для метрики.
+// DeleteExpired removes rows with expires_at <= NOW(). dbloader.Load
+// already filters them on read (see dbloader.go), and the DELETE here only
+// keeps the table from bloating. It returns the number deleted for a metric.
 func (w *PgxWriter) DeleteExpired(ctx context.Context) (int64, error) {
 	tag, err := w.pool.Exec(ctx, `DELETE FROM verified_bot_ips WHERE expires_at <= NOW()`)
 	if err != nil {
