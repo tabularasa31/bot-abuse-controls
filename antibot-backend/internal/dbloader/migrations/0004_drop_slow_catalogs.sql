@@ -1,5 +1,5 @@
 -- 0004_drop_slow_catalogs.sql — the slow catalogs moved into the catalogs/ git
--- repo (see ADR-006). The database remains only for the runtime state that
+-- repo. The database remains only for the runtime state that
 -- changes automatically and does not suit files by nature: verified_bot_ips
 -- (the rDNS worker) and policy (antibotapi from the dashboard).
 --

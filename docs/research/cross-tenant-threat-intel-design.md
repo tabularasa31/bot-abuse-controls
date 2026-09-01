@@ -1,8 +1,8 @@
 # Design #6 — cross-tenant threat intel (the network effect)
 
 > **Status: PLANNED / design draft.** Not implemented. This is idea #6 from
-> [bot-detector-roadmap.md](bot-detector-roadmap.md). It builds on ADR-006 (global
-> catalogs), B9 (the log receiver), Channel C (B5/B6), G1/G2 (the subnet unit) and
+> [bot-detector-roadmap.md](bot-detector-roadmap.md). It builds on the global
+> catalogs, B9 (the log receiver), Channel C (B5/B6), G1/G2 (the subnet unit) and
 > the solve-rate work (solve rate).
 
 ## The idea in one line
@@ -26,7 +26,7 @@ react in seconds rather than minutes.
 
 | | Slow tier (ALREADY exists) | Fast tier (NEW) |
 |---|---|---|
-| What | `tls_fp_blocklist` / `asn_datacenters` (ADR-006) | the `active_threats` hot list |
+| What | `tls_fp_blocklist` / `asn_datacenters` | the `active_threats` hot list |
 | Confidence | high, **human-gated** (PR) | automatic, during an attack |
 | TTL | permanent (until auto-demote) | minutes to hours, **self-expiring** |
 | Action at the tenant | block/challenge per policy | **pre-arm only** (challenge-first), NOT an auto-block |

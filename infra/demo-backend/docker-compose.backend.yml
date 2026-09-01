@@ -1,7 +1,7 @@
 # antibot-backend demo stack — PostgreSQL + HA backend pair behind a
 # TLS-terminating LB. Substrate (compose/certs/LB) is [B1]; the backend image
 # is the real Go service from [B2] (catalog server + log receiver + rDNS
-# worker, ADR-005). App-level deploy with migrations is still [B15].
+# worker). App-level deploy with migrations is still [B15].
 #
 # Run on the demo VM:
 #   cp .env.example .env && edit .env   # set POSTGRES_PASSWORD
@@ -34,7 +34,7 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # The HA pair ADR-005 requires. Both instances run the same Go binary from
+  # The HA pair. Both instances run the same Go binary from
   # antibot-backend/ (B2): catalog server + log receiver + rDNS worker. They
   # depend on Postgres being healthy before start.
   backend-1:
@@ -50,7 +50,7 @@ services:
       # The slow catalogs (tls_fp_blocklist / ua_blacklist / ...) live in the git repo
       # at ../../catalogs/, mounted below as a read-only volume. Both
       # replicas read the same snapshot (the mtime cache in the reloader guards against
-      # redundant YAML parses between ticks). See ADR-006.
+      # redundant YAML parses between ticks).
       CATALOGS_DIR: "/catalogs"
       # [B9] the disk queue for the BAC_LOG sink. The path inside the container matches
       # the volume mounted below; without it, PostgreSQL downtime would lose

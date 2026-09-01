@@ -34,7 +34,7 @@ chosen deliberately rather than drifted into.
 
 The product is a **programmable L7 security edge**: an OpenResty reverse proxy that
 **terminates TLS** and runs a verdict cascade, with a Go backend
-(`antibot-backend`), catalog delivery over Channel C (ADR-005/006) and a
+(`antibot-backend`), catalog delivery over Channel C and a
 shadow→staging→active workflow.
 
 The main consequence is that **where we physically sit determines the boundary of the
@@ -93,9 +93,9 @@ Not "yet another WAF" — on bare signatures, mature engines will outrun us. Wha
 distinctive here:
 
 1. **TLS/JA4 fingerprinting plus behaviour.** Most WAFs do not do this; we already
-   compute the fingerprint at the edge (ADR-002/004). It catches bots signatures never
+   compute the fingerprint at the edge. It catches bots signatures never
    see.
-2. **Channel C plus git catalogs plus shadow→staging→active** (ADR-006). Operational
+2. **Channel C plus git catalogs plus shadow→staging→active**. Operational
    maturity in rule delivery, out of the box, is rare. WAF signatures drop into the same
    workflow.
 3. **Cross-tenant threat intel.** An attack on one tenant is immunity for the rest. A

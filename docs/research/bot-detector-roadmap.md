@@ -78,8 +78,8 @@ diversifying event sources, and a daily-snapshot diff of the evidence chain
 ### #6 — Cross-tenant threat intel (the network effect)
 An attack on one customer is free reconnaissance protecting all the others. The
 principle: **the attacker's reputation (fp/subnet/ASN) is global, the enforcement
-stance (attack_mode/drop) is per tenant**. The global catalogs (ADR-006:
-`tls_fp_blocklist` / `ua_blacklist` / `asn_datacenters`) are already
+stance (attack_mode/drop) is per tenant**. The global catalogs
+(`tls_fp_blocklist` / `ua_blacklist` / `asn_datacenters`) are already
 cross-tenant — that is the slow, PR-gated tier. What is new is a **fast tier**: a
 short-TTL hot list of active attackers, auto-published during an attack and
 pre-arming ALL edges (challenge-first, a lower threshold), so that when a botnet

@@ -58,7 +58,7 @@ As part of the demo stack (an HA pair behind a TLS LB plus Postgres) — see
 | `HTTP_ADDR` | `:8080` | the HTTP listen address. The B1 substrate's LB comes here. |
 | `INSTANCE_NAME` | hostname | the label in `/health` and the logs (for round-robin checks). |
 | `POSTGRES_DSN` | empty | the DSN for pgxpool. Empty means skeleton mode with no DB (Channel C answers 503). |
-| `CATALOGS_DIR` | `./catalogs` | the directory of slow catalogs from product (ADR-006). Without files there, Bootstrap fails. |
+| `CATALOGS_DIR` | `./catalogs` | the directory of slow catalogs from product. Without files there, Bootstrap fails. |
 | `CATALOG_RELOAD_INTERVAL` | `5s` | how often the backend rereads the catalogs (files plus DB → Merge → Store). Shorter than the 30 s edge poll, so that changes arrive within ≤30 s. |
 | `MIGRATE_ON_STARTUP` | `true` | run the embedded migrations before the HTTP start when `POSTGRES_DSN` is set. `false` for production scenarios with an external migrator (B15). |
 | `RDNS_INTERVAL` | `30m` | a deprecated knob from the B2 skeleton. In B7 the worker is reactive (triggered by the log stream) with no periodic tick; the parameter is ignored. |
@@ -70,7 +70,7 @@ As part of the demo stack (an HA pair behind a TLS LB plus Postgres) — see
 
 ## The PostgreSQL schema
 
-After ADR-006 only the runtime tables remain in the database:
+Only the runtime tables live in the database:
 - `policy` — per-host settings, written through antibotapi from the dashboard;
 - `verified_bot_ips` — written by the rDNS worker (B7);
 - `logs` — the BAC_LOG receiver (B9).

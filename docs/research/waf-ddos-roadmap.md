@@ -4,8 +4,8 @@
 > grow the product after closing the C series (challenge) and D1 (scoring)" towards
 > WAF and anti-DDoS. Nothing described below is **implemented** in the stand until
 > it has explicitly moved into [ROADMAP.md](../../ROADMAP.md) → "IN PLACE TODAY".
-> Do not present it as done. The WAF engine is deliberately left as a
-> **research/ADR candidate** (build versus buy is unresolved) — see §3. Volumetric
+> Do not present it as done. The WAF engine is deliberately left as
+> **an open question** (build versus buy is unresolved) — see §3. Volumetric
 > L3/L4 is included in the roadmap on request, but honestly marked as **outside the
 > OpenResty stand** (reality level 3 per the project scope) — see §4.3.
 >
@@ -44,7 +44,7 @@ Three conclusions that set the direction:
    DDoS is an explicit goal (§"cutting off DDoS bots") while WAF is mentioned only
    indirectly (XSS, as the reason for `HttpOnly` on the cookie). This is **greenfield**.
 3. **The delivery and observability infrastructure is reusable.** Channel C
-   (`catalog_pull.lua`, the ADR-006 git catalogs), shadow/active mode
+   (`catalog_pull.lua`, the git catalogs), shadow/active mode
    (`policy.enforce`), staged rollout (staging→active), the structured log
    (`bac_log.lua`), the metrics and the kill switch  all get reused for both WAF
    signatures and DDoS rules, with nothing to reinvent.
@@ -70,7 +70,7 @@ This preserves the rules-reference invariant: "the only decision point is L5", a
 flags do not issue verdicts themselves (apart from the explicit hard-block exit points
 under `policy.enforce`).
 
-## 3. WAF — L7 content inspection (build versus buy NOT decided → an ADR candidate)
+## 3. WAF — L7 content inspection (build versus buy NOT decided)
 
 ### 3.1 What is in the MVP scope
 A minimal useful WAF at the edge:
@@ -89,7 +89,7 @@ Out of MVP scope: ML anomaly detection on bodies, full CRS paranoia level 3+, an
 anti-evasion normalisation of every conceivable encoding (a long tail, added
 iteratively).
 
-### 3.2 The engine fork — needs a spike plus an ADR (decision deferred)
+### 3.2 The engine fork — needs a spike before the decision (deferred)
 
 **Option A — integrate [Coraza](https://github.com/corazawaf/coraza) plus OWASP CRS.**
 Coraza is a Go implementation of ModSecurity seclang, with
@@ -98,7 +98,7 @@ Set is a set proven over years.
 - **+** Instant Top 10 coverage, maintained rules, seclang familiar to operators.
 - **−** Someone else's rule model, outside our Channel C / shadow mode / `bac_log`;
   we either pull it in as a Go service (another `auth_request` hop — which we already
-  rejected in ADR-001 in favour of edge Lua) or look for a Lua binding of questionable
+  rejected in favour of edge Lua) or look for a Lua binding of questionable
   maturity. Body-inspection latency on every request needs measuring. CRS is famous for
   false positives and would need tuning that does not fit our staging→active workflow
   out of the box.
@@ -106,7 +106,7 @@ Set is a set proven over years.
 **Option B — our own ruleset in the style of the cascade.**
 A `waf.lua` stage with our own signatures; catalogs (`waf_rules.yaml`) over Channel C
 exactly like `tls_fp_blocklist`; shadow/active through `policy.enforce`; flags in
-`bac_log`; staged rollout and `git revert` for free (ADR-006).
+`bac_log`; staged rollout and `git revert` for free.
 - **+** One architecture: the same log, metrics, kill switch, mode gate, PR workflow
   and CI validation of rules. Controlled latency (we inspect exactly what we chose to).
 - **−** We own completeness and anti-evasion ourselves. Coverage grows slowly. The risk
@@ -116,12 +116,12 @@ exactly like `tls_fp_blocklist`; shadow/active through `policy.enforce`; flags i
 signatures** as data in our catalog format. We take proven patterns but run them
 through our machine and workflow.
 
-**Recommendation: spike before committing.** Run a research spike (modelled on
-`infra/nginx-lua-poc/spikes/` from ADR-002): (1) measure per-request body-inspection
+**Recommendation: spike before committing.** Run a research spike: (1) measure
+per-request body-inspection
 latency for a Coraza integration versus native Lua inspection on a representative body;
 (2) assess whether CRS tuning fits shadow→staging→active; (3) estimate the size of our
-own signature core for the Top 10. Then write **ADR-007 "WAF engine: build vs buy"**.
-No code lands before that ADR.
+own signature core for the Top 10. Then settle **the WAF engine: build versus buy**
+in writing. No code lands before that decision.
 
 ### 3.3 Open questions for the WAF
 - Body inspection requires **buffering** it (`lua_need_request_body` / reading
@@ -198,7 +198,7 @@ infrastructure:
   "drop this at L3/L4" signal (format, transport) for the network layer to execute. This
   is an **edge-ACL feed**, an analogue of `ip_blocklist` but for a firewall rather than
   for Lua;
-- write a **research ADR/design** for eBPF/XDP dropping as a future phase, without
+- write a **research design** for eBPF/XDP dropping as a future phase, without
   implementing it in production.
 - do NOT assume an integration with a production edge's configuration management.
   If a production network layer becomes necessary, that is a separate phase.
@@ -238,7 +238,7 @@ rate)**.
 | API scraping / abuse | partly covered by `rate_api`  and `rate_scan_urls`; new: per-API-key quotas | ★★★ |
 | API key brute force / leaked key | rate limits plus reputation per key | ★★★ |
 | Enumeration / BOLA probing | overlaps with `rate_scan_urls` (recon URIs) | ★★ |
-| Schema/contract enforcement | partly hygiene, partly **WAF** (§3) — the boundary goes in an ADR | ★★ |
+| Schema/contract enforcement | partly hygiene, partly **WAF** (§3) — the boundary needs pinning down | ★★ |
 | Business-logic abuse (coupons, scalping) | needs application context → **backend**, not the edge | ★ out of scope |
 
 ### 5.3 What gets reused
@@ -267,14 +267,14 @@ P covers the auth-credential-abuse and rate/quota domains. Tickets are in §7.
 - **Business-logic abuse** — needs application context, outside the edge.
 - **Credential stuffing** at the edge means volume plus failed ratio plus bot score,
   **not** checking a password against a breach list (the edge never touches passwords).
-- **Schema enforcement** partly bleeds into WAF (§3) — pin the boundary in an ADR so it
+- **Schema enforcement** partly bleeds into WAF (§3) — pin the boundary in writing so it
   does not duplicate the W series.
 
 ### 5.6 The `Q` series — the second wave (API contract / governance / transport), filed
 P covers only the abuse-control slice (auth plus quotas). Full API protection is broader;
 the second wave adds what is edge-reachable but was not in P (domains 4/7/8 plus part of
 1/3). This is a **positive model** (an allowlist of what is permitted), complementary to
-the negative WAF model (§3, the `W` series); the Q↔W boundary goes in an ADR. Tickets are
+the negative WAF model (§3, the `W` series); the Q↔W boundary has to be pinned down. Tickets are
 in §7.
 
 | Ticket | What | OWASP API |
@@ -306,12 +306,12 @@ that are absent from the backlog entirely:
 1. **Slow-attacks baseline** (§4.2, [E1]) — the cheapest and most urgent: the stand is
    currently vulnerable to slowloris out of the box (no `limit_conn`, no timeouts). Pure
    nginx config.
-2. **The WAF spike plus ADR-007** (§3.2) — research, does not block the D series, can
+2. **The WAF spike and the build-versus-buy decision** (§3.2) — research, does not block the D series, can
    start early.
 3. **API security / account protection** (§5) — cheaper than WAF because it is closer to
    the core (rate/reputation/challenge/fingerprint). The foundation is
    identity-extraction (§5.4).
-4. **WAF MVP** (§3.1) — after the ADR, along whichever path it chooses.
+4. **WAF MVP** (§3.1) — after that decision, along whichever path it chooses.
 5. **HTTP/2 DoS audit** (§4.2, [E4]) — targeted, depends on the build version.
 6. **The DDoS L3/L4 contract** (§4.3) — design the edge-ACL feed; implementing the
    network-level drop is a future phase with production access.
@@ -330,9 +330,9 @@ that are absent from the backlog entirely:
   as a signal, depends on R2 ). Reuses `bac_log`, the metrics, G1 reputation
   and the edge ACL.
 - **WAF — there is NO such axis in the backlog** (checked: 0 tasks on WAF/SQLi/XSS).
-  Proposed as a `W` series: W1 spike/ADR-007, W2 the engine, W3 the signature catalog
+  Proposed as a `W` series: W1 the spike and the engine decision, W2 the engine, W3 the signature catalog
   over Channel C, W4 a per-host WAF profile in the policy, W5 virtual patching. Reuses
-  ADR-006 (git catalogs), B10 (the Policy API) and `policy.enforce` (the mode gate),
+  the git catalogs, B10 (the Policy API) and `policy.enforce` (the mode gate),
   plus `bac_log` and the metrics.
 - **API security / account protection — filed (§5.4, the `P` series):** [P1] (identity extraction), [P2] (per-key/per-account profiles), [P3]
   (failed-auth feedback), [P4] (auth-endpoint policy config),
@@ -344,7 +344,7 @@ that are absent from the backlog entirely:
   research, not as an implementation (reality level 3).
 
 ## 8. What we are NOT doing at this step
-- No WAF code lands before ADR-007 (build versus buy is settled by the spike).
+- No WAF code lands before build versus buy is settled by the spike.
 - No more **rate-based** L7 DDoS tickets — that is the G series (G1–G4), already in the
   backlog.
 - Slow attacks and HTTP/2 DoS are not added as cascade stages — they sit below
