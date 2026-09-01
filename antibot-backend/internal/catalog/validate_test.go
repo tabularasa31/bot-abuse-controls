@@ -2,16 +2,16 @@ package catalog
 
 import "testing"
 
-// PR #43 review follow-up: Validate должна принимать ровно то же
-// подмножество, что edge'овый lua-resty-ipmatcher — а не строгий
-// netip.ParsePrefix. См. validateCIDR.
+// A review follow-up: Validate must accept exactly the same
+// subset as the edge's lua-resty-ipmatcher — not the strict
+// netip.ParsePrefix. See validateCIDR.
 func TestValidate_CIDRAcceptsSameSetAsIpmatcher(t *testing.T) {
 	good := []string{
-		"203.0.113.0/24", // канонический IPv4 prefix
-		"198.51.100.5",   // bare IPv4 — ipmatcher трактует как /32
-		"10.0.0.5/8",     // host-биты заданы — ipmatcher маскирует
-		"2001:db8::/32",  // канонический IPv6 prefix
-		"2001:db8::1",    // bare IPv6 — ipmatcher трактует как /128
+		"203.0.113.0/24", // a canonical IPv4 prefix
+		"198.51.100.5",   // a bare IPv4 — ipmatcher treats it as /32
+		"10.0.0.5/8",     // host bits are set — ipmatcher masks them
+		"2001:db8::/32",  // a canonical IPv6 prefix
+		"2001:db8::1",    // a bare IPv6 — ipmatcher treats it as /128
 	}
 	bad := []string{
 		"999.0.0.0/33",
@@ -23,20 +23,20 @@ func TestValidate_CIDRAcceptsSameSetAsIpmatcher(t *testing.T) {
 	for _, c := range good {
 		d := &Data{IPBlocklist: map[string]string{c: "block"}}
 		if err := Validate(d); err != nil {
-			t.Errorf("Validate отвергла валидный CIDR/IP %q: %v", c, err)
+			t.Errorf("Validate rejected the valid CIDR/IP %q: %v", c, err)
 		}
 	}
 	for _, c := range bad {
 		d := &Data{IPBlocklist: map[string]string{c: "block"}}
 		if err := Validate(d); err == nil {
-			t.Errorf("Validate приняла мусор %q без ошибки", c)
+			t.Errorf("Validate accepted the junk %q without an error", c)
 		}
 	}
 }
 
-// 86exrefdz: Policy.OriginIP — пусто (тенант не проксируется) или одиночный
-// bare-адрес. Префиксы/мусор должны валиться до Store.Replace, иначе
-// reloader fail-stale на следующем тике (симметрия с ValidateOriginIP в
+// Policy.OriginIP — empty (a non-proxied tenant) or a single
+// bare address. Prefixes and junk must fail before Store.Replace, otherwise the
+// reloader goes fail-stale on the next tick (symmetric with ValidateOriginIP in
 // antibotapi).
 func TestValidate_PolicyOriginIP(t *testing.T) {
 	for _, ip := range []string{"", "203.0.113.9", "2001:db8::1"} {
@@ -57,19 +57,19 @@ func TestValidate_PolicyOriginIP(t *testing.T) {
 	}
 }
 
-// PR #43 review (Angle A): normalize должен coerce-нить системные срезы
-// nil → []T{}, не только per-host policy. Иначе json.Marshal эмитит
-// `null` на пустой БД, ETag дрейфит.
+// From review: normalize must coerce the system slices
+// nil → []T{}, not only the per-host policy. Otherwise json.Marshal emits
+// `null` on an empty database and the ETag drifts.
 func TestNormalize_SystemSlicesNotNilAfterEmpty(t *testing.T) {
-	d := &Data{} // все срезы nil
+	d := &Data{} // every slice is nil
 	normalize(d)
 	if d.UABlacklist == nil {
-		t.Errorf("UABlacklist остался nil после normalize")
+		t.Errorf("UABlacklist stayed nil after normalize")
 	}
 	if d.IPWhitelist == nil {
-		t.Errorf("IPWhitelist остался nil после normalize")
+		t.Errorf("IPWhitelist stayed nil after normalize")
 	}
 	if d.ASNDatacenters == nil {
-		t.Errorf("ASNDatacenters остался nil после normalize")
+		t.Errorf("ASNDatacenters stayed nil after normalize")
 	}
 }

@@ -7,8 +7,8 @@ import (
 )
 
 // TestLoad_MigrateOnStartup_AcceptsCaseVariants — PR #43 review (Angle A):
-// раньше switch'е по литералам отказывал на 'True'/'False'/'FALSE', хотя
-// они идиоматичны для YAML/k8s-secret. Сейчас через strconv.ParseBool.
+// the earlier switch over literals refused 'True'/'False'/'FALSE', even though
+// they are idiomatic for YAML and k8s secrets. It now goes through strconv.ParseBool.
 func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -48,12 +48,12 @@ func TestLoad_MigrateOnStartup_AcceptsCaseVariants(t *testing.T) {
 func TestLoad_MigrateOnStartup_RejectsGarbage(t *testing.T) {
 	t.Setenv("MIGRATE_ON_STARTUP", "maybe")
 	if _, err := config.Load(); err == nil {
-		t.Fatal("Load: ожидалась ошибка для невалидного MIGRATE_ON_STARTUP")
+		t.Fatal("Load: an error was expected for an invalid MIGRATE_ON_STARTUP")
 	}
 }
 
-// TestLoad_DashboardAPIToken — пустой по умолчанию (fail-closed: handler
-// не регистрируется), читается из ENV.
+// TestLoad_DashboardAPIToken — empty by default (fail-closed: the handler
+// is not registered), read from ENV.
 func TestLoad_DashboardAPIToken(t *testing.T) {
 	t.Run("default empty", func(t *testing.T) {
 		t.Setenv("DASHBOARD_API_TOKEN", "")

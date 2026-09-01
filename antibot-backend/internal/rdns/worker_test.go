@@ -1,10 +1,10 @@
-// rDNS worker unit tests. DNS-зависимости и DB замоканы — тесту не нужны
-// ни сеть, ни Postgres. Покрываем:
-//   - FamilyOfUA (классификатор UA → семья).
-//   - classify: верный PTR+forward → verified; чужой суффикс → rejected;
-//     forward не указал на исходный IP → rejected; NXDOMAIN → rejected.
-//   - Enqueue: дедуп через CatalogStore и через in-flight.
-//   - GC: возвращает 0 без ошибок; counter инкрементируется на > 0.
+// rDNS worker unit tests. The DNS dependencies and the DB are mocked — the test needs
+// neither the network nor Postgres. We cover:
+//   - FamilyOfUA (the UA → family classifier).
+//   - classify: a correct PTR plus forward → verified; a foreign suffix → rejected;
+//     a forward that did not point at the original IP → rejected; NXDOMAIN → rejected.
+//   - Enqueue: deduplication through CatalogStore and through in-flight.
+//   - GC: it returns 0 with no errors; the counter increments above 0.
 package rdns
 
 import (
@@ -101,7 +101,7 @@ func TestFamilyOfUA(t *testing.T) {
 		{"Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", FamilyBing},
 		{"Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)", FamilyYandex},
 		{"DuckDuckBot/1.0; (+http://duckduckgo.com/duckduckbot.html)", FamilyDDG},
-		// Кейс не нормализуется наружу — мы смотрим только содержит ли.
+		// The case is not normalised outwards — we only check containment.
 		{"GOOGLEBOT", FamilyGoogle},
 		{"curl/7.81", ""},
 		{"", ""},
@@ -126,7 +126,7 @@ func TestClassify_VerifiedGooglebot(t *testing.T) {
 }
 
 func TestClassify_RejectsForeignSuffix(t *testing.T) {
-	// PTR в чужой зоне — должно быть rejected без forward-lookup.
+	// A PTR in a foreign zone — it must be rejected with no forward lookup.
 	r := &fakeResolver{
 		addr: map[string][]string{"1.2.3.4": {"impostor.example.org."}},
 	}
@@ -138,8 +138,8 @@ func TestClassify_RejectsForeignSuffix(t *testing.T) {
 }
 
 func TestClassify_RejectsForwardMismatch(t *testing.T) {
-	// PTR в правильной зоне, но forward DNS не указал на исходный IP —
-	// классическая подмена PTR. Должно быть rejected.
+	// A PTR in the right zone, but forward DNS did not point at the original IP —
+	// the classic PTR forgery. It must be rejected.
 	r := &fakeResolver{
 		addr: map[string][]string{"1.2.3.4": {"fake.googlebot.com."}},
 		host: map[string][]string{"fake.googlebot.com": {"5.6.7.8"}},
@@ -177,7 +177,7 @@ func TestEnqueue_DedupesInFlight(t *testing.T) {
 	r := &fakeResolver{}
 	w := newTestWorker(t, r, &fakeCatalog{}, &fakeDB{})
 	w.Enqueue("1.2.3.4", FamilyGoogle)
-	w.Enqueue("1.2.3.4", FamilyGoogle) // дубль — должен попасть в skipped
+	w.Enqueue("1.2.3.4", FamilyGoogle) // a duplicate — it must land in skipped
 	if len(w.queue) != 1 {
 		t.Errorf("queue len=%d, want 1 (dedup)", len(w.queue))
 	}
@@ -196,7 +196,7 @@ func TestEnqueue_DropsOnFullQueue(t *testing.T) {
 	if counterValue(t, w.dropped) != 1 {
 		t.Errorf("dropped=%v, want 1", counterValue(t, w.dropped))
 	}
-	// In-flight для дропнутой задачи должен сняться, иначе IP залип.
+	// In-flight for a dropped task must be cleared, otherwise the IP is stuck.
 	if _, in := w.inFlight.Load("2.2.2.2"); in {
 		t.Error("in-flight for dropped IP must be cleared")
 	}
@@ -209,7 +209,7 @@ func TestProcess_UpsertsAndIncrementsMetric(t *testing.T) {
 	}
 	db := &fakeDB{}
 	w := newTestWorker(t, r, &fakeCatalog{}, db)
-	// Фиксируем часы — TTL должен сесть ровно на now+1ч.
+	// We pin the clock — the TTL must land exactly on now+1 h.
 	frozen := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return frozen }
 
@@ -233,17 +233,17 @@ func TestProcess_UpsertsAndIncrementsMetric(t *testing.T) {
 }
 
 func TestProcess_SkipsPersistOnShutdownInducedReject(t *testing.T) {
-	// P1: classify не различает authoritative-NXDOMAIN от ctx.Canceled —
-	// оба превращаются в "rejected". При parent ctx canceled во время
-	// shutdown воркер раньше писал бы rejected:family с TTL 1ч,
-	// блокируя legit Googlebot на час. Проверяем: с canceled ctx
-	// upsert НЕ должен происходить.
+	// P1: classify cannot tell an authoritative NXDOMAIN from ctx.Canceled —
+	// both turn into "rejected". With the parent ctx cancelled during a
+	// shutdown, the worker used to write rejected:family with a 1 h TTL,
+	// blocking a legitimate Googlebot for an hour. We check that with a cancelled ctx
+	// no upsert happens.
 	r := &fakeResolver{} // empty maps → LookupAddr returns error
 	db := &fakeDB{}
 	w := newTestWorker(t, r, &fakeCatalog{}, db)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // сразу cancel — имитируем shutdown
+	cancel() // cancel immediately — simulating a shutdown
 	w.process(ctx, task{ip: "66.249.66.1", claimedFamily: FamilyGoogle})
 
 	db.mu.Lock()
@@ -257,8 +257,8 @@ func TestProcess_SkipsPersistOnShutdownInducedReject(t *testing.T) {
 }
 
 func TestEnqueue_HoldsInFlightPastWrite(t *testing.T) {
-	// P2: после успешного upsert'а inFlight должен оставаться занятым
-	// на PostWriteHold, чтобы перекрыть окно до reloader-тика.
+	// P2: after a successful upsert, inFlight must stay occupied
+	// for PostWriteHold, to cover the window until the reloader ticks.
 	r := &fakeResolver{
 		addr: map[string][]string{"66.249.66.1": {"crawl.googlebot.com."}},
 		host: map[string][]string{"crawl.googlebot.com": {"66.249.66.1"}},
@@ -270,19 +270,19 @@ func TestEnqueue_HoldsInFlightPastWrite(t *testing.T) {
 		Config{
 			QueueSize: 16, Workers: 1,
 			DNSTimeout: time.Second, GCInterval: time.Hour,
-			PostWriteHold: time.Hour, // долгий hold — гарантированно не истечёт за тест
+			PostWriteHold: time.Hour, // a long hold — guaranteed not to expire during the test
 		},
 		r, &fakeCatalog{}, db)
 
-	// Идём через полный путь Enqueue → consume(ctx) с одним consumer'ом,
-	// чтобы inFlight реально был заселён до process().
+	// We go through the full path Enqueue → consume(ctx) with a single consumer,
+	// so that inFlight is genuinely populated before process().
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); w.Run(ctx) }()
 
 	w.Enqueue("66.249.66.1", FamilyGoogle)
 
-	// Ждём пока consumer запишет upsert.
+	// We wait for the consumer to write the upsert.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		db.mu.Lock()
@@ -301,13 +301,13 @@ func TestEnqueue_HoldsInFlightPastWrite(t *testing.T) {
 		<-done
 		t.Fatalf("expected 1 upsert, got %d", gotUpserts)
 	}
-	// inFlight должен ещё содержать ip — releaseInFlight отложен на 1ч.
+	// inFlight must still contain the ip — releaseInFlight is deferred by an hour.
 	if _, ok := w.inFlight.Load("66.249.66.1"); !ok {
 		cancel()
 		<-done
-		t.Error("inFlight для записанного IP снят сразу — hold не работает")
+		t.Error("inFlight for the written IP was cleared immediately — the hold is not working")
 	}
-	// Второй Enqueue для того же IP должен быть skipped (inFlight держит).
+	// A second Enqueue for the same IP must be skipped (inFlight holds it).
 	w.Enqueue("66.249.66.1", FamilyGoogle)
 	if counterValue(t, w.skipped) < 1 {
 		t.Errorf("second Enqueue not skipped: skipped=%v", counterValue(t, w.skipped))
@@ -317,7 +317,7 @@ func TestEnqueue_HoldsInFlightPastWrite(t *testing.T) {
 }
 
 func TestRun_ConsumesQueueAndShutsDown(t *testing.T) {
-	// End-to-end через Run: enqueue → consume → upsert → ctx.Done() → stop.
+	// End to end through Run: enqueue → consume → upsert → ctx.Done() → stop.
 	r := &fakeResolver{
 		addr: map[string][]string{"66.249.66.1": {"crawl.googlebot.com."}},
 		host: map[string][]string{"crawl.googlebot.com": {"66.249.66.1"}},
@@ -331,7 +331,7 @@ func TestRun_ConsumesQueueAndShutsDown(t *testing.T) {
 
 	w.Enqueue("66.249.66.1", FamilyGoogle)
 
-	// Polling до 2с — ждём, пока consumer заберёт задачу из очереди.
+	// Polling up to 2 s — we wait for the consumer to take the task off the queue.
 	deadline := time.Now().Add(2 * time.Second)
 	gotOne := false
 	for time.Now().Before(deadline) {
@@ -348,5 +348,5 @@ func TestRun_ConsumesQueueAndShutsDown(t *testing.T) {
 		t.Fatalf("worker did not process the task within 2s")
 	}
 	cancel()
-	<-done // shutdown отработал чисто
+	<-done // the shutdown completed cleanly
 }

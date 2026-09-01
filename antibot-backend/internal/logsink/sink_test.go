@@ -17,12 +17,12 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-// fakeWriter — управляемая ошибка через atomic. Хранит вставленные батчи
-// для проверки.
+// fakeWriter — a controllable error through an atomic. It stores the inserted batches
+// for checking.
 type fakeWriter struct {
 	mu      sync.Mutex
 	batches [][][]any
-	failN   atomic.Int32 // сколько следующих Insert'ов вернут ошибку
+	failN   atomic.Int32 // how many of the next Inserts return an error
 }
 
 func (f *fakeWriter) Insert(_ context.Context, rows [][]any) error {
@@ -115,7 +115,7 @@ func TestParseRow_Roundtrip(t *testing.T) {
 	if _, ok := row[1].(time.Time); !ok {
 		t.Errorf("ts type=%T", row[1])
 	}
-	// raw — последний элемент, должен быть оригинальные байты.
+	// raw is the last element and must be the original bytes.
 	rawBytes, ok := row[len(row)-1].([]byte)
 	if !ok || len(rawBytes) == 0 {
 		t.Errorf("raw bytes missing: %T", row[len(row)-1])
@@ -156,7 +156,7 @@ func TestSink_HappyPath_BatchFlushes(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s.Submit(goodLine(t, "req-h"))
 	}
-	// Размер партии достигнут — флаш должен быть почти мгновенно.
+	// The batch size was reached — the flush must be almost immediate.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if w.totalRows() == 3 {
@@ -181,12 +181,12 @@ func TestSink_FlushOnTimer(t *testing.T) {
 }
 
 func TestSink_DropOnFullQueue(t *testing.T) {
-	// QueueSize=1, не запускаем Run — Submit не drain'ится → второй Submit
-	// должен дропнуть.
+	// QueueSize=1 and we do not start Run — Submit is never drained, so the second Submit
+	// must drop.
 	cfg := Config{QueueSize: 1, BatchSize: 100, FlushInterval: time.Hour}
 	s, _ := newTestSink(t, cfg)
 	s.Submit(goodLine(t, "a"))
-	s.Submit(goodLine(t, "b")) // должен дропнуться
+	s.Submit(goodLine(t, "b")) // must be dropped
 	if got := promCounterValue(t, s.dropped); got != 1 {
 		t.Fatalf("dropped=%v, want 1", got)
 	}
@@ -202,10 +202,10 @@ func TestSink_SpillToDiskOnInsertError(t *testing.T) {
 		FlushInterval: time.Hour,
 		SpoolDir:      dir,
 		SpoolMaxBytes: 1 << 20,
-		DrainInterval: time.Hour, // отключаем drain в этом тесте
+		DrainInterval: time.Hour, // we disable the drain in this test
 	}
 	s, w := newTestSink(t, cfg)
-	w.failN.Store(1) // первый Insert упадёт
+	w.failN.Store(1) // the first Insert fails
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go s.Run(ctx)
@@ -242,7 +242,7 @@ func TestSink_DrainerRecoversSpool(t *testing.T) {
 		DrainInterval: 20 * time.Millisecond,
 	}
 	s, w := newTestSink(t, cfg)
-	w.failN.Store(1) // первый Insert упадёт, второй (drain) пройдёт
+	w.failN.Store(1) // the first Insert fails, the second (the drain) succeeds
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go s.Run(ctx)
@@ -252,7 +252,7 @@ func TestSink_DrainerRecoversSpool(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if w.totalRows() == 1 {
-			// файл должен исчезнуть.
+			// the file must disappear.
 			ents, _ := os.ReadDir(dir)
 			leftover := 0
 			for _, e := range ents {
@@ -279,11 +279,11 @@ func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
 		BatchSize:     1,
 		FlushInterval: time.Hour,
 		SpoolDir:      dir,
-		SpoolMaxBytes: 100, // крошечный потолок — заведомо превысим
+		SpoolMaxBytes: 100, // a tiny ceiling — we will certainly exceed it
 		DrainInterval: time.Hour,
 	}
 	s, w := newTestSink(t, cfg)
-	// Пусть все Insert падают, чтобы все батчи летели в спул.
+	// Let every Insert fail, so that every batch flies into the spool.
 	w.failN.Store(10)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -291,7 +291,7 @@ func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		s.Submit(goodLine(t, "evict"))
-		time.Sleep(20 * time.Millisecond) // гарантируем уникальные UnixNano
+		time.Sleep(20 * time.Millisecond) // we guarantee unique UnixNano values
 	}
 
 	deadline := time.Now().Add(time.Second)
@@ -304,8 +304,8 @@ func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
 	t.Fatal("spool budget did not evict any file")
 }
 
-// listSpoolFiles должен пропускать .quarantine и .partial — иначе
-// drainOnce перечитает уже-в-DB файл и вставит дубликаты (PR-56 review).
+// listSpoolFiles must skip .quarantine and .partial — otherwise
+// drainOnce rereads a file already in the DB and inserts duplicates (from review).
 func TestListSpoolFiles_SkipsQuarantineAndPartial(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{
@@ -364,7 +364,7 @@ func TestSink_ParseErrorSkippedNotSpilled(t *testing.T) {
 	if w.totalRows() != 0 {
 		t.Fatalf("rows inserted=%d, want 0", w.totalRows())
 	}
-	// Спул не должен наполниться — insert вернёт nil при пустых rows.
+	// The spool must not fill up — insert returns nil on empty rows.
 	ents, _ := os.ReadDir(dir)
 	for _, e := range ents {
 		if filepath.Ext(e.Name()) == ".ndjson" {

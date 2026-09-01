@@ -8,15 +8,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// discardLogger — лог в /dev/null для тестов. NewReloader требует *slog.Logger,
-// но проверять формат сообщений в этих тестах не нужно — Bootstrap/tick
-// возвращают error напрямую.
+// discardLogger — logging to /dev/null for the tests. NewReloader requires a *slog.Logger,
+// but these tests need not check message formats — Bootstrap/tick
+// return the error directly.
 func discardLogger(_ *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// discardReg — новый prometheus.Registry на тест, чтобы MustRegister'ы не
-// конфликтовали между запусками одного процесса (parallel test runs).
+// discardReg — a fresh prometheus.Registry per test, so that MustRegister calls do not
+// clash between runs within one process (parallel test runs).
 func discardReg() prometheus.Registerer {
 	return prometheus.NewRegistry()
 }

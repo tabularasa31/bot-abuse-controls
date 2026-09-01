@@ -1,9 +1,9 @@
-// Internal test (same package) для decodeASNBlock — он unexported
-// и не должен экспортироваться: вызывается только из loadPolicy.
+// An internal test (same package) for decodeASNBlock — it is unexported
+// and must stay that way: it is called only from loadPolicy.
 //
-// Покрытие per PR-58 review #6: out-of-range элементы (отрицательные,
-// >2^32-1) скипаются БЕЗ ошибки, чтобы один битый ASN не валил весь
-// catalog-тик → edge fail-stale для всего пула.
+// The coverage per review: out-of-range elements (negative,
+// >2^32-1) are skipped WITHOUT an error, so that one broken ASN does not fail the whole
+// catalog tick → an edge fail-stale for the entire pool.
 package dbloader
 
 import (
@@ -23,15 +23,15 @@ func TestDecodeASNBlock(t *testing.T) {
 		{"valid", "[15169, 13335, 1]", []uint32{15169, 13335, 1}, false},
 		{"with zero", "[0, 1]", []uint32{0, 1}, false},
 		{"max uint32", "[4294967295]", []uint32{4294967295}, false},
-		// Out-of-range элементы скипаются, валидные сохраняются.
+		// Out-of-range elements are skipped and valid ones are kept.
 		{"negative skipped", "[-1, 100, -5, 200]", []uint32{100, 200}, false},
 		{"too big skipped", "[5000000000, 100]", []uint32{100}, false},
 		{"all out of range", "[-1, 5000000000]", []uint32{}, false},
-		// JSON null: НЕ маппим в 0 (default-zero ловушка). PR-58 review #2.
+		// A JSON null: we do NOT map it to 0 (the default-zero trap). From review.
 		{"single null skipped", "[null]", []uint32{}, false},
 		{"null mixed with valid", "[null, 100, null, 200]", []uint32{100, 200}, false},
-		// Битый JSON → ошибка (это уже не «один битый элемент», это поломанное
-		// поле — loader должен fail-stale, а не серебряно скипнуть).
+		// Broken JSON → an error (that is no longer "one broken element", it is a broken
+		// field — the loader must fail stale rather than silently skip it).
 		{"bad json", "not-json", nil, true},
 		{"not array", `{"x":1}`, nil, true},
 	}
@@ -53,9 +53,9 @@ func TestDecodeASNBlock(t *testing.T) {
 }
 
 // TestDecodeASNBlock_EmptyResetsDst — PR-58 review #6: contract «empty
-// input → nil output» должен держаться даже при reuse'aющем caller'е.
-// Раньше функция оставляла dst untouched на empty input → future-refactor
-// с переиспользованием Policy struct silently leak'ал stale ASN.
+// input → nil output" must hold even for a caller that reuses it.
+// The function used to leave dst untouched on an empty input → a future refactor
+// reusing a Policy struct would silently leak a stale ASN.
 func TestDecodeASNBlock_EmptyResetsDst(t *testing.T) {
 	dst := []uint32{1, 2, 3}
 	if err := decodeASNBlock(nil, &dst); err != nil {

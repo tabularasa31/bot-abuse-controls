@@ -1,5 +1,5 @@
-// receiver_test — покрывает parsing + Enqueue-интеграцию. Тестирует только
-// HTTP-handler через httptest; rDNS-зависимости заменены на запись в slice.
+// receiver_test — covers parsing plus the Enqueue integration. It tests only the
+// HTTP handler through httptest; the rDNS dependencies are replaced with writes into a slice.
 package logs_test
 
 import (
@@ -43,7 +43,7 @@ func (e *enq) Enqueue(ip, family string) {
 	e.rows = append(e.rows, row{ip, family})
 }
 
-// классификатор — упрощённый: ищем "Googlebot"/"bingbot" в UA.
+// the classifier is simplified: we look for "Googlebot"/"bingbot" in the UA.
 func classify(ua string) string {
 	switch {
 	case strings.Contains(strings.ToLower(ua), "googlebot"):
@@ -70,10 +70,10 @@ func TestReceiver_EnqueuesBotUAs(t *testing.T) {
 	ts, e := newSrv(t)
 	body := strings.Join([]string{
 		`{"ip":"66.249.66.1","ua":"Googlebot/2.1"}`,
-		`{"ip":"1.2.3.4","ua":"curl/7"}`,                          // не бот — игнор
-		`{"ip":"40.77.167.1","ua":"Mozilla/5.0 ... bingbot/2.0"}`, // бот
-		`{"ip":"","ua":"Googlebot"}`,                              // пустой IP — игнор
-		`{not-json}`,                                              // битый JSON — игнор + parseErr
+		`{"ip":"1.2.3.4","ua":"curl/7"}`,                          // not a bot — ignored
+		`{"ip":"40.77.167.1","ua":"Mozilla/5.0 ... bingbot/2.0"}`, // a bot
+		`{"ip":"","ua":"Googlebot"}`,                              // an empty IP — ignored
+		`{not-json}`,                                              // broken JSON — ignored plus parseErr
 	}, "\n")
 	resp := postLogs(t, ts.URL+"/v1/logs", bytes.NewBufferString(body))
 	defer resp.Body.Close()

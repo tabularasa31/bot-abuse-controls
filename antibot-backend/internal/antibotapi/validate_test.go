@@ -15,13 +15,13 @@ func TestValidateSite(t *testing.T) {
 		{"", true},
 		{"foo.example", false},
 		{"a.b.c.example.com", false},
-		{"single", false},                // single-label internal hostname разрешён
-		{"foo-bar.example.com", false},   // дефис внутри label
+		{"single", false},                // a single-label internal hostname is allowed
+		{"foo-bar.example.com", false},   // a hyphen inside a label
 		{strings.Repeat("a", 63), false}, // max label len
-		{strings.Repeat("a", 64), true},  // > 63 в label
+		{strings.Repeat("a", 64), true},  // > 63 in a label
 		{strings.Repeat("a.", 100) + "z", false},
 		{strings.Repeat("a", 254), true}, // > 253 total
-		// Mусор, который раньше проходил по len-only:
+		// Junk that used to pass the len-only check:
 		{"../etc/passwd", true},
 		{"foo/bar", true},
 		{"foo bar", true},
@@ -30,7 +30,7 @@ func TestValidateSite(t *testing.T) {
 		{".foo.example", true}, // leading dot
 		{"foo.example.", true}, // trailing dot
 		{"foo..bar", true},     // empty label
-		{"foo.例え.jp", true},    // non-ASCII (IDN не поддерживаем)
+		{"foo.例え.jp", true},    // non-ASCII (IDN is not supported)
 		{"foo\x00bar", true},   // NUL
 		{"foo\nbar", true},     // newline (header injection guard)
 		// Public suffixes rejected — the edge parent-domain fallback would
@@ -38,9 +38,9 @@ func TestValidateSite(t *testing.T) {
 		{"com", true},                     // bare gTLD
 		{"org", true},                     // bare gTLD
 		{"co.uk", true},                   // multi-label ccTLD suffix
-		{"xn--p1ai", true},                // .рф (punycode)
+		{"xn--p1ai", true},                // the .рф TLD (punycode)
 		{"example.com", false},            // registrable domain — allowed
-		{"xn--e1afmkfd.xn--p1ai", false}, // пример.рф — registrable, allowed
+		{"xn--e1afmkfd.xn--p1ai", false},  // пример.рф — registrable, allowed
 	}
 	for _, tc := range cases {
 		err := antibotapi.ValidateSite(tc.in)
