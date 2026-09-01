@@ -16,3 +16,12 @@ Bot & Abuse Controls v1 — антибот-каскад для CDN-эджа (Ope
 
 См. [`infra/demo-stand/README.md`](infra/demo-stand/README.md) для demo-эджа и
 [`antibot-backend/README.md`](antibot-backend/README.md) для backend'a.
+
+## Лицензия
+
+[AGPL-3.0](LICENSE). Сетевое использование считается распространением: если ты
+запускаешь модифицированную версию как сервис, исходники модификаций нужно
+опубликовать.
+
+Два вендоренных Lua-файла остаются под Apache-2.0 — см.
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
