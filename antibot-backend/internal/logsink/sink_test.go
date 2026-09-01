@@ -174,10 +174,14 @@ func TestSink_FlushOnTimer(t *testing.T) {
 	go s.Run(ctx)
 
 	s.Submit(goodLine(t, "req-t"))
-	time.Sleep(120 * time.Millisecond)
-	if w.totalRows() != 1 {
-		t.Fatalf("timer flush not triggered: got %d", w.totalRows())
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if w.totalRows() == 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	t.Fatalf("timer flush not triggered: got %d rows", w.totalRows())
 }
 
 func TestSink_DropOnFullQueue(t *testing.T) {
@@ -212,24 +216,18 @@ func TestSink_SpillToDiskOnInsertError(t *testing.T) {
 
 	s.Submit(goodLine(t, "spilled"))
 
+	// spill renames the file into place before bumping the counter, so the file
+	// appearing does not yet mean the metric has moved. Wait for both.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		ents, _ := os.ReadDir(dir)
-		hasBatch := false
-		for _, e := range ents {
-			if filepath.Ext(e.Name()) == ".ndjson" {
-				hasBatch = true
-			}
-		}
-		if hasBatch {
-			if promCounterValue(t, s.spooledFiles) < 1 {
-				t.Fatalf("spooledFiles metric not bumped")
-			}
+		if batches, _ := countSpoolFiles(t, dir); batches > 0 && promCounterValue(t, s.spooledFiles) >= 1 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("spool file not produced after insert error")
+	batches, _ := countSpoolFiles(t, dir)
+	t.Fatalf("spool file not produced after insert error: batch files=%d, spooledFiles=%v",
+		batches, promCounterValue(t, s.spooledFiles))
 }
 
 func TestSink_DrainerRecoversSpool(t *testing.T) {
@@ -249,28 +247,20 @@ func TestSink_DrainerRecoversSpool(t *testing.T) {
 
 	s.Submit(goodLine(t, "drain-me"))
 
+	// drainOnce inserts, then removes the file, then bumps the metric. Waiting on
+	// the rows alone would observe the middle of that sequence, so poll until
+	// every effect is visible and only then decide.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if w.totalRows() == 1 {
-			// the file must disappear.
-			ents, _ := os.ReadDir(dir)
-			leftover := 0
-			for _, e := range ents {
-				if filepath.Ext(e.Name()) == ".ndjson" {
-					leftover++
-				}
-			}
-			if leftover != 0 {
-				t.Fatalf("spool not cleaned: %d files", leftover)
-			}
-			if got := promCounterValue(t, s.drained); got < 1 {
-				t.Fatalf("drained metric not bumped: %v", got)
-			}
+		batches, leftover := countSpoolFiles(t, dir)
+		if w.totalRows() == 1 && batches == 0 && leftover == 0 && promCounterValue(t, s.drained) >= 1 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("drain did not recover spooled batch, inserted=%d", w.totalRows())
+	batches, leftover := countSpoolFiles(t, dir)
+	t.Fatalf("drain did not recover the spooled batch: rows=%d, batch files=%d, other files=%d, drained=%v",
+		w.totalRows(), batches, leftover, promCounterValue(t, s.drained))
 }
 
 func TestSink_SpoolBudgetEvictsOldest(t *testing.T) {
@@ -361,16 +351,40 @@ func TestSink_ParseErrorSkippedNotSpilled(t *testing.T) {
 	if got := promCounterValue(t, s.parseErr); got < 1 {
 		t.Fatalf("parseErr=%v, want >=1", got)
 	}
+	// parseErr is bumped in the middle of the flush, so give the rest of it a
+	// moment before asserting on what it must NOT have done.
+	time.Sleep(50 * time.Millisecond)
 	if w.totalRows() != 0 {
 		t.Fatalf("rows inserted=%d, want 0", w.totalRows())
 	}
 	// The spool must not fill up — insert returns nil on empty rows.
-	ents, _ := os.ReadDir(dir)
+	if batches, leftover := countSpoolFiles(t, dir); batches != 0 || leftover != 0 {
+		t.Fatalf("spool not empty after parse error: batch files=%d, other files=%d", batches, leftover)
+	}
+}
+
+// countSpoolFiles reports how many drainable batch files are in dir and how many
+// other files are left behind (a mid-write .partial, or a .quarantine the drain
+// could not remove). Both matter: drainOnce bumps drained on the quarantine path
+// too, so an empty batch count alone does not prove the spool was cleaned up.
+// Returns -1 on a read error rather than failing, so it stays usable inside a
+// t.Fatalf argument list.
+func countSpoolFiles(t *testing.T, dir string) (batches, leftover int) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return -1, -1
+	}
 	for _, e := range ents {
-		if filepath.Ext(e.Name()) == ".ndjson" {
-			t.Fatalf("unexpected spool file %s after parse error", e.Name())
+		switch {
+		case e.IsDir():
+		case filepath.Ext(e.Name()) == ".ndjson":
+			batches++
+		default:
+			leftover++
 		}
 	}
+	return batches, leftover
 }
 
 func promCounterValue(t *testing.T, c prometheus.Counter) float64 {
