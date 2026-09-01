@@ -96,7 +96,7 @@ services:
       # compose service names from timer-context cosockets.
       - ./resolver.conf:/etc/nginx/resolver.conf:ro
       # Cascade Lua: stage modules + shared fp compute
-      # (ja4_compute + ja4_helpers, источник правды теперь здесь же).
+      # (ja4_compute + ja4_helpers; the source of truth now lives here too).
       - ./lua:/etc/nginx/lua:ro
       # Cascade config files (defaults + IP/UA/ASN/fp catalogs), read once
       # at init_by_lua via the `config` Lua module. Editing a file here and
@@ -108,9 +108,9 @@ services:
       # change = bump CASCADE_VERSION + edit page.html + `openresty -s
       # reload`. See infra/demo-stand/challenge/README.md.
       - ./challenge:/etc/nginx/challenge:ro
-      # Cascade version pin. challenge.lua сверяет это значение с
-      # <meta name="cascade-version"> в шаблоне на init_by_lua; mismatch
-      # валит старт — защита от рассинхрона шаблона и Lua-каскада.
+      # Cascade version pin. challenge.lua compares this value with
+      # <meta name="cascade-version"> in the template at init_by_lua; a mismatch
+      # fails the start — protection against the template and the Lua cascade drifting apart.
       - ./CASCADE_VERSION:/etc/nginx/CASCADE_VERSION:ro
       # GeoLite2 databases for the A6 geo/ASN lookup. License-gated, NOT
       # committed — populate with scripts/fetch-geoip.sh. If empty the stand
@@ -128,8 +128,8 @@ services:
 
   # Ships BAC_LOG records from nginx-demo's stdout to the antibot-backend's
   # Loki (via the LB-nginx mTLS gate). Behind `profiles: [observability]`
-  # so `docker compose up` без флагов поднимает только nginx-demo, как
-  # сейчас — это сохраняет старый workflow стенда. To ship logs:
+  # so `docker compose up` with no flags brings up only nginx-demo, as it
+  # does today — that preserves the stand's old workflow. To ship logs:
   #   LOKI_PUSH_URL=https://<backend>/loki/api/v1/push docker compose \
   #     -f docker-compose.demo.yml --profile observability up -d
   #

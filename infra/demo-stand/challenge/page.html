@@ -43,13 +43,13 @@
 (function () {
   "use strict";
 
-  // SHA-256(nonce + JS_SECRET). JS_SECRET — фиксированный «pepper», вшитый в
-  // шаблон. Real cryptographic security приходит от HMAC-подписи nonce на
-  // server-side (challenge_secret.lua); этот константный пеппер нужен только
-  // как «proof of JS execution»: бот без JS-движка не вычислит SHA-256 и
-  // не отправит токен. Любая ротация семантики (новый pepper / алгоритм /
-  // payload) должна сопровождаться bump'ом CASCADE_VERSION, чтобы старый
-  // шаблон не оказался в одной паре с новым каскадом.
+  // SHA-256(nonce + JS_SECRET). JS_SECRET is a fixed "pepper" baked into the
+  // template. The real cryptographic security comes from the HMAC signature over the nonce
+  // server-side (challenge_secret.lua); this constant pepper only serves
+  // as a "proof of JS execution": a bot with no JS engine cannot compute the SHA-256 and
+  // cannot send the token. Any rotation of the semantics (new pepper / algorithm /
+  // payload) must come with a CASCADE_VERSION bump, so that an old
+  // template never ends up paired with a new cascade.
   var JS_SECRET = "tf_challenge_v1_proof_of_execution";
 
   var data = document.getElementById("challenge-data").dataset;

@@ -1,31 +1,31 @@
 # challenge/ — HTML+JS challenge page asset (C2)
 
-Статический ассет, который edge сервит при `verdict=challenge` (Phase 4, Step 5.2
-«Ветка A» в [vision.md](../../../docs/product/vision.md)). На демо доставляется
-file-mount'ом (Channel A на демо = bind-mount, см.
-[docker-compose.demo.yml](../docker-compose.demo.yml)); в проде это будет
-Puppet (`modules/nginx/files/lua/nginx2/`), но контракт «один файл, читается
-один раз на init, обновление = `openresty -s reload`» одинаковый.
+A static asset the edge serves on `verdict=challenge` (Phase 4, Step 5.2,
+"Branch A" in [vision.md](../../../docs/product/vision.md)). On the demo it is delivered
+by a file mount (Channel A on the demo = bind mount, see
+[docker-compose.demo.yml](../docker-compose.demo.yml)); in production this will be
+Puppet (`modules/nginx/files/lua/nginx2/`), but the contract — "one file, read
+once at init, update = `openresty -s reload`" — is the same.
 
-## Файлы
+## The files
 
-- `page.html` — единственный шаблон. Edge подставляет в плейсхолдеры на render:
-  - `{{NONCE}}` — base64url payload + HMAC, выдается `challenge.issue_nonce(host)`
-    (см. [../lua/challenge.lua](../lua/challenge.lua)). Подписан тем же HMAC
-    secret'ом, что и clearance cookie ([C1](../lua/challenge_secret.lua));
-    содержит `host` + `expiry` (TTL 60с). Любой proxy пула валидирует без
+- `page.html` — the only template. The edge fills in these placeholders at render time:
+  - `{{NONCE}}` — base64url payload + HMAC, issued by `challenge.issue_nonce(host)`
+    (see [../lua/challenge.lua](../lua/challenge.lua)). Signed with the same HMAC
+    secret as the clearance cookie ([C1](../lua/challenge_secret.lua));
+    carries `host` + `expiry` (TTL 60 s). Any proxy in the pool validates it without
     shared state.
-  - `{{EXPIRY}}` — unix-timestamp истечения nonce (для дебага в DevTools).
+  - `{{EXPIRY}}` — the unix timestamp of the nonce expiry (for debugging in DevTools).
 
-  Версия каскада в шаблоне — **литералы** (не плейсхолдеры): в
-  `<meta name="cascade-version">`, в HTML-комментарии и в
-  `data-cascade-version` зашита та версия, с которой шаблон совместим.
-  `init_by_lua` сверяет meta с [../CASCADE_VERSION](../CASCADE_VERSION) и
-  фейлит nginx старт при расхождении.
+  The cascade version in the template is a set of literals (not placeholders): the version the
+  template is compatible with is baked into `<meta name="cascade-version">`, an HTML comment
+  and `data-cascade-version`.
+  `init_by_lua` compares the meta tag against [../CASCADE_VERSION](../CASCADE_VERSION) and
+  fails the nginx start on a mismatch.
 
-## Контракт с C5 (verify endpoint)
+## The contract with C5 (the verify endpoint)
 
-JS POST-ит на `/__challenge/verify` тело:
+The JS POSTs this body to `/__challenge/verify`:
 
 ```json
 {
@@ -44,26 +44,26 @@ JS POST-ит на `/__challenge/verify` тело:
 }
 ```
 
-Сервер (C5) должен:
-1. Декодировать nonce, проверить HMAC через `challenge_secret.get()`.
-2. Проверить `expiry > now` (одноразовость через TTL — replay-защита по vision §5.2).
-3. Пересчитать `sha256(nonce + JS_SECRET)` и сравнить с `token`. `JS_SECRET`
-   — константа в [`page.html`](page.html), смена требует bump'a `CASCADE_VERSION`.
-4. Сравнить `cascade_version` с серверной — отвергнуть несовпадающие
-   (защита от stale-кеша браузера со старой страницей).
-5. Записать `fp` в BAC_LOG (challenge-pass событие, аналитика) и выписать
-   clearance cookie с тем же HMAC secret'ом.
+The server (C5) must:
+1. Decode the nonce and check the HMAC through `challenge_secret.get()`.
+2. Check that `expiry > now` (single use through the TTL — replay protection per vision §5.2).
+3. Recompute `sha256(nonce + JS_SECRET)` and compare it with `token`. `JS_SECRET`
+   is a constant in [`page.html`](page.html); changing it requires a `CASCADE_VERSION` bump.
+4. Compare `cascade_version` with the server-side one and reject mismatches
+   (protection against a stale browser cache holding an old page).
+5. Write `fp` into BAC_LOG (the challenge-pass event, for analytics) and issue the
+   clearance cookie with the same HMAC secret.
 
 ## Bump `CASCADE_VERSION`
 
-Bump обязателен в любом PR, который меняет:
-- формат nonce-payload (поля, кодирование),
+A bump is mandatory in any PR that changes:
+- the nonce payload format (fields, encoding),
 - `JS_SECRET`,
-- ожидаемые поля POST'а на verify,
-- набор fingerprint-полей,
-- путь verify endpoint'a.
+- the expected fields of the verify POST,
+- the set of fingerprint fields,
+- the path of the verify endpoint.
 
-Bump = одна строка в [../CASCADE_VERSION](../CASCADE_VERSION) + замена всех
-литералов версии в [`page.html`](page.html) (HTML-комментарий + `<meta>` +
-`data-cascade-version`). `init_by_lua` валит старт, если meta и
-`CASCADE_VERSION` разъехались — это и есть страховка от забытого bump'a.
+A bump = one line in [../CASCADE_VERSION](../CASCADE_VERSION) plus replacing every
+version literal in [`page.html`](page.html) (the HTML comment + `<meta>` +
+`data-cascade-version`). `init_by_lua` fails the start if the meta tag and
+`CASCADE_VERSION` have drifted apart — that is the safety net for a forgotten bump.
