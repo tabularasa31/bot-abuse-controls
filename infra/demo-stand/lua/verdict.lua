@@ -124,6 +124,7 @@ if config.stage_enabled(config.defaults, "clearance") then
     -- policy.get is contractually non-nil (the POOL_DEFAULT fallback), but we
     -- guard with `p and` for consistency with challenge_verify.lua /
     -- verification.lua — one pattern for reading policy on the edge (from review).
+    local opts
     local p = policy.get(host)
     if p and p.attack_mode then
         local max_ttl
